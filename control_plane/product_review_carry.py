@@ -81,6 +81,7 @@ def carry_owner_acceptance(
     if not _carryable(accepted, profile) or accepted.base_branch != base_branch.strip():
         # Accepted on another base (or one never recorded): the change is not the same.
         return None
+    accepted_head = accepted.head_sha.strip().lower()
     refreshes = (
         refresh_store.list_merge_train_branch_refresh_records(
             repository=profile.repository, pull_request_number=pull_request_number
@@ -90,7 +91,7 @@ def carry_owner_acceptance(
     )
     carry = _base_only_refresh(
         repository=profile.repository,
-        accepted_head=accepted.head_sha.strip().lower(),
+        accepted_head=accepted_head,
         head=head,
         base_branch=base_branch.strip(),
         refreshes=refreshes,
@@ -102,25 +103,28 @@ def carry_owner_acceptance(
         refresh_record_ids, base_commit = carry
         reason = "merge_train_base_refresh"
     else:
-        branch = quote(base_branch.strip(), safe="")
-        base_commit = _text(
-            _object(read(f"/repos/{_path(profile.repository)}/branches/{branch}"), "commit").get(
-                "sha"
-            )
-        ).lower()
-        if re.fullmatch(r"[0-9a-f]{40}", base_commit) is None:
-            return None
         comparison = _object(
-            read(f"/repos/{_path(profile.repository)}/compare/{accepted.head_sha}...{head}")
+            read(f"/repos/{_path(profile.repository)}/compare/{accepted_head}...{head}")
         )
+        refresh_record_ids = ()
         if comparison.get("status") == "ahead":
-            commits = _client_impact_commits(comparison, accepted.head_sha, head)
+            commits = _client_impact_commits(comparison, accepted_head, head)
             if not commits:
                 return None
-        elif comparison.get("status") != "diverged":
+            base_commit = ""
+            reason = "client_impact_none"
+        elif comparison.get("status") == "diverged":
+            branch = quote(base_branch.strip(), safe="")
+            base_commit = _text(
+                _object(
+                    read(f"/repos/{_path(profile.repository)}/branches/{branch}"), "commit"
+                ).get("sha")
+            ).lower()
+            if re.fullmatch(r"[0-9a-f]{40}", base_commit) is None:
+                return None
+            reason = "unchanged_patch_base_update"
+        else:
             return None
-        refresh_record_ids = ()
-        reason = "client_impact_none" if commits else "unchanged_patch_base_update"
     if reason != "client_impact_none":
         responses: dict[str, object] = {}
 
@@ -200,7 +204,7 @@ def carry_owner_acceptance(
                 .replace("+00:00", "Z"),
                 "carried_from": ProductReviewCarry(
                     record_id=accepted.record_id,
-                    head_sha=accepted.head_sha.strip().lower(),
+                    head_sha=accepted_head,
                     reason=reason,
                     refresh_record_ids=refresh_record_ids,
                     comparison_base_sha=base_commit,

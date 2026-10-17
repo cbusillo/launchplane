@@ -127,6 +127,8 @@ head to the new head (at most 250 commits); incomplete history never carries.
 A merge trailer alone cannot prove it was conflict-free, so unproven merges,
 including conflict-resolving merges, need a new decision. The existing clean
 merge-train refresh proof below continues to apply.
+If recorded train refreshes and invisible commits are mixed between status
+publishes, neither proof covers the whole history and a new decision is needed.
 
 This carry records reason `client_impact_none` and every commit SHA with its
 `client_impact` trailer value in `carried_from.commits`, in order. The Client sees

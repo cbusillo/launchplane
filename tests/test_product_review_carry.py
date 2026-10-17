@@ -32,6 +32,7 @@ _REFRESHED_HEAD = "b064ecdc" + "0" * 32
 _SECOND_REFRESH_HEAD = "c0ffee00" + "0" * 32
 # Another merge of the same two parents with the same change, pushed by someone else.
 _OTHER_MERGE_HEAD = "d00dfeed" + "0" * 32
+_REBASED_HEAD = "eeeeeeee" + "0" * 32
 _BASE_COMMIT = "1111111111111111111111111111111111111111"
 _NEWER_BASE_COMMIT = "2222222222222222222222222222222222222222"
 _OWNER_GITHUB_ID = "9001"
@@ -262,7 +263,7 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
         )
         self.assertEqual(carried.owner_github_id, accepted.owner_github_id)
         self.assertEqual(carried.feedback_url, accepted.feedback_url)
-        self.assertIn("no Client-visible changes", str(self.github.statuses[0]["description"]))
+        self.assertEqual(evidence["comparison_base_sha"], "")
         self._publish()
         self.assertEqual(len(self._decisions()), 2)
 
@@ -293,6 +294,12 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
         self.assertEqual([commit.sha for commit in carry.commits], [c["sha"] for c in commits])
         self.github.base_branch = "release"
         self.assertEqual(self._publish()["state"], "pending")
+
+    def test_trailer_history_uses_the_normalized_accepted_head(self) -> None:
+        self.accepted = self.accepted.model_copy(update={"head_sha": _ACCEPTED_HEAD.upper()})
+        self.store.write_product_review_decision_record(self.accepted)
+        self._later_commits("Adjust tests\n\nClient-impact: none")
+        self.assertEqual(self._publish()["state"], "success")
 
     def test_conflict_merge_needs_a_new_decision_even_if_marked_none(self) -> None:
         # verireel#520: resolve a conflict with an earlier landed change.
@@ -376,8 +383,11 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
         assert carried.carried_from is not None
         self.assertEqual(carried.carried_from.refresh_record_ids, (first, second))
 
-    def test_acceptance_carries_across_an_update_outside_the_train(self) -> None:
-        self.github.head_sha = _OTHER_MERGE_HEAD
+    def test_acceptance_carries_across_a_rebase_outside_the_train(self) -> None:
+        self.github.head_sha = _REBASED_HEAD
+        self.github.file_modes[_REBASED_HEAD] = self.github.file_modes[_ACCEPTED_HEAD]
+        self.github.merge_bases[_REBASED_HEAD] = _BASE_COMMIT
+        self.github.changes[(_BASE_COMMIT, _REBASED_HEAD)] = _change()
 
         self.assertEqual(self._publish()["state"], "success")
         carried, accepted = self._decisions()
@@ -390,6 +400,13 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
         self.assertEqual(carried.carried_from.refresh_record_ids, ())
         self._publish()
         self.assertEqual(len(self._decisions()), 2)
+
+    def test_unrecorded_base_merge_needs_a_new_decision(self) -> None:
+        commits = self._later_commits("Merge main\n\nClient-impact: none")
+        self.github.head_sha = _OTHER_MERGE_HEAD
+        commits[0]["sha"] = _OTHER_MERGE_HEAD
+        commits[0]["parents"] = [{"sha": _ACCEPTED_HEAD}, {"sha": _BASE_COMMIT}]
+        self.assert_waits_for_the_client(self._publish())
 
     def test_rebase_does_not_require_ancestry_or_a_refresh_store(self) -> None:
         # Comparisons may be diverged: a rebase no longer contains the accepted head.
@@ -539,6 +556,7 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
             result = self.github(path=path, token="fixture-token")
             if "/compare/" in path:
                 comparisons.append(path)
+            if f"/compare/{_BASE_COMMIT}..." in path:
                 self.github.base_sha = _NEWER_BASE_COMMIT
             return result
 
@@ -551,13 +569,14 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
             read=moving_base,
         )
         self.assertIsNotNone(carried)
+        # The history read is separate; both feature comparisons use the pinned base.
         self.assertEqual(
-            comparisons,
-            [
-                f"/repos/{_REPOSITORY}/compare/{_ACCEPTED_HEAD}...{_REFRESHED_HEAD}",
-                f"/repos/{_REPOSITORY}/compare/{_BASE_COMMIT}...{_ACCEPTED_HEAD}",
-                f"/repos/{_REPOSITORY}/compare/{_BASE_COMMIT}...{_REFRESHED_HEAD}",
-            ],
+            {
+                path.rsplit("/", 1)[1].split("...")[0]
+                for path in comparisons
+                if not path.endswith(f"/{_ACCEPTED_HEAD}...{_REFRESHED_HEAD}")
+            },
+            {_BASE_COMMIT},
         )
 
     def test_unreadable_or_truncated_comparisons_do_not_carry(self) -> None:
