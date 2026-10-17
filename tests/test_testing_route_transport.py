@@ -259,3 +259,42 @@ class TestingRouteTransportTests(unittest.TestCase):
             self.publish(self.plan.old_backend, self.plan.old_backend)
         self.assertEqual(retained.read_text(), "retained")
         self.assertEqual(self.effect_count, 0)
+
+    def test_missing_or_changed_retained_identity_refuses_before_any_writer(self) -> None:
+        environment = self.containers["old"]["Config"]["Env"]
+        self.containers["old"]["Config"]["Env"] = ["PLATFORM_INSTANCE=testing"]
+        with self.assertRaises(ValueError):
+            self.publish(self.plan.old_backend, self.plan.old_backend)
+        changed = self.identity.model_copy(update={"deployment_record_id": "different-deployment"})
+        self.containers["old"]["Config"]["Env"] = [
+            "PLATFORM_INSTANCE=testing",
+            "LAUNCHPLANE_RUNTIME_IDENTITY_JSON=" + changed.model_dump_json(),
+        ]
+        with self.assertRaises(ValueError):
+            self.publish(self.plan.old_backend, self.plan.old_backend)
+        self.assertEqual(self.effect_count, 0)
+        self.assertFalse(self.route_file.exists())
+        self.containers["old"]["Config"]["Env"] = environment
+
+    def test_cross_lane_plan_refuses_before_provider_reads(self) -> None:
+        different = self.plan.model_copy(update={"host": "other.invalid"})
+        with patch.object(self.client, "read") as read, self.assertRaises(ValueError):
+            self.client.publish(
+                different,
+                different.old_backend,
+                expected_backend=different.old_backend,
+                dispatch_guard=self.guard,
+            )
+        read.assert_not_called()
+        self.assertEqual(self.effect_count, 0)
+
+    def test_fixed_host_writer_refuses_a_document_for_another_public_host(self) -> None:
+        document = route_document(self.plan, self.plan.old_backend)
+        next(iter(document["http"]["routers"].values()))["rule"] = "Host(`production.invalid`)"
+        with (
+            patch.object(transport, "route_document", return_value=document),
+            self.assertRaises(NativeSourceUnavailable),
+        ):
+            self.publish(self.plan.old_backend, self.plan.old_backend)
+        self.assertEqual(self.effect_count, 0)
+        self.assertFalse(self.route_file.exists())
