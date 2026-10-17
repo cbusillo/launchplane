@@ -270,7 +270,13 @@ Source-read permission for an import credential remains separate from execution.
 
 Existing **Odoo preview refresh** follows overall direction's disposable-preview
 rule rather than requiring positive `unused` or `reproducible` observations that
-no source produces. This does not publish either fact. An active, unique service
+no automatic preview collector produces. This does not publish either fact.
+Scheduled closed-preview cleanup uses the existing disposable observation API:
+the authenticated Director agent records its current facts for the exact owned
+preview, with evidence and binding checks. Unknown facts hold cleanup. Testing
+observations retain their separate service-collector requirement. Same-key
+observation and lifecycle finalization remain available after evidence expires.
+An active, unique service
 preview is required. A staff hold or recorded `in_use`, `only_copy` or shared
 resource report refuses refresh even after that report expires or its binding
 changes. Resolve the real exception first through the existing target-policy or

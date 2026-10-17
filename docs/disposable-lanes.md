@@ -203,8 +203,13 @@ or custody qualification.
 The bounded service API `POST /v1/disposable-lanes/observations` accepts only the
 authenticated Director agent. `inspect` returns the binding digest and unknown
 facts, without provider actions. `record` requires that digest and records the
-authenticated actor and current time itself. Caller-supplied facts and references
-are assertions: while an authoritative collector is unavailable, the service
+authenticated actor and current time itself. For an exact owned preview it
+records the Director agent's observed usage, data custody and isolation facts,
+with required evidence references, the current binding and the existing expiry.
+Unknown facts stay unknown. Existing protected reports cannot be overwritten by
+an unverified safe assertion. This supplies scheduled preview cleanup's facts
+through the existing service API, without direct record edits.
+For testing lanes, caller-supplied facts and references remain assertions: while an authoritative collector is unavailable, the service
 stores usage, custody and isolation as `unknown`, even if the request asserts
 `unused`, `reproducible` or `isolated`. Those assertions never permit an apply.
 `clear` removes this product's exact-scope observation, including stale preview

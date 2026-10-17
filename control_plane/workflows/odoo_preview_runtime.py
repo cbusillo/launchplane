@@ -352,13 +352,15 @@ def build_odoo_preview_apply_inputs(
                 runtime_plan=runtime_plan, compose_name=compose_name
             )
         )
-        host, token = dokploy_source.read_dokploy_config(
-            control_plane_root=control_plane_root,
-            database_url=database_url,
-        )
         try:
-            absent = _destroyed_preview_absence_verified(host=host, token=token, plan=provisional)
-        except click.ClickException:
+            host, token = dokploy_source.read_dokploy_config(
+                control_plane_root=control_plane_root,
+                database_url=database_url,
+            )
+            absent = _recorded_preview_matches_absence(
+                record_store, profile, request.pr_number, provisional
+            ) and _destroyed_preview_absence_verified(host=host, token=token, plan=provisional)
+        except (FileNotFoundError, ValueError, click.ClickException):
             absent = False
         if absent:
             blockers = tuple(
@@ -1462,6 +1464,11 @@ def _destroyed_preview_absence_verified(
         path="/api/compose.search",
         query={"q": plan.compose_name, "limit": 25},
     )
+    if isinstance(searched, dict):
+        wrappers = [
+            searched[key] for key in ("composes", "items", "results", "data") if key in searched
+        ]
+        searched = wrappers[0] if len(wrappers) == 1 else None
     if (
         not isinstance(searched, list)
         or len(searched) >= 25
@@ -1509,6 +1516,35 @@ def _destroyed_preview_absence_verified(
             if domain_host.strip().lower() == plan.domain_host.lower():
                 return False
     return _complete_preview_compose_inventory(host=host, token=token) == inventory
+
+
+def _recorded_preview_matches_absence(
+    store: object,
+    profile: LaunchplaneProductProfileRecord,
+    number: int,
+    plan: OdooPreviewDokployDryRunPlan,
+) -> bool:
+    # Current naming alone cannot erase a preview created under older settings.
+    reader = getattr(store, "list_preview_records", None)
+    generation_reader = getattr(store, "read_preview_generation_record", None)
+    if not callable(reader) or not callable(generation_reader):
+        return False
+    previews = [
+        item
+        for item in reader(context_name=profile.preview.context)
+        if item.anchor_pr_number == number
+        and item.anchor_repo in {profile.repository, profile.repository.partition("/")[2]}
+    ]
+    if len(previews) != 1 or previews[0].canonical_url != plan.preview_url:
+        return False
+    generation = generation_reader(
+        previews[0].serving_generation_id or previews[0].active_generation_id
+    )
+    identity = generation.runtime_identity
+    return identity is not None and (identity.context, identity.instance) == (
+        profile.preview.context,
+        plan.compose_name,
+    )
 
 
 def _missing_endpoint_paths(*, request: OdooPreviewDokployDryRunRequest) -> tuple[str, ...]:

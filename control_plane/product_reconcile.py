@@ -1495,38 +1495,10 @@ def reconcile_preview_target(
         recover_held_preview,
     )
 
-    decision = _plan_preview_target(
-        record_store=record_store,
-        profile=profile,
-        repository_id=repository_id,
-        transport=transport,
-        pull_request_number=pull_request_number,
-    )
-    cleanup = (
-        decision.plan.get("action") == "destroy"
-        and decision.plan.get("reason") == "pull_request_not_open"
-    )
-    if decision.plan.get("reason") == "preview_cleanup_pr_state_unknown":
-        return ReconcileOutcome(decision.plan)
-    if cleanup:
-        try:
-            _preview_cleanup_guard(record_store, profile, pull_request_number)
-        except ProductReconcileError as error:
-            decision.plan.update(action="wait", held=True, reason=error.code)
-            return ReconcileOutcome(decision.plan, error=str(error))
     held = held_preview_reservations(record_store, product=profile.product)
     recovery: list[dict[str, object]] = []
     for reservation in held[:100]:
         classified = classify_preview_reservation(reservation, profile=profile, store=record_store)
-        if (
-            cleanup
-            and not classified.get("original_action_available")
-            and classified.get("target_pull_request_number") == pull_request_number
-        ):
-            # A new authoritative destroy discards disposable output. It does not
-            # reconstruct or report success for an earlier unknown operation.
-            recovery.append(classified)
-            continue
         try:
             original = original_preview_intent(reservation, profile=profile, store=record_store)
         except ValueError:
@@ -1557,8 +1529,32 @@ def reconcile_preview_target(
         )
         and entry.get("settlement") not in {"adopted", "completed", "replayed"}
     ]
+    decision = _plan_preview_target(
+        record_store=record_store,
+        profile=profile,
+        repository_id=repository_id,
+        transport=transport,
+        pull_request_number=pull_request_number,
+    )
+    cleanup = (
+        decision.plan.get("action") == "destroy"
+        and decision.plan.get("reason") == "pull_request_not_open"
+    )
+    if decision.plan.get("reason") == "preview_cleanup_pr_state_unknown":
+        decision.plan.update(
+            {
+                key: value
+                for key, value in (previous_plan or {}).items()
+                if key in {"destroy_retry_key", "destroy_failed_attempts"}
+            }
+        )
+        return ReconcileOutcome(decision.plan)
     if (
-        not cleanup and any(entry.get("settlement") != "reconcile_required" for entry in unresolved)
+        any(
+            entry.get("settlement") != "reconcile_required"
+            and not (cleanup and entry.get("classification") == "original_evidence_unavailable")
+            for entry in unresolved
+        )
     ) or len(held) > 100:
         return ReconcileOutcome(
             {

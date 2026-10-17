@@ -88,7 +88,6 @@ class OdooPreviewProviderMutationAdapter:
         self._control_plane_root = control_plane_root
         self._pre_mutation_guard = pre_mutation_guard
         self._qualify_existing_refresh = qualify_existing_refresh
-        self._recheck_guard = qualify_existing_refresh or disposable_cleanup
         self._record_store = record_store
         self._profile = profile
         self._apply_request = apply_request
@@ -248,7 +247,9 @@ class OdooPreviewProviderMutationAdapter:
         def checkpoint_effect(phase: str) -> None:
             nonlocal effect_started
             self.execution_check()
-            if (not effect_started or self._recheck_guard) and self._pre_mutation_guard is not None:
+            if (
+                not effect_started or self._qualify_existing_refresh
+            ) and self._pre_mutation_guard is not None:
                 try:
                     self._pre_mutation_guard()
                 except Exception as error:
@@ -360,7 +361,7 @@ class OdooPreviewProviderMutationAdapter:
         records: dict[str, object] = {}
         lifecycle_finalized = driver_status == "pass"
         if lifecycle_finalized:
-            if self._recheck_guard and self._pre_mutation_guard is not None:
+            if self._qualify_existing_refresh and self._pre_mutation_guard is not None:
                 try:
                     self._pre_mutation_guard()
                 except Exception as error:
@@ -423,7 +424,7 @@ class OdooPreviewApplyOperation:
             if check is None:
                 return DurableProviderOperationResult("in_progress", None, 409, {})
             check()
-            if self.disposable_cleanup:
+            if self.disposable_cleanup and existing is None and allow_mutation:
                 if (
                     self.adapter._pre_mutation_guard is None
                     or self.adapter._issued_plan.operation != "destroy"
@@ -442,6 +443,7 @@ class OdooPreviewApplyOperation:
                 ):
                     if (
                         held.provider_target_key != self.adapter.target_key()
+                        or not held.reconciliation_key
                         or held.state != "running"
                     ):
                         continue
@@ -459,9 +461,13 @@ class OdooPreviewApplyOperation:
                     ) <= parse_launchplane_mutation_timestamp(
                         lookup.observed_at, field_name="observed_at"
                     ):
-                        store.mark_mutation_reconcile_required(
+                        marked = store.mark_mutation_reconcile_required(
                             reservation=held, reconciliation_key=held.reconciliation_key
                         )
+                        if marked.status != "updated":
+                            return DurableProviderOperationResult(
+                                "target_busy", marked.record, 409, {}
+                            )
             if existing is None:
                 self.adapter.capture_schedule_binding()
             elif isinstance(retained_intent.get("schedule_binding"), dict):
@@ -564,6 +570,20 @@ def prepare_odoo_preview_apply_operation(
                 != issued_plan.plan_request.pr_number
             ):
                 return False
+            from control_plane.storage.postgres import PostgresRecordStore
+
+            if classification.get("original_action_available") or cast(
+                PostgresRecordStore, record_store
+            ).read_original_mutation_intent(reservation):
+                return _original_supersession_is_quiescent(
+                    reservation=reservation,
+                    profile=profile,
+                    request=apply_request,
+                    root=control_plane_root,
+                    database_url=database_url,
+                    check=supersession_is_quiescent,
+                    store=record_store,
+                )
             return supersession_is_quiescent(
                 control_plane_root_path=control_plane_root,
                 request=apply_request,

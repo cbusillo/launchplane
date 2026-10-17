@@ -24131,12 +24131,14 @@ def create_launchplane_fastapi_app(
                     "observed_at": now,
                     "expires_at": now + timedelta(seconds=observation.lifetime_seconds),
                     "replaced_target_id": retained_target,
-                    # References supplied by an agent are assertions, not
-                    # verified occupancy/custody/physical-isolation records.
-                    # There is no complete authoritative collector yet.
-                    "usage": "unknown",
-                    "data": "unknown",
-                    "production_resources": "unknown",
+                    # The authenticated Director agent can record its observed
+                    # facts for this exact owned disposable preview. Testing
+                    # retains its independent service-collector requirement.
+                    "usage": observation.usage if preview is not None else "unknown",
+                    "data": observation.data if preview is not None else "unknown",
+                    "production_resources": observation.production_resources
+                    if preview is not None
+                    else "unknown",
                 }
             )
             if not store.publish_collected_disposable_lane_safety(evidence):

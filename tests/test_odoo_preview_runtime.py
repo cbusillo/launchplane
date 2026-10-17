@@ -555,6 +555,29 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         )
 
     def test_destroy_converges_when_independent_inventory_proves_absence(self) -> None:
+        profile = _profile()
+        store = Mock(wraps=_OdooApplyInputsStore())
+        store.list_preview_records = Mock(
+            return_value=(
+                Mock(
+                    anchor_pr_number=45,
+                    anchor_repo=profile.repository,
+                    canonical_url="https://pr-45.cm-preview.example.test",
+                    serving_generation_id="saved-generation",
+                ),
+            )
+        )
+        store.read_preview_generation_record = Mock(
+            return_value=Mock(
+                runtime_identity=Mock(
+                    context=profile.preview.context, instance="cm-odoo-preview-pr-45"
+                )
+            )
+        )
+
+        def provider_read(*, path: str, **_: object) -> object:
+            return {"items": [], "total": 0} if path == "/api/compose.search" else []
+
         with (
             patch(
                 "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
@@ -562,7 +585,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             ),
             patch(
                 "control_plane.workflows.odoo_preview_runtime.dokploy_api.dokploy_request",
-                return_value=[],
+                side_effect=provider_read,
             ) as provider,
             patch(
                 "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_control_plane_dokploy_source_of_truth",
@@ -575,8 +598,8 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         ):
             inputs = build_odoo_preview_apply_inputs(
                 control_plane_root=Path("."),
-                record_store=_OdooApplyInputsStore(),
-                profile=_profile(),
+                record_store=store,
+                profile=profile,
                 request=OdooPreviewApplyInputsRequest(
                     product="odoo-tenant-cm",
                     operation="destroy",
@@ -585,6 +608,20 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                 ),
             )
             self.assertEqual(inputs.status, "ready")
+            moved = build_odoo_preview_apply_inputs(
+                control_plane_root=Path("."),
+                record_store=store,
+                profile=profile.model_copy(
+                    update={
+                        "preview": profile.preview.model_copy(
+                            update={"app_name_prefix": "changed-preview"}
+                        )
+                    }
+                ),
+                request=inputs.plan_request,
+            )
+            self.assertEqual(moved.status, "blocked")
+
             result = execute_odoo_preview_dokploy_apply(
                 control_plane_root=Path("."),
                 request=OdooPreviewDokployApplyRequest(dry_run_plan=inputs.dry_run_plan),
