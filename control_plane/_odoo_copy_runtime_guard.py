@@ -100,7 +100,7 @@ def inspect_copy_runtime(spec, *, expected_instance):
     private_state = Path.home().resolve(strict=True) / ('.local/state/launchplane-testing-disposal' if expected_instance == 'testing' else '.local/state/launchplane-rehearsals')
     for container in all_containers:
         for mount in container.get('Mounts', []):
-            if mount.get('RW', True) and mount.get('Source'):
+            if (expected_instance == 'rehearsal' or mount.get('RW', True)) and mount.get('Source'):
                 source_path = Path(mount['Source']).resolve(strict=False)
                 if private_state.is_relative_to(source_path) or source_path.is_relative_to(private_state):
                     raise RuntimeError('Disposal state is exposed to a container')

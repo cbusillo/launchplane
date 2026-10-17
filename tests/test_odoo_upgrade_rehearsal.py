@@ -622,6 +622,48 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.inspect()
 
+    def test_read_only_consumer_cannot_see_private_raw_source_custody(self) -> None:
+        self.fixture.containers["foreign"] = {
+            "Id": "foreign-container",
+            "Config": {"Labels": {}},
+            "Mounts": [
+                {
+                    "Type": "bind",
+                    "Source": str(Path.home()),
+                    "Destination": "/host-home",
+                    "RW": False,
+                }
+            ],
+        }
+        # The foreign container is not part of the internal network or volume
+        # inventory. Its read-only ancestor bind alone must block capture.
+        docker = self.host["docker"]
+
+        def network(*arguments: str, **kwargs: Any) -> bytes:
+            if arguments == ("inspect", "testing-data"):
+                import json
+
+                return json.dumps(
+                    [
+                        {
+                            "Internal": True,
+                            "Containers": {
+                                item["Id"]: {}
+                                for name, item in self.fixture.containers.items()
+                                if name != "foreign"
+                            },
+                        }
+                    ]
+                ).encode()
+            return cast(bytes, docker(*arguments, **kwargs))
+
+        self.host["docker"] = network
+        self.host["one_inspection"] = lambda name: __import__("json").loads(
+            network("inspect", name)
+        )[0]
+        with self.assertRaisesRegex(RuntimeError, "state is exposed"):
+            self.inspect()
+
     def test_host_bind_and_published_ports_refuse_before_data_work(self) -> None:
         web = self.fixture.containers["web"]
         web["HostConfig"]["PortBindings"] = {"8069/tcp": [{"HostPort": "8069"}]}
