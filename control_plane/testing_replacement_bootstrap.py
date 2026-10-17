@@ -85,16 +85,16 @@ class BootstrapPrerequisiteCode(StrEnum):
 
 _PREREQUISITE_MESSAGES: dict[BootstrapPrerequisiteCode, str] = {
     BootstrapPrerequisiteCode.CREDENTIALS_UNSAFE: (
-        "Lane-local testing credential safety could not be verified against the active policy."
+        "Lane-local testing password safety could not be verified against the active policy."
     ),
     BootstrapPrerequisiteCode.CREDENTIALS_UNVERIFIED: (
-        "Existing testing and production managed versions could not prove credential separation."
+        "Existing testing and production managed versions could not prove password separation."
     ),
     BootstrapPrerequisiteCode.CREDENTIAL_VERSIONS_MISSING: (
-        "Credential comparison needs all existing local testing and production managed versions."
+        "Password comparison needs all existing local testing and production managed versions."
     ),
     BootstrapPrerequisiteCode.CREDENTIALS_OVERLAP: (
-        "An existing local testing credential equals a production source credential."
+        "An existing local testing password equals a production source password."
     ),
     BootstrapPrerequisiteCode.RESTORE_SOURCE_UNCONFIGURED: (
         "The supported production-copy source could not be verified from its managed configuration."

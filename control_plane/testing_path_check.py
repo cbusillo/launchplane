@@ -40,7 +40,7 @@ _WALKTHROUGH_DESCRIPTIONS = {
     WalkthroughPrerequisite.ORIGIN: "Verify the testing HTTPS origin belongs to this target.",
     WalkthroughPrerequisite.DATABASE: "Verify the recorded testing database matches the running copy.",
     WalkthroughPrerequisite.ISOLATION_OR_USAGE: "Verify connection isolation and the absence of protected staff sessions.",
-    WalkthroughPrerequisite.CREDENTIAL: "Supply the task id to verify its account credential custody.",
+    WalkthroughPrerequisite.CREDENTIAL: "Supply the task id to verify its account access and custody.",
 }
 
 
@@ -66,10 +66,10 @@ def read_testing_prerequisites(
             read()
         except TestingCredentialsOverlap:
             state, code = "blocked", "testing_credentials_overlap"
-            description = "Generate independent testing-local credentials; an existing value equals production's."
+            description = "Generate independent testing-local passwords; an existing value equals production's."
         except TestingCredentialVersionsMissing:
             state, code = "blocked", "testing_credential_versions_missing"
-            description = "Configure the missing managed local credentials before comparing testing and production."
+            description = "Configure the missing managed local passwords before comparing testing and production."
         except TestingBootstrapPrerequisiteError as error:
             state, code = "blocked", error.code
             description = str(error)  # Fixed code-owned text, never the underlying exception.
@@ -127,13 +127,13 @@ def read_testing_prerequisites(
     check(
         "testing_credentials",
         "testing_credentials_unverified",
-        "Verify testing-local managed credentials are distinct from production.",
+        "Verify testing-local managed passwords are distinct from production.",
         lambda: require_distinct_testing_credentials(store, profile, context),
     )
     check(
         "testing_credential_safety",
         "testing_credentials_unsafe",
-        "Verify only lane-local credentials can reach the testing recipient.",
+        "Verify only lane-local passwords can reach the testing recipient.",
         lambda: require_testing_credential_safety(
             store, context, testing_credential_omissions(store, context, None)
         ),
