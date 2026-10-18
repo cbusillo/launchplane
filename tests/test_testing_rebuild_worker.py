@@ -781,6 +781,11 @@ class NativeTestingWorkerTests(unittest.TestCase):
                 "publish",
                 side_effect=AssertionError("A still-pending writer cannot be replaced or inverted"),
             ),
+            patch.object(
+                service.NativeTestingRebuildExecution,
+                "readiness",
+                side_effect=ValueError("fixture candidate failed while writer was pending"),
+            ),
             self.assertRaises(service.NativeTestingRebuildPending),
         ):
             self.execute()
