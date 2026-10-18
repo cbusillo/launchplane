@@ -737,6 +737,53 @@ class NativeTestingWorkerTests(unittest.TestCase):
             self.assertEqual(self.execute().deploy_status, "fail")
         self.assertEqual(self.effects, [])
 
+    def test_late_route_writer_cannot_be_overridden_while_its_original_outcome_is_unknown(
+        self,
+    ) -> None:
+        from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
+
+        pending: list[Any] = []
+
+        def delayed(plan: Any, backend: str, *, expected_backend: str, dispatch_guard: Any) -> None:
+            def send() -> None:
+                pending.append(
+                    lambda: self.switch(
+                        plan,
+                        backend,
+                        expected_backend=expected_backend,
+                        dispatch_guard=lambda write: write(),
+                    )
+                )
+                raise NativeSourceUnavailable("fixture proxy writer has not returned")
+
+            dispatch_guard(send)
+
+        with (
+            patch.object(DokployTestingRouteTransport, "publish", side_effect=delayed),
+            self.assertRaises(service.NativeTestingRebuildPending),
+        ):
+            self.execute()
+        self.assertEqual(self.effects, [])
+        self.assertEqual(self.current(), self.fixture.before)
+        with (
+            patch.object(
+                DokployTestingRouteTransport,
+                "publish",
+                side_effect=AssertionError("A still-pending writer cannot be replaced or inverted"),
+            ),
+            self.assertRaises(service.NativeTestingRebuildPending),
+        ):
+            self.execute()
+        self.assertEqual(self.effects, [])
+        self.assertFalse(self.retained["stopped"])
+        self.assertEqual(len(pending), 1)
+        pending.pop()()
+        self.fail_public = True
+        self.assertEqual(self.execute().deploy_status, "fail")
+        self.assertEqual(self.effects, ["switch-new", "switch-old"])
+        self.assertEqual(self.current(), self.fixture.before)
+        self.assertFalse(self.retained["stopped"])
+
     def test_unknown_public_health_keeps_observing_the_same_candidate_without_retirement(
         self,
     ) -> None:
