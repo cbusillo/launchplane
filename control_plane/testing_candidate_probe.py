@@ -1,6 +1,9 @@
 """Fixed private readiness probe; application passwords never leave the host."""
 
+import inspect
+
 from control_plane._odoo_copy_runtime_guard import COPY_RUNTIME_INSPECTION_LIBRARY
+from control_plane.dokploy.docker_errors import docker_daemon_authorization_denied
 
 CANDIDATE_CONTAINER_PROBE = r"""
 import configparser, hmac, json, os, sys
@@ -78,6 +81,8 @@ print('candidate_credentials_verified=true')
 
 CANDIDATE_HOST_PROBE = (
     COPY_RUNTIME_INSPECTION_LIBRARY
+    + "\n"
+    + inspect.getsource(docker_daemon_authorization_denied)
     + r"""
 import base64, hashlib, json, re, subprocess, sys
 from pathlib import Path
@@ -85,7 +90,7 @@ from pathlib import Path
 def docker(*arguments, stdin=None):
     result = subprocess.run(['docker', *arguments], input=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60, check=False)
     if result.returncode:
-        if any(word in result.stderr.lower() for word in (b'permission denied', b'unauthorized', b'password authentication failed')):
+        if docker_daemon_authorization_denied(result.stderr):
             raise PermissionError('Candidate runtime refused the operation')
         raise RuntimeError('Candidate runtime readback failed')
     return result.stdout

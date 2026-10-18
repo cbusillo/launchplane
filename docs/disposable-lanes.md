@@ -803,7 +803,11 @@ health request bypasses proxy environment settings and refuses redirects. A
 read-only connection using the running web configuration checks the generated
 database password and the active local administrator's stored password hash.
 The login follows startup's trimmed value or `admin` default. Local database
-authentication failure is a failed candidate check, not a provider denial.
+authentication or SQL/file permission failure in either the integration readback
+or credential program is a failed candidate check. Only a Docker socket, daemon
+or authorization-plugin refusal is reported as a provider denial. Both programs
+use the route transport's shared classification and drop private driver stderr;
+neither retries or selects another identity after a refusal.
 The plaintext master value and database settings are checked for consistency
 with the running container environment. These local comparisons do not attest
 that a stored provider environment update was deployed; provider configuration,
