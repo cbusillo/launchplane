@@ -689,6 +689,7 @@ class OdooRehearsalAdapter:
             provider_operation_response_payload,
         )
         from control_plane.dokploy.sandbox_placement import (
+            IsolatedPlacementObservationRequired,
             create_isolated_placement,
             created_placement,
         )
@@ -741,15 +742,18 @@ class OdooRehearsalAdapter:
                     self.store.compare_and_write_odoo_upgrade_rehearsal(record, updated)
                     record = updated
 
-                create_isolated_placement(
-                    self.root,
-                    namespace=record.rehearsal_id,
-                    server_id=record.server_id,
-                    description="Isolated Odoo rehearsal",
-                    checkpoint=checkpoint,
-                    before_create=lease.checkpoint_effect,
-                    record_identity=record_identity,
-                )
+                try:
+                    create_isolated_placement(
+                        self.root,
+                        namespace=record.rehearsal_id,
+                        server_id=record.server_id,
+                        description="Isolated Odoo rehearsal",
+                        checkpoint=checkpoint,
+                        before_create=lease.checkpoint_effect,
+                        record_identity=record_identity,
+                    )
+                except IsolatedPlacementObservationRequired:
+                    raise RehearsalRefused(RehearsalPrerequisite.RECOVERY_REQUIRED) from None
                 resources = rehearsal_resource(record)
                 checkpoint()
                 lease.checkpoint_effect("independent_storage")

@@ -282,6 +282,7 @@ class CandidateApplicationTests(unittest.TestCase):
         self.assertEqual(kwargs["run_destructive_restore"], self.compiled.plan.source != "empty")
         self.assertEqual(kwargs["fresh_testing_generation"], self.compiled.plan.generation)
         self.assertEqual(kwargs["testing_candidate_namespace"], self.allocation.namespace)
+        kwargs["before_provider_mutation"](post_deploy.ODOO_POST_DEPLOY_SCHEDULE_UPSERT)
         kwargs["before_provider_mutation"](post_deploy.ODOO_POST_DEPLOY_SCHEDULE_TRIGGER)
         self.effects.append("restore")
         self.restore_deployments.append({"deploymentId": "original-restore", "status": "done"})
@@ -578,6 +579,48 @@ class CandidateApplicationTests(unittest.TestCase):
         assert resumed.application is not None
         self.assertEqual(resumed.application.phase, "prepared")
         self.assertEqual(self.effects, ["configure", "deploy", "restore"])
+        self.fixture.assert_serving_unchanged()
+
+    def test_lost_lease_before_restore_dispatch_can_resume_original_setup(self) -> None:
+        self.execution()
+
+        def checkpoint(phase: str) -> None:
+            if phase == post_deploy.ODOO_POST_DEPLOY_SCHEDULE_TRIGGER:
+                raise RuntimeError("fixture lease lost before restore dispatch")
+
+        self.execution_lease.checkpoint_effect.side_effect = checkpoint
+        with self.assertRaises(RuntimeError):
+            self.prepare_application()
+        record = self.store.read_testing_candidate(self.allocation.namespace)
+        assert record is not None and record.application is not None
+        self.assertIs(record.application.restore_workflow_started, False)
+        self.assertFalse(record.application.restore_schedule_id)
+        self.assertEqual(self.effects, ["configure", "deploy"])
+        self.execution_lease.checkpoint_effect.side_effect = None
+        resumed = self.prepare_application()
+        assert resumed.application is not None
+        self.assertEqual(resumed.application.phase, "prepared")
+        self.assertEqual(self.effects, ["configure", "deploy", "restore"])
+        self.fixture.assert_serving_unchanged()
+
+    def test_refused_schedule_setup_can_be_abandoned_without_a_restore_job(self) -> None:
+        self.execution()
+        with (
+            patch.object(api, "find_matching_dokploy_schedule", return_value=None),
+            self.assertRaises(ValueError),
+        ):
+            self.prepare_application()
+        abandoned = application.abandon_candidate_application(
+            root=self.root,
+            store=self.store,
+            namespace=self.allocation.namespace,
+            lease=self.execution_lease,
+            guard=self.fixture.guard,
+        )
+        assert abandoned.application is not None
+        self.assertEqual(abandoned.application.phase, "abandoned")
+        self.assertEqual(abandoned.compose_id, self.allocation.compose_id)
+        self.assertEqual(self.effects, ["configure", "deploy"])
         self.fixture.assert_serving_unchanged()
 
     def test_failed_original_build_can_be_abandoned_without_running_a_restore(self) -> None:

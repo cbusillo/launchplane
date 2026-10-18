@@ -225,10 +225,14 @@ class NativeTestingWorkerTests(unittest.TestCase):
         return result
 
     def route_read(self) -> dict[str, Any]:
+        endpoints = [] if self.retained["stopped"] else [self.intent.old.private_url]
+        legacy = self.raw["services"].get("old@docker")
+        if endpoints and legacy is not None:
+            endpoints.extend(item["url"] for item in legacy["loadBalancer"]["servers"])
         return {
             "raw": deepcopy(self.raw),
             "owned_file": json.dumps(self.owned) if self.owned is not None else None,
-            "old_endpoints": (self.intent.old.private_url,),
+            "old_endpoints": tuple(endpoints),
         }
 
     def switch(
@@ -273,6 +277,19 @@ class NativeTestingWorkerTests(unittest.TestCase):
             authorize=self.authorize,
             lease_owner="native-worker-fixture",
         )
+
+    def test_initial_capture_maps_the_observed_ip_to_one_of_its_physical_dns_names(self) -> None:
+        frame = self.route_read()
+        aliases = (self.intent.old.private_url, "http://old-testing-web-1:8069")
+        frame["old_endpoints"] = (*aliases, *frame["old_endpoints"])
+        with patch.object(DokployTestingRouteTransport, "read", return_value=frame):
+            captured = self.capture_function(
+                root=self.root, store=self.store, operation=self.operation
+            )
+        self.assertIn(captured.old.private_url, aliases)
+        self.assertEqual(captured.old.runtime_identity, self.original_identity)
+        self.assertEqual(self.effects, [])
+        self.assertEqual(self.current(), self.fixture.before)
 
     def test_one_action_preserves_address_credentials_and_retires_only_after_publication(
         self,

@@ -228,6 +228,7 @@ def capture_rebuild_intent(
                 context=operation.context,
                 host=str(urlsplit(lane.base_url).hostname),
                 old_backend=endpoint,
+                old_backend_addresses=tuple(endpoints),
                 new_backend=f"http://{namespace}:{profile.runtime_port}",
                 raw=raw,
                 public_entrypoints=points,
@@ -237,8 +238,11 @@ def capture_rebuild_intent(
         except ValueError:
             continue
         possible.append(endpoint)
-    if len(possible) != 1:
-        raise ValueError("Exactly one actual retained testing backend is required.")
+    if not possible:
+        raise ValueError("A physically verified retained testing DNS backend is required.")
+    # The host binds all these aliases to the same exact, unshared web process.
+    # An owned route already restricts this set to its recorded selected alias.
+    endpoint = sorted(possible)[0]
     return NativeTestingRebuildIntent(
         operation_id=operation.operation_id,
         profile=profile,
@@ -248,7 +252,7 @@ def capture_rebuild_intent(
         old=TestingCopy(
             copy_id=before.target_id.target_id,
             target_id=before.target_id.target_id,
-            private_url=possible[0],
+            private_url=endpoint,
             resource_binding=retained["physical_binding"],
             runtime_identity=identity,
         ),
@@ -685,6 +689,7 @@ class NativeTestingRebuildExecution:
                 context=self.operation.context,
                 host=self.plan.host,
                 old_backend=self.plan.old.private_url,
+                old_backend_addresses=tuple(frame["old_endpoints"]),
                 new_backend=self.plan.new.private_url,
                 raw=frame["raw"],
                 public_entrypoints=self.intent.public_entrypoints,
