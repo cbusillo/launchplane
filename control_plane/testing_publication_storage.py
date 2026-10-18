@@ -24,6 +24,7 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.secret_record import SecretRecord, SecretBinding
 from control_plane.storage import postgres as db
+from control_plane.testing_candidate_runtime import testing_profile_binding
 from control_plane.storage.product_authority_bundle import (
     ProductAuthorityBundle,
     ProviderTargetWrite,
@@ -37,6 +38,19 @@ PUBLICATION_ROUTE = "service:testing-serving-publication"
 
 def _same(left: object, right: object) -> bool:
     return canonical_json_sha256(left) == canonical_json_sha256(right)
+
+
+def serving_snapshot_matches(
+    actual: TestingServingSnapshot, expected: TestingServingSnapshot
+) -> bool:
+    """Staff holds are current operator policy, not serving-copy identity."""
+    values = []
+    for snapshot in (actual, expected):
+        payload = snapshot.model_dump(mode="json")
+        payload["target"].pop("updated_at", None)
+        payload["target"]["policies"].pop("staff_testing_hold", None)
+        values.append(payload)
+    return _same(*values)
 
 
 def _snapshot(
@@ -165,7 +179,12 @@ def _sources(
         ),
         profiles,
     )
-    if plan.profile not in profiles:
+    current_profile = next(
+        (item for item in profiles if item.product == plan.profile.product), None
+    )
+    if current_profile is None or testing_profile_binding(
+        current_profile, plan.candidate.context
+    ) != testing_profile_binding(plan.profile, plan.candidate.context):
         raise ValueError("Product authority changed before publication.")
     candidate = session.get(
         db.LaunchplaneTestingCandidateRow, plan.candidate.namespace, with_for_update=True
@@ -356,7 +375,7 @@ def publish(
         _sources(store, session, plan, runtime_after=prior.state == "applied")
         expected = plan.before if prior.state == "planned" else effective_after(prior)
         current = _snapshot(store, session, plan.candidate.product, plan.candidate.context)
-        if not _same(current.model_dump(mode="json"), expected.model_dump(mode="json")):
+        if not serving_snapshot_matches(current, expected):
             raise ValueError("Serving authority changed since the original publication.")
         if inverse and prior.state == "planned":
             # This row lock has waited for any original forward transaction.
@@ -382,6 +401,19 @@ def publish(
             }
         )
         replacement = plan.before if inverse else effective_after(result)
+        replacement = replacement.model_copy(
+            update={
+                "target": replacement.target.model_copy(
+                    update={
+                        "policies": replacement.target.policies.model_copy(
+                            update={
+                                "staff_testing_hold": current.target.policies.staff_testing_hold
+                            }
+                        ),
+                    }
+                )
+            }
+        )
         aliases = _retain_old(store, session, plan)
         if not inverse:
             aliases = ((plan.candidate.namespace, "testing-candidate"),)
@@ -462,7 +494,11 @@ def _write_serving_snapshot(
     )
     bundle = ProductAuthorityBundle(
         required_context_owner=(plan.candidate.product, plan.candidate.context),
-        expected_product_profiles=(plan.profile,),
+        expected_product_profiles=(
+            LaunchplaneProductProfileRecord.model_validate(
+                session.get(db.LaunchplaneProductProfileRow, plan.profile.product).payload
+            ),
+        ),
         dokploy_targets=(replacement.target,),
         dokploy_target_ids=(replacement.target_id,),
         provider_target_writes=(

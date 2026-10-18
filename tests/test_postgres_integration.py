@@ -13819,6 +13819,24 @@ class RealPostgresTestingPublicationTests(unittest.TestCase):
 
 
 class RealPostgresNativeTestingWorkerTests(unittest.TestCase):
+    def test_profile_edit_during_cutover_preserves_original_publication(self) -> None:
+        self.run_worker_case(
+            "test_unrelated_profile_edit_after_cutover_does_not_strand_publication"
+        )
+
+    def test_healthy_cutover_records_reality_under_a_new_staff_hold(self) -> None:
+        self.run_worker_case(
+            "test_new_hold_after_healthy_cutover_records_reality_and_preserves_old_copy"
+        )
+
+    def test_lost_execution_lock_keeps_the_original_effects_observable(self) -> None:
+        self.run_worker_case(
+            "test_lost_execution_lock_after_route_dispatch_keeps_original_observation"
+        )
+
+    def test_pre_effect_runtime_drift_does_not_fence_the_lane(self) -> None:
+        self.run_worker_case("test_changed_runtime_before_effects_refuses_without_fencing_the_lane")
+
     def test_prewrite_failure_keeps_old_copy_and_is_terminal(self) -> None:
         self.run_worker_case(
             "test_route_writer_excluded_before_dispatch_fails_with_old_copy_serving"

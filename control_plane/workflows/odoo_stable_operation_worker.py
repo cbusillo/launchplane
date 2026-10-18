@@ -2386,8 +2386,12 @@ def _execute_target_replacement_with_checkpoint(
             isinstance(error, DrillPrerequisite)
             and error.code == "testing_storage_reconciliation_pending"
         )
-        rebuild_pending = operation.is_native_testing_rebuild and isinstance(
-            error, (NativeTestingRebuildPending, TimeoutError)
+        rebuild_pending = operation.is_native_testing_rebuild and (
+            isinstance(error, (NativeTestingRebuildPending, TimeoutError))
+            or (
+                isinstance(record_store, PostgresRecordStore)
+                and native_rebuild_effects_started(record_store, operation)
+            )
         )
         if rebuild_pending:
             logging.info("The original native testing rebuild will continue through observation.")

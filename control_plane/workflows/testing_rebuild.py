@@ -343,7 +343,7 @@ def execute_testing_rebuild(
             except TestingRebuildHealthFailure:
                 save(step="rolling_back", error="candidate_public_health_failed", route=observation)
             else:
-                provider.guard(plan)
+                provider.guard(plan, recovery=True)
                 save(publication_started=True)
                 provider.publish(plan, plan.new, forward_started=True)
                 save(step="retiring", route=observation)

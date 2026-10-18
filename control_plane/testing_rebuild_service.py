@@ -11,6 +11,9 @@ from urllib.parse import urlsplit
 from pydantic import Field
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
+from control_plane.durable_operation_authorization import (
+    DurableOperationAuthorizationDeniedError,
+)
 from control_plane.contracts.promotion_record import HealthcheckEvidence
 from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementApplyResult,
@@ -89,6 +92,7 @@ from control_plane.testing_candidate_application import (
     candidate_terminal_custody_evidence,
 )
 from control_plane.testing_candidate_runtime import (
+    testing_profile_binding,
     CandidateSource,
     TestingCandidateRuntimeInputs,
     candidate_application_intent,
@@ -101,6 +105,7 @@ from control_plane.testing_publication_storage import (
     publish,
     read_publication,
     read_snapshot,
+    serving_snapshot_matches,
 )
 from control_plane.testing_rebuild_storage import RecordTestingRebuildStore
 from control_plane.testing_serving_copy import published_testing_copy
@@ -334,7 +339,6 @@ class NativeTestingRebuildAdapter:
         with self.store.testing_replacement_execution_lock(self.operation.operation_id) as check:
             if check is None:
                 raise NativeTestingRebuildPending("The original rebuild still has an executor.")
-            lease.checkpoint_effect("testing_rebuild_execution")
             executor = NativeTestingRebuildExecution(self, lease, check)
             record = executor.run()
             return ProviderMutationOutcome(
@@ -342,6 +346,9 @@ class NativeTestingRebuildAdapter:
                 {
                     "result": rebuild_result(record, executor.allocation).model_dump(mode="json"),
                 },
+                provider_effect_performed=native_rebuild_effects_started(
+                    self.store, self.operation
+                ),
             )
 
 
@@ -407,11 +414,15 @@ class NativeTestingRebuildExecution:
         self.check_lock()
         self.lease.assert_current()
         self.adapter.authorize("testing_rebuild_checkpoint")
-        if (
-            not recovery
-            and self.store.read_product_profile_record(self.operation.product)
-            != self.intent.profile
+        if not recovery and not is_exclusive_product_context(
+            context=self.operation.context,
+            product=self.operation.product,
+            owners=product_context_owner_map(self.store.list_product_profile_records()),
         ):
+            raise ValueError("The testing context no longer belongs exclusively to this product.")
+        if not recovery and testing_profile_binding(
+            self.store.read_product_profile_record(self.operation.product), self.operation.context
+        ) != testing_profile_binding(self.intent.profile, self.operation.context):
             raise ValueError("The original testing profile changed.")
         target = self.store.read_dokploy_target_record(
             context_name=self.operation.context, instance_name="testing"
@@ -486,7 +497,7 @@ class NativeTestingRebuildExecution:
             if publication is not None and publication.state == "applied"
             else self.intent.before
         )
-        if not recovery and current != expected:
+        if not recovery and not serving_snapshot_matches(current, expected):
             raise ValueError("Testing serving authority changed outside the original rebuild.")
         if not post_deploy.compose_data_workflow_is_quiescent(
             host=self.host,
@@ -713,6 +724,7 @@ class NativeTestingRebuildExecution:
                 allocation=allocation,
                 artifact_id=self.operation.request.artifact_id,
                 source=rebuild_source(self.operation),
+                admitted_profile=self.intent.profile,
             )
             app_plan = self.inputs.plan
         else:
@@ -729,6 +741,7 @@ class NativeTestingRebuildExecution:
                     allocation=allocation,
                     artifact_id=self.operation.request.artifact_id,
                     source=rebuild_source(self.operation),
+                    admitted_profile=self.intent.profile,
                 )
         self.allocation = allocation
         self.plan = self.build_plan(allocation, app_plan)
@@ -843,6 +856,7 @@ class NativeTestingRebuildExecution:
             route=self.route,
             reservation=self.lease.evidence_reservation(),
             now=datetime.now(UTC),
+            admitted_profile=self.intent.profile,
         )
         prepare_publication(
             self.store, plan=self.publication, reservation=self.lease.evidence_reservation()
@@ -957,7 +971,7 @@ class NativeTestingRebuildExecution:
         self, plan: TestingRebuildPlan, desired: TestingCopy, *, forward_started: bool
     ) -> None:
         assert self.publication is not None and isinstance(self.lease, ProviderEvidenceLease)
-        self.guard(recovery=desired == plan.old)
+        self.guard(recovery=True)
         observation = self.current_route(plan) if desired == plan.new else None
         publish(
             self.store,
@@ -1184,6 +1198,7 @@ class NativeTestingRebuildExecution:
                 def dispatch(send: Callable[[], None]) -> None:
                     parent.guard(recovery=recovery)
                     lease.assert_current()
+                    parent.lease.checkpoint_effect(phase)
                     lease.checkpoint_effect(phase)
                     send()
 
@@ -1341,12 +1356,17 @@ def execute_native_testing_rebuild(
     except api.DokployRequestFailed as error:
         if error.status_code in {401, 403}:
             raise NativeSourceAuthorizationDenied(str(error)) from error
-        if error.retryable:
+        if error.retryable or native_rebuild_effects_started(store, operation):
             raise NativeTestingRebuildPending(
                 "The original provider outcome needs observation."
             ) from error
         raise
-    except ValueError as error:
+    except DurableOperationAuthorizationDeniedError:
+        raise
+    except TimeoutError:
+        # The worker already preserves timeout uncertainty on the same operation.
+        raise
+    except Exception as error:
         if native_rebuild_effects_started(store, operation):
             raise NativeTestingRebuildPending(
                 "The original rebuild effects remain fenced; continue their observation."

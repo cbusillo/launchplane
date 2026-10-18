@@ -130,6 +130,28 @@ def neutralized_candidate_overrides(
     )
 
 
+def testing_profile_binding(
+    profile: LaunchplaneProductProfileRecord, context: str
+) -> dict[str, object]:
+    """The product fields that determine this admitted testing runtime."""
+    lane = next(
+        (lane for lane in profile.lanes if (lane.context, lane.instance) == (context, "testing")),
+        None,
+    )
+    if lane is None:
+        raise ValueError("The admitted testing context is no longer configured.")
+    return {
+        "product": profile.product,
+        "lifecycle": profile.lifecycle_state,
+        "driver": profile.driver_id,
+        "image_repository": profile.image.repository,
+        "runtime_port": profile.runtime_port,
+        "health_path": profile.health_path,
+        "context": context,
+        "base_url": lane.base_url.rstrip("/"),
+    }
+
+
 def candidate_runtime_inputs(
     *,
     root: Path,
@@ -137,6 +159,7 @@ def candidate_runtime_inputs(
     allocation: TestingCandidateAllocation,
     artifact_id: str,
     source: CandidateSource,
+    admitted_profile: LaunchplaneProductProfileRecord | None = None,
 ) -> TestingCandidateRuntimeInputs:
     """Read managed inputs only; no secret write, target adoption or live mutation."""
     if allocation.intent_sha256 != candidate_application_intent(
@@ -151,6 +174,12 @@ def candidate_runtime_inputs(
         raise ValueError("Candidate needs its independent storage receipt first.")
     require_candidate_target_custody(store, allocation)
     profile = store.read_product_profile_record(allocation.product)
+    if admitted_profile is not None:
+        if testing_profile_binding(profile, allocation.context) != testing_profile_binding(
+            admitted_profile, allocation.context
+        ):
+            raise ValueError("The admitted testing runtime profile changed.")
+        profile = admitted_profile
     lane = next(
         lane
         for lane in profile.lanes
