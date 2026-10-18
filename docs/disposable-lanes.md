@@ -1178,36 +1178,54 @@ a fresh operation read before another explicit resume. An unknown original
 route writer still waits for managed-host outcome proof (#4017); resume does not
 make an old route file or a timeout proof that dispatch was excluded.
 
-Each native route effect retains its exact mounted-filesystem custody in the
-existing private original-intent record before dispatch. Its provider attempt
-gets a deterministic execution key. The proxy's fixed writer uses its existing
-`flock` command on a per-key descriptor inherited by its rename/sync children.
-Execution receipts live alongside the owned testing route in a private directory
-whose files are not route configuration. They bind that key, filesystem, desired
-document and original preimage. No application receives a provider credential
-or host mount, and there is no direct host-file fallback.
+Each native route effect retains its logical intent in the existing private
+original-intent record. Each physical writer child separately retains its actual
+proxy process, boot/clock epoch, directory identity, original fence, preimage and
+execution key before dispatch. A replacement directory gets a new physical child;
+the first child's custody never changes. No application receives a provider
+credential or host mount, and there is no direct host-file fallback.
 
-After a lost reply, authorized recovery can settle that same execution under its
-original lock. A busy lock remains unknown, including when a killed shell left
-a child able to rename. With exclusive custody, settlement records either the
-exact applied document or a durable exclusion. Sealing a never-started key also
-prevents an original Docker exec that arrives later from writing. Changed mount
-custody, conflicting receipts, timeouts and denials never qualify an exclusion.
-Missing lock support fails preflight. A confirmed non-applied forward writer
-ends with the old route selected and its copy retained. An excluded inverse
-attempt may obtain a fresh attempt key through the existing durable retry
-transaction; its preceding writer is sealed first. The rebuild operation and
-request key stay the same. Legacy dispatches without this protocol remain
-observation-only; they are never upgraded by guessing their filesystem custody.
+The managed proxy keeps one permanent descriptor lock and one latest-generation
+receipt beside the owned route. The writer pins that directory before checking
+its identity; rename and sync children inherit the descriptor. It removes only
+abandoned staging files while holding that lock. Completed rebuilds do not add
+per-key directories or files. The previous per-execution writer is removed.
 
-These receipts are narrow provider execution evidence, not another desired-state
-journal. Keep their lock inodes and terminal seals while an original writer
-could still arrive. The isolated Traefik rehearsal disconnects a real Docker
-exec client before rename, observes the lock as busy while old traffic serves,
-then adopts the original completion without another route write. Separate shell
-tests kill the writer before rename and before completion recording while a
-child retains the descriptor. This does not replace managed-host qualification
-or the CM proof required by #3963.
+Lock allocation has its own creation-only durable child. Each actual generation
+initializer invocation gets a unique durable nonce and never resends that nonce.
+A positive witness can be adopted read-only; a lost pre-nonce call can be fenced
+by another unique invocation under the same original lock. Ordinary writers and
+settlements cannot create a missing lock or generation. They compare the exact
+generation and revision before changing the latest slot. An old settlement cannot
+seal a successor, and losing a same-boot historical lock is not permission to
+bootstrap another one.
+
+Every mutating shell checks its captured private proxy process identity, boot ID
+and boot-time clock offset before filesystem writes. Capture requires the process
+to have aged beyond its exported start tick and rechecks Docker's start identity.
+A proxy restart can read and reuse a preserved directory fence. Its prior runtime
+cannot write if an older directory returns. After a confirmed fresh boot, a
+preserved known generation can advance under its actual current lock even if
+Linux renumbered the device. The transition records the retired boot and original
+slot; all older boot-bound calls reject. Unrecorded generations are not adopted.
+
+After a lost writer reply, authorized recovery settles the immutable physical
+attempt under its original lock. A busy lock remains unknown, including when a
+killed shell left a child able to rename. Exclusive settlement records either the
+exact applied document or exclusion. A retired runtime/root proves that its
+writer cannot affect the current route; it does not claim the old writer never
+ran. A confirmed non-applied forward attempt keeps the old copy serving. An
+excluded or retired inverse may obtain a fresh physical attempt through the
+existing durable retry transaction, preserving the rebuild and request key.
+Timeouts and denials never establish exclusion. Legacy dispatches remain
+observation-only; recovery never guesses their original custody.
+
+These are provider execution receipts in the existing operation journal, not
+another desired-state journal. The isolated Traefik rehearsal disconnects a real
+Docker exec client before rename and observes its inherited lock. Shell and
+emitted-host tests also cover surviving children, generation/revision races,
+missing fences, returning roots, restart adoption and fresh-boot recovery. They
+do not replace managed-host qualification or the CM proof required by #3963.
 
 The worker regression executes a second application's configure/deploy/initialize
 stages and same-address adoption, then the ordinary replacement and post-deploy

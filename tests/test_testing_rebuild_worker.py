@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from control_plane import testing_rebuild_service as service
+from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementApplyRequest,
     OdooStableTargetReplacementApplyResult,
@@ -193,7 +194,29 @@ class NativeTestingWorkerTests(unittest.TestCase):
         )
         self.enterContext(
             patch.object(
-                DokployTestingRouteTransport, "settle_execution", side_effect=self.settle_execution
+                DokployTestingRouteTransport,
+                "settle_attempt",
+                side_effect=lambda attempt, **kwargs: self.settle_execution(
+                    attempt.execution, attempt.key, **kwargs
+                ),
+            )
+        )
+        from control_plane.dokploy.testing_route_execution import TestingRouteFence
+        from control_plane.testing_route_effects import TestingRouteFenceController
+
+        self.route_fence_ensure = self.enterContext(
+            patch.object(
+                TestingRouteFenceController,
+                "ensure",
+                return_value=TestingRouteFence(
+                    generation="a" * 64,
+                    lock_identity="1:2",
+                    revision=0,
+                    key="none",
+                    desired="absent",
+                    original="absent",
+                    state="initialized",
+                ),
             )
         )
         self.enterContext(
@@ -250,7 +273,16 @@ class NativeTestingWorkerTests(unittest.TestCase):
             "raw": deepcopy(self.raw),
             "owned_file": json.dumps(self.owned) if self.owned is not None else None,
             "old_endpoints": tuple(endpoints),
-            "execution_custody": {"mount_source": "/fixture/dynamic", "filesystem": "1:1"},
+            "file_sha256": canonical_json_sha256(self.owned)
+            if self.owned is not None
+            else "absent",
+            "execution_custody": {
+                "mount_source": "/fixture/dynamic",
+                "filesystem": "1:1",
+                "proxy_id": "fixture-proxy",
+                "proxy_started_at": "fixture-original-start",
+                "process_epoch": "fixture-original-process",
+            },
         }
 
     def settle_execution(self, execution: Any, key: str, *, dispatch_guard: Any) -> str:
@@ -273,7 +305,8 @@ class NativeTestingWorkerTests(unittest.TestCase):
         desired_runtime_identity: RuntimeIdentity | None = None,
         execution: Any = None,
         execution_key: str = "",
-    ) -> None:
+        writer_attempt: Any = None,
+    ) -> str:
         def publish() -> None:
             if backend == plan.new_backend:
                 self.assertEqual(self.current().target_id, self.fixture.before.target_id)
@@ -286,6 +319,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
                     self.raw[section][name + "@file"] = {**value, "status": "enabled"}
 
         dispatch_guard(publish)
+        return "applied"
 
     def health(self, base_url: str, path: str) -> HealthcheckEvidence:
         identity = (
@@ -593,11 +627,12 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.fail_public = True
         hold: Any = None
 
-        def held(plan: Any, backend: str, **kwargs: Any) -> None:
+        def held(plan: Any, backend: str, **kwargs: Any) -> str:
             nonlocal hold
             self.switch(plan, backend, **kwargs)
             if backend == plan.new_backend:
                 hold = self.apply_staff_hold(True, "Staff need the testing lane")
+            return "applied"
 
         with (
             patch.object(DokployTestingRouteTransport, "publish", side_effect=held),
@@ -630,10 +665,11 @@ class NativeTestingWorkerTests(unittest.TestCase):
         )
 
     def test_unrelated_profile_edit_after_cutover_does_not_strand_publication(self) -> None:
-        def edited(plan: Any, backend: str, **kwargs: Any) -> None:
+        def edited(plan: Any, backend: str, **kwargs: Any) -> str:
             self.switch(plan, backend, **kwargs)
             if backend == plan.new_backend:
                 self.change_unrelated_profile()
+            return "applied"
 
         with patch.object(DokployTestingRouteTransport, "publish", side_effect=edited):
             self.assertEqual(self.execute().deploy_status, "pass")
@@ -1560,10 +1596,11 @@ class NativeTestingWorkerTests(unittest.TestCase):
     def test_new_hold_after_healthy_cutover_records_reality_and_preserves_old_copy(self) -> None:
         hold: Any = None
 
-        def held(plan: Any, backend: str, **kwargs: Any) -> None:
+        def held(plan: Any, backend: str, **kwargs: Any) -> str:
             nonlocal hold
             self.switch(plan, backend, **kwargs)
             hold = self.apply_staff_hold(True, "Staff hold after cutover")
+            return "applied"
 
         with (
             patch.object(DokployTestingRouteTransport, "publish", side_effect=held),
@@ -2372,7 +2409,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.fail_public = True
         inverse_attempts = 0
 
-        def publish(plan: Any, backend: str, *, dispatch_guard: Any, **kwargs: Any) -> None:
+        def publish(plan: Any, backend: str, *, dispatch_guard: Any, **kwargs: Any) -> str:
             nonlocal inverse_attempts
             if backend == plan.old_backend:
                 inverse_attempts += 1
@@ -2382,7 +2419,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
                         raise TestingRouteWriteNotStarted("fixture old alias unavailable")
 
                     dispatch_guard(send)
-            self.switch(plan, backend, dispatch_guard=dispatch_guard, **kwargs)
+            return self.switch(plan, backend, dispatch_guard=dispatch_guard, **kwargs)
 
         with patch.object(DokployTestingRouteTransport, "publish", side_effect=publish):
             with self.assertRaises(service.NativeTestingRebuildPending):
@@ -2410,6 +2447,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
             desired_runtime_identity: RuntimeIdentity | None = None,
             execution: Any = None,
             execution_key: str = "",
+            writer_attempt: Any = None,
         ) -> None:
             def send() -> None:
                 pending.append(
@@ -2457,6 +2495,20 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertEqual(self.current(), self.fixture.before)
         self.assertFalse(self.retained["stopped"])
 
+    def test_interrupted_generation_preparation_can_continue_the_forward_switch(self) -> None:
+        from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
+
+        fence = self.route_fence_ensure.return_value
+        self.route_fence_ensure.side_effect = [
+            NativeSourceUnavailable("fixture unknown initializer before route dispatch"),
+            fence,
+        ]
+        with self.assertRaises(service.NativeTestingRebuildPending):
+            self.execute()
+        self.assertEqual(self.effects, [])
+        self.assertEqual(self.execute().deploy_status, "pass")
+        self.assertEqual(self.effects, ["switch-new", "stop-old"])
+
     def test_sealed_non_applied_writer_finishes_without_candidate_readiness(self) -> None:
         from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
 
@@ -2472,7 +2524,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
         ):
             self.execute()
         with (
-            patch.object(DokployTestingRouteTransport, "settle_execution", return_value="excluded"),
+            patch.object(DokployTestingRouteTransport, "settle_attempt", return_value="excluded"),
             patch.object(
                 DokployTestingRouteTransport,
                 "publish",
@@ -2523,7 +2575,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
             ),
             patch.object(
                 DokployTestingRouteTransport,
-                "settle_execution",
+                "settle_attempt",
                 side_effect=AssertionError("Legacy custody is not guessed"),
             ),
             patch.object(
@@ -2545,7 +2597,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
 
         def interrupted(
             plan: Any, backend: str, *, dispatch_guard: Any, execution_key: str, **kwargs: Any
-        ) -> None:
+        ) -> str:
             if backend == plan.old_backend:
                 keys.append(execution_key)
                 if len(keys) == 1:
@@ -2554,11 +2606,12 @@ class NativeTestingWorkerTests(unittest.TestCase):
                         raise NativeSourceUnavailable("fixture lost inverse response")
 
                     dispatch_guard(send)
-            self.switch(
+            return self.switch(
                 plan, backend, dispatch_guard=dispatch_guard, execution_key=execution_key, **kwargs
             )
 
-        def settle(execution: Any, key: str, *, dispatch_guard: Any) -> str:
+        def settle(attempt: Any, *, dispatch_guard: Any) -> str:
+            execution, key = attempt.execution, attempt.key
             if execution.backend == self.fixture.route.old_backend:
                 self.assertEqual(key, keys[-1])
                 dispatch_guard(lambda: None)
@@ -2568,7 +2621,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
         with patch.object(DokployTestingRouteTransport, "publish", side_effect=interrupted):
             with self.assertRaises(service.NativeTestingRebuildPending):
                 self.execute()
-            with patch.object(DokployTestingRouteTransport, "settle_execution", side_effect=settle):
+            with patch.object(DokployTestingRouteTransport, "settle_attempt", side_effect=settle):
                 self.assertEqual(self.execute().deploy_status, "fail")
         self.assertEqual(len(keys), 2)
         self.assertNotEqual(keys[0], keys[1])

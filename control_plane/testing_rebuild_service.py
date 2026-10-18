@@ -64,11 +64,14 @@ from control_plane.dokploy.testing_route import (
 )
 from control_plane.dokploy.testing_route_transport import (
     DokployTestingRouteTransport,
-    TestingRouteWriteNotStarted,
 )
 from control_plane.dokploy.testing_route_execution import (
-    ROUTE_RECEIPT_PHASE,
     TestingRouteExecutionIntent,
+)
+from control_plane.testing_route_effects import (
+    TestingRouteEffects,
+    TestingRouteFenceController,
+    ROUTE_PREPARING,
 )
 from control_plane.lane_usage import evaluate_lane_usage
 from control_plane.odoo_testing_usage import read_odoo_testing_usage
@@ -141,9 +144,6 @@ class TestingRebuildRefused(ValueError):
     def __init__(self, code: str, message: str) -> None:
         self.code = code
         super().__init__(message)
-
-
-_ROUTE_WRITE_EXCLUDED_PHASE = "route_write_not_started"
 
 
 class NativeTestingRebuildIntent(FrozenRecord):
@@ -1281,22 +1281,7 @@ class NativeTestingRebuildExecution:
         def perform(dispatch: Callable[[Callable[[], None]], None]) -> None:
             if execution is None:
                 raise NativeTestingRebuildPending("A legacy route writer remains observation-only.")
-            current = self.store.read_idempotency_record(
-                scope=REBUILD_SCOPE,
-                route_path=REBUILD_ROUTE + ":effect",
-                idempotency_key=self.operation.operation_id + ":" + phase,
-            )
-            if current is None or current.state != "running":
-                raise NativeTestingRebuildPending("The original route execution lease changed.")
-            self.transport.publish(
-                self.route,
-                desired.private_url,
-                expected_backend=previous.private_url,
-                dispatch_guard=dispatch,
-                desired_runtime_identity=desired.runtime_identity,
-                execution=execution,
-                execution_key=execution.key(attempt=current.attempt),
-            )
+            raise NativeTestingRebuildPending("Route writes require their durable physical child.")
 
         self.run_effect(
             phase,
@@ -1305,6 +1290,16 @@ class NativeTestingRebuildExecution:
             reconcile_only=reconcile_only,
             recovery=desired == plan.old,
             route_execution=execution,
+            route_publish=lambda attempt, dispatch: self.transport.publish(
+                self.route,
+                desired.private_url,
+                expected_backend=previous.private_url,
+                dispatch_guard=dispatch,
+                desired_runtime_identity=desired.runtime_identity,
+                execution=attempt.execution,
+                execution_key=attempt.key,
+                writer_attempt=attempt,
+            ),
         )
 
     def route_backend(self) -> str:
@@ -1506,10 +1501,32 @@ class NativeTestingRebuildExecution:
         exclude_undispatched: bool = False,
         recovery: bool = False,
         route_execution: TestingRouteExecutionIntent | None = None,
+        route_publish: Callable[..., object] | None = None,
     ) -> DurableProviderOperationResult:
         parent = self
         forward_route = phase == "route:" + self.plan.new.copy_id
         inverse_route = phase == "route:" + self.plan.old.copy_id
+        assert isinstance(self.lease, ProviderEvidenceLease)
+        evidence_lease = self.lease
+        route_effect = (
+            TestingRouteEffects(
+                controller=TestingRouteFenceController(
+                    store=self.store,
+                    transport=self.transport,
+                    execution=route_execution,
+                    guard=lambda: self.guard(recovery=recovery),
+                    checkpoint=self.lease.checkpoint_effect,
+                    lease_owner=lambda: evidence_lease.evidence_reservation().lease_owner,
+                ),
+                phase=phase,
+                present=present,
+                publish=route_publish,
+                recovery_guard=lambda: self.guard(recovery=True),
+                inverse=inverse_route,
+            )
+            if route_execution is not None and route_publish is not None
+            else None
+        )
 
         class Effect:
             def target_key(self) -> str:
@@ -1526,40 +1543,14 @@ class NativeTestingRebuildExecution:
             ) -> ProviderObservation:
                 if exclude_undispatched:
                     return ProviderObservation("unknown" if provider_effect_phase else "absent")
-                if (
-                    route_execution is not None
-                    and provider_effect_phase == ROUTE_RECEIPT_PHASE + phase
-                ):
-                    current = parent.store.read_idempotency_record(
-                        scope=REBUILD_SCOPE,
-                        route_path=REBUILD_ROUTE + ":effect",
-                        idempotency_key=parent.operation.operation_id + ":" + phase,
-                    )
-                    if current is None:
+                if route_effect is not None:
+                    if prior is None:
                         return ProviderObservation("unknown")
-
-                    def settle(send: Callable[[], None]) -> None:
-                        parent.guard(recovery=True)
-                        parent.lease.checkpoint_effect("settle:" + phase)
-                        send()
-
-                    outcome = parent.transport.settle_execution(
-                        route_execution,
-                        route_execution.key(attempt=current.attempt),
-                        dispatch_guard=settle,
-                    )
-                    if outcome == "excluded":
-                        if forward_route:
-                            return ProviderObservation(
-                                "present", 200, {"route_write_not_started": True}
-                            )
-                        return ProviderObservation("absent", retry_safe=True)
-                    if outcome != "applied":
-                        return ProviderObservation("unknown")
+                    return route_effect.observe(provider_effect_phase, prior.attempt)
+                if (forward_route or inverse_route) and provider_effect_phase:
+                    return ProviderObservation("unknown")
                 if present():
                     return ProviderObservation("present", 200)
-                if inverse_route and provider_effect_phase == _ROUTE_WRITE_EXCLUDED_PHASE:
-                    return ProviderObservation("absent", retry_safe=True)
                 return ProviderObservation("unknown" if provider_effect_phase else "absent")
 
             def apply(
@@ -1573,6 +1564,8 @@ class NativeTestingRebuildExecution:
                         {"not_dispatched": True, "cause": "candidate_public_health_failed"},
                         provider_effect_performed=False,
                     )
+                if route_effect is not None:
+                    return route_effect.apply(lease)
                 if present():
                     return ProviderMutationOutcome(200, provider_effect_performed=False)
 
@@ -1589,23 +1582,10 @@ class NativeTestingRebuildExecution:
                     parent.guard(recovery=recovery)
                     lease.assert_current()
                     parent.lease.checkpoint_effect(phase)
-                    lease.checkpoint_effect(
-                        ROUTE_RECEIPT_PHASE + phase if route_execution is not None else phase
-                    )
+                    lease.checkpoint_effect(phase)
                     send()
 
-                try:
-                    execute(dispatch)
-                except TestingRouteWriteNotStarted:
-                    if forward_route:
-                        return ProviderMutationOutcome(
-                            200, {"route_write_not_started": True}, provider_effect_performed=False
-                        )
-                    if inverse_route:
-                        lease.checkpoint_effect(_ROUTE_WRITE_EXCLUDED_PHASE)
-                    raise NativeTestingRebuildPending(
-                        "The original route writer returned before writing."
-                    ) from None
+                execute(dispatch)
                 if not present():
                     raise NativeTestingRebuildPending("The original effect has not converged.")
                 return ProviderMutationOutcome(200)
@@ -1639,6 +1619,9 @@ class NativeTestingRebuildExecution:
                 and prior is not None
                 and prior.provider_effect_started_at
                 and not inverse_route
+                and not (
+                    route_effect is not None and prior.provider_effect_phase == ROUTE_PREPARING
+                )
             ),
         )
         if result.status not in {"completed", "adopted", "replayed"}:

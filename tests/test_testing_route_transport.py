@@ -5,6 +5,7 @@ import base64
 from contextlib import redirect_stdout
 import io
 import json
+import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -21,13 +22,23 @@ from control_plane.dokploy.native_copy_stream import (
     NativeSourceAuthorizationDenied,
     NativeSourceUnavailable,
 )
-from control_plane.dokploy.testing_route import TestingRoutePending, route_document
+from control_plane.dokploy.testing_route import (
+    TestingRoutePending,
+    route_document,
+    observe_testing_route,
+)
+from control_plane.dokploy.testing_route_execution import (
+    TestingRouteExecutionCustody,
+    TestingRouteInitializer,
+    TestingRouteWriterAttempt,
+    TestingRouteFence,
+)
 from tests import test_testing_route as route_tests
 from tests.test_odoo_testing_native_source import Connection
 
 
 class TestingRouteTransportTests(unittest.TestCase):
-    def setUp(self) -> None:
+    def setUp(self, *, initialize_fence: bool = True) -> None:
         self.temporary = TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
@@ -60,7 +71,7 @@ class TestingRouteTransportTests(unittest.TestCase):
             "proxy": {
                 "Id": "proxy",
                 "Name": "/dokploy-traefik",
-                "State": {"Status": "running"},
+                "State": {"Status": "running", "StartedAt": "fixture-start-original"},
                 "Config": {"Labels": None},
                 "Mounts": [
                     {
@@ -122,6 +133,26 @@ class TestingRouteTransportTests(unittest.TestCase):
         }
         self.bin = self.root / "bin"
         self.bin.mkdir()
+        self.process_start = self.root / "process-start"
+        self.process_start.write_text("100")
+        self.process_boot = self.root / "process-boot"
+        self.process_boot.write_text("12345678-1234-1234-1234-123456789abc")
+        self.device_offset = self.root / "device-offset"
+        self.device_offset.write_text("0")
+        self.script(
+            "cat",
+            "import sys;from pathlib import Path\n"
+            "if len(sys.argv)==1: sys.stdout.buffer.write(sys.stdin.buffer.read());sys.exit(0)\n"
+            "p=sys.argv[1]\n"
+            "if p=='/proc/sys/kernel/random/boot_id': print(Path("
+            + repr(str(self.process_boot))
+            + ").read_text())\n"
+            "elif p=='/proc/1/stat': print('1 (proxy) S '+'0 '*18+Path("
+            + repr(str(self.process_start))
+            + ").read_text()+' 0')\n"
+            "elif p=='/proc/uptime': print('1000000.00 0.00')\n"
+            "else: sys.stdout.buffer.write(Path(p).read_bytes())",
+        )
         self.script(
             "sha256sum",
             "import hashlib,sys;from pathlib import Path;print(hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest()+'  '+sys.argv[1])",
@@ -130,7 +161,12 @@ class TestingRouteTransportTests(unittest.TestCase):
             "sync", "import os,sys;fd=os.open(sys.argv[-1],os.O_RDONLY);os.fsync(fd);os.close(fd)"
         )
         self.script(
-            "stat", "import os,sys;s=os.stat(sys.argv[-1]);print(str(s.st_dev)+':'+str(s.st_ino))"
+            "stat",
+            "import os,sys;from pathlib import Path;p=sys.argv[-1]\n"
+            "s=os.fstat(int(p.rsplit('/',1)[1])) if p.startswith('/proc/self/fd/') else os.stat(p)\n"
+            "print(str(s.st_dev+int(Path("
+            + repr(str(self.device_offset))
+            + ").read_text()))+':'+str(s.st_ino))",
         )
         self.script(
             "flock",
@@ -143,8 +179,10 @@ class TestingRouteTransportTests(unittest.TestCase):
             b"permission denied while trying to connect to the Docker daemon socket"
         )
         self.before_publish: Any = None
+        self.before_native: Any = None
         self.writer_timeout = False
         self.lose_writer_reply = False
+        self.remote_modes: list[str] = []
         self.original_run = subprocess.run
         self.enterContext(patch.object(transport, "_read_remote", side_effect=self.remote))
         self.client = transport.DokployTestingRouteTransport(
@@ -159,6 +197,11 @@ class TestingRouteTransportTests(unittest.TestCase):
             old_runtime_identity=self.identity,
         )
         self.guards = 0
+        if initialize_fence:
+            initializer = self.initializer()
+            self.client.initialize_execution(initializer, dispatch_guard=self.guard)
+            self.effect_count = self.guards = 0
+            self.remote_modes.clear()
 
     def script(self, name: str, body: str) -> None:
         path = self.bin / name
@@ -177,13 +220,21 @@ class TestingRouteTransportTests(unittest.TestCase):
 
     def command(self, command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
         result = b""
+        proxy_id = self.containers["proxy"]["Id"]
         if command[1:3] == ["ps", "-aq"]:
             result = "\n".join(self.containers).encode()
         elif command[1] == "inspect":
-            result = json.dumps([self.containers[name] for name in command[2:]]).encode()
-        elif command[1:4] == ["exec", "proxy", "cat"]:
+            result = json.dumps(
+                [
+                    self.containers[name]
+                    if name in self.containers
+                    else next(item for item in self.containers.values() if item["Id"] == name)
+                    for name in command[2:]
+                ]
+            ).encode()
+        elif command[1:4] == ["exec", proxy_id, "cat"]:
             result = self.static.encode()
-        elif command[1:3] == ["exec", "proxy"] and command[3:5] == ["sh", "-c"]:
+        elif command[1:3] == ["exec", proxy_id] and command[3:5] == ["sh", "-c"]:
             actual = [
                 str(self.root) if argument == transport.TRAEFIK_DYNAMIC_DIRECTORY else argument
                 for argument in command[3:]
@@ -192,8 +243,11 @@ class TestingRouteTransportTests(unittest.TestCase):
             return self.original_run(
                 actual, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, env=environment
             )
-        elif command[1:4] == ["exec", "-i", "proxy"]:
+        elif command[1:4] == ["exec", "-i", proxy_id]:
             self.effect_count += 1
+            if self.before_native is not None:
+                callback, self.before_native = self.before_native, None
+                callback()
             if self.writer_timeout:
                 raise subprocess.TimeoutExpired(command, 1)
             if self.deny:
@@ -223,13 +277,17 @@ class TestingRouteTransportTests(unittest.TestCase):
         return subprocess.CompletedProcess(command, 0, stdout=result, stderr=b"")
 
     def remote(self, **kwargs: Any) -> None:
+        self.remote_modes.append(kwargs["payload"]["mode"])
         opener = Mock()
         opener.open.side_effect = lambda *_args, **_kwargs: io.BytesIO(
             json.dumps(self.raw).encode()
         )
 
         def dispatch() -> None:
-            if kwargs["payload"]["mode"] == "publish" and self.before_publish is not None:
+            if (
+                kwargs["payload"]["mode"] in {"publish", "publish_v2"}
+                and self.before_publish is not None
+            ):
                 self.before_publish()
             output = io.StringIO()
             with (
@@ -273,6 +331,14 @@ class TestingRouteTransportTests(unittest.TestCase):
         execution = self.client.execution_intent(
             self.plan, backend, operation_id="fixture:" + expected
         )
+        frame = self.client.read()
+        writer = TestingRouteWriterAttempt(
+            execution=execution,
+            custody=execution.custody,
+            fence=TestingRouteFence.model_validate(frame["execution_fence"]["fence"]),
+            expected_file_sha256=frame["file_sha256"],
+            key=execution.key(attempt=1),
+        )
         self.client.publish(
             self.plan,
             backend,
@@ -283,74 +349,165 @@ class TestingRouteTransportTests(unittest.TestCase):
             else self.new_identity,
             execution=execution,
             execution_key=execution.key(attempt=1),
+            writer_attempt=writer,
+        )
+        frame = self.client.read()
+        observe_testing_route(
+            self.plan,
+            frame["raw"],
+            json.loads(frame["owned_file"]) if frame["owned_file"] else None,
+        )
+
+    def initializer(self, name: str = "original") -> TestingRouteInitializer:
+        frame = self.client.read()
+        custody = TestingRouteExecutionCustody.model_validate(frame["execution_custody"])
+        lock_identity = self.client.allocate_execution_lock(custody, dispatch_guard=self.guard)
+        return TestingRouteInitializer(
+            operation_id="fixture fenced rebuild",
+            server_id=self.client.server_id,
+            route_id=self.plan.route_id,
+            custody=custody,
+            generation=hashlib.sha256(
+                ("fixture durable initializer child:" + name).encode()
+            ).hexdigest(),
+            lock_identity=lock_identity,
+        )
+
+    def fenced_attempt(self, backend: str, *, name: str = "original") -> TestingRouteWriterAttempt:
+        initializer = self.initializer(name)
+        fence = self.client.initialize_execution(initializer, dispatch_guard=self.guard)
+        execution = self.client.execution_intent(
+            self.plan, backend, operation_id="fixture fenced rebuild"
+        )
+        return TestingRouteWriterAttempt(
+            execution=execution,
+            custody=initializer.custody,
+            fence=fence,
+            expected_file_sha256=self.client.read()["file_sha256"],
+            key=hashlib.sha256(("fixture durable writer child:" + name).encode()).hexdigest(),
+        )
+
+    def publish_attempt(self, attempt: TestingRouteWriterAttempt, expected: str) -> str | None:
+        return self.client.publish(
+            self.plan,
+            attempt.execution.backend,
+            expected_backend=expected,
+            desired_runtime_identity=self.identity
+            if attempt.execution.backend == self.plan.old_backend
+            else self.new_identity,
+            dispatch_guard=self.guard,
+            execution=attempt.execution,
+            execution_key=attempt.key,
+            writer_attempt=attempt,
+        )
+
+    def test_a_lost_initializer_reply_is_observed_without_another_send(self) -> None:
+        initializer = self.initializer()
+        self.lose_writer_reply = True
+        with self.assertRaises(NativeSourceUnavailable):
+            self.client.initialize_execution(initializer, dispatch_guard=self.guard)
+        self.lose_writer_reply = False
+        sends = self.effect_count
+        fence = self.client.observe_initializer(initializer)
+        self.assertEqual(fence.generation, initializer.generation)
+        self.assertEqual(self.effect_count, sends)
+        self.assertFalse(self.route_file.exists())
+
+    def test_restart_between_host_inspection_and_exec_refuses_the_inner_write(self) -> None:
+        attempt = self.fenced_attempt(self.plan.new_backend)
+        before = self.client.read_execution_fence(attempt.custody)
+        self.before_native = lambda: self.process_start.write_text("200")
+        with self.assertRaises(NativeSourceUnavailable):
+            self.publish_attempt(attempt, self.plan.old_backend)
+        self.assertFalse(self.route_file.exists())
+        current = TestingRouteExecutionCustody.model_validate(
+            self.client.read()["execution_custody"]
+        )
+        self.assertEqual(self.client.read_execution_fence(current), before)
+
+    def test_a_shared_process_namespace_is_refused_before_any_mutation(self) -> None:
+        self.containers["proxy"]["HostConfig"] = {"PidMode": "host"}
+        with self.assertRaises(NativeSourceUnavailable):
+            self.client.read()
+        self.assertEqual(self.effect_count, 0)
+
+    def test_a_fenced_writer_keeps_custody_when_the_mount_source_is_respelled(self) -> None:
+        attempt = self.fenced_attempt(self.plan.new_backend)
+        self.containers["proxy"]["Mounts"][0]["Source"] = "/fixture/canonical-dynamic"
+        outcome = self.publish_attempt(attempt, self.plan.old_backend)
+        self.assertEqual(outcome, "applied")
+        self.assertEqual(self.client.settle_attempt(attempt, dispatch_guard=self.guard), "applied")
+
+    def test_a_delayed_host_call_cannot_rediscover_a_successor_proxy(self) -> None:
+        attempt = self.fenced_attempt(self.plan.new_backend)
+        sends = self.effect_count
+        self.before_publish = lambda: self.containers["proxy"].update({"Id": "successor-proxy"})
+        with self.assertRaises(transport.TestingRouteWriteNotStarted):
+            self.publish_attempt(attempt, self.plan.old_backend)
+        self.assertEqual(self.effect_count, sends)
+        self.assertFalse(self.route_file.exists())
+        self.assertEqual(self.client.settle_attempt(attempt, dispatch_guard=self.guard), "retired")
+
+    def test_inverse_uses_the_new_root_without_rewriting_original_custody(self) -> None:
+        # Keep executable fixtures outside the actual directory being replaced.
+        self.root = self.root / "dynamic"
+        self.root.mkdir()
+        self.route_file = self.root / (self.plan.route_id + ".yml")
+        original = self.fenced_attempt(self.plan.new_backend)
+        self.assertEqual(self.publish_attempt(original, self.plan.old_backend), "applied")
+        document = self.route_file.read_bytes()
+        retired = self.root.with_name("retired")
+        self.root.rename(retired)
+        self.root.mkdir()
+        self.route_file.write_bytes(document)
+        sends = self.effect_count
+        self.assertEqual(self.client.settle_attempt(original, dispatch_guard=self.guard), "retired")
+        self.assertEqual(self.effect_count, sends)
+        inverse = self.fenced_attempt(self.plan.old_backend, name="inverse in new root")
+        self.assertNotEqual(inverse.custody.filesystem, original.custody.filesystem)
+        self.assertEqual(self.publish_attempt(inverse, self.plan.new_backend), "applied")
+        self.assertEqual(self.client.settle_attempt(inverse, dispatch_guard=self.guard), "applied")
+        self.assertEqual(
+            self.route_file.read_bytes(),
+            json.dumps(
+                route_document(self.plan, self.plan.old_backend),
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode(),
         )
 
     def test_settlement_excludes_a_delayed_original_writer(self) -> None:
-        execution = self.client.execution_intent(
-            self.plan, self.plan.new_backend, operation_id="fixture-rebuild"
-        )
-        key = execution.key(attempt=1)
-        outcome = self.client.settle_execution(execution, key, dispatch_guard=self.guard)
+        attempt = self.fenced_attempt(self.plan.new_backend)
+        outcome = self.client.settle_attempt(attempt, dispatch_guard=self.guard)
         self.assertEqual(outcome, "excluded")
         with self.assertRaises(transport.TestingRouteWriteNotStarted):
-            self.client.publish(
-                self.plan,
-                self.plan.new_backend,
-                expected_backend=self.plan.old_backend,
-                desired_runtime_identity=self.new_identity,
-                dispatch_guard=self.guard,
-                execution=execution,
-                execution_key=key,
-            )
+            self.publish_attempt(attempt, self.plan.old_backend)
         self.assertFalse(self.route_file.exists())
         self.assertEqual(self.client.read()["raw"], self.raw)
 
     def test_lost_finished_reply_has_a_durable_original_outcome(self) -> None:
-        execution = self.client.execution_intent(
-            self.plan, self.plan.new_backend, operation_id="fixture-rebuild"
-        )
-        key = execution.key(attempt=1)
+        attempt = self.fenced_attempt(self.plan.new_backend)
         self.lose_writer_reply = True
         with self.assertRaises(NativeSourceUnavailable):
-            self.client.publish(
-                self.plan,
-                self.plan.new_backend,
-                expected_backend=self.plan.old_backend,
-                desired_runtime_identity=self.new_identity,
-                dispatch_guard=self.guard,
-                execution=execution,
-                execution_key=key,
-            )
+            self.publish_attempt(attempt, self.plan.old_backend)
         self.lose_writer_reply = False
         before = self.route_file.read_bytes()
-        self.assertEqual(
-            self.client.settle_execution(execution, key, dispatch_guard=self.guard), "applied"
-        )
+        self.assertEqual(self.client.settle_attempt(attempt, dispatch_guard=self.guard), "applied")
         self.assertEqual(self.route_file.read_bytes(), before)
 
-    def test_changed_mount_cannot_seal_the_original_writer(self) -> None:
-        execution = self.client.execution_intent(
-            self.plan, self.plan.new_backend, operation_id="fixture"
-        )
+    def test_source_alias_does_not_replace_the_actual_lock_or_root(self) -> None:
+        attempt = self.fenced_attempt(self.plan.new_backend)
         self.containers["proxy"]["Mounts"][0]["Source"] = "/fixture/another-mount"
-        with self.assertRaises(NativeSourceUnavailable) as caught:
-            self.client.settle_execution(
-                execution, execution.key(attempt=1), dispatch_guard=self.guard
-            )
-        self.assertNotIsInstance(caught.exception, transport.TestingRouteWriteNotStarted)
-        self.assertEqual(self.effect_count, 0)
+        self.assertEqual(self.client.settle_attempt(attempt, dispatch_guard=self.guard), "excluded")
         self.assertFalse(self.route_file.exists())
 
     def test_settlement_denial_is_not_exclusion_or_an_alternate_writer(self) -> None:
-        execution = self.client.execution_intent(
-            self.plan, self.plan.new_backend, operation_id="fixture"
-        )
+        attempt = self.fenced_attempt(self.plan.new_backend)
+        before = self.effect_count
         self.deny = True
         with self.assertRaises(NativeSourceAuthorizationDenied):
-            self.client.settle_execution(
-                execution, execution.key(attempt=1), dispatch_guard=self.guard
-            )
-        self.assertEqual(self.effect_count, 1)
+            self.client.settle_attempt(attempt, dispatch_guard=self.guard)
+        self.assertEqual(self.effect_count, before + 1)
         self.assertFalse(self.route_file.exists())
 
     def test_initial_read_discovers_actual_host_entrypoints_without_assuming_names(self) -> None:
@@ -495,6 +652,13 @@ class TestingRouteTransportTests(unittest.TestCase):
         execution = self.client.execution_intent(
             self.plan, self.plan.new_backend, operation_id="fixture"
         )
+        attempt = TestingRouteWriterAttempt(
+            execution=execution,
+            custody=execution.custody,
+            fence=TestingRouteFence.model_validate(self.client.read()["execution_fence"]["fence"]),
+            expected_file_sha256="absent",
+            key=execution.key(attempt=1),
+        )
         with (
             patch.object(self.client, "read", side_effect=AssertionError("Provider read started")),
             self.assertRaises(ValueError),
@@ -507,6 +671,7 @@ class TestingRouteTransportTests(unittest.TestCase):
                 desired_runtime_identity=self.new_identity.model_copy(update={"context": "other"}),
                 execution=execution,
                 execution_key=execution.key(attempt=1),
+                writer_attempt=attempt,
             )
         self.assertEqual(self.effect_count, 0)
 
@@ -520,7 +685,7 @@ class TestingRouteTransportTests(unittest.TestCase):
             patch.object(transport, "_read_remote", native_copy_stream._read_remote),
             self.assertRaises(transport.TestingRouteWriteNotStarted),
         ):
-            self.client._run({"mode": "publish"})
+            self.client._run({"mode": "publish_v2"})
         self.assertEqual(len(connection.sent), 2)
 
     def test_permission_denial_is_propagated_without_an_alternate_writer(self) -> None:
@@ -582,6 +747,13 @@ class TestingRouteTransportTests(unittest.TestCase):
         execution = self.client.execution_intent(
             self.plan, self.plan.old_backend, operation_id="fixture"
         )
+        attempt = TestingRouteWriterAttempt(
+            execution=execution,
+            custody=execution.custody,
+            fence=TestingRouteFence.model_validate(self.client.read()["execution_fence"]["fence"]),
+            expected_file_sha256="absent",
+            key=execution.key(attempt=1),
+        )
         with patch.object(self.client, "read") as read, self.assertRaises(ValueError):
             self.client.publish(
                 different,
@@ -591,6 +763,7 @@ class TestingRouteTransportTests(unittest.TestCase):
                 desired_runtime_identity=self.identity,
                 execution=execution,
                 execution_key=execution.key(attempt=1),
+                writer_attempt=attempt,
             )
         read.assert_not_called()
         self.assertEqual(self.effect_count, 0)

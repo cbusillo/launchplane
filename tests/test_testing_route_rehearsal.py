@@ -20,12 +20,16 @@ from control_plane.dokploy.testing_route import (
     TestingLaneRoute,
 )
 from control_plane.dokploy.testing_route_transport import (
-    ATOMIC_TESTING_ROUTE_WRITER,
     TRAEFIK_DYNAMIC_DIRECTORY,
 )
 from control_plane.dokploy.testing_route_execution import (
     TestingRouteExecutionCustody,
     TestingRouteExecutionIntent,
+    ALLOCATE_TESTING_ROUTE_LOCK,
+    FENCED_TESTING_ROUTE_WRITER,
+    READ_TESTING_ROUTE_FENCE,
+    parse_testing_route_fence,
+    TestingRouteFence,
 )
 from control_plane.contracts.canonical_json import canonical_json_sha256
 
@@ -142,6 +146,50 @@ class TestingRouteRehearsalTests(unittest.TestCase):
                         "exec", proxy, "stat", "-c", "%d:%i", TRAEFIK_DYNAMIC_DIRECTORY
                     ),
                 )
+                epoch = docker(
+                    "exec",
+                    proxy,
+                    "sh",
+                    "-c",
+                    "cat /proc/sys/kernel/random/boot_id; cat /proc/1/stat; if test -e /proc/self/timens_offsets; then sed -n '/^boottime/p' /proc/self/timens_offsets; else printf 'boottime 0 0\\n'; fi",
+                ).splitlines()
+                process_epoch = ":".join(
+                    [epoch[0], epoch[1].rsplit(") ", 1)[-1].split()[19], *epoch[2].split()[1:]]
+                )
+                lock = docker(
+                    "exec",
+                    proxy,
+                    "sh",
+                    "-c",
+                    ALLOCATE_TESTING_ROUTE_LOCK,
+                    "_",
+                    TRAEFIK_DYNAMIC_DIRECTORY,
+                    route_file.name,
+                    custody.filesystem,
+                    process_epoch,
+                )
+                generation = hashlib.sha256(prefix.encode()).hexdigest()
+                docker(
+                    "exec",
+                    "-i",
+                    proxy,
+                    "sh",
+                    "-c",
+                    FENCED_TESTING_ROUTE_WRITER,
+                    "_",
+                    TRAEFIK_DYNAMIC_DIRECTORY,
+                    route_file.name,
+                    custody.filesystem,
+                    "initialize",
+                    generation,
+                    "0",
+                    generation,
+                    "absent",
+                    generation,
+                    "absent",
+                    lock,
+                    process_epoch,
+                )
 
                 def writer_arguments(
                     backend: str, operation: str, expected: str, mode: str = "publish"
@@ -158,16 +206,36 @@ class TestingRouteRehearsalTests(unittest.TestCase):
                     return [
                         "sh",
                         "-c",
-                        ATOMIC_TESTING_ROUTE_WRITER,
+                        FENCED_TESTING_ROUTE_WRITER,
                         "_",
                         TRAEFIK_DYNAMIC_DIRECTORY,
                         route_file.name,
+                        custody.filesystem,
+                        mode,
+                        generation,
+                        str(
+                            TestingRouteFence.model_validate(
+                                parse_testing_route_fence(
+                                    docker(
+                                        "exec",
+                                        proxy,
+                                        "sh",
+                                        "-c",
+                                        READ_TESTING_ROUTE_FENCE,
+                                        "_",
+                                        TRAEFIK_DYNAMIC_DIRECTORY,
+                                        route_file.name,
+                                        custody.filesystem,
+                                    )
+                                )["fence"]
+                            ).revision
+                        ),
+                        execution.key(attempt=1),
                         expected,
                         execution.document_sha256,
-                        execution.key(attempt=1),
-                        custody.filesystem,
-                        canonical_json_sha256(custody.model_dump(mode="json")),
-                        mode,
+                        generation,
+                        lock,
+                        process_epoch,
                     ]
 
                 initial = json.dumps(
@@ -257,7 +325,7 @@ class TestingRouteRehearsalTests(unittest.TestCase):
                                 + TRAEFIK_DYNAMIC_DIRECTORY
                                 + "/.writer-bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
                                 "-e",
-                                "ROUTE_FILE=" + TRAEFIK_DYNAMIC_DIRECTORY + "/" + route_file.name,
+                                "ROUTE_FILE=" + route_file.name,
                                 "-e",
                                 "GATE_ENTERED=" + TRAEFIK_DYNAMIC_DIRECTORY + "/entered",
                                 "-e",
@@ -277,23 +345,29 @@ class TestingRouteRehearsalTests(unittest.TestCase):
                             deadline = time.monotonic() + 10
                             while not entered.exists():
                                 if process.poll() is not None or time.monotonic() >= deadline:
+                                    details = (
+                                        process.communicate(timeout=5)
+                                        if process.poll() is not None
+                                        else (b"", b"")
+                                    )
                                     self.fail(
-                                        "The isolated Docker writer did not reach its rename gate"
+                                        "The isolated Docker writer did not reach its rename gate: "
+                                        + repr(details)
                                     )
                                 stop.wait(0.01)
                             process.kill()
                             process.communicate(timeout=5)
+                            settlement = arguments.copy()
+                            settlement[settlement.index("publish")] = "settle"
                             self.assertEqual(
-                                docker("exec", "-i", proxy, *arguments[:-1], "settle", content=b""),
+                                docker("exec", "-i", proxy, *settlement, content=b""),
                                 "busy",
                             )
                             self.assertEqual(observed(), old_url)
                             release.touch()
                             deadline = time.monotonic() + 10
                             while True:
-                                outcome = docker(
-                                    "exec", "-i", proxy, *arguments[:-1], "settle", content=b""
-                                )
+                                outcome = docker("exec", "-i", proxy, *settlement, content=b"")
                                 if outcome != "busy":
                                     self.assertEqual(outcome, "applied")
                                     break
