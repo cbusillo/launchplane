@@ -8,6 +8,13 @@ from pathlib import Path
 from uuid import uuid4
 from typing import Literal, Protocol, cast
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.testing_serving_copy import (
+    published_testing_copy,
+    render_maintained_testing_copy,
+    omitted_maintenance_keys,
+    resolve_testing_maintenance_environment,
+    require_maintained_local_credentials,
+)
 
 import click
 from pydantic import BaseModel, ConfigDict, Field
@@ -1419,6 +1426,19 @@ def build_odoo_stable_target_replacement_plan(
             context_name=lane.context, instance_name=lane.instance
         )
     )
+    published_copy = None
+    if (
+        isinstance(record_store, PostgresRecordStore)
+        and lane.instance == "testing"
+        and target_record is not None
+        and target_id_record is not None
+        and request.strategy == "recreate-in-place"
+    ):
+        published_copy = published_testing_copy(
+            record_store, product=profile.product, context=lane.context
+        )
+        if published_copy is not None and request.data_source_mode == "existing":
+            require_maintained_local_credentials(record_store, published_copy)
     if _requires_two_slot_release(lane, inventory):
         return OdooStableTargetReplacementPlan(
             plan_status="blocked",
@@ -1595,7 +1615,7 @@ def build_odoo_stable_target_replacement_plan(
                     "DB-backed desired authority for: " + ", ".join(volume_authority_drift_keys),
                     volume_authority_drift_keys,
                 )
-        if not current_target.domain_hosts:
+        if not current_target.domain_hosts and published_copy is None:
             block(
                 "domains_missing", "Current target has no discoverable Dokploy domains to cut over."
             )
@@ -1644,6 +1664,9 @@ def build_odoo_stable_target_replacement_plan(
                     instance=lane.instance,
                 )
             )
+            if published_copy is not None:
+                assert isinstance(record_store, PostgresRecordStore)
+                site_keys.difference_update(omitted_maintenance_keys(record_store, lane.context))
             # A lane may retire a key its site's records hold (for example a shared
             # integration setting kept off this lane); the retirement wins and the key
             # is not delivered. Declared and driver keys still cannot be retired.
@@ -1662,14 +1685,21 @@ def build_odoo_stable_target_replacement_plan(
                 )
             )
             # Rendering checks the image, domains and port before any provider write.
-            dokploy_compose.render_odoo_raw_compose_file(
-                image_reference=profile.image.repository,
-                hold_web_until_integration_readback=(
-                    web_held_until_integration_readback(lane.instance)
-                ),
-                domain_hosts=current_target.domain_hosts,
-                runtime_port=profile.runtime_port,
-            )
+            if published_copy is not None:
+                render_maintained_testing_copy(
+                    published_copy,
+                    image_reference=profile.image.repository,
+                    hold_web=web_held_until_integration_readback(lane.instance),
+                )
+            else:
+                dokploy_compose.render_odoo_raw_compose_file(
+                    image_reference=profile.image.repository,
+                    hold_web_until_integration_readback=(
+                        web_held_until_integration_readback(lane.instance)
+                    ),
+                    domain_hosts=current_target.domain_hosts,
+                    runtime_port=profile.runtime_port,
+                )
             if request.data_source_mode == "upstream_restore" and not (
                 generation is not None and generation.source_mode == "container-export"
             ):
@@ -1956,6 +1986,30 @@ def execute_odoo_stable_target_replacement_apply(
     target_id_record = record_store.read_dokploy_target_id_record(
         context_name=plan.context, instance_name=plan.instance
     )
+    published_copy = (
+        published_testing_copy(record_store, product=profile.product, context=plan.context)
+        if isinstance(record_store, PostgresRecordStore) and plan.instance == "testing"
+        else None
+    )
+    if published_copy is not None:
+        if request.data_source_mode != "existing" or provider_effect_checkpoint is None:
+            raise OdooTargetReplacementStageError(
+                "strategy_unsupported",
+                "Use the service worker and native rebuild action for this testing copy.",
+            )
+        original_checkpoint = provider_effect_checkpoint
+
+        def maintained_copy_checkpoint(phase: str) -> None:
+            assert isinstance(record_store, PostgresRecordStore)
+            if (
+                published_testing_copy(record_store, product=profile.product, context=plan.context)
+                != published_copy
+            ):
+                raise ValueError("The adopted testing copy changed before provider dispatch.")
+            require_maintained_local_credentials(record_store, published_copy)
+            original_checkpoint(phase)
+
+        provider_effect_checkpoint = maintained_copy_checkpoint
     generation = read_current_testing_generation(
         record_store, product=profile.product, context=plan.context, instance=plan.instance
     )
@@ -2062,6 +2116,13 @@ def execute_odoo_stable_target_replacement_apply(
             )
 
     runtime_source: dict[str, str] = {"data_source_mode": plan.data_source_mode}
+    if published_copy is not None:
+        runtime_source.update(
+            {
+                "testing_publication": published_copy.plan.key,
+                "testing_candidate": published_copy.plan.candidate.namespace,
+            }
+        )
     if generation is not None and generation.drill_database:
         runtime_source[TESTING_DRILL_DATABASE_KEY] = generation.drill_database
     record_store.write_deployment_record(
@@ -2272,11 +2333,19 @@ def execute_odoo_stable_target_replacement_apply(
                 )
 
                 require_registered_remote_server(target_payload.get("serverId"))
-            site_environment = control_plane_runtime_environments.resolve_site_runtime_environment(
-                control_plane_root=control_plane_root,
-                context_name=plan.context,
-                instance_name=plan.instance,
-            )
+            if published_copy is not None:
+                assert isinstance(record_store, PostgresRecordStore)
+                site_environment = resolve_testing_maintenance_environment(
+                    control_plane_root, record_store, published_copy
+                )
+            else:
+                site_environment = (
+                    control_plane_runtime_environments.resolve_site_runtime_environment(
+                        control_plane_root=control_plane_root,
+                        context_name=plan.context,
+                        instance_name=plan.instance,
+                    )
+                )
         # The site's own environment is delivered whole, as live sync does: worker
         # credentials, global values and other sites' values never reach it.
         runtime_environment_values = dict(site_environment.values)
@@ -2342,6 +2411,11 @@ def execute_odoo_stable_target_replacement_apply(
                     instance_name=plan.instance,
                 )
             )
+            if published_copy is not None:
+                assert isinstance(record_store, PostgresRecordStore)
+                runtime_secret_binding_keys.difference_update(
+                    omitted_maintenance_keys(record_store, plan.context)
+                )
             # Check every secret this deployment carries, including ones the profile
             # doesn't declare, such as an override's secret-backed addon setting.
             transported_secret_keys = (
@@ -2375,18 +2449,27 @@ def execute_odoo_stable_target_replacement_apply(
                 if key in {"required", "status", "policy_record_id", "policy_sha256"}
             }
         )
-        compose_file = dokploy_compose.render_odoo_raw_compose_file(
-            image_reference=image_reference,
-            hold_web_until_integration_readback=web_held_until_integration_readback(plan.instance),
-            domain_hosts=plan.expected_domain_hosts,
-            runtime_port=profile.runtime_port,
-            publish_host_ports=generation is None,
-            mount_workflow_ssh=generation is None,
-            isolated_testing=generation is not None,
-            domain_certificate_type=generation.certificate_type
-            if generation is not None
-            else "none",
-        )
+        if published_copy is not None:
+            compose_file = render_maintained_testing_copy(
+                published_copy,
+                image_reference=image_reference,
+                hold_web=web_held_until_integration_readback(plan.instance),
+            )
+        else:
+            compose_file = dokploy_compose.render_odoo_raw_compose_file(
+                image_reference=image_reference,
+                hold_web_until_integration_readback=web_held_until_integration_readback(
+                    plan.instance
+                ),
+                domain_hosts=plan.expected_domain_hosts,
+                runtime_port=profile.runtime_port,
+                publish_host_ports=generation is None,
+                mount_workflow_ssh=generation is None,
+                isolated_testing=generation is not None,
+                domain_certificate_type=generation.certificate_type
+                if generation is not None
+                else "none",
+            )
         current_env_map = dokploy_api.parse_dokploy_env_text(str(target_payload.get("env") or ""))
         current_identity = _runtime_identity_map(current_env_map)
         try:

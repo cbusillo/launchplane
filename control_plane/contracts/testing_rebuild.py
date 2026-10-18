@@ -134,7 +134,8 @@ class TestingRebuildRecord(FrozenRecord):
     publication_started: bool = False
     rollback_started: bool = False
     retirement_recovery: TestingCopyReadiness | None = None
-    error: Literal["", "candidate_public_health_failed"] = ""
+    error: Literal["", "candidate_public_health_failed", "candidate_preparation_failed"] = ""
+    preparation_failure_evidence: str = Field(default="", exclude_if=lambda value: not value)
 
     @model_validator(mode="after")
     def validate_checkpoint(self) -> Self:
@@ -155,16 +156,41 @@ class TestingRebuildRecord(FrozenRecord):
             self.ended_at is not None and not self.began_at <= self.ended_at <= self.updated_at
         ):
             raise ValueError("Rebuild checkpoint times are out of order.")
-        if self.step != "preparing" and (
-            self.preparation is None
-            or (self.preparation.plan_digest, self.preparation.copy_id)
-            != (self.plan.digest, self.plan.new.copy_id)
+        preparation_failed = self.step == "failed" and self.error == "candidate_preparation_failed"
+        if bool(self.preparation_failure_evidence) != preparation_failed or (
+            preparation_failed
+            and any(
+                (
+                    self.preparation is not None,
+                    self.readiness is not None,
+                    self.route is not None,
+                    self.publication_started,
+                    self.retirement_started,
+                    self.rollback_started,
+                )
+            )
+        ):
+            raise ValueError(
+                "Preparation failure requires retained custody before any traffic effect."
+            )
+        if (
+            not preparation_failed
+            and self.step != "preparing"
+            and (
+                self.preparation is None
+                or (self.preparation.plan_digest, self.preparation.copy_id)
+                != (self.plan.digest, self.plan.new.copy_id)
+            )
         ):
             raise ValueError("Rebuild progress requires its independent-copy receipt.")
-        if self.step not in {"preparing", "prepared"} and (
-            self.readiness is None
-            or (self.readiness.copy_id, self.readiness.host, self.readiness.runtime_identity)
-            != (self.plan.new.copy_id, self.plan.host, self.plan.new.runtime_identity)
+        if (
+            not preparation_failed
+            and self.step not in {"preparing", "prepared"}
+            and (
+                self.readiness is None
+                or (self.readiness.copy_id, self.readiness.host, self.readiness.runtime_identity)
+                != (self.plan.new.copy_id, self.plan.host, self.plan.new.runtime_identity)
+            )
         ):
             raise ValueError("Cutover progress requires the candidate's readiness receipt.")
         if (self.step in {"complete", "failed"}) != (self.ended_at is not None):

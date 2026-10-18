@@ -105,6 +105,14 @@ class TestingRebuildObservationUnavailable(ValueError):
     """Evidence is missing or stale; preserve intent and observe again."""
 
 
+class TestingRebuildPreparationFailure(ValueError):
+    """A terminal original candidate job failed and its custody is retained."""
+
+    def __init__(self, *, copy_id: str, evidence_id: str) -> None:
+        super().__init__("Candidate preparation failed; its original custody is retained.")
+        self.copy_id, self.evidence_id = copy_id, evidence_id
+
+
 class TestingRebuildHealthFailure(ValueError):
     """A fresh, verified stable-address probe failed or served the wrong copy."""
 
@@ -200,7 +208,20 @@ def execute_testing_rebuild(
         if record.step == "preparing":
             _route(provider.current_route(plan), plan, plan.old)
             provider.guard(plan)
-            receipt = provider.prepare(plan)
+            try:
+                receipt = provider.prepare(plan)
+            except TestingRebuildPreparationFailure as failure:
+                if failure.copy_id != plan.new.copy_id or not failure.evidence_id:
+                    raise ValueError("Candidate failure proof belongs to another copy.") from None
+                _route(provider.current_route(plan), plan, plan.old)
+                provider.guard(plan)
+                save(
+                    step="failed",
+                    ended_at=clock(),
+                    error="candidate_preparation_failed",
+                    preparation_failure_evidence=failure.evidence_id,
+                )
+                return record
             if (receipt.plan_digest, receipt.copy_id) != (plan.digest, plan.new.copy_id):
                 raise ValueError("Prepared copy differs from the admitted rebuild.")
             _route(provider.current_route(plan), plan, plan.old)

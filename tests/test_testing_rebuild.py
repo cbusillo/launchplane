@@ -20,7 +20,10 @@ from control_plane.contracts.testing_rebuild import (
 )
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_rebuild_storage import RecordTestingRebuildStore
-from control_plane.workflows.testing_rebuild import execute_testing_rebuild
+from control_plane.workflows.testing_rebuild import (
+    execute_testing_rebuild,
+    TestingRebuildPreparationFailure,
+)
 
 
 def rebuild_plan(source: str = "production") -> TestingRebuildPlan:
@@ -278,6 +281,37 @@ class TestingRebuildTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.store.save(record)
         self.assertTrue(self.store.load(self.plan).publication_started)
+
+    def test_terminal_candidate_failure_keeps_old_serving_and_allows_historical_replay(
+        self,
+    ) -> None:
+        failure = TestingRebuildPreparationFailure(
+            copy_id=self.plan.new.copy_id, evidence_id="original-candidate-terminal-custody"
+        )
+        with patch.object(self.provider, "prepare", side_effect=failure):
+            result = self.run_rebuild()
+        self.assertEqual(result.step, "failed")
+        self.assertEqual(result.preparation_failure_evidence, failure.evidence_id)
+        self.assertTrue(self.provider.old_running)
+        self.assertEqual(self.provider.serving, self.plan.old)
+        self.assertEqual(self.provider.published, self.plan.old)
+        self.assertNotIn("retire", self.provider.actions)
+        with patch.object(self.provider, "prepare", side_effect=AssertionError("No replay effect")):
+            self.assertEqual(self.run_rebuild(), result)
+
+    def test_preparation_denial_or_foreign_failure_proof_is_never_terminal_success(self) -> None:
+        for failure in (
+            PermissionError("fixture refusal"),
+            TestingRebuildPreparationFailure(copy_id="foreign", evidence_id="foreign"),
+        ):
+            with (
+                self.subTest(failure=type(failure).__name__),
+                patch.object(self.provider, "prepare", side_effect=failure),
+            ):
+                with self.assertRaises((PermissionError, ValueError)):
+                    self.run_rebuild()
+                self.assertEqual(self.store.load(self.plan).step, "preparing")
+                self.assertTrue(self.provider.old_running)
 
     def test_rebuild_and_both_restore_sources_keep_the_address(self) -> None:
         for source in ("empty", "production", "upstream"):

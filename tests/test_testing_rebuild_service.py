@@ -1,6 +1,17 @@
 """The ordinary replacement action admits a native rebuild only on testing."""
 
 import unittest
+import yaml
+from unittest.mock import patch
+from control_plane import secrets
+from control_plane.contracts.secret_record import SecretVersion
+from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.testing_serving_copy import resolve_testing_maintenance_environment
+from control_plane.testing_serving_copy import (
+    render_maintained_testing_copy,
+    require_maintained_local_credentials,
+)
+from control_plane.odoo_testing_restore import read_current_testing_generation
 from tests import test_testing_publication as publication_tests
 from control_plane.testing_serving_copy import published_testing_copy
 from control_plane.contracts.testing_publication import TestingPublicationRecord
@@ -64,6 +75,104 @@ class PublishedTestingCopyTests(unittest.TestCase):
             self.store,
             product=self.fixture.candidate.product,
             context=self.fixture.candidate.context,
+        )
+
+    def test_maintenance_reads_only_local_or_explicit_nonproduction_credentials(self) -> None:
+        versions: dict[str, str] = {}
+        for key, classification in (("SAFE_TEST_TOKEN", "testing"), ("LIVE_TOKEN", "prod_only")):
+            result = secrets.write_secret_value(
+                record_store=self.store,
+                scope="context_instance",
+                integration=secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+                name=key.lower(),
+                plaintext_value=key.lower() + "-fixture",
+                binding_key=key,
+                context_name=self.fixture.candidate.context,
+                instance_name="testing",
+                actor="fixture",
+            )
+            binding = next(
+                item
+                for item in self.store.list_secret_bindings()
+                if item.secret_id == result["secret_id"]
+            )
+            self.store.write_secret_binding(
+                binding.model_copy(
+                    update={"declared_secret_class": classification, "value_source": "supplied"}
+                )
+            )
+            versions[key] = self.store.read_secret_record(result["secret_id"]).current_version_id
+        read = PostgresRecordStore.read_secret_version
+
+        def scoped(store: PostgresRecordStore, version: str) -> SecretVersion:
+            if version == versions["LIVE_TOKEN"]:
+                raise AssertionError("Excluded credentials cannot be read")
+            return read(store, version)
+
+        with patch.object(
+            PostgresRecordStore, "read_secret_version", autospec=True, side_effect=scoped
+        ):
+            environment = resolve_testing_maintenance_environment(
+                self.fixture.fixture.root, self.store, self.publication
+            )
+        self.assertEqual(environment.values["SAFE_TEST_TOKEN"], "safe_test_token-fixture")
+        self.assertNotIn("LIVE_TOKEN", environment.values)
+
+    def test_changed_local_password_version_requires_a_new_private_copy(self) -> None:
+        binding = next(
+            item
+            for item in self.publication.plan.secret_read_set.bindings
+            if item.binding_key == "ODOO_DB_PASSWORD" and item.instance == "testing"
+        )
+        record = self.store.read_secret_record(binding.secret_id)
+        self.store.write_secret_record(
+            record.model_copy(update={"current_version_id": "new-version"})
+        )
+        with self.assertRaises(ValueError):
+            require_maintained_local_credentials(self.store, self.publication)
+        # Custody is still readable, so rebuilding can install the new credential.
+        self.assertEqual(self.select(), self.publication)
+
+    def test_restored_copy_uses_native_publication_instead_of_legacy_bootstrap_receipts(
+        self,
+    ) -> None:
+        fixture = publication_tests.TestingPublicationTests()
+        fixture.source_mode = "upstream"
+        fixture.setUp()
+        try:
+            fixture.prepare()
+            fixture.publish()
+            self.assertEqual(
+                read_current_testing_generation(
+                    fixture.store,
+                    product=fixture.candidate.product,
+                    context=fixture.candidate.context,
+                    instance="testing",
+                ),
+                fixture.current().generation,
+            )
+        finally:
+            fixture.doCleanups()
+
+    def test_later_build_keeps_private_alias_and_never_publishes_a_host_port(self) -> None:
+        document = yaml.safe_load(
+            render_maintained_testing_copy(
+                self.publication,
+                image_reference="example.invalid/new-build@sha256:" + "d" * 64,
+                hold_web=True,
+            )
+        )
+        web = document["services"]["web"]
+        self.assertFalse(web.get("ports"))
+        self.assertTrue(
+            any(
+                self.fixture.candidate.namespace in network.get("aliases", [])
+                for network in web["networks"].values()
+                if isinstance(network, dict)
+            )
+        )
+        self.assertFalse(
+            any(key.startswith("traefik.http.routers.") for key in web.get("labels", {}))
         )
 
     def test_empty_copy_remains_selected_across_later_build_inventory(self) -> None:
