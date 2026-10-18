@@ -383,12 +383,17 @@ class TestingRouteTransportTests(unittest.TestCase):
                 self.assertEqual(self.effect_count, 0)
                 self.assertFalse(self.route_file.exists())
 
-    def test_candidate_port_and_runtime_lane_must_match_before_publication(self) -> None:
+    def test_candidate_port_must_match_before_publication(self) -> None:
         self.containers["new"]["Config"]["Env"].append("ODOO_HTTP_PORT=8070")
         with self.assertRaises(transport.TestingRouteWriteNotStarted):
             self.publish(self.plan.new_backend, self.plan.old_backend)
         self.assertEqual(self.effect_count, 0)
-        with self.assertRaises(ValueError):
+
+    def test_runtime_lane_must_match_before_provider_reads(self) -> None:
+        with (
+            patch.object(self.client, "read", side_effect=AssertionError("Provider read started")),
+            self.assertRaises(ValueError),
+        ):
             self.client.publish(
                 self.plan,
                 self.plan.new_backend,
