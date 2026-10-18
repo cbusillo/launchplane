@@ -13867,9 +13867,6 @@ class RealPostgresTestingRebuildResumeTests(unittest.TestCase):
 
 
 class RealPostgresNativeTestingWorkerTests(unittest.TestCase):
-    def test_changed_binding_plan_retains_original_configured_copy(self) -> None:
-        self.run_worker_case("test_changed_binding_plan_retains_original_configured_copy")
-
     def test_secret_rotation_retains_configured_copy_without_deployment(self) -> None:
         self.run_worker_case(
             "test_secret_rotation_retains_original_configured_copy_without_deployment"

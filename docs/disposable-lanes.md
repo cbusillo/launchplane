@@ -982,9 +982,11 @@ If original configuration is positively matched but preparation now fails before
 any deployment, the same observation may retain that configured private copy
 with a configuration-retained receipt binding its original plan and fingerprint.
 This also handles a lost update reply and a testing secret rotation before the
-first build. The original configuration must match, deployment history and
-restore/build receipts must be absent, custody must remain private and current
-guards/leases must pass. A nonempty mismatch stays unknown. No fresh inputs are
+first build. Admission-change recovery uses this same retention for both
+configuring and configured copies; it does not advance an observed copy to a
+runnable phase after refusing the operation. The original configuration must
+match, deployment history and restore/build receipts must be absent, custody must
+remain private and current guards/leases must pass. A nonempty mismatch stays unknown. No fresh inputs are
 written or deployed. A replay uses the retained receipt and keeps old traffic
 selected.
 

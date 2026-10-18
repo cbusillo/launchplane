@@ -546,13 +546,14 @@ class NativeTestingRebuildExecution:
                     # admission refusal must not dispatch preparation again.
                     self.guard(recovery=True)
             app = candidate.application
-            if app is not None and app.phase == "configuring":
+            if app is not None and app.phase in {"configuring", "configured"}:
                 candidate = observe_candidate_configuration(
                     root=self.root,
                     store=self.store,
                     record=candidate,
                     lease=self.lease,
                     guard=lambda: self.guard(recovery=True),
+                    retain_configured=True,
                 )
                 app = candidate.application
             if app is not None and app.phase in {"deploying", "restoring"}:
