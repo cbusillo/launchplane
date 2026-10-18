@@ -875,7 +875,9 @@ The testing Actions page replaces the unavailable generic replacement cards with
 a typed administrator control for fresh empty,
 sanitized production and configured upstream copies. It shows the unchanged
 address and selects the latest verified product build through the existing
-testing build selector. `GET /v1/products/{product}/testing-rebuild/inputs`
+testing build selector. The audit reason is prefilled and may be edited; a ready
+lane can be rebuilt with the primary button without entering build IDs or text.
+`GET /v1/products/{product}/testing-rebuild/inputs`
 reads that selection, actual retained-copy/route admission, current use/hold and
 generated credential provenance. It does not record an artifact, reserve a copy,
 create a lease or dispatch a mutation. Its `candidate_verification: pending`

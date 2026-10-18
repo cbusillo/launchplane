@@ -8,7 +8,7 @@ export function TestingRebuildPanel({ detail, fixtureMode, onRefresh }: {
   detail: ProductEnvironmentDetail; fixtureMode: boolean; onRefresh: () => void;
 }) {
   const [source, setSource] = useState<TestingRebuildSubmit["data_source_mode"]>("empty");
-  const [reason, setReason] = useState("");
+  const [reason, setReason] = useState("Rebuild testing for a fresh test session.");
   const [preflight, setPreflight] = useState<TestingRebuildPreflight | null>(null);
   const [inspectionError, setInspectionError] = useState("");
   const [attempt, setAttempt] = useState(() => readTestingRebuildAttempt(detail.product));
@@ -78,16 +78,16 @@ export function TestingRebuildPanel({ detail, fixtureMode, onRefresh }: {
     <header className="promotion-control-header"><div>
       <p className="eyebrow">Testing</p><h2 id="testing-rebuild-title">Rebuild testing at the same address</h2>
       <p>{detail.base_url}</p>
-      <p>Prepare a new copy with the latest verified build. A working copy keeps serving until its replacement is healthy. Testing passwords stay in place.</p>
+      <p>Use the latest verified build. A working copy keeps serving until its replacement is healthy. Testing passwords and the old copy's data are retained.</p>
     </div></header>
     {fixtureMode ? <p>Rebuild controls are off in fixture mode.</p> : null}
     <label className="promotion-field"><span>Start with</span><select value={attempt?.payload.data_source_mode ?? source} disabled={locked} onChange={event => { setSource(event.target.value as TestingRebuildSubmit["data_source_mode"]); setPreflight(null); setResult(null); setMessage(""); }}>
       <option value="empty">Fresh empty database</option><option value="production_restore">Sanitized production copy</option><option value="upstream_restore">Configured upstream copy</option>
     </select></label>
-    <p>Copied data has live keys and outbound connections removed before it runs. The previous copy's data is retained.</p>
-    <label className="promotion-field"><span>Reason</span><input value={attempt?.payload.reason ?? reason} disabled={locked} maxLength={1000} onChange={event => setReason(event.target.value)} /></label>
-    {!attempt && !fixtureMode ? <p>{inspectionError || (preflight ? "Latest verified build selected. The worker rechecks the lane and verifies the new copy before switching." : "Checking the current build and testing lane…")}</p> : null}
+    {(attempt?.payload.data_source_mode ?? source) !== "empty" ? <p>Copied data has live keys and outbound connections removed before it runs.</p> : null}
+    {!attempt && !fixtureMode ? <p>{inspectionError || (preflight ? "Latest verified build selected." : "Checking the current build and testing lane…")}</p> : null}
     {!attempt ? <button type="button" className="primary-button" disabled={locked || !preflight || !reason.trim()} onClick={() => void rebuild()}>Rebuild testing</button> : null}
+    <details><summary>Reason (optional edit)</summary><label className="promotion-field"><span>Reason</span><input value={attempt?.payload.reason ?? reason} disabled={locked} maxLength={1000} onChange={event => setReason(event.target.value)} /></label></details>
     {inspectionError && !attempt ? <button type="button" className="secondary-button" disabled={busy || fixtureMode} onClick={() => setRefresh(value => value + 1)}>Refresh inspection</button> : null}
     {attempt && !attempt.denied ? <button type="button" className="secondary-button" disabled={busy || fixtureMode} onClick={() => void rebuild(attempt)}>{attempt.operationId ? "Resume watching this rebuild" : "Recover this request"}</button> : null}
     {attempt?.denied ? <p>This request was denied and will not be submitted again. The denial needs to be resolved before rebuilding.</p> : null}

@@ -1,6 +1,6 @@
 import { expect, test, waitForState } from "./state";
 
-for (const outcome of ["success", "lost-reply", "denied", "stale-build"] as const) {
+for (const outcome of ["success", "lost-reply", "denied", "stale-build", "preflight-unavailable"] as const) {
   test(`testing rebuild keeps its address and original request after ${outcome} @responsive`, async ({ page }, testInfo) => {
     await page.goto("/ui/products?fixture=empty");
     const fixtures = await page.evaluate(async () => {
@@ -21,7 +21,9 @@ for (const outcome of ["success", "lost-reply", "denied", "stale-build"] as cons
     await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", trace_id: "session", csrf_token: "fixture-csrf", identity: fixtures.identity } }));
     await page.route("**/v1/products", route => route.fulfill({ json: { status: "ok", trace_id: "products", products: fixtures.products } }));
     await page.route("**/v1/products/atlas-commerce/environments/testing", route => route.fulfill({ json: { status: "ok", trace_id: "lane", environment } }));
-    await page.route("**/v1/products/atlas-commerce/testing-rebuild/inputs?*", route => route.fulfill({ json: {
+    await page.route("**/v1/products/atlas-commerce/testing-rebuild/inputs?*", route => outcome === "preflight-unavailable"
+      ? route.fulfill({ status: 503, json: { trace_id: "preflight-unavailable", error: { code: "testing_preflight_unavailable", message: "Testing inspection is unavailable." } } })
+      : route.fulfill({ json: {
       status: "pass", product: environment.product, context: environment.context, instance: "testing", base_url: environment.base_url,
       artifact_id: "current-verified-build", source_git_ref: "c".repeat(40), data_source_mode: new URL(route.request().url()).searchParams.get("data_source_mode"),
       observed_at: new Date().toISOString(), candidate_verification: "pending",
@@ -39,11 +41,23 @@ for (const outcome of ["success", "lost-reply", "denied", "stale-build"] as cons
     await page.goto("/ui/products/atlas-commerce/environments/testing/actions");
     const panel = page.getByRole("region", { name: "Rebuild testing at the same address" });
     await expect(panel).toBeVisible();
-    await expect(panel.getByRole("button", { name: "Rebuild testing", exact: true })).toBeDisabled();
-    await panel.getByLabel("Start with").selectOption("upstream_restore");
+    if (outcome === "preflight-unavailable") {
+      await expect(panel.getByText("Testing inspection is unavailable.")).toBeVisible();
+      await expect(panel.getByRole("button", { name: "Rebuild testing", exact: true })).toBeDisabled();
+      expect(writes.length).toBe(0);
+      await panel.screenshot({ path: testInfo.outputPath("testing-rebuild-unavailable.png") });
+      return;
+    }
+    const selectedSource = outcome === "success" ? "empty" : outcome === "stale-build" ? "production_restore" : "upstream_restore";
+    if (selectedSource !== "empty") await panel.getByLabel("Start with").selectOption(selectedSource);
     await expect(panel.getByText("Latest verified build selected.", { exact: false })).toBeVisible();
-    await panel.getByLabel("Reason", { exact: true }).fill("Prepare a fresh testing copy.");
+    if (outcome === "lost-reply") {
+      await panel.getByText("Reason (optional edit)", { exact: true }).click();
+      await panel.getByLabel("Reason", { exact: true }).fill("Prepare a fresh testing copy.");
+    }
     await expect(panel.getByRole("button", { name: "Rebuild testing", exact: true })).toBeEnabled();
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await page.screenshot({ path: testInfo.outputPath("testing-rebuild-viewport.png") });
     await panel.screenshot({ path: testInfo.outputPath("testing-rebuild-ready.png") });
     await panel.getByRole("button", { name: "Rebuild testing", exact: true }).click();
     if (outcome === "lost-reply") {
@@ -71,7 +85,7 @@ for (const outcome of ["success", "lost-reply", "denied", "stale-build"] as cons
       await page.clock.runFor(2500);
       await expect(panel.getByRole("status")).toContainText("Testing rebuilt and verified healthy at the same address.");
       expect(polled).toBe(true);
-      expect(writes[0].body.data_source_mode).toBe("upstream_restore");
+      expect(writes[0].body.data_source_mode).toBe(selectedSource);
       expect(writes[0].body).not.toHaveProperty("instance");
     }
     await expect(panel).toContainText(environment.base_url);
