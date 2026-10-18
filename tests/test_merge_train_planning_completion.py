@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from email.message import Message
 from io import BytesIO
 from typing import Any, cast
@@ -28,6 +28,7 @@ from tests.test_merge_train_scheduler import _policy_record
 from tests.test_merge_train_structural_provenance import _entry, _records
 from control_plane import merge_train_controller_run_once as controller
 from control_plane import merge_train_batch_landing as standalone
+from control_plane.merge_train_controller_feedback import build_feedback_payloads
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -87,22 +88,27 @@ class PlanningProvider:
         self.missing_project_item = False
         self.references = [7]
         self.merged = True
+        self.base_branch = "main"
+        self.default_branch: Any = "main"
         self.merged_at: Any = "2026-09-30T23:59:00Z"
         self.drop_label_write = False
+        self.issue_reads: list[str] = []
 
     def request(self, *, path: str, method: str = "GET", body: Any = None, **_kwargs: Any) -> Any:
+        if method == "GET" and path.startswith(f"/repos/{_REPO}/issues/"):
+            self.issue_reads.append(path)
         if path == "/graphql":
             query = body["query"]
             if "closingIssuesReferences" in query:
                 return {
                     "data": {
                         "repository": {
-                            "defaultBranchRef": {"name": "main"},
+                            "defaultBranchRef": {"name": self.default_branch},
                             "object": {"text": json.dumps(self.config)},
                             "pullRequest": {
                                 "merged": self.merged,
                                 "mergedAt": self.merged_at,
-                                "baseRefName": "main",
+                                "baseRefName": self.base_branch,
                                 "mergeCommit": {"oid": "landed"},
                                 "closingIssuesReferences": {
                                     "nodes": [
@@ -202,10 +208,13 @@ class PlanningCompletionTests(TestCase):
         self.comment_mock = self.comment.start()
         self.addCleanup(self.comment.stop)
 
-    def record(self, *, recorded_at: str = "2026-10-01T00:00:00Z") -> MergeTrainPrFeedbackRecord:
+    def record(
+        self, *, recorded_at: str = "2026-10-01T00:00:00Z", base_branch: str = "main"
+    ) -> MergeTrainPrFeedbackRecord:
         return build_merge_train_pr_feedback_record(
             request=MergeTrainPrFeedbackEnvelope(
                 repository=_REPO,
+                base_branch=base_branch,
                 pull_request_number=9,
                 event="completed",
                 controller_action="land_batch",
@@ -867,7 +876,119 @@ class PlanningCompletionTests(TestCase):
         self.assertFalse(result.retryable)
         self.comment_mock.assert_not_called()
 
-    def test_unmerged_change_cannot_drive_metadata(self) -> None:
+    def test_collapsed_stack_child_feedback_is_delivered_without_metadata_completion(self) -> None:
+        payloads = build_feedback_payloads(
+            response={
+                "result": {
+                    "repository": _REPO,
+                    "base_branch": "main",
+                    "controller_action": "land_batch",
+                    "landing_plan": {
+                        "candidate_pull_request_number": 99,
+                        "entries": [{"pull_request_number": 9, "status": "merged"}],
+                    },
+                    "stack_collapse_plan": {
+                        "entries": [{"pull_request_number": 8, "status": "closed"}]
+                    },
+                },
+                "records": {"merge_train_batch_landing_plan_record_id": "landed-batch"},
+            }
+        )
+        request = MergeTrainPrFeedbackEnvelope.model_validate(
+            next(payload for payload in payloads if payload["pull_request_number"] == 8)
+        )
         self.provider.merged = False
-        self.assertEqual(self.record().delivery_status, "failed")
+        self.provider.merged_at = None
+        result = build_merge_train_pr_feedback_record(
+            request=request,
+            policy_key="test",
+            policy_sha256="digest",
+            token="fixture",
+            recorded_at="2026-10-01T00:00:00Z",
+            response_trace_id="stack-child",
+            planning_author_ids=(_BOT,),
+        )
+        self.assertEqual(result.delivery_status, "delivered")
+        self.assertEqual(_receipt(result)["status"], "not_applicable")
+        self.assertFalse(_receipt(result)["ok"])
+        self.assertIn(request.message, self.comment_mock.call_args.kwargs["body"])
         self.assertFalse(self.provider.writes)
+        self.assertFalse(self.provider.issue_reads)
+
+    def test_nondefault_landing_feedback_does_not_require_planning_reconciliation(self) -> None:
+        self.provider.base_branch = "release"
+        original = copy.deepcopy(self.provider.issue)
+        result = self.record(base_branch="release")
+        self.assertEqual(result.delivery_status, "delivered")
+        self.assertEqual(_receipt(result)["status"], "not_applicable")
+        self.assertFalse(_receipt(result)["ok"])
+        self.assertEqual(self.provider.issue, original)
+        self.assertFalse(self.provider.writes)
+        self.assertFalse(self.provider.issue_reads)
+        self.comment_mock.assert_called_once()
+
+    def test_wrong_feedback_base_is_not_a_nondefault_skip(self) -> None:
+        self.provider.base_branch = "other"
+        for merged in (False, True):
+            with self.subTest(merged=merged):
+                self.provider.merged = merged
+                result = self.record(base_branch="release")
+                self.assertEqual(result.delivery_status, "failed")
+                self.assertFalse(result.retryable)
+                self.assertFalse(self.provider.writes)
+                self.assertFalse(self.provider.issue_reads)
+                self.comment_mock.assert_not_called()
+
+    def test_small_merge_clock_difference_waits_then_reconciles(self) -> None:
+        attempted = datetime.fromisoformat("2026-10-01T00:00:00+00:00")
+        self.provider.merged_at = (attempted + timedelta(seconds=1)).isoformat()
+        result = self.record(recorded_at=attempted.isoformat())
+        self.assertEqual(result.delivery_status, "failed")
+        self.assertTrue(result.retryable)
+        self.assertFalse(self.provider.writes)
+        self.assertFalse(self.provider.issue_reads)
+        self.comment_mock.assert_not_called()
+        completed = deliver_merge_train_pr_feedback_record(
+            record=result,
+            token="fixture",
+            attempted_at=(attempted + timedelta(seconds=2)).isoformat(),
+            planning_author_ids=(_BOT,),
+        )
+        self.assertEqual(completed.delivery_status, "delivered")
+        self.assertTrue(_receipt(completed)["ok"])
+
+    def test_incomplete_provider_identity_cannot_be_classified_not_applicable(self) -> None:
+        for field, value in (
+            ("merged", None),
+            ("merged", "false"),
+            ("default_branch", None),
+            ("default_branch", ""),
+        ):
+            with self.subTest(field=field, value=value):
+                self.provider = PlanningProvider()
+                self.provider.merged = False
+                setattr(self.provider, field, value)
+                with patch.object(
+                    completion, "github_api_request", side_effect=self.provider.request
+                ):
+                    result = self.record()
+                self.assertEqual(result.delivery_status, "failed")
+                self.assertFalse(result.retryable)
+                self.assertFalse(self.provider.issue_reads)
+                self.assertFalse(self.provider.writes)
+                self.comment_mock.assert_not_called()
+
+    def test_merge_clock_skew_boundary_uses_the_same_bounded_grace(self) -> None:
+        attempted = datetime.fromisoformat("2026-10-01T00:00:00+00:00")
+        for offset, retryable in (
+            (completion.PROJECTION_GRACE, True),
+            (completion.PROJECTION_GRACE + timedelta(microseconds=1), False),
+        ):
+            with self.subTest(offset=offset):
+                self.provider.merged_at = (attempted + offset).isoformat()
+                result = self.record(recorded_at=attempted.isoformat())
+                self.assertEqual(result.delivery_status, "failed")
+                self.assertEqual(result.retryable, retryable)
+                self.assertFalse(self.provider.issue_reads)
+                self.assertFalse(self.provider.writes)
+                self.comment_mock.assert_not_called()

@@ -420,17 +420,41 @@ def reconcile_completed_change(
         )
         repo = _object(data.get("repository"))
         pull = _object(repo.get("pullRequest"))
-        sha = _object(pull.get("mergeCommit") or {}).get("oid")
-        observed_merge_time = _timestamp(pull["mergedAt"])
+        default_branch = _object(repo.get("defaultBranchRef")).get("name")
         if (
-            pull.get("merged") is not True
+            type(pull.get("merged")) is not bool
             or pull.get("baseRefName") != base_branch
-            or _object(repo.get("defaultBranchRef")).get("name") != base_branch
-            or not sha
-            or observed_merge_time > attempted
+            or not isinstance(default_branch, str)
+            or not default_branch.strip()
         ):
             raise PlanningCompletionReview(
-                "Planning completion requires a confirmed default-branch landing."
+                "Planning completion requires confirmed pull-request and branch identities."
+            )
+        # Completed feedback also covers closed stack children and release-branch
+        # trains. Their legacy comment is valid, but this is no keyword-closure
+        # metadata proof. No issue discovery or mutation applies to these records.
+        if pull["merged"] is False or default_branch != base_branch:
+            if landing is not None:
+                raise PlanningCompletionReview(
+                    "Planning completion landing changed during its read."
+                )
+            return {
+                "ok": False,
+                "status": "not_applicable",
+                "reason": "pull_request_not_merged"
+                if pull["merged"] is False
+                else "non_default_base",
+                "issues": [],
+            }
+        sha = _object(pull.get("mergeCommit") or {}).get("oid")
+        observed_merge_time = _timestamp(pull["mergedAt"])
+        if not sha or observed_merge_time > attempted + PROJECTION_GRACE:
+            raise PlanningCompletionReview(
+                "Planning completion requires a confirmed default-branch landing and merge time."
+            )
+        if observed_merge_time > attempted:
+            raise PlanningCompletionPending(
+                "Planning completion is waiting for the worker clock to reach GitHub's merge time."
             )
         if landing is not None and (landing != sha or merged_at != observed_merge_time):
             raise PlanningCompletionReview("Planning completion landing changed during its read.")

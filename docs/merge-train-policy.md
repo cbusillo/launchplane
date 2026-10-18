@@ -2134,8 +2134,8 @@ Both native controller and standalone batch landings persist pending completed
 feedback before candidate cleanup or returning to the caller. The existing
 terminal-feedback recovery drains it even during an otherwise idle worker pass;
 repeated cleanup does not queue the same landing again. Queueing performs no
-provider calls under the controller lease. Completed feedback reconciles
-planning metadata for the change's native closing references. For a managed
+provider calls under the controller lease. For a merged PR on the default branch,
+completed feedback reconciles planning metadata for its native closing references. For a managed
 issue authored by an identity already trusted by the repository's enqueue
 policy, it requires completed closure, a reviewed clear wait, and closed native
 blockers and sub-issues. It preserves open finish lines and reporter-owned
@@ -2147,6 +2147,14 @@ the issue body remain intact. Its saved comment carries a hidden
 readbacks. The persisted record schema stays compatible with older workers
 during rolling deployment and rollback. A receipt is evidence, never authority;
 each retry uses the current policy's trusted identities.
+
+Completed feedback also covers closed stack children and release-branch trains.
+Those preserve their existing completion comment with an explicit
+`not_applicable`, `ok: false` receipt: no issue discovery or metadata mutation
+applies, and the receipt is not planning-completion proof. The provider must
+return a real merged flag, matching feedback/PR base and a known default branch;
+missing or mismatched identity evidence remains a global hold. A null merge
+timestamp is normal for an unmerged stack child and is not parsed on this path.
 
 A held, reporter-owned or not-yet-closed source does not prevent other eligible
 sources in the same PR from being reconciled. The held source stays unchanged,
@@ -2169,8 +2177,10 @@ that same retry path; authorization denial takes precedence. Unknown GraphQL
 failures need review. GitHub's delayed keyword-closure projection waits only within
 15 minutes of the verified PR merge time. This includes an issue reopened before
 a later merge whose new closure has not projected yet. Any still-open source
-after that window requires owning review and stays unchanged. Missing, invalid,
-inconsistent or future merge timestamps fail closed. A real wait, incomplete prerequisite, cross-repository closing link,
+after that window requires owning review and stays unchanged. A merge timestamp
+slightly ahead of the worker clock waits within the same bounded grace, before
+any issue IO. Missing, invalid, inconsistent or further-future timestamps need
+owning review. A real wait, incomplete prerequisite, cross-repository closing link,
 untrusted author, malformed evidence or readback mismatch leaves a failed
 receipt for owning-agent review. This failure does not undo the landing. Queueing
 does no GitHub IO, but metadata delivery adds requests to the serial scheduler;
