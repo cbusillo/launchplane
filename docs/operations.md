@@ -5058,3 +5058,56 @@ processing completed: only `action: sent_release_digest` proves a successful sen
 messages that were deliberately not sent. Disable the dedicated policy (`status: disabled`)
 through the same service surface to stop future and queued sends; it leaves
 health-alert policies and historical delivery evidence intact.
+
+
+### Prepared retired-delivery table migration
+
+Issue #2437's migration `e7c1d5e9a3b6` removes only the 22 tables named by
+`RETIRED_TABLES` in that revision. Normal service startup stays on the preceding
+`e6b0c4d8f2a5` revision. This is an explicit expand/contract hold: source delivery
+and a green PR do not authorize applying the drop to the shared database.
+The candidate runtime accepts either revision and retains expiry/key-retirement,
+activation/history/policy maintenance, custody evidence and native train fences.
+Further schema changes must reconcile this held migration before advancing the
+startup target.
+
+Before application, obtain the Director's explicit shared-data/release approval
+on #2437. From the approved Launchplane host and exact reviewed image, verify
+that every HTTP replica and worker is on consumer-free source including #3930,
+read the current schema revision, and inventory the candidate tables' row counts
+and database dependencies. Quiesce database writers and deployment/reconciliation
+workers. No arbitrary-checkout live-target or direct SQL fallback is authorized.
+
+Preserve the full pre-migration database with `pg_dump --format=custom --no-owner`
+using the host's existing credential source; keep it in approved private backup
+storage. Restore it into a disposable database with
+`pg_restore --no-owner --exit-on-error`, verify all table schemas and rows, and
+compare rows in primary-key order with canonical JSON keys. Preserve full columns,
+not just payloads. Treat this backup as sensitive and retain it for the rollback
+window. The source rehearsal seeds every retiring table and checks restored
+rows/columns plus every surviving table's contents. A dump file without a proven
+restore is insufficient.
+
+Only after that proof and the recorded approval, the approved host/image runs:
+
+```bash
+uv run python -m control_plane.storage.schema_migration --target-revision e7c1d5e9a3b6
+```
+
+The existing serialized migration helper holds the deployment advisory lock.
+The revision takes non-waiting exclusive locks on all existing retiring tables
+before dropping any, uses restrictive drops, and never cascades into an unexpected
+dependent object. A busy table or retained database dependency aborts the
+PostgreSQL transaction without advancing the revision or partially dropping
+history. Diagnose the dependency or worker before a new attempt. The migration
+also removes three now-unused trigger functions; shared append-only and effect
+identity guards remain for retained history.
+
+Verify the candidate runtime's schema checks, privileged-worker startup/expiry
+maintenance and normal train/history reads after migration. Do not infer empty
+or inactive live state from source searches or the disposable rehearsal.
+Downgrade deliberately refuses before DDL; it cannot reconstruct the deleted
+rows. Recovery requires a separately approved restore of the verified full
+pre-migration backup with its matching image and writer quiescence. Images
+before this preparation accept only the old revision and cannot simply restart
+against the contracted database. Keep the Protection App/access decision separate.

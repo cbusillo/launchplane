@@ -14,6 +14,10 @@ from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
+from control_plane.storage.migrations.versions import (
+    e7c1d5e9a3b6_drop_retired_delivery_tables as retired_delivery,
+)
+
 AUTHZ_COMPATIBILITY_FLOOR_REVISION = "f3b5d7e9a1c2"
 
 
@@ -25,7 +29,12 @@ def _migration_head() -> str:
 
 
 EXPECTED_ALEMBIC_HEAD_REVISION = _migration_head()
-RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS = (EXPECTED_ALEMBIC_HEAD_REVISION,)
+# Expand/contract: shipping the prepared drop does not apply it at startup.
+PRE_RETIREMENT_ALEMBIC_REVISION = retired_delivery.down_revision
+RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS = (
+    PRE_RETIREMENT_ALEMBIC_REVISION,
+    EXPECTED_ALEMBIC_HEAD_REVISION,
+)
 ORDINARY_AGENT_DELIVERY_ACTIVATION_TABLE = "launchplane_ordinary_agent_delivery_activations"
 ORDINARY_AGENT_DELIVERY_ACTIVATION_EVENT_TABLE = (
     "launchplane_ordinary_agent_delivery_activation_events"
@@ -151,77 +160,16 @@ ORDINARY_AGENT_ACTIVATION_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] 
 
 CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
     *ORDINARY_AGENT_ACTIVATION_POSTGRES_COLUMN_TYPES,
-    CriticalColumnType(
-        "launchplane_provider_delivery_inspections", "generation", ("bigint", "int8")
-    ),
-    CriticalColumnType(
-        "launchplane_provider_delivery_inspections",
-        "provider_attempt_ordinal",
-        ("bigint", "int8"),
-    ),
-    CriticalColumnType(
-        "launchplane_provider_delivery_inspections", "action_ordinal", ("bigint", "int8")
-    ),
-    CriticalColumnType(
-        "launchplane_provider_delivery_inspections", "repository_id", ("bigint", "int8")
-    ),
-    CriticalColumnType(
-        "launchplane_provider_delivery_inspections",
-        "repository_completion_sequence",
-        ("bigint", "int8"),
-    ),
-    CriticalColumnType("launchplane_provider_delivery_inspections", "payload", ("jsonb",)),
     CriticalColumnType("launchplane_ordinary_agent_effects", "binding_revision", ("bigint",)),
     CriticalColumnType("launchplane_ordinary_agent_effects", "action_ordinal", ("bigint",)),
     CriticalColumnType("launchplane_ordinary_agent_effects", "revision", ("bigint",)),
     CriticalColumnType("launchplane_ordinary_agent_effects", "payload", ("jsonb",)),
-    CriticalColumnType(
-        "launchplane_ordinary_agent_semantic_dispatches", "semantic_ordinal", ("bigint",)
-    ),
-    CriticalColumnType("launchplane_ordinary_agent_semantic_dispatches", "payload", ("jsonb",)),
-    CriticalColumnType("launchplane_ordinary_agent_semantic_outcomes", "payload", ("jsonb",)),
-    CriticalColumnType("launchplane_ordinary_agent_effect_reconciliations", "payload", ("jsonb",)),
-    CriticalColumnType("launchplane_ordinary_agent_effect_completions", "payload", ("jsonb",)),
     CriticalColumnType("launchplane_ordinary_agent_effect_custody", "payload", ("jsonb",)),
-    CriticalColumnType(
-        "launchplane_ordinary_agent_landing_preparations", "attempt_ordinal", ("bigint",)
-    ),
-    CriticalColumnType("launchplane_ordinary_agent_landing_preparations", "payload", ("jsonb",)),
-    CriticalColumnType(
-        "launchplane_ordinary_agent_landing_bindings", "dispatch_ordinal", ("bigint",)
-    ),
-    CriticalColumnType("launchplane_ordinary_agent_landing_bindings", "payload", ("jsonb",)),
-    CriticalColumnType(
-        "launchplane_ordinary_agent_provider_waits", "retry_not_before", ("bigint",)
-    ),
-    CriticalColumnType("launchplane_ordinary_agent_provider_waits", "payload", ("jsonb",)),
-    CriticalColumnType("launchplane_ordinary_agent_job_claims", "generation", ("bigint",)),
-    CriticalColumnType("launchplane_ordinary_agent_job_claims", "claim_expires_at", ("bigint",)),
-    CriticalColumnType("launchplane_ordinary_agent_job_claims", "next_due_at", ("bigint",)),
-    CriticalColumnType("launchplane_ordinary_agent_job_claims", "released_controller", ("jsonb",)),
-    CriticalColumnType("launchplane_ordinary_agent_read_attempts", "binding_revision", ("bigint",)),
-    CriticalColumnType("launchplane_ordinary_agent_read_attempts", "attempt_ordinal", ("bigint",)),
-    CriticalColumnType("launchplane_ordinary_agent_read_attempts", "revision", ("bigint",)),
-    CriticalColumnType("launchplane_ordinary_agent_read_attempts", "payload", ("jsonb",)),
-    CriticalColumnType("launchplane_ordinary_agent_read_custody", "payload", ("jsonb",)),
-    CriticalColumnType("launchplane_ordinary_agent_read_outcomes", "payload", ("jsonb",)),
-    CriticalColumnType(
-        "launchplane_ordinary_agent_candidate_check_observations", "binding_revision", ("bigint",)
-    ),
-    CriticalColumnType(
-        "launchplane_ordinary_agent_candidate_check_observations",
-        "observation_ordinal",
-        ("bigint",),
-    ),
-    CriticalColumnType(
-        "launchplane_ordinary_agent_candidate_check_observations", "payload", ("jsonb",)
-    ),
     CriticalColumnType("launchplane_ordinary_agent_sessions", "credential_version", ("bigint",)),
     CriticalColumnType("launchplane_ordinary_agent_leases", "revision", ("bigint",)),
     CriticalColumnType("launchplane_ordinary_agent_sessions", "payload", ("jsonb",)),
     CriticalColumnType("launchplane_ordinary_agent_leases", "payload", ("jsonb",)),
     CriticalColumnType("launchplane_ordinary_agent_finite_requests", "payload", ("jsonb",)),
-    CriticalColumnType("launchplane_ordinary_agent_session_operations", "payload", ("jsonb",)),
     CriticalColumnType("launchplane_ordinary_agent_deliveries", "delivery_expires_at", ("bigint",)),
     CriticalColumnType("launchplane_ordinary_agent_deliveries", "credential_version", ("bigint",)),
     CriticalColumnType(
@@ -769,16 +717,6 @@ CRITICAL_POSTGRES_COLUMN_TYPES: tuple[CriticalColumnType, ...] = (
         "is_current",
         ("boolean", "bool"),
     ),
-    CriticalColumnType(
-        "launchplane_ordinary_agent_credential_custody",
-        "payload",
-        ("jsonb",),
-    ),
-    CriticalColumnType(
-        "launchplane_ordinary_agent_lifecycle_audits",
-        "payload",
-        ("jsonb",),
-    ),
 )
 
 _ACTIVE_OPERATION_PREDICATE_TOKENS = ("status", "pending", "running")
@@ -901,47 +839,6 @@ ORDINARY_AGENT_ACTIVATION_CHECK_CONSTRAINTS: tuple[CriticalCheckConstraint, ...]
 CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
     *ORDINARY_AGENT_ACTIVATION_SCHEMA_INDEXES,
     CriticalIndex(
-        "launchplane_provider_delivery_inspections",
-        "provider_delivery_generation_charge_uq",
-        ("demand_id", "generation"),
-        unique=True,
-        predicate_expression="provider_attempt_ordinal = 1",
-    ),
-    CriticalIndex(
-        "launchplane_provider_delivery_inspections",
-        "provider_delivery_attempt_uq",
-        ("demand_id", "generation", "provider_attempt_ordinal"),
-        unique=True,
-    ),
-    CriticalIndex(
-        "launchplane_provider_delivery_inspections",
-        "provider_delivery_repository_flight_uq",
-        ("repository_id",),
-        unique=True,
-        predicate_expression="inspection_phase = 'active'",
-    ),
-    CriticalIndex(
-        "launchplane_provider_delivery_inspections",
-        "provider_delivery_repository_custody_uq",
-        ("repository_id",),
-        unique=True,
-        predicate_expression=(
-            "custody_phase IN ('minting', 'issued', 'issue_unknown', 'cleanup_unknown')"
-        ),
-    ),
-    CriticalIndex(
-        "launchplane_provider_delivery_inspections",
-        "provider_delivery_completion_sequence_uq",
-        ("repository_id", "repository_completion_sequence"),
-        unique=True,
-    ),
-    CriticalIndex(
-        "launchplane_provider_delivery_inspections",
-        "provider_delivery_receipt_uq",
-        ("receipt_id",),
-        unique=True,
-    ),
-    CriticalIndex(
         "launchplane_ordinary_agent_effects",
         "ordinary_effect_charge_uq",
         ("lease_id", "action_ordinal"),
@@ -951,61 +848,6 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
         "launchplane_ordinary_agent_effects",
         "ordinary_effect_semantic_uq",
         ("request_id", "binding_revision", "semantic_key"),
-        unique=True,
-    ),
-    CriticalIndex(
-        "launchplane_ordinary_agent_semantic_dispatches",
-        "ordinary_dispatch_ordinal_uq",
-        ("effect_id", "semantic_ordinal"),
-        unique=True,
-    ),
-    CriticalIndex(
-        "launchplane_ordinary_agent_landing_preparations",
-        "ordinary_landing_entry_attempt_uq",
-        ("request_id", "binding_revision", "pull_request_number", "attempt_ordinal"),
-        unique=True,
-    ),
-    CriticalIndex(
-        "launchplane_ordinary_agent_landing_preparations",
-        "ordinary_landing_predecessor_uq",
-        ("predecessor_preparation_id",),
-        unique=True,
-    ),
-    CriticalIndex(
-        "launchplane_ordinary_agent_landing_preparations",
-        "ordinary_landing_root_charge_uq",
-        ("lease_id", "action_ordinal"),
-        unique=True,
-        predicate_expression="predecessor_preparation_id IS NULL",
-    ),
-    CriticalIndex(
-        "launchplane_ordinary_agent_landing_bindings",
-        "ordinary_landing_effect_dispatch_uq",
-        ("effect_id", "dispatch_ordinal"),
-        unique=True,
-    ),
-    CriticalIndex(
-        "launchplane_ordinary_agent_landing_bindings",
-        "ix_launchplane_ordinary_agent_landing_bindings_effect_id",
-        ("effect_id",),
-    ),
-    CriticalIndex(
-        "launchplane_ordinary_agent_read_attempts",
-        "ordinary_read_attempt_ordinal_uq",
-        ("request_id", "binding_revision", "purpose", "candidate_sha", "attempt_ordinal"),
-        unique=True,
-    ),
-    CriticalIndex(
-        "launchplane_ordinary_agent_read_attempts",
-        "ordinary_read_active_uq",
-        ("request_id", "binding_revision", "purpose"),
-        unique=True,
-        predicate_tokens=("reserved", "reading"),
-    ),
-    CriticalIndex(
-        "launchplane_ordinary_agent_candidate_check_observations",
-        "ordinary_candidate_observation_uq",
-        ("request_id", "binding_revision", "candidate_sha", "observation_ordinal"),
         unique=True,
     ),
     CriticalIndex(
@@ -1712,42 +1554,12 @@ CRITICAL_SCHEMA_INDEXES: tuple[CriticalIndex, ...] = (
         unique=True,
         predicate_expression="is_current",
     ),
-    CriticalIndex(
-        "launchplane_ordinary_agent_credential_custody",
-        "launchplane_ordinary_agent_custody_credential_version_uidx",
-        ("credential_id", "credential_version"),
-        unique=True,
-    ),
-    CriticalIndex(
-        "launchplane_ordinary_agent_lifecycle_audits",
-        "launchplane_ordinary_agent_lifecycle_audit_operation_uidx",
-        ("operation_id",),
-        unique=True,
-    ),
 )
 
 CRITICAL_PRIMARY_KEYS: tuple[CriticalPrimaryKey, ...] = (
     *ORDINARY_AGENT_ACTIVATION_PRIMARY_KEYS,
-    CriticalPrimaryKey("launchplane_provider_delivery_inspections", ("attempt_id",)),
     CriticalPrimaryKey("launchplane_ordinary_agent_effects", ("effect_id",)),
-    CriticalPrimaryKey("launchplane_ordinary_agent_semantic_dispatches", ("child_id",)),
-    CriticalPrimaryKey("launchplane_ordinary_agent_semantic_outcomes", ("child_id",)),
-    CriticalPrimaryKey("launchplane_ordinary_agent_effect_reconciliations", ("observation_id",)),
-    CriticalPrimaryKey("launchplane_ordinary_agent_effect_completions", ("effect_id",)),
     CriticalPrimaryKey("launchplane_ordinary_agent_effect_custody", ("attempt_id",)),
-    CriticalPrimaryKey("launchplane_ordinary_agent_landing_preparations", ("preparation_id",)),
-    CriticalPrimaryKey("launchplane_ordinary_agent_landing_bindings", ("preparation_id",)),
-    CriticalPrimaryKey("launchplane_ordinary_agent_provider_waits", ("quota_key_sha256",)),
-    CriticalPrimaryKey("launchplane_ordinary_agent_job_claims", ("request_id",)),
-    CriticalPrimaryKey("launchplane_ordinary_agent_read_attempts", ("attempt_id",)),
-    CriticalPrimaryKey("launchplane_ordinary_agent_read_custody", ("custody_attempt_id",)),
-    CriticalPrimaryKey("launchplane_ordinary_agent_read_outcomes", ("attempt_id",)),
-    CriticalPrimaryKey(
-        "launchplane_ordinary_agent_candidate_check_observations", ("observation_id",)
-    ),
-    CriticalPrimaryKey(
-        "launchplane_ordinary_agent_session_operations", ("principal_id", "operation_id")
-    ),
     CriticalPrimaryKey("launchplane_ordinary_agent_deliveries", ("operation_id",)),
     CriticalPrimaryKey("launchplane_ordinary_agent_delivery_audits", ("event_id",)),
     CriticalPrimaryKey(
@@ -1804,14 +1616,6 @@ CRITICAL_PRIMARY_KEYS: tuple[CriticalPrimaryKey, ...] = (
     CriticalPrimaryKey(
         "launchplane_ordinary_agent_authentication_credentials",
         ("record_id",),
-    ),
-    CriticalPrimaryKey(
-        "launchplane_ordinary_agent_credential_custody",
-        ("record_id",),
-    ),
-    CriticalPrimaryKey(
-        "launchplane_ordinary_agent_lifecycle_audits",
-        ("event_id",),
     ),
     CriticalPrimaryKey(
         "launchplane_production_backup_targets",
@@ -2281,17 +2085,7 @@ def ordinary_effect_write_fence_errors(engine: Engine) -> list[str]:
             "ordinary effect payload identity mismatch",
         ),
     )
-    for suffix in (
-        "semantic_dispatches",
-        "semantic_outcomes",
-        "effect_reconciliations",
-        "effect_completions",
-        "effect_custody",
-        "read_custody",
-        "read_outcomes",
-        "candidate_check_observations",
-        "delivery_activation_events",
-    ):
+    for suffix in ("effect_custody", "delivery_activation_events"):
         errors.extend(
             _postgres_write_fence_errors(
                 engine=engine,
@@ -2300,30 +2094,6 @@ def ordinary_effect_write_fence_errors(engine: Engine) -> list[str]:
                 function_name="launchplane_ordinary_append_only_guard",
                 trigger_fragments=("before delete or update",),
                 function_fragments=("raise exception", "append-only"),
-            )
-        )
-    for suffix, trigger_name, function_name, fragment in (
-        (
-            "read_attempts",
-            "ordinary_read_identity",
-            "launchplane_ordinary_read_identity_guard",
-            "ordinary read identity is immutable",
-        ),
-        (
-            "provider_waits",
-            "ordinary_provider_wait",
-            "launchplane_ordinary_provider_wait_guard",
-            "ordinary provider wait cannot move backwards",
-        ),
-    ):
-        errors.extend(
-            _postgres_write_fence_errors(
-                engine=engine,
-                table_name="launchplane_ordinary_agent_" + suffix,
-                trigger_name=trigger_name,
-                function_name=function_name,
-                trigger_fragments=("before insert or delete or update",),
-                function_fragments=(fragment,),
             )
         )
     return errors

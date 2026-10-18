@@ -29,53 +29,19 @@ from control_plane.storage.schema_invariants import (
     CRITICAL_PRIMARY_KEYS,
     CRITICAL_SCHEMA_INDEXES,
     EXPECTED_ALEMBIC_HEAD_REVISION,
+    PRE_RETIREMENT_ALEMBIC_REVISION,
     _canonical_predicate_expression,
 )
 from control_plane.storage.schema_migration import (
     alembic_config,
     migrate_schema,
+    main as migrate_main,
     schema_migration_action,
+    SCHEMA_MIGRATION_TARGET_REVISION,
 )
 
 
 class SchemaMigrationTests(unittest.TestCase):
-    def test_landing_retry_schema_invariants_are_expected(self) -> None:
-        column_types = {
-            (column.table_name, column.column_name): column.accepted_type_tokens
-            for column in CRITICAL_POSTGRES_COLUMN_TYPES
-        }
-        indexes = {(index.table_name, index.index_name): index for index in CRITICAL_SCHEMA_INDEXES}
-
-        self.assertEqual(
-            column_types[("launchplane_ordinary_agent_landing_preparations", "attempt_ordinal")],
-            ("bigint",),
-        )
-        self.assertEqual(
-            column_types[("launchplane_ordinary_agent_landing_bindings", "dispatch_ordinal")],
-            ("bigint",),
-        )
-        root_charge = indexes[
-            (
-                "launchplane_ordinary_agent_landing_preparations",
-                "ordinary_landing_root_charge_uq",
-            )
-        ]
-        self.assertTrue(root_charge.unique)
-        self.assertEqual(root_charge.column_names, ("lease_id", "action_ordinal"))
-        self.assertEqual(
-            root_charge.predicate_expression,
-            "predecessor_preparation_id IS NULL",
-        )
-        self.assertEqual(
-            indexes[
-                (
-                    "launchplane_ordinary_agent_landing_bindings",
-                    "ordinary_landing_effect_dispatch_uq",
-                )
-            ].column_names,
-            ("effect_id", "dispatch_ordinal"),
-        )
-
     def test_landing_retry_migration_preserves_roots_and_allows_bounded_successors(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_url = (
@@ -104,7 +70,7 @@ class SchemaMigrationTests(unittest.TestCase):
                 )
             engine.dispose()
 
-            command.upgrade(config, EXPECTED_ALEMBIC_HEAD_REVISION)
+            command.upgrade(config, PRE_RETIREMENT_ALEMBIC_REVISION)
             engine = create_engine(database_url)
             inspector = inspect(engine)
             preparation_columns = {
@@ -143,7 +109,7 @@ class SchemaMigrationTests(unittest.TestCase):
             with engine.begin() as connection:
                 connection.execute(text("UPDATE alembic_version SET version_num = 'c7f9a1b3d5e8'"))
             engine.dispose()
-            command.upgrade(config, EXPECTED_ALEMBIC_HEAD_REVISION)
+            command.upgrade(config, PRE_RETIREMENT_ALEMBIC_REVISION)
             engine = create_engine(database_url)
 
             with engine.begin() as connection:
@@ -238,7 +204,7 @@ class SchemaMigrationTests(unittest.TestCase):
                 f"sqlite+pysqlite:///{Path(temporary_directory_name) / 'records.sqlite3'}"
             )
             config = alembic_config(database_url)
-            command.upgrade(config, EXPECTED_ALEMBIC_HEAD_REVISION)
+            command.upgrade(config, PRE_RETIREMENT_ALEMBIC_REVISION)
             engine = create_engine(database_url)
             with engine.begin() as connection:
                 connection.execute(
@@ -403,7 +369,7 @@ class SchemaMigrationTests(unittest.TestCase):
             finally:
                 engine.dispose()
 
-            command.upgrade(config, EXPECTED_ALEMBIC_HEAD_REVISION)
+            command.upgrade(config, PRE_RETIREMENT_ALEMBIC_REVISION)
             engine = create_engine(database_url)
             try:
                 columns = {
@@ -1086,7 +1052,7 @@ class SchemaMigrationTests(unittest.TestCase):
                             "payload": json.dumps(profile_payload),
                         },
                     )
-                command.upgrade(config, EXPECTED_ALEMBIC_HEAD_REVISION)
+                command.upgrade(config, PRE_RETIREMENT_ALEMBIC_REVISION)
                 with engine.connect() as connection:
                     migrated_payload: str = connection.execute(
                         text(
@@ -1151,7 +1117,7 @@ class SchemaMigrationTests(unittest.TestCase):
                     ),
                     patch(
                         "control_plane.storage.schema_migration._current_revision",
-                        side_effect=(revision, EXPECTED_ALEMBIC_HEAD_REVISION),
+                        side_effect=(revision, SCHEMA_MIGRATION_TARGET_REVISION),
                     ),
                     patch("control_plane.storage.schema_migration.command.stamp") as stamp,
                     patch("control_plane.storage.schema_migration.command.upgrade") as upgrade,
@@ -1160,16 +1126,16 @@ class SchemaMigrationTests(unittest.TestCase):
                         database_url="postgresql+psycopg://launchplane:test@postgres/launchplane"
                     )
 
-                self.assertEqual(migrated_revision, EXPECTED_ALEMBIC_HEAD_REVISION)
+                self.assertEqual(migrated_revision, SCHEMA_MIGRATION_TARGET_REVISION)
                 self.assertEqual(stamp.call_args.args[1], revision)
                 self.assertEqual(
                     upgrade.call_args.args[1],
-                    EXPECTED_ALEMBIC_HEAD_REVISION,
+                    SCHEMA_MIGRATION_TARGET_REVISION,
                 )
 
     def test_fenced_revision_is_current_by_default(self) -> None:
         self.assertEqual(
-            schema_migration_action(current_revision=EXPECTED_ALEMBIC_HEAD_REVISION),
+            schema_migration_action(current_revision=SCHEMA_MIGRATION_TARGET_REVISION),
             "current",
         )
 
@@ -1181,6 +1147,41 @@ class SchemaMigrationTests(unittest.TestCase):
             ),
             "upgrade",
         )
+
+    def test_host_migration_cli_keeps_default_and_passes_explicit_supported_target(self) -> None:
+        from contextlib import redirect_stdout
+        from io import StringIO
+
+        for argv, expected in (
+            ([], SCHEMA_MIGRATION_TARGET_REVISION),
+            (["--target-revision", EXPECTED_ALEMBIC_HEAD_REVISION], EXPECTED_ALEMBIC_HEAD_REVISION),
+        ):
+            with (
+                self.subTest(argv=argv),
+                patch.dict(
+                    "os.environ", {"LAUNCHPLANE_DATABASE_URL": "postgresql://local/rehearsal"}
+                ),
+                patch(
+                    "control_plane.storage.schema_migration.migrate_schema", return_value=expected
+                ) as migrate,
+                redirect_stdout(StringIO()),
+            ):
+                self.assertEqual(migrate_main(argv), 0)
+                migrate.assert_called_once_with(
+                    database_url="postgresql://local/rehearsal", target_revision=expected
+                )
+
+    def test_host_migration_cli_refuses_unknown_target_before_opening_database(self) -> None:
+        from contextlib import redirect_stderr
+        from io import StringIO
+
+        with (
+            patch("control_plane.storage.schema_migration.migrate_schema") as migrate,
+            redirect_stderr(StringIO()),
+            self.assertRaises(SystemExit),
+        ):
+            migrate_main(["--target-revision", "unknown"])
+        migrate.assert_not_called()
 
     def test_unknown_revision_fails_closed(self) -> None:
         with self.assertRaisesRegex(ValueError, "Unsupported Launchplane database revision"):
@@ -1325,7 +1326,7 @@ class SchemaMigrationTests(unittest.TestCase):
             database_url = f"sqlite+pysqlite:///{database_path}"
             config = alembic_config(database_url)
 
-            command.upgrade(config, EXPECTED_ALEMBIC_HEAD_REVISION)
+            command.upgrade(config, PRE_RETIREMENT_ALEMBIC_REVISION)
             engine = create_engine(database_url)
             try:
                 inspector = inspect(engine)
@@ -1920,7 +1921,7 @@ class SchemaMigrationTests(unittest.TestCase):
                 )
             engine.dispose()
 
-            command.upgrade(config, EXPECTED_ALEMBIC_HEAD_REVISION)
+            command.upgrade(config, PRE_RETIREMENT_ALEMBIC_REVISION)
             engine = create_engine(database_url)
             try:
                 with engine.connect() as connection:
@@ -2367,7 +2368,7 @@ class SchemaMigrationTests(unittest.TestCase):
                 f"sqlite+pysqlite:///{Path(temporary_directory_name) / 'records.sqlite3'}"
             )
             config = alembic_config(database_url)
-            command.upgrade(config, EXPECTED_ALEMBIC_HEAD_REVISION)
+            command.upgrade(config, PRE_RETIREMENT_ALEMBIC_REVISION)
             engine = create_engine(database_url)
             try:
                 inspector = inspect(engine)
@@ -2601,7 +2602,7 @@ class SchemaMigrationTests(unittest.TestCase):
                 f"sqlite+pysqlite:///{Path(temporary_directory_name) / 'records.sqlite3'}"
             )
             config = alembic_config(database_url)
-            command.upgrade(config, EXPECTED_ALEMBIC_HEAD_REVISION)
+            command.upgrade(config, PRE_RETIREMENT_ALEMBIC_REVISION)
             engine = create_engine(database_url)
             try:
                 with engine.begin() as connection:
@@ -2649,7 +2650,7 @@ class SchemaMigrationTests(unittest.TestCase):
                 f"sqlite+pysqlite:///{Path(temporary_directory_name) / 'records.sqlite3'}"
             )
             config = alembic_config(database_url)
-            command.upgrade(config, EXPECTED_ALEMBIC_HEAD_REVISION)
+            command.upgrade(config, PRE_RETIREMENT_ALEMBIC_REVISION)
             engine = create_engine(database_url)
             try:
                 with engine.begin() as connection:
@@ -2689,7 +2690,7 @@ class SchemaMigrationTests(unittest.TestCase):
                 f"sqlite+pysqlite:///{Path(temporary_directory_name) / 'records.sqlite3'}"
             )
             config = alembic_config(database_url)
-            command.upgrade(config, EXPECTED_ALEMBIC_HEAD_REVISION)
+            command.upgrade(config, PRE_RETIREMENT_ALEMBIC_REVISION)
             engine = create_engine(database_url)
             try:
                 with engine.begin() as connection:

@@ -33,7 +33,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sqlalchemy import create_engine, delete, event, insert, inspect, select, text, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.engine import make_url
-from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError, SQLAlchemyError
 
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.workflows.dokploy_target_adoption import (
@@ -276,6 +276,7 @@ from control_plane.storage.product_authority_bundle import (
 from control_plane.storage.schema_invariants import (
     AUTHZ_COMPATIBILITY_FLOOR_REVISION,
     EXPECTED_ALEMBIC_HEAD_REVISION,
+    PRE_RETIREMENT_ALEMBIC_REVISION,
     verify_postgres_schema_invariants,
 )
 from control_plane.storage.schema_migration import migrate_schema, schema_migration_action
@@ -3412,6 +3413,118 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_prepared_retirement_startup_leaves_populated_history_at_previous_revision(
+        self,
+    ) -> None:
+        from control_plane.storage.migrations.versions import (
+            e7c1d5e9a3b6_drop_retired_delivery_tables as migration,
+        )
+        from tests.test_retired_delivery_migration import seed_retired_history, history_snapshot
+
+        with _isolated_postgres_database() as url:
+            self.assertEqual(migrate_schema(database_url=url), migration.down_revision)
+            engine = create_engine(url)
+            try:
+                seed_retired_history(engine)
+                before = history_snapshot(engine, migration.RETIRED_TABLES)
+                self.assertEqual(migrate_schema(database_url=url), migration.down_revision)
+                self.assertEqual(history_snapshot(engine, migration.RETIRED_TABLES), before)
+                verify_postgres_schema_invariants(engine)
+            finally:
+                engine.dispose()
+
+    def test_retirement_refuses_busy_tables_before_any_drop_and_can_retry_after_release(
+        self,
+    ) -> None:
+        from control_plane.storage.migrations.versions import (
+            e7c1d5e9a3b6_drop_retired_delivery_tables as migration,
+        )
+
+        with _isolated_postgres_database() as url:
+            config = _alembic_config(url)
+            alembic_command.upgrade(config, migration.down_revision)
+            engine = create_engine(url)
+            try:
+                with engine.begin() as holder:
+                    holder.execute(text(f"SELECT * FROM {migration.RETIRED_TABLES[-1]}"))
+                    with self.assertRaises(OperationalError):
+                        alembic_command.upgrade(config, migration.revision)
+                    self.assertTrue(
+                        set(migration.RETIRED_TABLES).issubset(inspect(engine).get_table_names())
+                    )
+                    self.assertEqual(_current_alembic_version(engine), migration.down_revision)
+                alembic_command.upgrade(config, migration.revision)
+                verify_postgres_schema_invariants(engine)
+            finally:
+                engine.dispose()
+
+    def test_retirement_rolls_back_all_drops_on_unexpected_retained_dependency(self) -> None:
+        from control_plane.storage.migrations.versions import (
+            e7c1d5e9a3b6_drop_retired_delivery_tables as migration,
+        )
+        from tests.test_retired_delivery_migration import seed_retired_history, history_snapshot
+
+        with _isolated_postgres_database() as url:
+            config = _alembic_config(url)
+            alembic_command.upgrade(config, migration.down_revision)
+            engine = create_engine(url)
+            try:
+                seed_retired_history(engine)
+                before = history_snapshot(engine, migration.RETIRED_TABLES)
+                with engine.begin() as connection:
+                    connection.execute(
+                        text(
+                            f"CREATE VIEW retained_delivery_reader AS SELECT * FROM {migration.RETIRED_TABLES[-1]}"
+                        )
+                    )
+                with self.assertRaises(SQLAlchemyError):
+                    alembic_command.upgrade(config, migration.revision)
+                self.assertEqual(history_snapshot(engine, migration.RETIRED_TABLES), before)
+                self.assertEqual(_current_alembic_version(engine), migration.down_revision)
+                with engine.begin() as connection:
+                    connection.execute(text("DROP VIEW retained_delivery_reader"))
+                alembic_command.upgrade(config, migration.revision)
+                verify_postgres_schema_invariants(engine)
+            finally:
+                engine.dispose()
+
+    def test_retained_ordinary_history_fences_are_required_after_table_retirement(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            for suffix, trigger in (
+                ("effects", "ordinary_effect_identity"),
+                ("effect_custody", "ordinary_append_only"),
+                ("delivery_activation_events", "ordinary_append_only"),
+            ):
+                with self.subTest(table=suffix), store._engine.connect() as connection:
+                    transaction = connection.begin()
+                    try:
+                        connection.execute(
+                            text(
+                                f"ALTER TABLE launchplane_ordinary_agent_{suffix} DISABLE TRIGGER {trigger}"
+                            )
+                        )
+                        transaction.commit()
+                        with self.assertRaises(RuntimeError):
+                            verify_postgres_schema_invariants(store._engine)
+                    finally:
+                        if transaction.is_active:
+                            transaction.rollback()
+                        connection.execute(
+                            text(
+                                f"ALTER TABLE launchplane_ordinary_agent_{suffix} ENABLE TRIGGER {trigger}"
+                            )
+                        )
+                        connection.commit()
+            verify_postgres_schema_invariants(store._engine)
+
+    def test_retired_delivery_drop_preserves_current_store_and_refuses_lossy_downgrade(
+        self,
+    ) -> None:
+        from tests.test_retired_delivery_migration import assert_retired_delivery_drop
+
+        with _isolated_postgres_database() as database_url:
+            assert_retired_delivery_drop(self, database_url)
+
     def test_retired_governance_migration_drops_rows_and_preserves_other_records(self) -> None:
         from tests.test_retired_governance_migration import assert_retired_governance_drop
 
@@ -3432,8 +3545,8 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
             finally:
                 store.close()
 
-        self.assertEqual(migrated_revision, EXPECTED_ALEMBIC_HEAD_REVISION)
-        self.assertEqual(observed_revision, EXPECTED_ALEMBIC_HEAD_REVISION)
+        self.assertEqual(migrated_revision, PRE_RETIREMENT_ALEMBIC_REVISION)
+        self.assertEqual(observed_revision, PRE_RETIREMENT_ALEMBIC_REVISION)
 
     def test_owner_review_policy_defaults_backfill_on_postgres(self) -> None:
         with _isolated_postgres_database() as database_url:
@@ -6084,7 +6197,8 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
             CONFIG_AUTHORITY_QUEUE_INDEX,
         )
 
-        with _head_postgres_database() as url:
+        with _isolated_postgres_database() as url:
+            alembic_command.upgrade(_alembic_config(url), PRE_RETIREMENT_ALEMBIC_REVISION)
             stores = [PostgresRecordStore(database_url=url) for _ in range(2)]
             try:
                 from control_plane.storage.migrations.versions import (
@@ -9281,7 +9395,8 @@ class RealPostgresChangeImpactAuditTests(unittest.TestCase):
             self.assertEqual(store.read_change_impact_policy_audit(first.record_id), original)
 
     def test_upgrade_preserves_legacy_policy_without_attributing_replay(self) -> None:
-        with _head_postgres_database() as database_url:
+        with _isolated_postgres_database() as database_url:
+            alembic_command.upgrade(_alembic_config(database_url), PRE_RETIREMENT_ALEMBIC_REVISION)
             store = PostgresRecordStore(database_url=database_url)
             first = _change_impact_policy()
             try:
@@ -9303,7 +9418,7 @@ class RealPostgresChangeImpactAuditTests(unittest.TestCase):
                 )
             finally:
                 engine.dispose()
-            alembic_command.upgrade(config, "head")
+            alembic_command.upgrade(config, PRE_RETIREMENT_ALEMBIC_REVISION)
             store = PostgresRecordStore(database_url=database_url)
             try:
                 store.verify_schema()
@@ -10832,7 +10947,8 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
             ef758915f005_disposable_testing_resource_allocations as migration,
         )
 
-        with _head_postgres_database() as url:
+        with _isolated_postgres_database() as url:
+            alembic_command.upgrade(_alembic_config(url), PRE_RETIREMENT_ALEMBIC_REVISION)
             store = PostgresRecordStore(database_url=url)
             self.addCleanup(store.close)
             profile = LaunchplaneProductProfileRecord.model_validate(
@@ -13389,7 +13505,8 @@ class RealPostgresTestingGenerationRetirementTests(unittest.TestCase):
             cd192c59f009_retained_testing_generations as migration,
         )
 
-        with _head_postgres_database() as url:
+        with _isolated_postgres_database() as url:
+            alembic_command.upgrade(_alembic_config(url), PRE_RETIREMENT_ALEMBIC_REVISION)
             fixture = TestingGenerationRetirementTests()
             fixture.database_url = url
             fixture.setUp()
@@ -13402,7 +13519,7 @@ class RealPostgresTestingGenerationRetirementTests(unittest.TestCase):
                 fixture.store.read_retained_testing_generation(fixture.operation.operation_id),
                 before,
             )
-            alembic_command.upgrade(config, "head")
+            alembic_command.upgrade(config, PRE_RETIREMENT_ALEMBIC_REVISION)
             fixture.store.verify_schema()
             self.assertEqual(
                 fixture.store.read_retained_testing_generation(fixture.operation.operation_id),

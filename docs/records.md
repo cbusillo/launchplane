@@ -56,10 +56,12 @@ boundary:
 Sixteen retired ordinary-agent tables, including credential custody, lifecycle
 audits, session operations, landing, semantic, effect-reconciliation, read and
 job-claim records, have no remaining reader. Their ORM models are deleted, and
-the privileged-operation worker no longer requires them at startup. The tables
-and their rows remain, created by the migration history and still checked by
-the PostgreSQL schema invariants and the adoption verifier, until a later
-migration under #2437 drops them.
+the privileged-operation worker no longer requires them at startup. Prepared
+migration `e7c1d5e9a3b6` drops those sixteen tables, provider-delivery inspections,
+and the five older unmodeled authorization/recovery/requirement-authority tables.
+Hosted startup remains on `e6b0c4d8f2a5`, so shipping this migration does not drop
+the shared tables or their rows. The candidate runtime accepts both revisions;
+its schema invariants require only tables with retained consumers.
 
 Enrollment, authentication/credential claim, session admission, finite-job
 execution, provider inspection, and joined ordinary-controller writes have been
@@ -76,8 +78,9 @@ an unresolved ordinary effect. These fences are not removed with the retired
 execution methods. Unused issuers, eligibility/lifecycle calculators, worker
 compatibility descriptors, inspection setup and their unreferenced contracts
 are removed. Only contracts and helpers consumed by retained maintenance,
-native train fences and historical policy/activation reads remain. Table
-retirement continues under #2437; no data migration has run.
+native train fences and historical policy/activation reads remain. Applying the
+prepared migration to shared data requires separate approval under #2437; see
+the [retirement procedure](operations.md#prepared-retired-delivery-table-migration).
 
 ### Provider Delivery Inspection
 
@@ -86,9 +89,9 @@ cbusillo/launchplane#2437. Do not extend it.
 
 The inspection reservation, token-custody transition, completion, and recovery
 methods and its ORM model are removed. `launchplane_provider_delivery_inspections`
-remains as historical storage with its uniqueness and state constraints until
-the later table migration under #2437. No inspection profile, credential, expectation, or
-activation is created by a migration.
+remains until `e7c1d5e9a3b6` is applied with separate shared-data approval.
+No inspection profile, credential, expectation, or activation is created by
+this migration.
 
 ## Schema Migrations
 
@@ -123,7 +126,8 @@ critical idempotency/active-operation index with missing uniqueness, columns, or
 partial predicate. It also refuses a database that already holds any table the
 migration history creates after the adoption revision. That includes retired
 tables whose ORM models are deleted while their tables remain; the verifier
-names them in `MIGRATED_TABLES_WITHOUT_MODELS` until a migration drops them. A
+uses the retirement migration's immutable table list to keep rejecting older
+unversioned installations that still contain them, even after the drop. A
 failure means the admin must stop and reconcile the schema before stamping; do
 not hand-edit the Alembic version table or skip the check.
 
