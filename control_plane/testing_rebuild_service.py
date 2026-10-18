@@ -386,12 +386,11 @@ class NativeTestingRebuildExecution:
             self.operation.product, self.operation.context, "testing"
         )
         if safety is not None and (
-            safety.usage == "in_use"
-            or safety.data == "only_copy"
+            safety.data == "only_copy"
             or safety.production_resources in {"shared", "separation_ready"}
         ):
             raise ValueError(
-                "The lane has a recorded protected use, copy or shared production resource."
+                "The lane has a recorded protected copy or shared production resource."
             )
         if any(
             item.target_id == self.intent.old.target_id
@@ -405,16 +404,19 @@ class NativeTestingRebuildExecution:
             control_plane_root=self.root,
             database_url=self.store.database_url,
         )
+        reported_usage = (
+            "in_use" if safety is not None and safety.usage == "in_use" else usage.usage
+        )
         decision = evaluate_lane_usage(
             self.store,
             profile=self.intent.profile,
             target=target,
             target_id=self.intent.before.target_id,
             instance="testing",
-            usage=usage.usage,
+            usage=reported_usage,
             # Unknown use alone cannot stop disposable work. A historical
             # positive report still uses the verified-down repair override.
-            require_unused=usage.usage != "unknown",
+            require_unused=reported_usage != "unknown",
         )
         retained_copy_operation(
             host=self.host,

@@ -580,6 +580,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
 
     def test_verified_down_checkpoint_allows_a_historical_login(self) -> None:
         from tests.support.down_lanes import record_lane_health
+        from tests.support.disposable_lanes import record_safety
 
         record_lane_health(
             self.store, self.operation.product, self.operation.context, datetime.now(UTC)
@@ -604,7 +605,16 @@ class NativeTestingWorkerTests(unittest.TestCase):
                 adapter, Mock(spec=["assert_current"]), Mock()
             )
             executor.host, executor.token = "fixture-host", "fixture-token"
-            executor.guard()
+            for recorded_use in ("unused", "in_use"):
+                with self.subTest(recorded_use=recorded_use):
+                    record_safety(
+                        self.store,
+                        self.operation.product,
+                        self.operation.context,
+                        "testing",
+                        usage=recorded_use,
+                    )
+                    executor.guard()
         self.assertEqual(self.effects, [])
 
     def test_hold_or_positive_use_refuses_before_any_candidate_or_route_effect(self) -> None:
