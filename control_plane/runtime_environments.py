@@ -242,6 +242,7 @@ def resolve_site_runtime_environment(
                 database_url=database_url,
                 include_global=False,
                 secret_scopes=site_secret_scopes(instance_name),
+                secret_binding_keys=secret_binding_keys,
             )
         except click.ClickException:
             # The refusal still names each key, without its source.
@@ -414,6 +415,7 @@ def _runtime_value_sources(
     database_url: str | None,
     include_global: bool = True,
     secret_scopes: frozenset[SecretScope] | None = None,
+    secret_binding_keys: frozenset[str] | None = None,
 ) -> dict[str, _RuntimeValueSource]:
     """Attribute each effective key to the layer that supplied it, in merge order.
 
@@ -451,6 +453,7 @@ def _runtime_value_sources(
                 context_name=context_name,
                 instance_name=instance_name,
                 scopes=secret_scopes,
+                binding_keys=secret_binding_keys,
             )
         )
     finally:
