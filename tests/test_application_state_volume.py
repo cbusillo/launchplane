@@ -791,6 +791,93 @@ class ApplicationStateVolumeTests(_DirectorTestingSetupFixture):
         self.assertFalse(self.store.list_held_provider_target_reservations())
         self.assertEqual(self.provider.call_count, calls)
 
+    async def test_removed_verified_mount_never_repeats_creation_and_can_retain(self) -> None:
+        from datetime import timedelta
+        from control_plane.application_state_volume import ApplicationStateVolumeAdapter
+        from control_plane.contracts.idempotency_record import (
+            format_launchplane_mutation_timestamp,
+            parse_launchplane_mutation_timestamp,
+        )
+
+        await self.plan()
+        checkpoint = ApplicationStateVolumeAdapter._checkpoint_phase
+
+        def interrupt_after_mount(
+            adapter: ApplicationStateVolumeAdapter, lease: Any, phase: str
+        ) -> None:
+            checkpoint(adapter, lease, phase)
+            if json.loads(phase).get("mount_verified") == "true":
+                raise OSError("Fixture: stopped after verified mount, before adoption")
+
+        with patch.object(
+            ApplicationStateVolumeAdapter, "_checkpoint_phase", new=interrupt_after_mount
+        ):
+            uncertain = await self.post()
+        self.assertEqual(uncertain.status_code, 409, uncertain.text)
+        calls = self.provider.call_count
+        self.live["mounts"] = []
+        retry = await self.post()
+        self.assertEqual(retry.status_code, 409, retry.text)
+        self.assertEqual(self.provider.call_count, calls)
+        with self.assertRaises(FileNotFoundError):
+            self.store.read_dokploy_target_id_record(
+                context_name=self.context, instance_name="testing"
+            )
+        row = self.store.list_held_provider_target_reservations()[0]
+        readback = (await self.post(mode="readback")).json()["result"]
+        self.assertEqual(readback["configuration_evidence"], "differs")
+        now = format_launchplane_mutation_timestamp(
+            parse_launchplane_mutation_timestamp(
+                row.lease_expires_at, field_name="lease_expires_at"
+            )
+            + timedelta(seconds=1)
+        )
+        with patch.object(self.store, "_database_mutation_timestamp", return_value=now):
+            retained = await self.post(
+                retain_state_volume_allocation=True,
+                expected_state_volume_custody_sha256=readback["custody_sha256"],
+            )
+        self.assertEqual(retained.status_code, 202, retained.text)
+        self.assertFalse(retained.json()["result"]["applied"])
+        self.assertEqual(self.provider.call_count, calls)
+        fresh = await self.post(mode="dry-run", state_volume_plan_id="", expected_plan_sha256="")
+        self.assertEqual(fresh.status_code, 202, fresh.text)
+        self.assert_production_unchanged()
+
+    async def test_recovered_pending_mount_removed_before_replay_is_not_created_again(self) -> None:
+        from control_plane.application_state_volume import ApplicationStateVolumeAdapter
+
+        await self.plan()
+        self.fail_after = MOUNT_CREATE
+        uncertain = await self.post()
+        self.assertEqual(uncertain.status_code, 409, uncertain.text)
+        self.fail_after = ""
+        calls = self.provider.call_count
+        checkpoint = ApplicationStateVolumeAdapter._checkpoint_phase
+
+        def remove_after_recovery(
+            adapter: ApplicationStateVolumeAdapter, lease: Any, phase: str
+        ) -> None:
+            checkpoint(adapter, lease, phase)
+            progress = json.loads(phase)
+            if progress.get("application") and not progress.get("pending"):
+                self.live["mounts"] = []
+
+        with patch.object(
+            ApplicationStateVolumeAdapter, "_checkpoint_phase", new=remove_after_recovery
+        ):
+            retry = await self.post()
+        self.assertEqual(retry.status_code, 409, retry.text)
+        self.assertEqual(self.provider.call_count, calls)
+        with self.assertRaises(FileNotFoundError):
+            self.store.read_dokploy_target_id_record(
+                context_name=self.context, instance_name="testing"
+            )
+        repeated = await self.post()
+        self.assertEqual(repeated.status_code, 409, repeated.text)
+        self.assertEqual(self.provider.call_count, calls)
+        self.assert_production_unchanged()
+
     async def test_authority_change_at_final_commit_refuses_and_preserves_custody(self) -> None:
         from datetime import timedelta
         from control_plane.contracts.idempotency_record import (

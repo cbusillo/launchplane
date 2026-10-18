@@ -476,8 +476,12 @@ class ApplicationStateVolumeAdapter:
             raise ValueError("Original application name changed.")
         data["app_name"] = app_name
         live = self._live(data["application"], data["environment"], app_name)
-        if data.get("pending") == MOUNT_CREATE and not self._mount_matches(live):
-            raise ValueError("Original mount effect remains uncertain; retain custody.")
+        if data.get("pending") == MOUNT_CREATE or data.get("mount_verified") == "true":
+            if not self._mount_matches(live):
+                raise ValueError("Original mount effect is uncertain or changed; retain custody.")
+            # Positive recovery promotes the dispatched effect permanently.
+            # Clearing pending must never make it eligible for another create.
+            data["mount_verified"] = "true"
         if data.get("pending") not in {None, APPLICATION_CREATE_PATH, MOUNT_CREATE}:
             raise ValueError("Unknown original provider phase.")
         data.pop("pending", None)
@@ -681,6 +685,8 @@ class ApplicationStateVolumeAdapter:
                     created["mount_verified"] = "true"
                     self._checkpoint_phase(lease, json.dumps(created, sort_keys=True))
                     return response
+                if created.get("mount_verified") == "true":
+                    raise ValueError("Original verified mount changed; never repeat creation.")
                 if (
                     live.get("mounts") != []
                     or live.get("deployments") != []

@@ -189,7 +189,10 @@ Repeating **apply with the original key** can recover a lost project, environmen
 or application response from exactly one original generated marker in complete
 provider inventory. It resumes only the next undispatched step under a renewed
 lease and the lane lock. A lost mount response resumes only when independent
-readback proves the exact mount exists. Separate lease-fenced progress is bound to the original operation key and
+readback proves the exact mount exists. Positive mount proof survives recovery;
+if that mount is later removed or changed, the original key refuses rather than
+attaching it again. Retain custody and review a fresh plan to continue.
+Separate lease-fenced progress is bound to the original operation key and
 survives runner retries and process restarts. A completed plan refuses use under
 a new key before effects or a held reservation can remain. Final target adoption
 checks and locks the same live reservation and rechecks reviewed lane authority
