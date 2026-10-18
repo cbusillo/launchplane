@@ -134,6 +134,18 @@ def selected_raw(raw, host, points):
 
 WRITE_STARTED=False
 
+def proxy_dns_names(container, proxy_networks):
+    names=set()
+    networks=container.get('NetworkSettings',{}).get('Networks',{})
+    for name,endpoint in networks.items():
+        if name not in proxy_networks or not (endpoint.get('IPAddress') or endpoint.get('GlobalIPv6Address')):
+            continue
+        names.update(value.casefold() for value in (endpoint.get('DNSNames') or [])+(endpoint.get('Aliases') or []) if isinstance(value,str))
+        container_name=str(container.get('Name') or '').lstrip('/')
+        if container_name:
+            names.add(container_name.casefold())
+    return names
+
 def main(spec):
     global WRITE_STARTED
     if not re.fullmatch(r'lp-testing-route-[a-f0-9]{32}',spec['route_id']) or not re.fullmatch(r'[a-zA-Z0-9.-]+',spec['host']):
@@ -146,6 +158,7 @@ def main(spec):
     if len(proxies)!=1:
         raise RuntimeError('Exactly one running managed proxy is required')
     proxy=proxies[0]
+    proxy_networks=proxy.get('NetworkSettings',{}).get('Networks',{})
     mounts=[item for item in proxy.get('Mounts',[]) if item.get('Destination')==DIRECTORY]
     if len(mounts)!=1 or mounts[0].get('Type')!='bind' or mounts[0].get('RW') is not True:
         raise RuntimeError('Managed proxy must watch a writable directory mount')
@@ -188,7 +201,7 @@ def main(spec):
             aliases.append(container_name)
         for alias in aliases:
             if alias==container_name or alias.startswith('lp-testing-') or alias.startswith(old_project+'-'):
-                if any(item['Id']!=old[0]['Id'] and alias in (item.get('NetworkSettings',{}).get('Networks',{}).get('dokploy-network',{}).get('Aliases') or []) for item in containers):
+                if any(item['Id']!=old[0]['Id'] and alias.casefold() in proxy_dns_names(item,proxy_networks) for item in containers):
                     raise RuntimeError('Retained testing alias is shared')
                 endpoints.append('http://'+alias+':'+port)
     if spec['mode']=='publish':
@@ -196,7 +209,7 @@ def main(spec):
             raise RuntimeError('The retained physical testing copy changed')
         desired=urlsplit(spec['desired_backend'])
         if spec['desired_backend']!=spec['retained_backend']:
-            matching=[item for item in containers if desired.hostname in (item.get('NetworkSettings',{}).get('Networks',{}).get('dokploy-network',{}).get('Aliases') or []) or item.get('Name','').lstrip('/')==desired.hostname]
+            matching=[item for item in containers if desired.hostname.casefold() in proxy_dns_names(item,proxy_networks)]
             if len(matching)!=1:
                 raise RuntimeError('The candidate testing alias is absent or shared')
             candidate=matching[0]
@@ -204,6 +217,9 @@ def main(spec):
             if candidate.get('State',{}).get('Status')!='running' or labels.get('com.docker.compose.project')!=desired.hostname or labels.get('com.docker.compose.service')!='web':
                 raise RuntimeError('The candidate testing alias changed ownership')
             environment=dict(item.split('=',1) for item in candidate.get('Config',{}).get('Env',[]) if '=' in item)
+            port=environment.get('ODOO_HTTP_PORT') or '8069'
+            if not port.isdigit() or not 0<int(port)<65536 or desired.port!=int(port):
+                raise RuntimeError('The candidate testing port changed')
             identity=json.loads(environment.get('LAUNCHPLANE_RUNTIME_IDENTITY_JSON','null'))
             if not isinstance(identity,dict) or environment.get('PLATFORM_INSTANCE')!='testing':
                 raise RuntimeError('The candidate testing runtime is unavailable')
@@ -336,6 +352,16 @@ class DokployTestingRouteTransport:
             self.payload["host"],
         ) or expected_backend not in {plan.old_backend, plan.new_backend}:
             raise ValueError("Testing route publication crossed its admitted lane or copy.")
+        if (
+            desired_runtime_identity.product,
+            desired_runtime_identity.context,
+            desired_runtime_identity.instance,
+        ) != (
+            self.old_runtime_identity.product,
+            self.old_runtime_identity.context,
+            "testing",
+        ):
+            raise ValueError("The desired testing runtime belongs to another lane.")
         frame = self.read()
         owned = None if frame["owned_file"] is None else json.loads(frame["owned_file"])
         if frame["owned_file"] is not None and not isinstance(owned, dict):
