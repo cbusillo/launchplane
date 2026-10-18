@@ -3,7 +3,7 @@ import json
 from typing import Any
 from unittest.mock import patch
 
-from control_plane.application_state_volume import MOUNT_CREATE
+from control_plane.application_state_volume import LANE_LOCK_PREFIX, MOUNT_CREATE
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.dokploy_target_setup_http import DokployTargetSetupEnvelope
 from control_plane.workflows.dokploy_target_adoption import (
@@ -19,6 +19,12 @@ class ApplicationStateVolumeTests(_DirectorTestingSetupFixture):
         super().setUp()
         self.payload.update(operation="create-application", state_volume_path="/var/lib/example")
         self.live: dict[str, Any] = {}
+        self.placement: dict[str, Any] = {}
+        self.enterContext(
+            patch(
+                "control_plane.dokploy_inventory.read_dokploy_inventory", side_effect=self.inventory
+            )
+        )
         self.fail_after = ""
         self.fail_before = ""
         self.preexisting_mounts: list[dict[str, Any]] = []
@@ -34,6 +40,16 @@ class ApplicationStateVolumeTests(_DirectorTestingSetupFixture):
     def mutate(self, _host: str, _token: str, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         if path == self.fail_before:
             raise TimeoutError("fixture: request outcome unavailable")
+        if path == PROJECT_CREATE_PATH:
+            self.placement = {
+                "project_id": "created-project",
+                "name": payload["name"],
+                "environments": [],
+            }
+        if path == ENVIRONMENT_CREATE_PATH:
+            self.placement["environments"].append(
+                {"environment_id": "created-environment", "name": payload["name"], "targets": []}
+            )
         if path == APPLICATION_CREATE_PATH:
             self.live = {
                 **payload,
@@ -41,7 +57,20 @@ class ApplicationStateVolumeTests(_DirectorTestingSetupFixture):
                 "applicationId": "created-application",
                 "serverId": self.payload["server_id"],
                 "mounts": deepcopy(self.preexisting_mounts),
+                "deployments": [],
             }
+            self.placement["environments"][0]["targets"].append(
+                {
+                    "target_id": self.live["applicationId"],
+                    "name": payload["name"],
+                    "category": "application",
+                    "placement": {
+                        "kind": "server",
+                        "server_id": self.payload["server_id"],
+                        "server_name": "Fixture",
+                    },
+                }
+            )
         if path == MOUNT_CREATE:
             self.live["mounts"].append(
                 {
@@ -67,6 +96,21 @@ class ApplicationStateVolumeTests(_DirectorTestingSetupFixture):
             MOUNT_CREATE: {"mountId": "created-mount"},
         }
         return responses[path]
+
+    def inventory(self, **_kwargs: Any) -> Any:
+        from control_plane.dokploy_inventory import InventoryPage, InventoryProject
+
+        projects = [deepcopy(self.placement)] if self.placement else []
+        return InventoryPage(
+            inventory_digest="fixture",
+            total_projects=len(projects),
+            total_environments=sum(len(p["environments"]) for p in projects),
+            total_targets=sum(len(e["targets"]) for p in projects for e in p["environments"]),
+            offset=0,
+            limit=2000,
+            next_offset=None,
+            projects=[InventoryProject.model_validate(p) for p in projects],
+        )
 
     async def plan(self) -> dict[str, Any]:
         result = await self.post(mode="dry-run")
@@ -199,22 +243,257 @@ class ApplicationStateVolumeTests(_DirectorTestingSetupFixture):
                 self.assertIn(plain.status_code, (400, 409), plain.text)
                 self.assertEqual(self.provider.call_count, calls)
 
-    async def test_lost_application_response_retains_known_placement_without_recreating(
-        self,
-    ) -> None:
+    async def test_lost_application_response_resumes_only_mount_then_adopts(self) -> None:
         await self.plan()
         self.fail_after = APPLICATION_CREATE_PATH
         result = await self.post()
         self.assertEqual(result.status_code, 409, result.text)
+        self.fail_after = ""
         calls = self.provider.call_count
+        retry = await self.post()
+        self.assertEqual(retry.status_code, 202, retry.text)
+        self.assertEqual([c.args[2] for c in self.provider.call_args_list[calls:]], [MOUNT_CREATE])
+        self.assert_production_unchanged()
+
+    async def test_lost_project_response_recovers_marker_without_repeating_project(self) -> None:
+        await self.plan()
+        self.fail_after = PROJECT_CREATE_PATH
+        result = await self.post()
+        self.assertEqual(result.status_code, 409, result.text)
+        self.fail_after = ""
+        calls = self.provider.call_count
+        retry = await self.post()
+        self.assertEqual(retry.status_code, 202, retry.text)
+        self.assertEqual(
+            [c.args[2] for c in self.provider.call_args_list[calls:]],
+            [ENVIRONMENT_CREATE_PATH, APPLICATION_CREATE_PATH, MOUNT_CREATE],
+        )
+
+    async def test_lost_environment_response_recovers_marker_without_repeating_placement(
+        self,
+    ) -> None:
+        await self.plan()
+        self.fail_after = ENVIRONMENT_CREATE_PATH
+        result = await self.post()
+        self.assertEqual(result.status_code, 409, result.text)
+        self.fail_after = ""
+        calls = self.provider.call_count
+        retry = await self.post()
+        self.assertEqual(retry.status_code, 202, retry.text)
+        self.assertEqual(
+            [c.args[2] for c in self.provider.call_args_list[calls:]],
+            [APPLICATION_CREATE_PATH, MOUNT_CREATE],
+        )
+
+    async def test_absent_unknown_project_can_be_retained_then_fresh_plan_applied(self) -> None:
+        from datetime import timedelta
+        from control_plane.application_state_volume import ROUTE
+        from control_plane.contracts.idempotency_record import (
+            format_launchplane_mutation_timestamp,
+            parse_launchplane_mutation_timestamp,
+        )
+
+        original = await self.plan()
+        self.fail_before = PROJECT_CREATE_PATH
+        result = await self.post()
+        self.assertEqual(result.status_code, 409, result.text)
+        calls = self.provider.call_count
+        self.fail_before = ""
         retry = await self.post()
         self.assertEqual(retry.status_code, 409, retry.text)
         self.assertEqual(self.provider.call_count, calls)
-        readback = await self.post(mode="readback")
-        phase = readback.json()["result"]["provider_effect_phase"]
-        self.assertIn("created-project", phase)
-        self.assertIn("created-environment", phase)
-        self.assertFalse(readback.json()["result"]["configuration_matches"])
+        readback = (await self.post(mode="readback")).json()["result"]
+        refused = await self.post(
+            retain_state_volume_allocation=True,
+            expected_state_volume_custody_sha256=readback["custody_sha256"],
+        )
+        self.assertEqual(refused.status_code, 409, refused.text)
+        row = next(
+            r for r in self.store.list_held_provider_target_reservations() if r.route_path == ROUTE
+        )
+        now = format_launchplane_mutation_timestamp(
+            parse_launchplane_mutation_timestamp(
+                row.lease_expires_at, field_name="lease_expires_at"
+            )
+            + timedelta(seconds=1)
+        )
+        with patch.object(self.store, "_database_mutation_timestamp", return_value=now):
+            retained = await self.post(
+                retain_state_volume_allocation=True,
+                expected_state_volume_custody_sha256=readback["custody_sha256"],
+            )
+            self.assertEqual(retained.status_code, 202, retained.text)
+            self.assertEqual(retained.json()["result"]["allocation_state"], "retained_uncertain")
+            replay = await self.post(
+                retain_state_volume_allocation=True,
+                expected_state_volume_custody_sha256=readback["custody_sha256"],
+            )
+            self.assertEqual(replay.status_code, 202, replay.text)
+            old_apply = await self.post()
+            self.assertEqual(old_apply.json()["result"]["allocation_state"], "retained_uncertain")
+            self.assertEqual(self.provider.call_count, calls)
+            forbidden = await self.post(idempotency_key="retained-plan-cannot-resume")
+            self.assertEqual(forbidden.status_code, 409, forbidden.text)
+            self.assertEqual(self.provider.call_count, calls)
+            fresh = await self.post(
+                mode="dry-run", state_volume_plan_id="", expected_plan_sha256=""
+            )
+            self.assertEqual(fresh.status_code, 202, fresh.text)
+            plan = fresh.json()["result"]
+            self.assertNotEqual(plan["allocation"], original["allocation"])
+            self.assertNotEqual(plan["state_volume"]["name"], original["state_volume"]["name"])
+            created = await self.post(
+                idempotency_key="fresh-allocation",
+                state_volume_plan_id=plan["state_volume_plan_id"],
+                expected_plan_sha256=plan["plan_sha256"],
+            )
+            self.assertEqual(created.status_code, 202, created.text)
+        self.assert_production_unchanged()
+
+    async def test_readback_outage_and_missing_target_are_bounded_observations(self) -> None:
+        import click
+
+        await self.plan()
+        result = await self.post()
+        self.assertEqual(result.status_code, 202, result.text)
+        calls = self.provider.call_count
+        for message in (
+            "HTTP 404: private provider details",
+            "connection failed: private provider details",
+        ):
+            with patch(
+                "control_plane.dokploy_target_setup_http.fetch_dokploy_target_payload_for_setup",
+                side_effect=click.ClickException(message),
+            ):
+                readback = await self.post(mode="readback")
+            self.assertEqual(readback.status_code, 202, readback.text)
+            self.assertFalse(readback.json()["result"]["configuration_matches"])
+            self.assertEqual(readback.json()["result"]["configuration_evidence"], "unavailable")
+            self.assertNotIn("private provider details", readback.text)
+            self.assertEqual(self.provider.call_count, calls)
+
+    async def test_plain_application_create_works_without_storage_reservation(self) -> None:
+        result = await self.post(state_volume_path="")
+        self.assertEqual(result.status_code, 202, result.text)
+        self.assertEqual(
+            [c.args[2] for c in self.provider.call_args_list],
+            [PROJECT_CREATE_PATH, ENVIRONMENT_CREATE_PATH, APPLICATION_CREATE_PATH],
+        )
+
+    def plain_setup(self, operation: str) -> dict[str, object]:
+        from control_plane.dokploy_target_setup_http import execute_dokploy_target_setup
+
+        request = DokployTargetSetupEnvelope.model_validate(
+            {
+                **self.payload,
+                "operation": operation,
+                "target_id": "other-target"
+                if operation in {"adopt", "complete-compose-source"}
+                else "",
+                "state_volume_path": "",
+                "state_volume_plan_id": "",
+                "expected_plan_sha256": "",
+            }
+        )
+        return execute_dokploy_target_setup(
+            control_plane_root_path=self.root,
+            record_store=self.store,
+            request=request,
+            required_context_owner=(self.profile.product, self.context),
+        )
+
+    def test_plain_adoption_works_without_storage_reservation(self) -> None:
+        self.live = {
+            "composeId": "other-target",
+            "name": "Unused fixture",
+            "environmentId": "isolated-environment",
+            "serverId": self.payload["server_id"],
+            "sourceType": "raw",
+        }
+        result = self.plain_setup("adopt")
+        self.assertTrue(result["applied"])
+        self.assertEqual(
+            self.store.read_dokploy_target_id_record(
+                context_name=self.context, instance_name="testing"
+            ).target_id,
+            "other-target",
+        )
+
+    async def test_unresolved_volume_blocks_adoption_and_source_completion(self) -> None:
+        await self.plan()
+        self.fail_before = PROJECT_CREATE_PATH
+        result = await self.post()
+        self.assertEqual(result.status_code, 409, result.text)
+        calls = self.provider.call_count
+        for operation in ("adopt", "complete-compose-source"):
+            with self.subTest(operation=operation), self.assertRaises(ValueError):
+                self.plain_setup(operation)
+            self.assertEqual(self.provider.call_count, calls)
+        with self.assertRaises(FileNotFoundError):
+            self.store.read_provider_target_record(
+                context_name=self.context, instance_name="testing"
+            )
+
+    def test_lane_execution_fence_refuses_all_competing_setup_mutations(self) -> None:
+        with self.store.testing_replacement_execution_lock(
+            LANE_LOCK_PREFIX + self.context
+        ) as check:
+            self.assertIsNotNone(check)
+            for operation in (
+                "create-application",
+                "create-compose",
+                "adopt",
+                "complete-compose-source",
+            ):
+                with self.subTest(operation=operation), self.assertRaises(ValueError):
+                    self.plain_setup(operation)
+        self.provider.assert_not_called()
+
+    async def test_unrecorded_next_dispatch_resumes_acknowledged_project(self) -> None:
+        from control_plane.application_state_volume_retention import (
+            checkpoint_state_volume_progress,
+        )
+
+        await self.plan()
+        failed = False
+
+        def checkpoint(*args: Any, **kwargs: Any) -> None:
+            nonlocal failed
+            if json.loads(kwargs["phase"]).get("pending") == ENVIRONMENT_CREATE_PATH and not failed:
+                failed = True
+                raise OSError("Fixture: interrupted before recording or dispatching next create")
+            checkpoint_state_volume_progress(*args, **kwargs)
+
+        with patch(
+            "control_plane.application_state_volume_retention.checkpoint_state_volume_progress",
+            side_effect=checkpoint,
+        ):
+            interrupted = await self.post()
+        self.assertEqual(interrupted.status_code, 409, interrupted.text)
+        calls = self.provider.call_count
+        retry = await self.post()
+        self.assertEqual(retry.status_code, 202, retry.text)
+        self.assertEqual(
+            [c.args[2] for c in self.provider.call_args_list[calls:]],
+            [ENVIRONMENT_CREATE_PATH, APPLICATION_CREATE_PATH, MOUNT_CREATE],
+        )
+
+    async def test_duplicate_or_incomplete_recovery_inventory_never_repeats_creation(self) -> None:
+        await self.plan()
+        self.fail_after = PROJECT_CREATE_PATH
+        failed = await self.post()
+        self.assertEqual(failed.status_code, 409, failed.text)
+        self.fail_after = ""
+        calls = self.provider.call_count
+        snapshot = self.inventory()
+        for bad in (
+            snapshot.model_copy(update={"next_offset": 1}),
+            snapshot.model_copy(update={"projects": snapshot.projects * 2, "total_projects": 2}),
+        ):
+            with patch("control_plane.dokploy_inventory.read_dokploy_inventory", return_value=bad):
+                retry = await self.post()
+            self.assertEqual(retry.status_code, 409, retry.text)
+            self.assertEqual(self.provider.call_count, calls)
 
     async def test_next_artifact_update_preserves_the_same_mount(self) -> None:
         from control_plane.workflows.dokploy_deploy import update_dokploy_target_artifact

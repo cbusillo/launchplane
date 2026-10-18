@@ -26112,6 +26112,7 @@ def create_launchplane_fastapi_app(
                     idempotency_scope(identity),
                     trace_id,
                     lane_owner,
+                    idempotency_key.strip(),
                 )
                 if setup_request.mode == "dry-run":
                     return accepted_evidence_response(
@@ -26122,6 +26123,13 @@ def create_launchplane_fastapi_app(
                         trace_id=trace_id,
                         records={},
                         result=adapter.readback(idempotency_key.strip()),
+                    )
+
+                if setup_request.retain_state_volume_allocation:
+                    return accepted_evidence_response(
+                        trace_id=trace_id,
+                        records={},
+                        result=adapter.retain(idempotency_key.strip()),
                     )
 
                 def volume_operation(store: PostgresRecordStore) -> DurableProviderOperationResult:

@@ -161,7 +161,10 @@ path, mount id, existing application id or caller-selected `app_name`.
 Start with `mode: dry-run`. The service saves only planning evidence in the DB
 and returns `state_volume_plan_id`, `plan_sha256`, the exact target intent and
 `state_volume: {name, mount_path}`. The service generates the new volume and
-application names. No provider resource is created by a dry run. Keep the
+application names, and returns `allocation` with the effective generated project,
+environment, target and application names. Caller names remain reviewed labels;
+only the generated names identify recoverable provider placement. No provider
+resource is created by a dry run. Keep the
 private request and response together. For `mode: apply`, add the returned
 `state_volume_plan_id`, `expected_plan_sha256: <plan_sha256>`, the normal setup
 confirmation and reason, and an `Idempotency-Key`. The same caller must use the
@@ -177,22 +180,48 @@ Creation does not deploy an artifact, copy state, or prove runtime retention.
 
 Use `mode: readback` with the unchanged private request, original plan/digest and
 original `Idempotency-Key` for observational recovery evidence. Readback reports
-`operation_state`, `provider_effect_phase` and `configuration_matches`, and
-never creates a resource or adopts a record. Repeating **apply with the original
-key** may finish record adoption when independent readback proves the original
-mount exists. It never repeats resource creation after an uncertain response.
-If a project, environment or application response is lost before all identities
-are known, or the mount is absent or changed, the operation stays unresolved with
-its known resource ids and pending phase. Preserve that evidence for supported
-reconciliation; a different key or plan cannot bypass the lane reservation.
-Do not delete or recreate partially created resources to retry this setup.
-Ordinary testing application/Compose creation also refuses while that lane has
-an unresolved storage reservation.
+`operation_state`, durable `provider_effect_phase`, `configuration_matches`,
+`configuration_evidence` (`matches`, `differs` or `unavailable`) and `custody_sha256`.
+Provider failures and missing targets return value-free `unavailable` evidence.
+Readback never creates a resource or adopts a record.
+
+Repeating **apply with the original key** can recover a lost project, environment
+or application response from exactly one original generated marker in complete
+provider inventory. It resumes only the next undispatched step under a renewed
+lease and the lane lock. A lost mount response resumes only when independent
+readback proves the exact mount exists. Separate lease-fenced progress survives
+runner retries and process restarts. Duplicate markers, incomplete inventory,
+changed identities and an absent uncertain mount preserve the unresolved operation.
+An empty inventory does not prove a dispatched provider create cannot finish later.
+A different key or plan cannot bypass the held lane reservation. All testing
+setup mutations, including adoption and source completion, share the lane lock
+and refuse unresolved storage custody.
+
+For an uncertain allocation that cannot resume, keep its resources and explicitly
+retain its custody through the service. Obtain current original-key readback.
+Send the unchanged reviewed setup request with `mode: apply`,
+`retain_state_volume_allocation: true`,
+`expected_state_volume_custody_sha256: <custody_sha256>`, the original key/plan,
+and the normal exact confirmation and reason. The service requires the original
+execution lease to have expired, unchanged authority and exact reviewed custody.
+It atomically fences the old worker and records `allocation_state: retained_uncertain`.
+This performs no provider mutation, deployment or deletion. Its original intent,
+known ids and pending phase remain retained even if a late create materializes.
+The retained allocation can never resume, including under another key. To keep
+working, request a fresh dry-run and apply its independent names with a new key.
+Do not delete or recreate partial resources as a retry. Retention is available
+under existing setup authority; it grants no access to a mounted resource.
+
+The mount path must contain mutable state only. The image author must keep
+application code outside that directory. Syntactic path validation cannot inspect
+an image or prove that a directory contains no code. The reviewed path is echoed
+in the saved plan; creation does not qualify the image's storage layout.
 
 Recovery uses the original caller scope, including its token label. Rotating
 that label does not transfer access to the original plan or release its lane
-reservation. Preserve the original receipts for supported reconciliation if
-the original caller becomes unavailable. Applications with mounts also fail
+reservation. Preserve the original receipts if the caller becomes unavailable; changing
+the caller scope requires a separate authority decision, and this operation
+provides no cross-scope transfer. Applications with mounts also fail
 the existing agent retirement guard; use a supported admin retirement/data
 custody path, rather than an unmounted-target deletion command, when retiring
 this testing lane. Creating storage does not authorize its later deletion.
