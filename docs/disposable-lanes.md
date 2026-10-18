@@ -1134,13 +1134,21 @@ browser journey do not establish CM health or rebuild timing.
 explicitly resumes a held native rebuild. It requires the original request's
 `Idempotency-Key`, the observed `expected_updated_at` and `expected_attempt`, and
 fresh authority for the existing target-replacement action from the original
-caller. A signed-in human is bound by immutable GitHub ID; a supported terminal
-or local caller must retain its original identity type, subject and token label.
+caller. A signed-in human is bound by immutable GitHub ID; supported
+`local_operator`/`local_admin` callers retain their original type, subject and token label.
+This route uses the existing `read_operator_mutation_identity` dependency, which
+refuses terminal-agent credentials. It follows the current target-replacement
+action policy rather than adding the administrator gate used by the browser's
+inspect/read routes. A caller admitted only by an action rule may resume through
+the API but still be unable to use that administrator browser view.
 The configured bearer value can rotate while those identity fields remain
 unchanged. Changing the label changes the caller; resume does not transfer a
 held request to that new identity or to an administrator.
 A workflow or service identity cannot substitute. Cookie callers also need the
 normal Origin/CSRF evidence. This action creates no authorization grant.
+An original workflow/service caller has no same-caller resume path here; its
+unresolved operation remains fenced. Independent successor recovery is tracked
+in #4013, without transferring its authority or claiming the old effect ended.
 
 Under the existing lane and row locks, resume records its fresh authorization
 and prior held error in an audit receipt, and queues the same operation in one
@@ -1149,6 +1157,8 @@ request key and all provider dispatch fences. Another operation holding the lane
 or a changed held revision refuses the transition. Repeating the same resume receipt returns
 the current original operation without resetting a running worker. The worker
 rechecks current authority and observes existing effects before continuing.
+Requeueing does not certify that an original writer is excluded, regardless of
+the held error code. Only the original provider fences can qualify dispatch.
 This is not the legacy denied-operation fence-release flow: it releases no
 provider fence and grants no alternate identity a replay.
 

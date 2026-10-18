@@ -13840,6 +13840,9 @@ class RealPostgresTestingPublicationTests(unittest.TestCase):
 
 
 class RealPostgresTestingRebuildResumeTests(unittest.TestCase):
+    def test_worker_denial_holds_fences_before_explicit_resume(self) -> None:
+        self.run_resume_case("test_worker_denial_holds_original_fences_before_explicit_resume")
+
     def run_resume_case(self, name: str) -> None:
         from tests.test_testing_rebuild_resume import TestingRebuildResumeTests
 
