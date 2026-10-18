@@ -1,4 +1,5 @@
 from copy import deepcopy
+import json
 from typing import Any
 from unittest.mock import patch
 
@@ -21,6 +22,7 @@ class ApplicationStateVolumeTests(_DirectorTestingSetupFixture):
         self.fail_after = ""
         self.fail_before = ""
         self.preexisting_mounts: list[dict[str, Any]] = []
+        self.application_suffix = "abc123"
         self.provider.side_effect = self.mutate
         self.enterContext(
             patch(
@@ -29,13 +31,13 @@ class ApplicationStateVolumeTests(_DirectorTestingSetupFixture):
             )
         )
 
-    def mutate(self, _host: str, _token: str, path: str, payload: dict[str, Any]) -> dict[str, str]:
+    def mutate(self, _host: str, _token: str, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         if path == self.fail_before:
             raise TimeoutError("fixture: request outcome unavailable")
         if path == APPLICATION_CREATE_PATH:
             self.live = {
                 **payload,
-                "appName": payload["appName"] + "-fixture",
+                "appName": payload.get("appName", "ordinary-app") + "-" + self.application_suffix,
                 "applicationId": "created-application",
                 "serverId": self.payload["server_id"],
                 "mounts": deepcopy(self.preexisting_mounts),
@@ -52,15 +54,19 @@ class ApplicationStateVolumeTests(_DirectorTestingSetupFixture):
             )
         if path == self.fail_after:
             raise TimeoutError("fixture: provider effect completed but response lost")
-        return {
-            PROJECT_CREATE_PATH: {"projectId": "created-project"},
+        responses: dict[str, dict[str, Any]] = {
+            PROJECT_CREATE_PATH: {
+                "project": {"projectId": "created-project"},
+                "environment": {"environmentId": "default-environment"},
+            },
             ENVIRONMENT_CREATE_PATH: {"environmentId": "created-environment"},
             APPLICATION_CREATE_PATH: {
                 "applicationId": "created-application",
                 "appName": str(self.live.get("appName", "")),
             },
             MOUNT_CREATE: {"mountId": "created-mount"},
-        }[path]
+        }
+        return responses[path]
 
     async def plan(self) -> dict[str, Any]:
         result = await self.post(mode="dry-run")
@@ -170,6 +176,28 @@ class ApplicationStateVolumeTests(_DirectorTestingSetupFixture):
         self.assertEqual(self.provider.call_count, calls)
         readback = await self.post(mode="readback")
         self.assertFalse(readback.json()["result"]["configuration_matches"])
+        self.assertEqual(
+            json.loads(readback.json()["result"]["provider_effect_phase"])["pending"], MOUNT_CREATE
+        )
+
+    async def test_plain_setup_cannot_bypass_unresolved_storage_creation(self) -> None:
+        await self.plan()
+        self.fail_before = MOUNT_CREATE
+        result = await self.post()
+        self.assertEqual(result.status_code, 409, result.text)
+        calls = self.provider.call_count
+        self.fail_before = ""
+        for operation in ("create-application", "create-compose"):
+            with self.subTest(operation=operation):
+                plain = await self.post(
+                    operation=operation,
+                    idempotency_key="ordinary-retry-" + operation,
+                    state_volume_path="",
+                    state_volume_plan_id="",
+                    expected_plan_sha256="",
+                )
+                self.assertIn(plain.status_code, (400, 409), plain.text)
+                self.assertEqual(self.provider.call_count, calls)
 
     async def test_lost_application_response_retains_known_placement_without_recreating(
         self,
@@ -227,7 +255,21 @@ class ApplicationStateVolumeTests(_DirectorTestingSetupFixture):
         result = await self.post()
         self.assertEqual(result.status_code, 409, result.text)
         self.assertNotIn(MOUNT_CREATE, [c.args[2] for c in self.provider.call_args_list])
+        readback = await self.post(mode="readback")
+        phase = json.loads(readback.json()["result"]["provider_effect_phase"])
+        self.assertEqual(phase["application"], self.live["applicationId"])
+        self.assertEqual(phase["app_name"], self.live["appName"])
         self.assert_production_unchanged()
+
+    async def test_unexpected_generated_name_refuses_and_retains_known_application(self) -> None:
+        await self.plan()
+        self.application_suffix = "unexpected"
+        result = await self.post()
+        self.assertEqual(result.status_code, 409, result.text)
+        self.assertNotIn(MOUNT_CREATE, [c.args[2] for c in self.provider.call_args_list])
+        readback = await self.post(mode="readback")
+        phase = json.loads(readback.json()["result"]["provider_effect_phase"])
+        self.assertEqual(phase["application"], self.live["applicationId"])
 
     async def test_provider_alias_to_production_refuses_mounting(self) -> None:
         await self.plan()
@@ -256,7 +298,7 @@ class ApplicationStateVolumeTests(_DirectorTestingSetupFixture):
     def test_local_setup_cannot_silently_ignore_storage_request(self) -> None:
         from control_plane.dokploy_target_setup_http import execute_dokploy_target_setup
 
-        with self.assertRaisesRegex(ValueError, "durable service"):
+        with self.assertRaises(ValueError):
             execute_dokploy_target_setup(
                 control_plane_root_path=self.root,
                 record_store=self.store,

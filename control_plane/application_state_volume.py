@@ -31,6 +31,18 @@ PLAN_ROUTE = ROUTE + "/state-volume-plan"
 MOUNT_CREATE = "/api/mounts.create"
 
 
+def state_volume_target_key(context: str) -> str:
+    return f"application-state-setup:{context}:testing"
+
+
+def require_no_held_state_volume(store: PostgresRecordStore, context: str) -> None:
+    if any(
+        row.provider_target_key == state_volume_target_key(context)
+        for row in store.list_held_provider_target_reservations()
+    ):
+        raise ValueError("Testing storage setup is unresolved; preserve its original key and plan.")
+
+
 def validate_volume_request(request: "DokployTargetSetupEnvelope") -> None:
     path = request.state_volume_path
     if (
@@ -130,7 +142,7 @@ class ApplicationStateVolumeAdapter:
                 "provider_host": host,
                 "plan_id": allocation,
                 "volume_name": "lp-testing-state-" + allocation,
-                "app_name": "lp-testing-app-" + allocation,
+                "app_name": "lp-testing-app-" + allocation + "-state",
             }
             intent["plan_sha256"] = request_fingerprint(intent)
             store.write_idempotency_record(
@@ -162,7 +174,7 @@ class ApplicationStateVolumeAdapter:
         return cls(root, store, request, scope, trace, product, intent)
 
     def target_key(self) -> str:
-        return f"application-state-setup:{self.request.context}:testing"
+        return state_volume_target_key(self.request.context)
 
     def reconciliation_key(self) -> str:
         return str(self.intent["plan_sha256"])
@@ -205,10 +217,18 @@ class ApplicationStateVolumeAdapter:
         ):
             raise ValueError("Reviewed testing target or provider changed; storage plan is stale.")
 
+    def _application_name(self, value: object) -> str:
+        if not isinstance(value, str) or not re.fullmatch(
+            re.escape(self.intent["app_name"]) + r"(?:-[a-z0-9]{6})?", value
+        ):
+            raise ValueError("Provider application name does not belong to this allocation.")
+        return value
+
     def _live(self, application_id: str, environment_id: str, app_name: str) -> api.JsonObject:
         from control_plane.dokploy_target_setup_http import fetch_dokploy_target_payload_for_setup
 
         host, token = source.read_dokploy_config(control_plane_root=self.root)
+        self._application_name(app_name)
         if host != self.intent["provider_host"]:
             raise ValueError("Provider binding changed.")
         for other in self.store.list_physical_provider_target_records():
@@ -409,6 +429,7 @@ class ApplicationStateVolumeAdapter:
             APPLICATION_CREATE_PATH,
             PROJECT_CREATE_PATH,
             ENVIRONMENT_CREATE_PATH,
+            _extract_provider_id,
         )
 
         started = False
@@ -428,26 +449,25 @@ class ApplicationStateVolumeAdapter:
                 ENVIRONMENT_CREATE_PATH: ("environment", "environmentId"),
                 APPLICATION_CREATE_PATH: ("application", "applicationId"),
             }[path]
-            value = response.get(field)
-            if not isinstance(value, str) or not value:
-                raise ValueError(
-                    "Provider create response lacks identity; preserve original operation."
-                )
+            value = _extract_provider_id(response, field, key)
             created[key] = value
+            default_environment = api.as_json_object(response.get("environment"))
+            if path == PROJECT_CREATE_PATH and default_environment:
+                default_id = default_environment.get("environmentId")
+                if isinstance(default_id, str) and default_id:
+                    created["default_environment"] = default_id
+            application_fields = api.as_json_object(response.get("application")) or response
+            if path == APPLICATION_CREATE_PATH and isinstance(
+                application_fields.get("appName"), str
+            ):
+                created["app_name"] = str(application_fields["appName"])
+            # Retain every acknowledged identity before any post-create validation
+            # or provider read can fail, including identities of refused resources.
+            lease.checkpoint_effect(json.dumps(created, sort_keys=True))
             if path == APPLICATION_CREATE_PATH:
-                app_name = response.get("appName")
                 # Dokploy appends a generated suffix to the requested base name.
                 # Retain its exact returned identity before dispatching the mount.
-                if not isinstance(app_name, str) or not (
-                    app_name == self.intent["app_name"]
-                    or (
-                        app_name.startswith(self.intent["app_name"] + "-")
-                        and re.fullmatch(r"[A-Za-z0-9._-]+", app_name)
-                    )
-                ):
-                    raise ValueError(
-                        "Provider application name does not belong to this allocation."
-                    )
+                app_name = self._application_name(application_fields.get("appName"))
                 created["app_name"] = app_name
                 self.checkpoint()
                 live = self._live(value, created["environment"], app_name)
@@ -455,7 +475,9 @@ class ApplicationStateVolumeAdapter:
                     raise ValueError("A new application must have positively empty mounts.")
                 execution_check()
                 self.checkpoint()
-                lease.checkpoint_effect(json.dumps(created, sort_keys=True))
+                lease.checkpoint_effect(
+                    json.dumps({**created, "pending": MOUNT_CREATE}, sort_keys=True)
+                )
                 mutate_dokploy_payload_for_target_setup(
                     host,
                     token,
@@ -470,6 +492,7 @@ class ApplicationStateVolumeAdapter:
                 )
                 if not self._mount_matches(self._live(value, created["environment"], app_name)):
                     raise ValueError("Independent state-volume readback differs.")
+                lease.checkpoint_effect(json.dumps(created, sort_keys=True))
                 execution_check()
                 self.checkpoint()
             return response

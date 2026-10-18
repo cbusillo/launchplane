@@ -186,6 +186,16 @@ are known, or the mount is absent or changed, the operation stays unresolved wit
 its known resource ids and pending phase. Preserve that evidence for supported
 reconciliation; a different key or plan cannot bypass the lane reservation.
 Do not delete or recreate partially created resources to retry this setup.
+Ordinary testing application/Compose creation also refuses while that lane has
+an unresolved storage reservation.
+
+Recovery uses the original caller scope, including its token label. Rotating
+that label does not transfer access to the original plan or release its lane
+reservation. Preserve the original receipts for supported reconciliation if
+the original caller becomes unavailable. Applications with mounts also fail
+the existing agent retirement guard; use a supported admin retirement/data
+custody path, rather than an unmounted-target deletion command, when retiring
+this testing lane. Creating storage does not authorize its later deletion.
 
 This option is service-only. The local/bootstrap CLI has no storage apply path.
 Actual state retention and isolation still require testing-lane qualification.

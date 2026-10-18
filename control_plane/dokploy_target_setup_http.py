@@ -52,6 +52,11 @@ def require_empty_testing_target_creation(
         product_context_owners,
     )
 
+    if not request.state_volume_path:
+        from control_plane.application_state_volume import require_no_held_state_volume
+
+        require_no_held_state_volume(record_store, request.context)
+
     if (
         request.operation not in {"create-compose", "create-application"}
         or request.instance != "testing"
@@ -551,6 +556,15 @@ def execute_dokploy_target_setup(
 ) -> dict[str, object]:
     if request.state_volume_path and application_mutate is None:
         raise ValueError("State-volume creation requires its reviewed durable service operation.")
+    if (
+        request.mode == "apply"
+        and request.instance == "testing"
+        and request.operation in {"create-application", "create-compose"}
+        and not request.state_volume_path
+    ):
+        from control_plane.application_state_volume import require_no_held_state_volume
+
+        require_no_held_state_volume(record_store, request.context)
 
     def mutate_setup(
         host: str, token: str, path: str, payload: dict[str, dokploy_api.JsonValue]
