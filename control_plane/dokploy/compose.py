@@ -133,8 +133,15 @@ def render_odoo_raw_compose_file(
     publish_host_ports: bool = True,
     mount_workflow_ssh: bool = True,
     isolated_testing: bool = False,
+    private_backend_alias: str = "",
     domain_certificate_type: Literal["none", "letsencrypt"] = "none",
 ) -> str:
+    if private_backend_alias and (
+        not isolated_testing
+        or domain_hosts
+        or not re.fullmatch(r"lp-testing-[a-f0-9]{32}", private_backend_alias)
+    ):
+        raise ValueError("A private backend requires an unrouted, isolated testing namespace.")
     normalized_image_reference = image_reference.strip()
     if isolated_testing and (
         publish_host_ports or mount_workflow_ssh or not hold_web_until_integration_readback
@@ -171,6 +178,14 @@ def render_odoo_raw_compose_file(
     # Dokploy adds `default` to domain-enabled services. Make that very network
     # private for testing, so provider conversion cannot add an outbound bridge.
     web_networks = "    networks: [default]" if isolated_testing and not domain_hosts else ""
+    if private_backend_alias:
+        web_route_labels = '    labels:\n      - "traefik.enable=false"\n'
+        web_networks = (
+            "    networks:\n      default: {}\n      dokploy-network:\n"
+            + "        aliases: ["
+            + json.dumps(private_backend_alias)
+            + "]"
+        )
     private_network = "    networks: [default]" if isolated_testing else ""
     testing_networks = "  default:\n    internal: true\n" if isolated_testing else ""
     web_extra_hosts = (

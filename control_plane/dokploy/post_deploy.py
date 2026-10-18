@@ -602,7 +602,18 @@ def run_compose_post_deploy_update(
     fresh_restore_source_environment: dict[str, str] | None = None,
     prepare_native_source: Callable[[dict[str, object], str], dict[str, object]] | None = None,
     clear_preview_fishbowl_source: bool = False,
+    testing_candidate_namespace: str = "",
 ) -> dict[str, str]:
+    if testing_candidate_namespace and (
+        target_definition.instance != "testing"
+        or target_definition.target_name != testing_candidate_namespace
+        or not re.fullmatch(r"lp-testing-[a-f0-9]{32}", testing_candidate_namespace)
+        or (
+            fresh_testing_generation is not None
+            and fresh_testing_generation.namespace != testing_candidate_namespace
+        )
+    ):
+        raise ValueError("Candidate schedule must belong to its isolated target namespace.")
     if fresh_testing_generation is not None:
         if (
             not run_destructive_restore
@@ -817,9 +828,12 @@ def run_compose_post_deploy_update(
         )
     )
     schedule_name = DOKPLOY_DATA_WORKFLOW_SCHEDULE_NAME
-    schedule_app_name = _build_dokploy_data_workflow_schedule_app_name(
-        context_name=target_definition.context,
-        instance_name=target_definition.instance,
+    schedule_app_name = (
+        testing_candidate_namespace
+        or _build_dokploy_data_workflow_schedule_app_name(
+            context_name=target_definition.context,
+            instance_name=target_definition.instance,
+        )
     )
     existing_schedule = api.find_matching_dokploy_schedule(
         host=host,

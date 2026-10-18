@@ -21,6 +21,7 @@ from control_plane.contracts.secret_record import SecretBinding
 from control_plane.contracts.secret_record import SecretRecord
 from control_plane.contracts.secret_record import SecretVersion
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.runtime_platform_credentials import PlatformCredentialRefusedError
 
 
 def _sqlite_database_url(database_path: Path) -> str:
@@ -52,7 +53,7 @@ def _seed_runtime_environment_records(
 
 class _FakeSecretReadStore:
     def __init__(self) -> None:
-        self.records = (
+        self.records: tuple[SecretRecord, ...] = (
             SecretRecord(
                 secret_id="secret-runtime-smtp-password-opw-testing",
                 scope="context_instance",
@@ -67,7 +68,7 @@ class _FakeSecretReadStore:
                 updated_by="operator",
             ),
         )
-        self.versions = (
+        self.versions: tuple[SecretVersion, ...] = (
             SecretVersion(
                 version_id="secret-version-current",
                 secret_id="secret-runtime-smtp-password-opw-testing",
@@ -83,7 +84,7 @@ class _FakeSecretReadStore:
                 ciphertext="previous-redacted-ciphertext",
             ),
         )
-        self.bindings = (
+        self.bindings: tuple[SecretBinding, ...] = (
             SecretBinding(
                 binding_id="secret-runtime-smtp-password-opw-testing-binding-smtp-password",
                 secret_id="secret-runtime-smtp-password-opw-testing",
@@ -161,6 +162,72 @@ class _FakeSecretReadStore:
 
 
 class LaunchplaneSecretsTests(unittest.TestCase):
+    def test_secret_selection_excludes_versions_before_reading_or_decrypting(self) -> None:
+        store = _FakeSecretReadStore()
+        local = store.records[0].model_copy(
+            update={
+                "secret_id": "local-db",
+                "current_version_id": "local-version",
+                "name": "local-db",
+            }
+        )
+        binding = store.bindings[0].model_copy(
+            update={
+                "binding_id": "local-binding",
+                "secret_id": local.secret_id,
+                "binding_key": "ODOO_DB_PASSWORD",
+            }
+        )
+        version = store.versions[0].model_copy(
+            update={
+                "version_id": local.current_version_id,
+                "secret_id": local.secret_id,
+                "ciphertext": "local-testing-ciphertext",
+            }
+        )
+        store.records += (local,)
+        store.bindings += (binding,)
+        store.versions += (version,)
+        with (
+            patch.object(store, "read_secret_version", wraps=store.read_secret_version) as read,
+            patch.object(
+                control_plane_secrets,
+                "_decrypt_secret_value",
+                side_effect=lambda ciphertext, _key: ciphertext,
+            ) as decrypt,
+        ):
+            values = control_plane_secrets.resolve_secret_values_for_integration_from_store(
+                record_store=store,
+                integration=local.integration,
+                context_name=local.context,
+                instance_name=local.instance,
+                binding_keys=frozenset({binding.binding_key}),
+            )
+            self.assertEqual(values, {binding.binding_key: version.ciphertext})
+            read.assert_called_once_with(local.current_version_id)
+            decrypt.assert_called_once_with(version.ciphertext, version.key_id)
+            read.reset_mock()
+            decrypt.reset_mock()
+            self.assertEqual(
+                control_plane_secrets.resolve_secret_values_for_integration_from_store(
+                    record_store=store,
+                    integration=local.integration,
+                    context_name=local.context,
+                    instance_name=local.instance,
+                    binding_keys=frozenset(),
+                ),
+                {},
+            )
+            read.assert_not_called()
+            decrypt.assert_not_called()
+            ordinary = control_plane_secrets.resolve_secret_values_for_integration_from_store(
+                record_store=store,
+                integration=local.integration,
+                context_name=local.context,
+                instance_name=local.instance,
+            )
+            self.assertEqual(set(ordinary), {item.binding_key for item in store.bindings})
+
     def test_secret_statuses_use_structural_read_store_boundary(self) -> None:
         store = _FakeSecretReadStore()
 
@@ -448,6 +515,29 @@ class LaunchplaneSecretsTests(unittest.TestCase):
                     )
                     for lane in lanes
                 }
+                with patch.object(
+                    control_plane_secrets,
+                    "_decrypt_secret_value",
+                    side_effect=AssertionError("Excluded secrets must not be decrypted"),
+                ):
+                    private = runtime_environments.resolve_site_runtime_environment(
+                        control_plane_root=control_plane_root,
+                        context_name="site",
+                        instance_name="testing",
+                        target_environment_override={},
+                        secret_binding_keys=frozenset(),
+                    )
+                    with self.assertRaises(PlatformCredentialRefusedError):
+                        runtime_environments.resolve_site_runtime_environment(
+                            control_plane_root=control_plane_root,
+                            context_name="site",
+                            instance_name="testing",
+                            target_environment_override={"GITHUB_TOKEN": "fixture"},
+                            secret_binding_keys=frozenset(),
+                        )
+                self.assertFalse(private.secret_keys)
+                self.assertNotIn("SITE_SHARED_TOKEN", private.values)
+                self.assertEqual(private.values["SITE_SETTING"], "site")
             store.close()
 
         for lane, environment in environments.items():

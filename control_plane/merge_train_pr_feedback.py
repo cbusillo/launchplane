@@ -1,4 +1,5 @@
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from time import time_ns
@@ -15,6 +16,51 @@ from control_plane.contracts.merge_train_pr_feedback_record import (
     merge_train_pr_feedback_marker,
 )
 from control_plane.workflows.launchplane import upsert_github_issue_comment
+from control_plane.merge_train_planning_completion import (
+    PlanningCompletionFailure,
+    PlanningCompletionPending,
+    PlanningCompletionProviderFailure,
+    PlanningCompletionSourceReview,
+    PlanningCompletionReview,
+    reconcile_completed_change,
+)
+from control_plane.merge_train_controller_feedback import build_feedback_payloads
+from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlanRecord
+from control_plane.contracts.merge_train_policy import MergeTrainRepositoryPolicy
+
+
+PLANNING_RECEIPT_PREFIX = "<!-- launchplane-planning-reconciliation "
+_PLANNING_NOTE_START = "<!-- launchplane-planning-review:start -->"
+_PLANNING_NOTE_END = "<!-- launchplane-planning-review:end -->"
+
+
+def _planning_comment(body: str, receipt: object, *, review: str = "") -> str:
+    controller_body = re.sub(
+        r"(?m)^" + re.escape(PLANNING_RECEIPT_PREFIX) + r"[^\n]* -->\n?", "", body
+    ).rstrip()
+    controller_body = re.sub(
+        re.escape(_PLANNING_NOTE_START) + r".*?" + re.escape(_PLANNING_NOTE_END),
+        "",
+        controller_body,
+        flags=re.DOTALL,
+    ).rstrip()
+    if review:
+        controller_body += (
+            "\n\n"
+            + _PLANNING_NOTE_START
+            + "\nPlanning reconciliation is incomplete and needs owning-agent review. "
+            + "The merge landed; source planning metadata has not all been verified.\n\n"
+            + review
+            + "\n"
+            + _PLANNING_NOTE_END
+        )
+    return (
+        controller_body
+        + "\n\n"
+        + PLANNING_RECEIPT_PREFIX
+        + json.dumps(receipt, sort_keys=True)
+        + " -->"
+    )
 
 
 class MergeTrainPrFeedbackEnvelope(BaseModel):
@@ -80,6 +126,77 @@ def require_merge_train_pr_feedback_record_store(
     raise TypeError("record store does not support merge train PR feedback records")
 
 
+def queue_landing_planning_feedback(
+    *,
+    store: object,
+    landing_record: MergeTrainBatchLandingPlanRecord,
+    repository_policy: MergeTrainRepositoryPolicy,
+    trace_id: str,
+) -> None:
+    """Persist native completion before returning to a caller; do no provider IO.
+
+    The existing terminal-feedback recovery uses current policy and its normal
+    delivery lock. No workstation, caller comeback, or new watcher owns this job.
+    """
+    if not repository_policy.enqueue.trusted_automation_github_user_ids:
+        return
+    if not landing_record.landing_plan.entries or any(
+        entry.status != "merged" for entry in landing_record.landing_plan.entries
+    ):
+        return
+    feedback_store = require_merge_train_pr_feedback_record_store(store)
+    payloads = build_feedback_payloads(
+        response={
+            "result": {
+                "mode": "land",
+                "landing_plan": landing_record.landing_plan.model_dump(mode="json"),
+            },
+            "records": {"merge_train_batch_landing_plan_record_id": landing_record.record_id},
+        },
+        source="service:native-landing-completion",
+        phase="batch-landing",
+    )
+    for payload in payloads:
+        request = MergeTrainPrFeedbackEnvelope.model_validate(payload)
+        if request.event != "completed":
+            continue
+        latest = feedback_store.list_merge_train_pr_feedback_records(
+            repository=request.repository,
+            base_branch=request.base_branch,
+            pr_number=request.pull_request_number,
+            limit=1,
+        )
+        if latest and (
+            latest[0].controller_record_id == landing_record.record_id
+            or _timestamp(latest[0].recorded_at) > _timestamp(landing_record.updated_at)
+        ):
+            continue
+        queued = build_merge_train_pr_feedback_record(
+            request=request,
+            policy_key=repository_policy.policy_key,
+            policy_sha256=landing_record.landing_plan.policy_sha256,
+            token="",
+            recorded_at=landing_record.updated_at,
+            response_trace_id=trace_id,
+            defer_until=landing_record.updated_at,
+        ).model_copy(
+            update={
+                "provider_retry_at": "",
+                "error_message": "Native landing planning completion queued for delivery.",
+            }
+        )
+        queued = queued.model_copy(
+            update={
+                "comment_markdown": queued.comment_markdown
+                + "\n\n"
+                + PLANNING_RECEIPT_PREFIX
+                + json.dumps({"ok": False, "status": "queued"}, sort_keys=True)
+                + " -->"
+            }
+        )
+        feedback_store.write_merge_train_pr_feedback_record(queued)
+
+
 def write_merge_train_pr_feedback_record(
     *,
     store: MergeTrainPrFeedbackRecordStore,
@@ -90,6 +207,7 @@ def write_merge_train_pr_feedback_record(
     recorded_at: str,
     response_trace_id: str,
     defer_until: str = "",
+    planning_author_ids: tuple[int, ...] = (),
 ) -> MergeTrainPrFeedbackRecord:
     with store.merge_train_feedback_delivery_lock(
         repository=request.repository, pull_request_number=request.pull_request_number
@@ -102,6 +220,7 @@ def write_merge_train_pr_feedback_record(
             recorded_at=recorded_at,
             response_trace_id=response_trace_id,
             defer_until=defer_until,
+            planning_author_ids=planning_author_ids,
         )
         store.write_merge_train_pr_feedback_record(record)
         return record
@@ -116,6 +235,7 @@ def build_merge_train_pr_feedback_record(
     recorded_at: str,
     response_trace_id: str,
     defer_until: str = "",
+    planning_author_ids: tuple[int, ...] = (),
 ) -> MergeTrainPrFeedbackRecord:
     marker = merge_train_pr_feedback_marker(
         repository=request.repository,
@@ -167,12 +287,19 @@ def build_merge_train_pr_feedback_record(
             }
         )
     return deliver_merge_train_pr_feedback_record(
-        record=record, token=token, attempted_at=recorded_at
+        record=record,
+        token=token,
+        attempted_at=recorded_at,
+        planning_author_ids=planning_author_ids,
     )
 
 
 def deliver_merge_train_pr_feedback_record(
-    *, record: MergeTrainPrFeedbackRecord, token: str, attempted_at: str
+    *,
+    record: MergeTrainPrFeedbackRecord,
+    token: str,
+    attempted_at: str,
+    planning_author_ids: tuple[int, ...] = (),
 ) -> MergeTrainPrFeedbackRecord:
     """Deliver the saved body; retry metadata never changes its evidence chronology."""
     attempts = record.delivery_attempts + (record.delivery_status == "failed")
@@ -190,24 +317,66 @@ def deliver_merge_train_pr_feedback_record(
         )
     else:
         owner, repo = record.repository.split("/", 1)
+        source_review = None
         try:
+            # Completion is persisted/retried by this same native feedback path,
+            # including scheduler landings with no surviving workstation driver.
+            if record.event == "completed" and (
+                planning_author_ids or PLANNING_RECEIPT_PREFIX in record.comment_markdown
+            ):
+                # Keep the existing persisted record schema readable by older
+                # workers during a rolling deploy or rollback. The receipt is
+                # evidence in its saved comment, never an authorization input.
+                changes["comment_markdown"] = _planning_comment(
+                    record.comment_markdown, {"ok": False, "status": "incomplete"}
+                )
+                try:
+                    receipt = reconcile_completed_change(
+                        repository=record.repository,
+                        base_branch=record.base_branch,
+                        number=record.pull_request_number,
+                        token=token,
+                        trusted_author_ids=planning_author_ids,
+                        attempted_at=attempted_at,
+                    )
+                except PlanningCompletionSourceReview as exc:
+                    if exc.receipt is None:
+                        raise PlanningCompletionReview(
+                            "Planning completion source review is missing its receipt."
+                        ) from exc
+                    source_review = exc
+                    receipt = exc.receipt
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise PlanningCompletionReview(
+                        "Planning completion received malformed provider evidence; owning-agent review required."
+                    ) from exc
+                changes["comment_markdown"] = _planning_comment(
+                    record.comment_markdown,
+                    receipt,
+                    review=source_review.message if source_review else "",
+                )
             comment = upsert_github_issue_comment(
                 owner=owner,
                 repo=repo,
                 issue_number=record.pull_request_number,
                 token=token,
                 marker=record.marker,
-                body=record.comment_markdown,
+                body=str(changes.get("comment_markdown", record.comment_markdown)),
                 skip_unchanged=True,
             )
             changes.update(
-                delivery_status="delivered",
+                delivery_status="failed" if source_review else "delivered",
                 delivery_action=comment["action"],
                 comment_id=comment["comment_id"],
                 comment_url=comment["comment_url"],
                 retryable=False,
+                error_message=source_review.message if source_review else "",
             )
         except click.ClickException as exc:
+            if isinstance(exc, PlanningCompletionFailure) and exc.receipt is not None:
+                changes["comment_markdown"] = _planning_comment(
+                    record.comment_markdown, exc.receipt
+                )
             retryable, retry_at, provider_retry_at = _delivery_retry(
                 exc, attempted_at=attempted_at, attempts=attempts
             )
@@ -248,8 +417,13 @@ def _delivery_retry(
     error: click.ClickException, *, attempted_at: str, attempts: int
 ) -> tuple[bool, str, str]:
     cause = error.__cause__
-    transient = isinstance(cause, (URLError, OSError))
+    transient = isinstance(cause, (URLError, OSError)) or isinstance(
+        error, PlanningCompletionPending
+    )
     rate_limited = False
+    if isinstance(error, PlanningCompletionProviderFailure):
+        transient = error.retryable
+        rate_limited = error.rate_limited
     deadlines = [
         _timestamp(attempted_at) + timedelta(seconds=min(60 * 2 ** min(attempts - 1, 4), 900))
     ]
