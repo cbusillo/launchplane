@@ -646,23 +646,35 @@ class LegacyPreviewReconciliationTests(unittest.IsolatedAsyncioTestCase):
     async def test_slow_provider_scan_keeps_http_event_loop_available(self) -> None:
         started = threading.Event()
         release = threading.Event()
+        finished = threading.Event()
 
         def slow_scan(**_: object) -> tuple[()]:
             started.set()
-            if not release.wait(5):
-                raise ValueError("fixture timed out")
-            return ()
+            try:
+                if not release.wait(LIFESPAN_HANG_DEADLINE_SECONDS):
+                    raise ValueError("fixture timed out")
+                return ()
+            finally:
+                finished.set()
 
         self.search.side_effect = slow_scan
-        task = asyncio.create_task(self.call("inspect"))
-        try:
-            self.assertTrue(await asyncio.to_thread(started.wait, 3))
-            healthy = await asyncio.wait_for(request(self.app, "GET", "/v1/health"), 2)
-            self.assertEqual(healthy.status_code, 200)
-        finally:
-            release.set()
-        inspected = await asyncio.wait_for(task, 5)
-        self.assertEqual(inspected.status_code, 202, inspected.text)
+        async with (
+            lifespan_client(self.app) as client,
+            asyncio.timeout(LIFESPAN_HANG_DEADLINE_SECONDS),
+        ):
+            task = asyncio.create_task(self.call("inspect", app=client))
+            try:
+                self.assertTrue(
+                    await asyncio.to_thread(started.wait, LIFESPAN_HANG_DEADLINE_SECONDS)
+                )
+                healthy = await request(client, "GET", "/v1/health")
+                self.assertEqual(healthy.status_code, 200)
+                self.assertFalse(finished.is_set())
+                self.assertFalse(task.done())
+            finally:
+                release.set()
+            inspected = await task
+            self.assertEqual(inspected.status_code, 202, inspected.text)
 
     async def test_unknown_product_has_bounded_not_found_result(self) -> None:
         response = await self.call("inspect", product="missing-product")
@@ -726,6 +738,8 @@ class LegacyPreviewReconciliationTests(unittest.IsolatedAsyncioTestCase):
                     self.assertFalse(finished.is_set())
                     self.assertFalse(task.done())
                     task.cancel()
+                    # Middleware can delay cancellation delivery. The final replay
+                    # and single-call checks prove the completed cancellation outcome.
                     await asyncio.sleep(0)
                     duplicate = await destroy()
                     self.assertEqual(duplicate.status_code, 409, duplicate.text)
@@ -757,121 +771,139 @@ class LegacyPreviewReconciliationTests(unittest.IsolatedAsyncioTestCase):
             orphaned_slugs=("pr-1",),
         )
         self.store.write_preview_lifecycle_plan_record(plan)
-        for operation in ("cleanup", "sweep"):
-            with self.subTest(operation=operation):
-                started = threading.Event()
-                release = threading.Event()
-                name = (
-                    "build_preview_lifecycle_cleanup_record"
-                    if operation == "cleanup"
-                    else "build_preview_lifecycle_sweep"
-                )
-                original = getattr(http_app_module, name)
-
-                def slow_work(**kwargs: Any) -> Any:
-                    started.set()
-                    if not release.wait(5):
-                        raise ValueError("fixture timed out")
-                    return original(**kwargs)
-
-                payload: dict[str, object] = {"source": "fixture", "apply": False}
-                if operation == "cleanup":
-                    payload.update(
-                        product=self.profile.product,
-                        context=self.profile.preview.context,
-                        plan_id=plan.plan_id,
+        async with (
+            lifespan_client(self.app) as client,
+            asyncio.timeout(LIFESPAN_HANG_DEADLINE_SECONDS),
+        ):
+            for operation in ("cleanup", "sweep"):
+                with self.subTest(operation=operation):
+                    started = threading.Event()
+                    release = threading.Event()
+                    finished = threading.Event()
+                    name = (
+                        "build_preview_lifecycle_cleanup_record"
+                        if operation == "cleanup"
+                        else "build_preview_lifecycle_sweep"
                     )
+                    original = getattr(http_app_module, name)
 
-                async def call() -> Any:
-                    return await request(
-                        self.app,
-                        "POST",
-                        f"/v1/previews/lifecycle-{operation}",
-                        headers={
-                            "Authorization": "Bearer local-operator-token",
-                            "Idempotency-Key": f"slow-lifecycle-{operation}",
-                        },
-                        payload=payload,
-                    )
+                    def slow_work(**kwargs: Any) -> Any:
+                        started.set()
+                        try:
+                            if not release.wait(LIFESPAN_HANG_DEADLINE_SECONDS):
+                                raise ValueError("fixture timed out")
+                            return original(**kwargs)
+                        finally:
+                            finished.set()
 
-                with (
-                    patch.object(http_app_module, name, side_effect=slow_work) as work,
-                    patch(
-                        "control_plane.preview_lifecycle_cleanup_routes.execute_generic_web_preview_inventory",
-                        return_value=GenericWebPreviewInventoryResult(
+                    payload: dict[str, object] = {"source": "fixture", "apply": False}
+                    if operation == "cleanup":
+                        payload.update(
                             product=self.profile.product,
                             context=self.profile.preview.context,
-                            source="fixture",
-                            app_name_prefix="fixture-preview",
-                            previews=(),
-                        ),
-                    ),
-                    patch(
-                        "control_plane.preview_lifecycle_cleanup_routes.discover_generic_web_preview_desired_state",
-                        return_value=PreviewDesiredStateRecord(
-                            desired_state_id="fixture-desired",
-                            product=self.profile.product,
-                            context=self.profile.preview.context,
-                            source="fixture",
-                            discovered_at=self.preview.created_at,
-                            repository=self.profile.repository,
-                            anchor_repo=self.preview.anchor_repo,
-                            status="pass",
-                            desired_count=0,
-                        ),
-                    ),
-                ):
-                    task = asyncio.create_task(call())
-                    try:
-                        self.assertTrue(await asyncio.to_thread(started.wait, 3))
-                        concurrent = await call()
-                        self.assertEqual(concurrent.status_code, 409, concurrent.text)
-                        health = await asyncio.wait_for(request(self.app, "GET", "/v1/health"), 2)
-                        self.assertEqual(health.status_code, 200)
-                        task.cancel()
-                        with self.assertRaises(asyncio.CancelledError):
-                            await task
-                        still_running = await call()
-                        self.assertEqual(still_running.status_code, 409, still_running.text)
-                        if operation == "sweep":
-                            other = self.profile.model_copy(
-                                update={
-                                    "product": "later-site",
-                                    "repository": "cbusillo/later-site",
-                                    "preview": self.profile.preview.model_copy(
-                                        update={"context": "later-preview"}
-                                    ),
-                                }
-                            )
-                            self.store.write_product_profile_record(other)
-                    finally:
-                        release.set()
-
-                    async def wait_for_completion() -> Any:
-                        while True:
-                            completed = await call()
-                            if completed.status_code != 409:
-                                return completed
-                            await asyncio.sleep(0.01)
-
-                    response = await asyncio.wait_for(wait_for_completion(), 5)
-                    self.assertEqual(response.status_code, 202, response.text)
-                    self.assertTrue(response.json()["replayed"])
-                    if operation == "sweep":
-                        self.assertEqual(
-                            [entry["product"] for entry in response.json()["result"]["profiles"]],
-                            [self.profile.product],
+                            plan_id=plan.plan_id,
                         )
-                        self.assertEqual(
-                            self.store.list_preview_lifecycle_plan_records(
-                                context_name="later-preview"
+
+                    async def call() -> Any:
+                        return await request(
+                            client,
+                            "POST",
+                            f"/v1/previews/lifecycle-{operation}",
+                            headers={
+                                "Authorization": "Bearer local-operator-token",
+                                "Idempotency-Key": f"slow-lifecycle-{operation}",
+                            },
+                            payload=payload,
+                        )
+
+                    with (
+                        patch.object(http_app_module, name, side_effect=slow_work) as work,
+                        patch(
+                            "control_plane.preview_lifecycle_cleanup_routes.execute_generic_web_preview_inventory",
+                            return_value=GenericWebPreviewInventoryResult(
+                                product=self.profile.product,
+                                context=self.profile.preview.context,
+                                source="fixture",
+                                app_name_prefix="fixture-preview",
+                                previews=(),
                             ),
-                            (),
-                        )
-                    replay = await call()
-                    self.assertEqual(replay.status_code, 202, replay.text)
-                    self.assertTrue(replay.json()["replayed"])
-                    work.assert_called_once()
+                        ),
+                        patch(
+                            "control_plane.preview_lifecycle_cleanup_routes.discover_generic_web_preview_desired_state",
+                            return_value=PreviewDesiredStateRecord(
+                                desired_state_id="fixture-desired",
+                                product=self.profile.product,
+                                context=self.profile.preview.context,
+                                source="fixture",
+                                discovered_at=self.preview.created_at,
+                                repository=self.profile.repository,
+                                anchor_repo=self.preview.anchor_repo,
+                                status="pass",
+                                desired_count=0,
+                            ),
+                        ),
+                    ):
+                        task = asyncio.create_task(call())
+                        try:
+                            self.assertTrue(
+                                await asyncio.to_thread(
+                                    started.wait, LIFESPAN_HANG_DEADLINE_SECONDS
+                                )
+                            )
+                            concurrent = await call()
+                            self.assertEqual(concurrent.status_code, 409, concurrent.text)
+                            health = await request(client, "GET", "/v1/health")
+                            self.assertEqual(health.status_code, 200)
+                            self.assertFalse(finished.is_set())
+                            self.assertFalse(task.done())
+                            task.cancel()
+                            with self.assertRaises(asyncio.CancelledError):
+                                await task
+                            still_running = await call()
+                            self.assertEqual(still_running.status_code, 409, still_running.text)
+                            self.assertFalse(finished.is_set())
+                            if operation == "sweep":
+                                other = self.profile.model_copy(
+                                    update={
+                                        "product": "later-site",
+                                        "repository": "cbusillo/later-site",
+                                        "preview": self.profile.preview.model_copy(
+                                            update={"context": "later-preview"}
+                                        ),
+                                    }
+                                )
+                                self.store.write_product_profile_record(other)
+                        finally:
+                            release.set()
+
+                        async def wait_for_completion() -> Any:
+                            while True:
+                                completed = await call()
+                                if completed.status_code != 409:
+                                    return completed
+                                await asyncio.sleep(0.01)
+
+                        response = await wait_for_completion()
+                        self.assertEqual(response.status_code, 202, response.text)
+                        self.assertTrue(response.json()["replayed"])
+                        if operation == "sweep":
+                            self.assertEqual(
+                                [
+                                    entry["product"]
+                                    for entry in response.json()["result"]["profiles"]
+                                ],
+                                [self.profile.product],
+                            )
+                            self.assertEqual(
+                                self.store.list_preview_lifecycle_plan_records(
+                                    context_name="later-preview"
+                                ),
+                                (),
+                            )
+                        replay = await call()
+                        self.assertEqual(replay.status_code, 202, replay.text)
+                        self.assertTrue(replay.json()["replayed"])
+                        work.assert_called_once()
 
     async def test_cleanup_destroy_keeps_checked_profile_and_refuses_wrong_context(self) -> None:
         self.app = self.build_app(("preview_lifecycle.cleanup",))
@@ -890,17 +922,21 @@ class LegacyPreviewReconciliationTests(unittest.IsolatedAsyncioTestCase):
         self.store.write_preview_lifecycle_plan_record(plan)
         started = threading.Event()
         release = threading.Event()
+        finished = threading.Event()
         original = build_preview_lifecycle_cleanup_record
 
         def slow_work(**kwargs: Any) -> Any:
             started.set()
-            if not release.wait(5):
-                raise ValueError("fixture timed out")
-            return original(**kwargs)
+            try:
+                if not release.wait(LIFESPAN_HANG_DEADLINE_SECONDS):
+                    raise ValueError("fixture timed out")
+                return original(**kwargs)
+            finally:
+                finished.set()
 
         async def call(key: str) -> Any:
             return await request(
-                self.app,
+                client,
                 "POST",
                 "/v1/previews/lifecycle-cleanup",
                 headers={"Authorization": "Bearer local-operator-token", "Idempotency-Key": key},
@@ -928,62 +964,71 @@ class LegacyPreviewReconciliationTests(unittest.IsolatedAsyncioTestCase):
                 "preview": self.profile.preview.model_copy(update={"context": "changed-preview"})
             }
         )
-        with (
-            patch(
-                "control_plane.http_app.build_preview_lifecycle_cleanup_record",
-                side_effect=slow_work,
-            ),
-            patch(
-                "control_plane.workflows.preview_lifecycle_cleanup._execute_generic_web_preview_destroy_unserialized",
-                return_value=result,
-            ) as provider,
+        async with (
+            lifespan_client(self.app) as client,
+            asyncio.timeout(LIFESPAN_HANG_DEADLINE_SECONDS),
         ):
-            task = asyncio.create_task(call("checked-cleanup"))
-            try:
-                self.assertTrue(await asyncio.to_thread(started.wait, 3))
-                self.store.write_product_profile_record(changed)
-            finally:
-                release.set()
-            response = await asyncio.wait_for(task, 5)
-            self.assertEqual(response.status_code, 202, response.text)
-            self.assertEqual(response.json()["result"]["status"], "blocked")
-            provider.assert_not_called()
-            self.assertEqual(self.store.read_preview_record(self.preview.preview_id), self.preview)
-            self.store.write_product_profile_record(self.profile)
-            with patch(
-                "control_plane.workflows.preview_lifecycle_cleanup.discover_generic_web_preview_desired_state",
-                return_value=PreviewDesiredStateRecord(
-                    desired_state_id="fresh-fixture-desired",
-                    product=self.profile.product,
-                    context=self.profile.preview.context,
-                    source="fixture",
-                    discovered_at=plan.planned_at,
-                    repository=self.profile.repository,
-                    anchor_repo=self.preview.anchor_repo,
-                    status="pass",
-                    desired_count=0,
+            with (
+                patch(
+                    "control_plane.http_app.build_preview_lifecycle_cleanup_record",
+                    side_effect=slow_work,
                 ),
+                patch(
+                    "control_plane.workflows.preview_lifecycle_cleanup._execute_generic_web_preview_destroy_unserialized",
+                    return_value=result,
+                ) as provider,
             ):
-                response = await call("fresh-checked-cleanup")
-            self.assertEqual(response.json()["result"]["status"], "pass")
-            provider.assert_called_once()
-            self.assertEqual(provider.call_args.kwargs["profile"], self.profile)
-            self.assertEqual(
-                self.store.read_preview_record(self.preview.preview_id).state, "destroyed"
-            )
-            self.store.write_product_profile_record(changed)
-        with patch(
-            "control_plane.workflows.preview_lifecycle_cleanup._execute_generic_web_preview_destroy_unserialized"
-        ) as provider:
-            response = await call("wrong-context-cleanup")
-            self.assertEqual(response.status_code, 202, response.text)
-            self.assertEqual(response.json()["result"]["status"], "blocked")
-            provider.assert_not_called()
-            disabled = self.profile.model_copy(
-                update={"preview": self.profile.preview.model_copy(update={"enabled": False})}
-            )
-            self.store.write_product_profile_record(disabled)
-            response = await call("disabled-preview-cleanup")
-            self.assertEqual(response.status_code, 202, response.text)
-            self.assertEqual(response.json()["result"]["status"], "blocked")
-            provider.assert_not_called()
+                task = asyncio.create_task(call("checked-cleanup"))
+                try:
+                    self.assertTrue(
+                        await asyncio.to_thread(started.wait, LIFESPAN_HANG_DEADLINE_SECONDS)
+                    )
+                    self.assertFalse(finished.is_set())
+                    self.store.write_product_profile_record(changed)
+                finally:
+                    release.set()
+                response = await task
+                self.assertEqual(response.status_code, 202, response.text)
+                self.assertEqual(response.json()["result"]["status"], "blocked")
+                provider.assert_not_called()
+                self.assertEqual(
+                    self.store.read_preview_record(self.preview.preview_id), self.preview
+                )
+                self.store.write_product_profile_record(self.profile)
+                with patch(
+                    "control_plane.workflows.preview_lifecycle_cleanup.discover_generic_web_preview_desired_state",
+                    return_value=PreviewDesiredStateRecord(
+                        desired_state_id="fresh-fixture-desired",
+                        product=self.profile.product,
+                        context=self.profile.preview.context,
+                        source="fixture",
+                        discovered_at=plan.planned_at,
+                        repository=self.profile.repository,
+                        anchor_repo=self.preview.anchor_repo,
+                        status="pass",
+                        desired_count=0,
+                    ),
+                ):
+                    response = await call("fresh-checked-cleanup")
+                self.assertEqual(response.json()["result"]["status"], "pass")
+                provider.assert_called_once()
+                self.assertEqual(provider.call_args.kwargs["profile"], self.profile)
+                self.assertEqual(
+                    self.store.read_preview_record(self.preview.preview_id).state, "destroyed"
+                )
+                self.store.write_product_profile_record(changed)
+            with patch(
+                "control_plane.workflows.preview_lifecycle_cleanup._execute_generic_web_preview_destroy_unserialized"
+            ) as provider:
+                response = await call("wrong-context-cleanup")
+                self.assertEqual(response.status_code, 202, response.text)
+                self.assertEqual(response.json()["result"]["status"], "blocked")
+                provider.assert_not_called()
+                disabled = self.profile.model_copy(
+                    update={"preview": self.profile.preview.model_copy(update={"enabled": False})}
+                )
+                self.store.write_product_profile_record(disabled)
+                response = await call("disabled-preview-cleanup")
+                self.assertEqual(response.status_code, 202, response.text)
+                self.assertEqual(response.json()["result"]["status"], "blocked")
+                provider.assert_not_called()
