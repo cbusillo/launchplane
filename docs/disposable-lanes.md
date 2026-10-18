@@ -685,13 +685,16 @@ in that same identified proxy to fetch its existing loopback API. It requires no
 host route to the proxy's Docker bridge address or published API port. The reader
 still requires managed-ingress membership and a private network namespace;
 host networking and sharing another container's network namespace refuse.
-It disables HTTP proxies, bounds the fetch time and emitted bytes, and rejects an
-oversized, incomplete or failed response before any route writer starts. It never
+It disables HTTP proxies, bounds emitted bytes, and applies a read-idle timeout
+within the existing Docker-client deadline. The client deadline bounds observation
+latency; it does not prove the container's read-only exec has stopped. An oversized,
+incomplete or failed response refuses before any route writer starts. It never
 enables an API, changes proxy configuration or tries a different access path on
 failure or denial. The emitted-program regression makes host HTTP unreachable
 while container-local reads and the ordinary cutover checks still work.
 CI also runs the actual reader in a digest-pinned isolated Traefik container with
 no bridge or published API port; the provider-free unit fixture is not its only proof.
+Both CI paths invoke the rehearsal command from repository quality metadata.
 Publication rechecks the static configuration,
 provider state, current file digest and retained physical web identity, then uses
 the existing proxy container to write a temporary file and atomically rename it.

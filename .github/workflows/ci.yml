@@ -902,9 +902,15 @@ jobs:
         if: matrix.shard_index == 0
         env:
           LAUNCHPLANE_TEST_TRAEFIK_IMAGE: ${{ env.LAUNCHPLANE_CI_TRAEFIK_IMAGE }}
-        run: |
+        run: &testing_route_reader_rehearsal |
           docker pull "$LAUNCHPLANE_TEST_TRAEFIK_IMAGE"
-          uv run --extra dev python -m unittest tests.test_testing_route_rehearsal.TestingRouteRehearsalTests.test_api_reader_works_with_no_bridge_or_published_port -v
+          uv run --extra dev python - <<'PY'
+          import json
+          from pathlib import Path
+          import subprocess
+          command = json.loads(Path(".github/github.json").read_text())["qualityGate"]["test"]["testingRouteReaderRehearsal"]
+          subprocess.run(command, shell=True, check=True)
+          PY
 
       - name: Upload unittest timings
         if: always()
@@ -1023,9 +1029,7 @@ jobs:
       - name: Qualify the container-local proxy API reader
         env:
           LAUNCHPLANE_TEST_TRAEFIK_IMAGE: ${{ env.LAUNCHPLANE_CI_TRAEFIK_IMAGE }}
-        run: |
-          docker pull "$LAUNCHPLANE_TEST_TRAEFIK_IMAGE"
-          uv run --extra dev python -m unittest tests.test_testing_route_rehearsal.TestingRouteRehearsalTests.test_api_reader_works_with_no_bridge_or_published_port -v
+        run: *testing_route_reader_rehearsal
 
   postgres_integration:
     needs: [runner_pool, verified_tree]
