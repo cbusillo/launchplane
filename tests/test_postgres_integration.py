@@ -14060,3 +14060,256 @@ class RealPostgresTestingPublicationTests(unittest.TestCase):
             finally:
                 release.set()
                 fixture.doCleanups()
+
+
+class RealPostgresTestingRebuildResumeTests(unittest.TestCase):
+    def test_worker_denial_holds_fences_before_explicit_resume(self) -> None:
+        self.run_resume_case("test_worker_denial_holds_original_fences_before_explicit_resume")
+
+    def run_resume_case(self, name: str) -> None:
+        from tests.test_testing_rebuild_resume import TestingRebuildResumeTests
+
+        with _head_postgres_database() as url:
+            fixture = TestingRebuildResumeTests(name)
+            fixture.database_url = url
+            result = unittest.TestResult()
+            fixture.run(result)
+            self.assertTrue(result.wasSuccessful(), (result.failures, result.errors))
+
+    def test_concurrent_requests_share_the_original_queue_transition(self) -> None:
+        self.run_resume_case("test_concurrent_resume_calls_share_one_queue_transition")
+
+    def test_receipt_failure_preserves_the_held_queue_item(self) -> None:
+        self.run_resume_case("test_resume_receipt_failure_rolls_back_the_queue_transition")
+
+    def test_another_lane_owner_keeps_the_original_held(self) -> None:
+        self.run_resume_case("test_another_active_lane_owner_prevents_resume")
+
+    def test_fresh_authorization_observes_the_same_route_before_retirement(self) -> None:
+        self.run_resume_case("test_original_worker_continues_without_another_route_dispatch")
+
+
+class RealPostgresNativeTestingWorkerTests(unittest.TestCase):
+    def test_secret_rotation_retains_configured_copy_without_deployment(self) -> None:
+        self.run_worker_case(
+            "test_secret_rotation_retains_original_configured_copy_without_deployment"
+        )
+
+    def test_secret_rotation_retains_applied_configuration_after_lost_reply(self) -> None:
+        self.run_worker_case(
+            "test_secret_rotation_retains_applied_configuration_after_lost_update_reply"
+        )
+
+    def test_unapplied_configuration_is_retained_without_holding_the_lane(self) -> None:
+        self.run_worker_case("test_unapplied_private_configuration_fails_without_holding_the_lane")
+
+    def test_empty_legacy_configuration_can_end_after_admission_loss(self) -> None:
+        self.run_worker_case("test_admission_loss_can_retain_an_empty_legacy_configuration")
+
+    def test_lost_configuration_observation_reply_reuses_original_evidence(self) -> None:
+        self.run_worker_case(
+            "test_lost_empty_configuration_observation_reply_reuses_its_abandonment"
+        )
+
+    def test_unapplied_configuration_finishes_worker_and_admits_new_intent(self) -> None:
+        self.run_worker_case(
+            "test_empty_configuration_failure_finishes_the_worker_and_admits_a_fresh_request"
+        )
+
+    def test_configuration_observation_rejects_unbound_abandonment_evidence(self) -> None:
+        self.run_worker_case("test_configuration_abandonment_receipt_must_bind_original_intent")
+
+    def test_hold_before_application_plan_keeps_original_authority(self) -> None:
+        self.run_worker_case(
+            "test_real_hold_before_application_plan_preserves_original_input_authority"
+        )
+
+    def test_hold_lift_resumes_the_existing_candidate(self) -> None:
+        self.run_worker_case("test_real_hold_set_and_clear_before_input_resume_preserves_candidate")
+
+    def test_lost_admission_observes_storage_without_preparing(self) -> None:
+        self.run_worker_case(
+            "test_admission_drift_observes_original_storage_without_preparing_again"
+        )
+
+    def test_lost_admission_observes_exact_original_configuration(self) -> None:
+        self.run_worker_case(
+            "test_admission_drift_observes_exact_original_configuration_without_new_inputs"
+        )
+
+    def test_incomplete_original_storage_ends_without_another_prepare(self) -> None:
+        self.run_worker_case(
+            "test_terminal_incomplete_storage_ends_admission_without_another_preparation"
+        )
+
+    def test_missing_candidate_cannot_poison_admission_checkpoint(self) -> None:
+        self.run_worker_case("test_missing_candidate_cannot_save_a_terminal_admission_checkpoint")
+
+    def test_next_rebuild_uses_the_new_desired_port(self) -> None:
+        self.run_worker_case(
+            "test_next_rebuild_moves_to_desired_port_without_reverting_the_profile"
+        )
+
+    def test_private_candidate_history_cannot_be_cancelled_after_marker_reset(self) -> None:
+        self.run_worker_case(
+            "test_private_candidate_without_a_current_outer_marker_cannot_be_cancelled"
+        )
+
+    def test_admission_drift_retains_unknown_candidate_creation(self) -> None:
+        self.run_worker_case("test_admission_drift_preserves_unknown_allocation_custody")
+
+    def test_admission_drift_retains_inflight_candidate_jobs(self) -> None:
+        self.run_worker_case("test_admission_drift_cannot_outlive_an_original_candidate_job")
+
+    def test_terminal_admission_receipt_remains_bound_to_original_intent(self) -> None:
+        self.run_worker_case("test_terminal_admission_receipt_cannot_replay_under_another_intent")
+
+    def test_profile_drift_after_publication_finishes_original_retirement(self) -> None:
+        self.run_worker_case(
+            "test_profile_drift_after_publication_does_not_strand_old_copy_retirement"
+        )
+
+    def test_retired_testing_lane_has_a_finite_original_failure(self) -> None:
+        self.run_worker_case("test_retired_testing_lane_after_effects_has_a_finite_result")
+
+    def test_changed_testing_credential_selection_keeps_original_custody(self) -> None:
+        self.run_worker_case(
+            "test_changed_testing_credentials_before_cutover_preserve_candidate_custody"
+        )
+
+    def test_partial_application_failure_survives_lost_checkpoint_reply(self) -> None:
+        self.run_worker_case(
+            "test_admission_failure_with_partial_application_survives_a_lost_checkpoint_reply"
+        )
+
+    def test_real_hold_set_and_clear_during_preparation_keeps_rebuild_live(self) -> None:
+        self.run_worker_case("test_real_hold_set_and_clear_during_preparation_allows_completion")
+
+    def test_post_allocation_profile_change_has_a_finite_failure(self) -> None:
+        self.run_worker_case("test_profile_drift_after_candidate_effects_ends_before_cutover")
+
+    def test_post_allocation_runtime_change_has_a_finite_failure(self) -> None:
+        self.run_worker_case("test_runtime_edit_after_candidate_effects_has_a_finite_result")
+
+    def test_post_allocation_context_loss_does_not_dispatch_a_route(self) -> None:
+        self.run_worker_case(
+            "test_context_loss_after_candidate_effects_ends_without_route_dispatch"
+        )
+
+    def test_sealed_non_applied_route_has_a_finite_result(self) -> None:
+        self.run_worker_case("test_sealed_non_applied_writer_finishes_without_candidate_readiness")
+
+    def test_inverse_retry_excludes_its_original_execution_key(self) -> None:
+        self.run_worker_case("test_excluded_inverse_attempt_uses_a_new_key_after_proven_exclusion")
+
+    def test_profile_edit_during_cutover_preserves_original_publication(self) -> None:
+        self.run_worker_case(
+            "test_unrelated_profile_edit_after_cutover_does_not_strand_publication"
+        )
+
+    def test_healthy_cutover_records_reality_under_a_new_staff_hold(self) -> None:
+        self.run_worker_case(
+            "test_new_hold_after_healthy_cutover_records_reality_and_preserves_old_copy"
+        )
+
+    def test_lost_execution_lock_keeps_the_original_effects_observable(self) -> None:
+        self.run_worker_case(
+            "test_lost_execution_lock_after_route_dispatch_keeps_original_observation"
+        )
+
+    def test_pre_effect_runtime_drift_does_not_fence_the_lane(self) -> None:
+        self.run_worker_case("test_changed_runtime_before_effects_refuses_without_fencing_the_lane")
+
+    def test_prewrite_failure_keeps_old_copy_and_is_terminal(self) -> None:
+        self.run_worker_case(
+            "test_route_writer_excluded_before_dispatch_fails_with_old_copy_serving"
+        )
+
+    def test_prewrite_exclusion_survives_interruption(self) -> None:
+        self.run_worker_case("test_completed_route_exclusion_resumes_without_private_readiness")
+
+    def test_inverse_retries_only_the_original_proven_unstarted_writer(self) -> None:
+        self.run_worker_case(
+            "test_inverse_prewrite_failure_retries_only_its_original_excluded_writer"
+        )
+
+    def test_private_failure_grace_and_original_jobs(self) -> None:
+        self.run_worker_case(
+            "test_terminal_private_probe_failure_is_bounded_and_keeps_old_copy_serving"
+        )
+
+    def test_inverse_restores_original_automatic_deploy_setting(self) -> None:
+        self.run_worker_case(
+            "test_rollback_restores_original_auto_deploy_after_excluding_unstarted_stop"
+        )
+
+    def test_pending_cutover_cannot_be_cancelled_and_original_observation_finishes(self) -> None:
+        self.run_worker_case(
+            "test_pending_native_effect_cannot_be_cancelled_and_original_observation_completes"
+        )
+
+    def test_post_effect_denial_holds_the_lane_without_another_attempt(self) -> None:
+        self.run_worker_case(
+            "test_post_effect_denial_keeps_the_lane_fenced_without_another_worker_attempt"
+        )
+
+    def test_interrupted_inverse_preserves_a_new_staff_hold(self) -> None:
+        self.run_worker_case(
+            "test_hold_after_interrupted_cutover_still_allows_original_inverse_on_resume"
+        )
+
+    def test_historical_use_completes_with_new_health_and_monitor_identity(self) -> None:
+        from tests.test_testing_rebuild_worker import NativeHistoricalUseTests
+
+        for name in unittest.defaultTestLoader.getTestCaseNames(NativeHistoricalUseTests):
+            with self.subTest(scenario=name), _head_postgres_database() as url:
+                fixture = NativeHistoricalUseTests(name)
+                fixture.database_url = url
+                result = unittest.TestResult()
+                fixture.run(result)
+                self.assertTrue(result.wasSuccessful(), (result.failures, result.errors))
+
+    def test_delayed_route_writer_is_reconciled_before_private_health_failure(self) -> None:
+        self.run_worker_case(
+            "test_late_route_writer_cannot_be_overridden_while_its_original_outcome_is_unknown"
+        )
+
+    def test_down_lane_qualifies_recorded_and_fresh_historical_use(self) -> None:
+        self.run_worker_case("test_verified_down_checkpoint_allows_a_historical_login")
+
+    def run_worker_case(self, name: str) -> None:
+        from tests import test_testing_rebuild_worker as worker_tests
+
+        with _head_postgres_database() as url:
+            fixture = worker_tests.NativeTestingWorkerTests()
+            fixture.database_url = url
+            fixture.setUp()
+            try:
+                getattr(fixture, name)()
+            finally:
+                fixture.doCleanups()
+
+    def test_same_address_publication_and_retirement(self) -> None:
+        self.run_worker_case(
+            "test_one_action_preserves_address_credentials_and_retires_only_after_publication"
+        )
+
+    def test_second_rebuild_preserves_the_address_and_private_deployment_alias(self) -> None:
+        self.run_worker_case(
+            "test_second_rebuild_uses_published_copy_and_preserves_later_deployment_route"
+        )
+
+    def test_expired_queue_worker_resumes_original_observation(self) -> None:
+        self.run_worker_case(
+            "test_expired_native_worker_keeps_its_original_key_and_resumes_observation"
+        )
+
+    def test_lost_stop_exclusion_cannot_restart_retirement(self) -> None:
+        self.run_worker_case(
+            "test_lost_exclusion_reply_cannot_restart_stop_when_new_health_recovers"
+        )
+
+    def test_unknown_stop_is_observed_without_duplicate_dispatch(self) -> None:
+        self.run_worker_case(
+            "test_unknown_dispatched_stop_is_not_excluded_or_repeated_when_health_recovers"
+        )

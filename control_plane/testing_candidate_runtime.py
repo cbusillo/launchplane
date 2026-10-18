@@ -58,6 +58,10 @@ from control_plane.testing_replacement_bootstrap import (
 CandidateSource = Literal["empty", "production", "upstream"]
 
 
+class CandidateRuntimeInputsChanged(ValueError):
+    """Explicit persisted input drift, distinct from unavailable observations."""
+
+
 @dataclass(frozen=True)
 class TestingCandidateRuntimeInputs:
     plan: TestingCandidateApplicationPlan
@@ -130,41 +134,36 @@ def neutralized_candidate_overrides(
     )
 
 
-def candidate_runtime_inputs(
-    *,
-    root: Path,
-    store: PostgresRecordStore,
-    allocation: TestingCandidateAllocation,
-    artifact_id: str,
-    source: CandidateSource,
-) -> TestingCandidateRuntimeInputs:
-    """Read managed inputs only; no secret write, target adoption or live mutation."""
-    if allocation.intent_sha256 != candidate_application_intent(
-        product=allocation.product,
-        context=allocation.context,
-        artifact_id=artifact_id,
-        source=source,
-    ):
-        raise ValueError("Candidate build/source differs from its original admitted operation.")
-    resources = candidate_resources(allocation)
-    if allocation.resources_binding_sha256 != resources.binding_sha256:
-        raise ValueError("Candidate needs its independent storage receipt first.")
-    require_candidate_target_custody(store, allocation)
-    profile = store.read_product_profile_record(allocation.product)
+def testing_profile_binding(
+    profile: LaunchplaneProductProfileRecord, context: str
+) -> dict[str, object]:
+    """The product fields that determine this admitted testing runtime."""
     lane = next(
-        lane
-        for lane in profile.lanes
-        if (lane.context, lane.instance) == (allocation.context, "testing")
+        (lane for lane in profile.lanes if (lane.context, lane.instance) == (context, "testing")),
+        None,
     )
-    artifact = store.read_artifact_manifest(artifact_id)
-    if not artifact_manifest_matches_image_repository(
-        artifact, expected_repository=profile.image.repository
-    ) or missing_required_odoo_modules_from_artifact(artifact):
-        raise ValueError("Candidate requires its product's admitted Odoo artifact/modules.")
-    omitted = testing_credential_omissions(store, allocation.context, None)
-    require_testing_credential_safety(store, allocation.context, omitted)
+    if lane is None:
+        raise ValueError("The admitted testing context is no longer configured.")
+    return {
+        "product": profile.product,
+        "lifecycle": profile.lifecycle_state,
+        "driver": profile.driver_id,
+        "image_repository": profile.image.repository,
+        "runtime_port": profile.runtime_port,
+        "health_path": profile.health_path,
+        "context": context,
+        "base_url": lane.base_url.rstrip("/"),
+    }
+
+
+def candidate_credential_authority(
+    store: PostgresRecordStore, context: str
+) -> tuple[frozenset[str], str]:
+    """Read binding/version provenance only; never decrypt or rotate a password."""
+    omitted = testing_credential_omissions(store, context, None)
+    require_testing_credential_safety(store, context, omitted)
     delivered = site_delivered_secret_bindings_from_store(
-        record_store=store, context_name=allocation.context, instance_name="testing"
+        record_store=store, context_name=context, instance_name="testing"
     )
     credentials: list[dict[str, object]] = []
     for key in sorted(FRESH_TESTING_LOCAL_CREDENTIAL_KEYS):
@@ -174,17 +173,19 @@ def candidate_runtime_inputs(
             or binding.value_source != "generated"
             or binding.declared_secret_class != "testing"
         ):
-            raise ValueError(
+            raise CandidateRuntimeInputsChanged(
                 "Candidate requires the existing service-generated testing-local credentials."
             )
         record = store.read_secret_record(binding.secret_id)
         version = store.read_secret_version(record.current_version_id)
         if (record.context, record.instance, record.scope) != (
-            allocation.context,
+            context,
             "testing",
             "context_instance",
         ) or version.secret_id != record.secret_id:
-            raise ValueError("Candidate local credential provenance is inconsistent.")
+            raise CandidateRuntimeInputsChanged(
+                "Candidate local credential provenance is inconsistent."
+            )
         credentials.append(
             {
                 "binding": binding.model_dump(mode="json"),
@@ -192,7 +193,54 @@ def candidate_runtime_inputs(
                 "version": {"version_id": version.version_id, "secret_id": version.secret_id},
             }
         )
-    credential_binding = canonical_json_sha256(credentials)
+    return omitted, canonical_json_sha256(credentials)
+
+
+def candidate_runtime_inputs(
+    *,
+    root: Path,
+    store: PostgresRecordStore,
+    allocation: TestingCandidateAllocation,
+    artifact_id: str,
+    source: CandidateSource,
+    admitted_profile: LaunchplaneProductProfileRecord | None = None,
+) -> TestingCandidateRuntimeInputs:
+    """Read managed inputs only; no secret write, target adoption or live mutation."""
+    if allocation.intent_sha256 != candidate_application_intent(
+        product=allocation.product,
+        context=allocation.context,
+        artifact_id=artifact_id,
+        source=source,
+    ):
+        raise CandidateRuntimeInputsChanged(
+            "Candidate build/source differs from its original admitted operation."
+        )
+    resources = candidate_resources(allocation)
+    if allocation.resources_binding_sha256 != resources.binding_sha256:
+        raise CandidateRuntimeInputsChanged(
+            "Candidate needs its independent storage receipt first."
+        )
+    require_candidate_target_custody(store, allocation)
+    profile = store.read_product_profile_record(allocation.product)
+    if admitted_profile is not None:
+        if testing_profile_binding(profile, allocation.context) != testing_profile_binding(
+            admitted_profile, allocation.context
+        ):
+            raise CandidateRuntimeInputsChanged("The admitted testing runtime profile changed.")
+        profile = admitted_profile
+    lane = next(
+        lane
+        for lane in profile.lanes
+        if (lane.context, lane.instance) == (allocation.context, "testing")
+    )
+    artifact = store.read_artifact_manifest(artifact_id)
+    if not artifact_manifest_matches_image_repository(
+        artifact, expected_repository=profile.image.repository
+    ) or missing_required_odoo_modules_from_artifact(artifact):
+        raise CandidateRuntimeInputsChanged(
+            "Candidate requires its product's admitted Odoo artifact/modules."
+        )
+    omitted, credential_binding = candidate_credential_authority(store, allocation.context)
     runtime = resolve_site_runtime_environment(
         control_plane_root=root,
         database_url=store.database_url,
@@ -202,7 +250,7 @@ def candidate_runtime_inputs(
         secret_binding_keys=FRESH_TESTING_LOCAL_CREDENTIAL_KEYS,
     )
     if any(not runtime.values.get(key) for key in FRESH_TESTING_LOCAL_CREDENTIAL_KEYS):
-        raise ValueError("Candidate local credentials are unavailable.")
+        raise CandidateRuntimeInputsChanged("Candidate local credentials are unavailable.")
     target = store.read_dokploy_target_record(
         context_name=allocation.context, instance_name="testing"
     )
@@ -318,7 +366,9 @@ def candidate_runtime_inputs(
         omitted_runtime_keys=tuple(sorted(omitted)),
     )
     if previous is not None and previous != plan:
-        raise ValueError("Candidate input authority changed; preserve its original operation.")
+        raise CandidateRuntimeInputsChanged(
+            "Candidate input authority changed; preserve its original operation."
+        )
     values = {
         key: value
         for key, value in runtime.values.items()
@@ -380,7 +430,7 @@ def candidate_authority_sha256(
     return canonical_json_sha256(
         {
             "profile": profile.model_dump(mode="json"),
-            "target": target.model_dump(mode="json"),
+            "target": testing_serving_target_authority(target),
             "runtime": [
                 item.model_dump(mode="json")
                 for item in sorted(
@@ -395,6 +445,13 @@ def candidate_authority_sha256(
             ),
         }
     )
+
+
+def testing_serving_target_authority(target: DokployTargetRecord) -> dict[str, object]:
+    """A staff pause and its writer provenance do not change a serving copy."""
+    payload = target.model_dump(mode="json", exclude={"updated_at", "source_label"})
+    payload["policies"].pop("staff_testing_hold", None)
+    return payload
 
 
 def candidate_runtime_fences(

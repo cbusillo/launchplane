@@ -40,6 +40,10 @@ class NativeSourceUnavailable(click.ClickException, ValueError):
     """The bounded source read did not produce complete evidence."""
 
 
+class NativeProgramFailed(NativeSourceUnavailable):
+    """A fixed program returned a failed frame; this proves no writer exclusion."""
+
+
 class NativeSourceExceedsBound(NativeSourceUnavailable):
     """A determinate capture limit; recovery must not repeat this source read."""
 
@@ -218,7 +222,7 @@ def _read_program(
         if value.get("type") == "denied":
             raise NativeSourceAuthorizationDenied("The registered source refused the read.")
         if value.get("type") == "failed":
-            raise NativeSourceUnavailable("The registered source read did not pass.")
+            raise NativeProgramFailed("The registered source read did not pass.")
         if value.get("type") == "source_exceeds_bound":
             raise NativeSourceExceedsBound("The source exceeds the bounded native copy capacity.")
         if value.get("type") == "upload_failed":

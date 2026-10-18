@@ -167,6 +167,33 @@ class TestingCandidateApplication(FrozenRecord):
     restore_workflow_started: bool | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
+    configuration_sha256: str = Field(
+        default="", pattern=r"^(?:[a-f0-9]{64})?$", exclude_if=lambda value: not value
+    )
+
+    @property
+    def configuration_only(self) -> bool:
+        """Recorded effects have not reached application execution or restore."""
+        return self.phase in {"configuring", "configured"} and not (
+            self.deployment_id
+            or self.prepared
+            or self.restore_schedule_id
+            or self.restore_previous_deployments
+            or self.workflow_evidence
+            or self.restore_workflow_started is not None
+        )
+
+    @property
+    def unapplied_configuration_evidence(self) -> str:
+        return "configuration-unapplied:" + canonical_json_sha256(
+            {"plan": self.plan.digest, "configuration": self.configuration_sha256}
+        )
+
+    @property
+    def retained_configuration_evidence(self) -> str:
+        return "configuration-retained:" + canonical_json_sha256(
+            {"plan": self.plan.digest, "configuration": self.configuration_sha256}
+        )
 
     @model_validator(mode="after")
     def validate_progress(self) -> Self:
@@ -193,6 +220,8 @@ class TestingCandidateApplication(FrozenRecord):
     def require_successor(self, previous: Self) -> None:
         if (
             self.plan != previous.plan
+            or previous.configuration_sha256
+            and self.configuration_sha256 != previous.configuration_sha256
             or previous.restore_workflow_started is not None
             and (
                 self.restore_workflow_started is None

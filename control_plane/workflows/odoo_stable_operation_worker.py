@@ -18,6 +18,11 @@ from pydantic import BaseModel
 from control_plane.lane_movement import LaneMovementRefused
 from control_plane.odoo_testing_drill import DrillSkipped, DrillPrerequisite
 from control_plane.odoo_testing_restore import read_current_testing_generation
+from control_plane.testing_rebuild_service import (
+    NativeTestingRebuildPending,
+    execute_native_testing_rebuild,
+    native_rebuild_effects_started,
+)
 
 from control_plane.contracts.odoo_stable_bootstrap import OdooStableBootstrapResult
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
@@ -2269,56 +2274,67 @@ def _execute_target_replacement_with_checkpoint(
         authorization_guard.authorize_execution()
         if _reconcile_deploy_is_held(record_store=record_store, operation=operation):
             raise _StaffTestingHoldError
-        if (
-            service_testing_operation(operation)
-            and operation.request.data_source_mode == "existing"
-            and incomplete_testing_restore(
-                cast(TestingRestoreHistoryStore, record_store),
-                context=operation.context,
-                instance=operation.instance,
-                generation=read_current_testing_generation(
-                    record_store,
-                    product=operation.product,
+        if operation.is_native_testing_rebuild:
+            if not isinstance(record_store, PostgresRecordStore):
+                raise ValueError("Native testing rebuilds require the shared service record store.")
+            result = execute_native_testing_rebuild(
+                root=control_plane_root_path,
+                store=record_store,
+                operation=operation,
+                authorize=authorization_guard.recheck_provider_effect,
+                lease_owner=lease_owner,
+            )
+        else:
+            if (
+                service_testing_operation(operation)
+                and operation.request.data_source_mode == "existing"
+                and incomplete_testing_restore(
+                    cast(TestingRestoreHistoryStore, record_store),
                     context=operation.context,
                     instance=operation.instance,
-                ),
-            )
-            is not None
-        ):
-            raise OdooTargetReplacementStageError(
-                TESTING_RESTORE_REQUIRED_CODE,
-                deploy_failure_description(TESTING_RESTORE_REQUIRED_CODE),
-            )
-        if isinstance(record_store, PostgresRecordStore):
-            from control_plane.odoo_testing_storage import prepare_drill_storage
+                    generation=read_current_testing_generation(
+                        record_store,
+                        product=operation.product,
+                        context=operation.context,
+                        instance=operation.instance,
+                    ),
+                )
+                is not None
+            ):
+                raise OdooTargetReplacementStageError(
+                    TESTING_RESTORE_REQUIRED_CODE,
+                    deploy_failure_description(TESTING_RESTORE_REQUIRED_CODE),
+                )
+            if isinstance(record_store, PostgresRecordStore):
+                from control_plane.odoo_testing_storage import prepare_drill_storage
 
-            prepare_drill_storage(
-                record_store,
-                operation,
-                control_plane_root_path,
-                checkpoint=lambda: authorization_guard.recheck_provider_effect(
-                    TARGET_REPLACEMENT_DESTRUCTIVE_RESTORE
+                prepare_drill_storage(
+                    record_store,
+                    operation,
+                    control_plane_root_path,
+                    checkpoint=lambda: authorization_guard.recheck_provider_effect(
+                        TARGET_REPLACEMENT_DESTRUCTIVE_RESTORE
+                    ),
+                )
+                record_store.activate_odoo_testing_drill(operation, time.time())
+            require_unchanged_production_artifact(
+                record_store=record_store,
+                product=operation.product,
+                instance=operation.request.instance,
+                artifact_id=operation.request.artifact_id,
+            )
+            result = execute_odoo_stable_target_replacement_apply(
+                control_plane_root=control_plane_root_path,
+                record_store=cast(OdooStableTargetReplacementStore, record_store),
+                request=operation.request,
+                provider_effect_checkpoint=checkpoint_provider_effect,
+                hold_uncertain_effects=execution_checkpoint is not None,
+                before_records_commit=(
+                    (lambda: execution_checkpoint("target_replacement_records_commit"))
+                    if execution_checkpoint is not None
+                    else None
                 ),
             )
-            record_store.activate_odoo_testing_drill(operation, time.time())
-        require_unchanged_production_artifact(
-            record_store=record_store,
-            product=operation.product,
-            instance=operation.request.instance,
-            artifact_id=operation.request.artifact_id,
-        )
-        result = execute_odoo_stable_target_replacement_apply(
-            control_plane_root=control_plane_root_path,
-            record_store=cast(OdooStableTargetReplacementStore, record_store),
-            request=operation.request,
-            provider_effect_checkpoint=checkpoint_provider_effect,
-            hold_uncertain_effects=execution_checkpoint is not None,
-            before_records_commit=(
-                (lambda: execution_checkpoint("target_replacement_records_commit"))
-                if execution_checkpoint is not None
-                else None
-            ),
-        )
         if authorization_guard.denial_error is not None:
             raise authorization_guard.denial_error
     except (_StaffTestingHoldError, DrillSkipped) as error:
@@ -2347,13 +2363,20 @@ def _execute_target_replacement_with_checkpoint(
             error,
         )
         finished_at = _utc_now_timestamp()
+        held_native_effects = (
+            operation.is_native_testing_rebuild
+            and isinstance(record_store, PostgresRecordStore)
+            and native_rebuild_effects_started(record_store, operation)
+        )
         terminal_operation = operation.model_copy(
             update={
-                "status": "fail",
-                "phase": "failed",
+                "status": "reconciliation_required" if held_native_effects else "fail",
+                "phase": operation.phase if held_native_effects else "failed",
                 "updated_at": finished_at,
-                "finished_at": finished_at,
-                "lease_owner": lease_owner,
+                "finished_at": "" if held_native_effects else finished_at,
+                "lease_owner": "" if held_native_effects else lease_owner,
+                "lease_expires_at": "" if held_native_effects else operation.lease_expires_at,
+                "heartbeat_at": "" if held_native_effects else operation.heartbeat_at,
                 "error_code": error.code,
                 "error_message": str(error),
             }
@@ -2363,7 +2386,25 @@ def _execute_target_replacement_with_checkpoint(
             isinstance(error, DrillPrerequisite)
             and error.code == "testing_storage_reconciliation_pending"
         )
-        if storage_pending:
+        rebuild_pending = operation.is_native_testing_rebuild and (
+            isinstance(error, (NativeTestingRebuildPending, TimeoutError))
+            or (
+                isinstance(record_store, PostgresRecordStore)
+                and native_rebuild_effects_started(record_store, operation)
+            )
+        )
+        rebuild_message = (
+            str(error)
+            if isinstance(error, NativeTestingRebuildPending)
+            else f"Continue observing the original testing effects after {type(error).__name__}."
+        )
+        if rebuild_pending:
+            logging.warning(
+                "Native testing rebuild %s remains pending: %s",
+                operation.operation_id,
+                rebuild_message,
+            )
+        elif storage_pending:
             logging.info("Odoo testing storage reconciliation will continue in the worker queue.")
         else:
             logging.exception(
@@ -2372,6 +2413,12 @@ def _execute_target_replacement_with_checkpoint(
             )
         terminal_operation = (
             _retry_source_order_read(
+                operation,
+                code="testing_rebuild_observation_pending",
+                message=rebuild_message,
+            )
+            if rebuild_pending
+            else _retry_source_order_read(
                 operation,
                 code="testing_storage_reconciliation_pending",
                 message="Continue bounded storage reconciliation before selecting a new copy.",
@@ -2472,7 +2519,7 @@ def _retry_source_order_read(
     code: str = "lane_movement.source_order_unavailable",
     message: str = "Source history could not be read; retry before any provider write.",
 ) -> Any:
-    """Keep a no-effect source read refusal durable and available to the worker."""
+    """Keep source reads or the caller's fenced effect observation in the queue."""
     return operation.model_copy(
         update={
             "status": "pending",

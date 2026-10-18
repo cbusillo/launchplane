@@ -5,6 +5,7 @@ import type {
   LogoutPayload,
   ProductListPayload,
 } from "./types";
+import type { InspectTestingRebuildData, InspectTestingRebuildResponse, ReadTestingRebuildResponse, SubmitTestingRebuildData, SubmitTestingRebuildResponse, LookupTestingRebuildData, LookupTestingRebuildResponse, ResumeTestingRebuildData, ResumeTestingRebuildResponse } from "./generated/openapi.ts";
 import type {
   ApplyProductionBackupAuthorityData,
   ApplyProductionBackupAuthorityResponse,
@@ -820,6 +821,45 @@ export function enqueueOdooProdPromotion(
     options.signal,
     options.onDispatch,
   );
+}
+
+export function inspectTestingRebuild(
+  product: string,
+  source: NonNullable<InspectTestingRebuildData["query"]>["data_source_mode"],
+  signal?: AbortSignal,
+): Promise<InspectTestingRebuildResponse> {
+  return requestJson(`/v1/products/${encodeURIComponent(product)}/testing-rebuild/inputs?data_source_mode=${encodeURIComponent(source ?? "empty")}`, "GET", undefined, signal);
+}
+
+export function submitTestingRebuild(
+  product: string,
+  payload: SubmitTestingRebuildData["body"],
+  options: BrowserOperationOptions,
+): Promise<SubmitTestingRebuildResponse> {
+  const request: SubmitTestingRebuildData = {
+    url: BROWSER_WRITE_ROUTES.testingRebuild, path: { product }, body: payload,
+    headers: { "Idempotency-Key": options.idempotencyKey },
+  };
+  return requestJson(request.url.replace("{product}", encodeURIComponent(product)), "POST", request.body,
+    options.signal, options.idempotencyKey, options.onDispatch);
+}
+
+export function readTestingRebuild(product: string, operationId: string, signal?: AbortSignal): Promise<ReadTestingRebuildResponse> {
+  return requestJson(`/v1/products/${encodeURIComponent(product)}/testing-rebuild/operations/${encodeURIComponent(operationId)}`, "GET", undefined, signal);
+}
+
+export function lookupTestingRebuild(product: string, payload: LookupTestingRebuildData["body"], options: BrowserOperationOptions): Promise<LookupTestingRebuildResponse> {
+  const request: LookupTestingRebuildData = {
+    url: BROWSER_WRITE_ROUTES.testingRebuildLookup, path: { product }, body: payload,
+    headers: { "Idempotency-Key": options.idempotencyKey },
+  };
+  return requestJson(request.url.replace("{product}", encodeURIComponent(product)), "POST", request.body,
+    options.signal, options.idempotencyKey);
+}
+
+export function resumeTestingRebuild(product: string, operationId: string, payload: ResumeTestingRebuildData["body"], options: BrowserOperationOptions): Promise<ResumeTestingRebuildResponse> {
+  const path = BROWSER_WRITE_ROUTES.testingRebuildResume.replace("{product}", encodeURIComponent(product)).replace("{operation_id}", encodeURIComponent(operationId));
+  return requestJson(path, "POST", payload, options.signal, options.idempotencyKey, options.onDispatch);
 }
 
 export function readOdooProdPromotionOperation(

@@ -48,6 +48,59 @@ def require_candidate_target_custody(
         raise ValueError("Candidate identity is already named by a legacy lane target.")
 
 
+def observe_candidate_storage(
+    *,
+    root: Path,
+    store: PostgresRecordStore,
+    allocation: TestingCandidateAllocation,
+    lease: ProviderOperationLease,
+    guard: Callable[[], None],
+) -> TestingCandidateAllocation:
+    """Read the original private resources without dispatching preparation again."""
+    if allocation.effect != "storage" or allocation.application is not None:
+        raise ValueError("Storage observation requires the original unconfigured candidate.")
+
+    def checkpoint() -> None:
+        lease.assert_current()
+        guard()
+        require_candidate_target_custody(store, allocation)
+
+    checkpoint()
+    lease.checkpoint_effect("independent_storage_readback")
+    _run_candidate_storage(root, store, allocation, "readback", checkpoint)
+    checkpoint()
+    updated = allocation.model_copy(
+        update={"resources_binding_sha256": candidate_resources(allocation).binding_sha256}
+    )
+    store.compare_and_write_testing_candidate(allocation, updated, observation_only=True)
+    return updated
+
+
+def _run_candidate_storage(
+    root: Path,
+    store: PostgresRecordStore,
+    record: TestingCandidateAllocation,
+    mode: Literal["prepare", "readback"],
+    checkpoint: Callable[[], None],
+) -> None:
+    run_resource_schedule(
+        root=root,
+        store=store,
+        resources=candidate_resources(record),
+        mode=mode,
+        checkpoint=checkpoint,
+        candidate_target=DokployTargetDefinition(
+            context=record.context,
+            instance="testing",
+            target_type="compose",
+            target_id=record.compose_id,
+            project_name=record.namespace,
+            target_name=record.namespace,
+        ),
+        candidate_server_id=record.server_id,
+    )
+
+
 def prepare_candidate_storage(
     *,
     root: Path,
@@ -116,29 +169,13 @@ def prepare_candidate_storage(
             recorded_placement=(record.project_id, record.environment_id, record.compose_id),
         )
     resources = candidate_resources(record)
-    definition = DokployTargetDefinition(
-        context=record.context,
-        instance="testing",
-        target_type="compose",
-        target_id=record.compose_id,
-        project_name=record.namespace,
-        target_name=record.namespace,
-    )
 
     def run(mode: Literal["prepare", "readback"]) -> None:
         # Do not allow caller-supplied source, domains or retained environment to
         # turn storage qualification into a deployment of the existing lane.
         if mode not in {"prepare", "readback"}:
             raise ValueError("Unsupported candidate storage operation.")
-        run_resource_schedule(
-            root=root,
-            store=store,
-            resources=resources,
-            mode=mode,
-            checkpoint=checkpoint,
-            candidate_target=definition,
-            candidate_server_id=record.server_id,
-        )
+        _run_candidate_storage(root, store, record, mode, checkpoint)
 
     if record.effect == "storage":
         try:

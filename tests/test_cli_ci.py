@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import subprocess
 import sys
 import unittest
@@ -14,6 +15,24 @@ from control_plane.cli_ci import (
     run_postgres_integration_tests,
 )
 from control_plane.unittest_sharding import UnittestShardingError, iter_test_target_ids
+
+
+class ColdStartupTests(unittest.TestCase):
+    def test_cli_help_starts_without_preloaded_provider_modules(self) -> None:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-c",
+                "import sys; sys.path.insert(0, sys.argv[1]); "
+                "from control_plane.cli import main; main(['--help'])",
+                str(Path(__file__).resolve().parents[1]),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 class PostgresIntegrationCommandTests(unittest.TestCase):

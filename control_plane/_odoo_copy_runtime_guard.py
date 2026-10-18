@@ -1,6 +1,38 @@
 """Runtime inspection shared by lane copies and standalone upgrade rehearsals."""
 
-COPY_RUNTIME_INSPECTION_LIBRARY = r"""
+VOLUME_BACKING_INSPECTION_LIBRARY = r"""
+def inspect_volume_backings(volumes, all_containers, own, *, expected_binding=None):
+    paths, identities, backings = [], set(), {}
+    for name in sorted(volumes):
+        volume = json.loads(docker("volume", "inspect", name))[0]
+        if volume.get("Driver") != "local" or volume.get("Options") not in (None, {}):
+            raise RuntimeError("Testing backing storage changed")
+        if expected_binding is not None and (volume.get("Labels") or {}).get("io.launchplane.testing-resources") != expected_binding:
+            raise RuntimeError("Testing backing storage changed")
+        backing = Path(volume["Mountpoint"]).resolve(strict=True)
+        identity = (backing.stat().st_dev, backing.stat().st_ino)
+        if expected_binding is not None and identity in identities:
+            raise RuntimeError("Testing backing storage overlaps")
+        identities.add(identity)
+        paths.append(backing)
+        backings[name] = {"path": str(backing), "device": identity[0], "inode": identity[1]}
+    for container in all_containers:
+        if container.get("Id") in own:
+            continue
+        for mount in container.get("Mounts", []):
+            if not mount.get("Source"):
+                continue
+            source_path = Path(mount["Source"]).resolve(strict=False)
+            if any(source_path == path or source_path.is_relative_to(path)
+                   or (mount.get("RW", True) and path.is_relative_to(source_path))
+                   for path in paths):
+                raise RuntimeError("Testing storage has a bind consumer")
+    return backings
+"""
+
+COPY_RUNTIME_INSPECTION_LIBRARY = (
+    VOLUME_BACKING_INSPECTION_LIBRARY
+    + r"""
 def inspect_copy_runtime(spec, *, expected_instance):
     gen = spec["generation"]
     namespace, project, database = gen["namespace"], spec["compose_project"], spec["database_name"]
@@ -71,32 +103,7 @@ def inspect_copy_runtime(spec, *, expected_instance):
             continue
         if any(mount.get("Name") in volumes for mount in container.get("Mounts", [])):
             raise RuntimeError("Testing storage is shared by another container")
-    # Resolve actual backing paths too: a bind alias of a named volume is
-    # storage sharing even when Docker reports different mount names.
-    paths = []
-    identities = set()
-    for name in volumes:
-        volume = json.loads(docker("volume", "inspect", name))[0]
-        if volume.get("Driver") != "local" or volume.get("Options") not in (None, {}) or volume.get("Labels", {}).get("io.launchplane.testing-resources") != gen["resources_binding_sha256"]:
-            raise RuntimeError("Testing backing storage changed")
-        backing = Path(volume["Mountpoint"]).resolve(strict=True)
-        identity = (backing.stat().st_dev, backing.stat().st_ino)
-        if identity in identities:
-            raise RuntimeError("Testing backing storage overlaps")
-        identities.add(identity)
-        paths.append(backing)
-    own = {item[1]["Id"] for item in containers.values()}
-    for container in all_containers:
-        if container.get("Id") in own:
-            continue
-        for mount in container.get("Mounts", []):
-            if not mount.get("Source"):
-                continue
-            source_path = Path(mount["Source"]).resolve(strict=False)
-            if any(source_path == path or source_path.is_relative_to(path)
-                   or (mount.get("RW", True) and path.is_relative_to(source_path))
-                   for path in paths):
-                raise RuntimeError("Testing storage has a bind consumer")
+    inspect_volume_backings(volumes, all_containers, {item[1]["Id"] for item in containers.values()}, expected_binding=gen["resources_binding_sha256"])
     private_state = Path.home().resolve(strict=True) / ('.local/state/launchplane-testing-disposal' if expected_instance == 'testing' else '.local/state/launchplane-rehearsals')
     for container in all_containers:
         for mount in container.get('Mounts', []):
@@ -106,3 +113,4 @@ def inspect_copy_runtime(spec, *, expected_instance):
                     raise RuntimeError('Disposal state is exposed to a container')
     return containers
 """
+)

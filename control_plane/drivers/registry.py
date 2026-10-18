@@ -790,7 +790,7 @@ ODOO_DRIVER = DriverDescriptor(
         _action(
             "target_replacement_apply",
             "Apply stable target replacement",
-            "Recreate an Odoo stable compose target in place after replacement planning passes.",
+            "Rebuild testing through a healthy independent copy, or replace a configured stable target.",
             safety="mutation",
             scope="instance",
             route_path="/v1/drivers/odoo/target-replacement-apply",

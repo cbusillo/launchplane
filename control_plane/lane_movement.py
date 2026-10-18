@@ -156,9 +156,9 @@ class SourceReadRetryRecord(Protocol):
 
 
 def source_read_retry_ready(record: SourceReadRetryRecord, claimed_at: str) -> bool:
-    if record.error_code == "business_hours_held":
-        # Calendar deferrals yield to other products instead of reclaiming the
-        # oldest pending promotion on every worker poll. Timing is reread on retry.
+    if record.error_code in {"business_hours_held", "testing_rebuild_observation_pending"}:
+        # Deferred work yields to other lanes instead of reclaiming the same
+        # pending operation on every worker poll. Its evidence is reread on retry.
         delay = 30
     elif record.error_code == "lane_movement.source_order_unavailable":
         delay = min(30 * 2 ** min(max(record.attempt - 1, 0), 6), 1800)

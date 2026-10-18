@@ -4,14 +4,16 @@ import base64
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
+import re
 
 from control_plane.contracts.testing_candidate import TestingCandidateAllocation
+from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.testing_candidate_application import (
     TestingCandidateApplication,
     TestingCandidatePrepared,
 )
 from control_plane.dokploy import api, compose, post_deploy, source
-from control_plane.dokploy.native_copy_stream import _read_remote
+from control_plane.dokploy.native_copy_stream import _read_remote, NativeProgramFailed
 from control_plane.dokploy.target_source_setup import require_empty_compose_source
 from control_plane.dokploy_target_setup_http import fetch_dokploy_compose_domains_for_target_setup
 from control_plane.integration_readback import (
@@ -31,6 +33,10 @@ from control_plane.testing_candidate_runtime import TestingCandidateRuntimeInput
 
 class CandidateObservationUnavailable(ValueError):
     """The original candidate effect or its private health needs observation."""
+
+
+class CandidatePrivateReadinessFailed(CandidateObservationUnavailable):
+    """The fixed read-only probe returned a failure, rather than losing its transport."""
 
 
 def candidate_private_readiness(
@@ -80,15 +86,18 @@ def candidate_private_readiness(
         "credential_program": base64.b64encode(CANDIDATE_CONTAINER_PROBE.encode()).decode(),
     }
     frames: list[dict[str, object]] = []
-    _read_remote(
-        host=host,
-        token=token,
-        server_id=allocation.server_id,
-        program=CANDIDATE_HOST_PROBE,
-        payload=spec,
-        receive=frames.append,
-        timeout_seconds=120,
-    )
+    try:
+        _read_remote(
+            host=host,
+            token=token,
+            server_id=allocation.server_id,
+            program=CANDIDATE_HOST_PROBE,
+            payload=spec,
+            receive=frames.append,
+            timeout_seconds=120,
+        )
+    except NativeProgramFailed:
+        raise CandidatePrivateReadinessFailed("The private probe returned a failure.") from None
     if frames != [{"type": "complete", "private_readiness_verified": True}]:
         raise CandidateObservationUnavailable("Candidate private readiness is unverified.")
     return TestingCandidatePrepared(
@@ -132,6 +141,108 @@ def require_candidate_configuration(
         or api.parse_dokploy_env_text(str(payload.get("env") or "")) != inputs.runtime_environment
     ):
         raise ValueError("Candidate configuration has not retained its exact admitted inputs.")
+
+
+def candidate_configuration_sha256(payload: api.JsonObject) -> str:
+    """Bind the intended private configuration without storing its secret values."""
+    return canonical_json_sha256(
+        {
+            **{
+                key: payload.get(key)
+                for key in (
+                    "composeId",
+                    "environmentId",
+                    "serverId",
+                    "name",
+                    "sourceType",
+                    "composePath",
+                    "autoDeploy",
+                )
+            },
+            "composeFile": compose.compose_file_sha256(str(payload.get("composeFile") or "")),
+            "env": api.parse_dokploy_env_text(str(payload.get("env") or "")),
+        }
+    )
+
+
+def observe_candidate_configuration(
+    *,
+    root: Path,
+    store: PostgresRecordStore,
+    record: TestingCandidateAllocation,
+    lease: ProviderOperationLease,
+    guard: Callable[[], None],
+    retain_configured: bool = False,
+) -> TestingCandidateAllocation:
+    """Observe the original private outcome; never select inputs or send an update."""
+    app = record.application
+    if app is None or not app.configuration_only:
+        raise CandidateObservationUnavailable("The original configuration custody is unavailable.")
+    lease.assert_current()
+    guard()
+    require_candidate_target_custody(store, record)
+    host, token = source.read_dokploy_config(
+        control_plane_root=root, database_url=store.database_url
+    )
+    payload = api.fetch_dokploy_target_payload(
+        host=host, token=token, target_type="compose", target_id=record.compose_id
+    )
+    if fetch_dokploy_compose_domains_for_target_setup(
+        host=host, token=token, compose_id=record.compose_id
+    ) or api.list_deployments_for_target(
+        host=host,
+        token=token,
+        target_type="compose",
+        target_id=record.compose_id,
+        require_complete=True,
+    ):
+        raise CandidateObservationUnavailable("The original private configuration remains unknown.")
+    if (
+        app.configuration_sha256
+        and candidate_configuration_sha256(payload) == app.configuration_sha256
+    ):
+        observed_app = app.model_copy(
+            update={
+                "phase": "abandoned",
+                "abandonment_evidence": app.retained_configuration_evidence,
+            }
+            if retain_configured
+            else {"phase": "configured"}
+        )
+    else:
+        try:
+            if app.phase != "configuring":
+                raise ValueError("A configured copy no longer matches its original update.")
+            require_empty_compose_source(payload, record.compose_id)
+            if (
+                (payload.get("serverId"), payload.get("environmentId"))
+                != (record.server_id, record.environment_id)
+                or payload.get("name") != record.namespace
+                or not re.fullmatch(
+                    re.escape(record.namespace) + r"(?:-[a-z0-9]{6})?",
+                    str(payload.get("appName") or ""),
+                )
+                or payload.get("env") not in (None, "")
+            ):
+                raise ValueError("The original empty configuration changed.")
+        except ValueError:
+            raise CandidateObservationUnavailable(
+                "The original private configuration remains unknown."
+            ) from None
+        # A late original update may still install the full credential-bearing
+        # configuration in this retained private copy. This is not cancellation.
+        # Its lease/CAS cannot advance an abandoned copy to deployment.
+        observed_app = app.model_copy(
+            update={
+                "phase": "abandoned",
+                "abandonment_evidence": app.unapplied_configuration_evidence,
+            }
+        )
+    lease.assert_current()
+    guard()
+    updated = record.model_copy(update={"application": observed_app})
+    store.compare_and_write_testing_candidate(record, updated, observation_only=True)
+    return updated
 
 
 def prepare_candidate_application(
@@ -225,7 +336,22 @@ def prepare_candidate_application(
                 env_text=environment, current_env_text="", target="testing candidate"
             )
             compose.validate_odoo_raw_compose_file(compose_file=inputs.compose_file)
-            save(phase="configuring")
+            update_payload: api.JsonObject = {
+                "composeId": record.compose_id,
+                "name": record.namespace,
+                "environmentId": record.environment_id,
+                "sourceType": "raw",
+                "composePath": "docker-compose.yml",
+                "composeFile": inputs.compose_file,
+                "autoDeploy": False,
+                "env": environment,
+            }
+            save(
+                phase="configuring",
+                configuration_sha256=candidate_configuration_sha256(
+                    {**update_payload, "serverId": record.server_id}
+                ),
+            )
             lease.checkpoint_effect("candidate_configuration")
             checkpoint()
             api.dokploy_request(
@@ -233,16 +359,7 @@ def prepare_candidate_application(
                 token=token,
                 path="/api/compose.update",
                 method="POST",
-                payload={
-                    "composeId": record.compose_id,
-                    "name": record.namespace,
-                    "environmentId": record.environment_id,
-                    "sourceType": "raw",
-                    "composePath": "docker-compose.yml",
-                    "composeFile": inputs.compose_file,
-                    "autoDeploy": False,
-                    "env": environment,
-                },
+                payload=update_payload,
             )
             current = payload()
         # A lost update reply is recovered only when all intended values match.
@@ -479,27 +596,16 @@ def candidate_build_terminal(*, host: str, token: str, record: TestingCandidateA
     return key + ":" + status
 
 
-def abandon_candidate_application(
+def candidate_terminal_custody_evidence(
     *,
     root: Path,
     store: PostgresRecordStore,
-    namespace: str,
-    lease: ProviderOperationLease,
-    guard: Callable[[], None],
-) -> TestingCandidateAllocation:
-    """Record terminal abandonment while keeping the copy and all custody records.
-
-    This does not delete storage, stop the old copy, clear fences or cancel a
-    running/unknown provider request. A replacement operation gets its own copy.
-    """
-    lease.assert_current()
-    guard()
-    record = store.read_testing_candidate(namespace)
-    if record is None or record.application is None:
+    record: TestingCandidateAllocation,
+) -> str:
+    """Read original terminal jobs and retained private custody without changing the copy."""
+    if record.application is None:
         raise ValueError("Candidate application is unavailable.")
     app = record.application
-    if app.phase == "abandoned":
-        return record
     require_candidate_target_custody(store, record)
     host, token = source.read_dokploy_config(
         control_plane_root=root, database_url=store.database_url
@@ -536,6 +642,27 @@ def abandon_candidate_application(
         not in api._DEPLOYMENT_SUCCESS_STATUSES | api._DEPLOYMENT_FAILURE_STATUSES
     ):
         raise ValueError("Candidate deployment is still running or changed.")
+    return evidence
+
+
+def abandon_candidate_application(
+    *,
+    root: Path,
+    store: PostgresRecordStore,
+    namespace: str,
+    lease: ProviderOperationLease,
+    guard: Callable[[], None],
+) -> TestingCandidateAllocation:
+    """Retain failed-copy custody; never cancel unknown jobs, stop a copy or delete storage."""
+    lease.assert_current()
+    guard()
+    record = store.read_testing_candidate(namespace)
+    if record is None or record.application is None:
+        raise ValueError("Candidate application is unavailable.")
+    app = record.application
+    if app.phase == "abandoned":
+        return record
+    evidence = candidate_terminal_custody_evidence(root=root, store=store, record=record)
     lease.assert_current()
     guard()
     require_candidate_target_custody(store, record)

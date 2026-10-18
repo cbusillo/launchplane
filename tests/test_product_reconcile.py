@@ -1082,6 +1082,32 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
         )
         self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), ())
 
+    def test_native_rebuild_cannot_select_ancestor_when_current_manifest_is_unavailable(
+        self,
+    ) -> None:
+        from control_plane.product_reconcile import latest_verified_testing_build
+
+        self._running_release(20, DEPLOYABLE)
+        self.github.add_run(10, OLDER)
+        download = self.github.get_bytes
+
+        def unavailable(path: str) -> bytes:
+            if "/artifacts/200/" in path:
+                raise BuildProvenanceError(
+                    "Fixture current manifest unavailable", code="github_read_failed"
+                )
+            return download(path)
+
+        profile = self.store.read_product_profile_record("site")
+        lane = next(item for item in profile.lanes if item.instance == "testing")
+        with (
+            patch.object(self.github, "get_bytes", unavailable),
+            self.assertRaises(ProductReconcileError) as refused,
+        ):
+            latest_verified_testing_build(self.store, profile, lane)
+        self.assertEqual(refused.exception.code, "ancestor_build")
+        self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), ())
+
     def test_rejected_newer_manifest_records_reason_and_run_before_falling_back(self) -> None:
         self._running_release(20, DEPLOYABLE)
         self.github.add_run(30, NEWEST)
