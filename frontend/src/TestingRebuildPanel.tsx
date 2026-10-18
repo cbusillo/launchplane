@@ -101,7 +101,7 @@ export function TestingRebuildPanel({ detail, fixtureMode, onRefresh }: {
   }
 
   const locked = fixtureMode || busy || !!attempt;
-  return <section className="promotion-control" aria-labelledby="testing-rebuild-title">
+  return <section className="promotion-control testing-rebuild-control" aria-labelledby="testing-rebuild-title">
     <header className="promotion-control-header"><div>
       <p className="eyebrow">Testing</p><h2 id="testing-rebuild-title">Rebuild testing at the same address</h2>
       <p>{detail.base_url}</p>

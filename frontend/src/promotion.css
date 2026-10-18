@@ -15,6 +15,10 @@
   padding: 22px;
 }
 
+.testing-rebuild-control {
+  color: var(--text);
+}
+
 .promotion-control-header,
 .promotion-loading,
 .promotion-authority-unavailable {
