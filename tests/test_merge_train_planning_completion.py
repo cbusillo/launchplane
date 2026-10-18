@@ -694,9 +694,7 @@ class PlanningCompletionTests(TestCase):
         self.assertFalse(held.retryable)
         self.assertFalse(_receipt(held)["ok"])
         self.assertEqual(held.comment_id, 3)
-        self.assertIn(
-            _PLANNING_NOTE_START, self.comment_mock.call_args.kwargs["body"]
-        )
+        self.assertIn(_PLANNING_NOTE_START, self.comment_mock.call_args.kwargs["body"])
         self.assertFalse(self.provider.writes)
 
     def test_reopened_source_can_finish_during_projection_grace(self) -> None:
