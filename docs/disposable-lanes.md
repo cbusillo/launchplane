@@ -680,7 +680,15 @@ using Python regex semantics.
 
 The fixed managed-server program discovers the running Dokploy Traefik process,
 its watched writable directory mount and private applied API. It reads only the
-lane-qualified dynamic filename. Publication rechecks the static configuration,
+lane-qualified dynamic filename. Applied-route observation uses a read-only exec
+in that same identified proxy to fetch its existing loopback API. It requires no
+host route to the proxy's Docker bridge address or published API port. The reader
+disables HTTP proxies, bounds the fetch time and emitted bytes, and rejects an
+oversized, incomplete or failed response before any route writer starts. It never
+enables an API, changes proxy configuration or tries a different access path on
+failure or denial. The emitted-program regression makes host HTTP unreachable
+while container-local reads and the ordinary cutover checks still work.
+Publication rechecks the static configuration,
 provider state, current file digest and retained physical web identity, then uses
 the existing proxy container to write a temporary file and atomically rename it.
 Immediately before that writer, a forward publication also requires exactly one

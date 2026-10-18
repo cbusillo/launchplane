@@ -14,6 +14,7 @@ from tempfile import TemporaryDirectory
 from typing import Any
 import unittest
 from unittest.mock import Mock, patch
+from urllib.error import URLError
 
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.dokploy import testing_route_transport as transport
@@ -173,6 +174,26 @@ class TestingRouteTransportTests(unittest.TestCase):
             "import fcntl,sys\ntry: fcntl.flock(int(sys.argv[-1]),fcntl.LOCK_EX|fcntl.LOCK_NB)\nexcept BlockingIOError: sys.exit(1)",
         )
         self.effect_count = 0
+        self.api_response: bytes | None = None
+        self.api_exit = 0
+        self.deny_api = False
+        self.timeout_api = False
+        self.api_calls = 0
+        self.api_output_sizes: list[int] = []
+        self.api_body = self.root / "api-body"
+        self.api_status = self.root / "api-status"
+        self.script(
+            "wget",
+            "import sys;from pathlib import Path\n"
+            "from urllib.parse import urlsplit\n"
+            "url=urlsplit(sys.argv[-1])\n"
+            "if url.hostname!='127.0.0.1' or url.path!='/api/rawdata': sys.exit(2)\n"
+            "sys.stdout.buffer.write(Path("
+            + repr(str(self.api_body))
+            + ").read_bytes())\nsys.exit(int(Path("
+            + repr(str(self.api_status))
+            + ").read_text()))",
+        )
         self.apply_immediately = True
         self.deny = False
         self.denial_message = (
@@ -235,14 +256,31 @@ class TestingRouteTransportTests(unittest.TestCase):
         elif command[1:4] == ["exec", proxy_id, "cat"]:
             result = self.static.encode()
         elif command[1:3] == ["exec", proxy_id] and command[3:5] == ["sh", "-c"]:
+            if command[5] == transport.READ_TRAEFIK_API:
+                self.api_calls += 1
+                if self.deny_api:
+                    return subprocess.CompletedProcess(
+                        command, 1, stdout=b"", stderr=self.denial_message
+                    )
+                if self.timeout_api:
+                    raise subprocess.TimeoutExpired(command, 60)
+                self.api_body.write_bytes(
+                    json.dumps(self.raw).encode()
+                    if self.api_response is None
+                    else self.api_response
+                )
+                self.api_status.write_text(str(self.api_exit))
             actual = [
                 str(self.root) if argument == transport.TRAEFIK_DYNAMIC_DIRECTORY else argument
                 for argument in command[3:]
             ]
             environment = {**os.environ, "PATH": str(self.bin) + os.pathsep + os.environ["PATH"]}
-            return self.original_run(
+            completed = self.original_run(
                 actual, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, env=environment
             )
+            if command[5] == transport.READ_TRAEFIK_API:
+                self.api_output_sizes.append(len(completed.stdout))
+            return completed
         elif command[1:4] == ["exec", "-i", proxy_id]:
             self.effect_count += 1
             if self.before_native is not None:
@@ -279,9 +317,7 @@ class TestingRouteTransportTests(unittest.TestCase):
     def remote(self, **kwargs: Any) -> None:
         self.remote_modes.append(kwargs["payload"]["mode"])
         opener = Mock()
-        opener.open.side_effect = lambda *_args, **_kwargs: io.BytesIO(
-            json.dumps(self.raw).encode()
-        )
+        opener.open.side_effect = URLError("Docker bridge is unreachable from the host")
 
         def dispatch() -> None:
             if (
@@ -412,6 +448,48 @@ class TestingRouteTransportTests(unittest.TestCase):
         self.assertEqual(fence.generation, initializer.generation)
         self.assertEqual(self.effect_count, sends)
         self.assertFalse(self.route_file.exists())
+
+    def test_route_observation_does_not_require_host_access_to_the_docker_address(self) -> None:
+        self.api_calls = 0
+        self.containers["proxy"]["NetworkSettings"]["Networks"] = {}
+        frame = self.client.read()
+        self.assertEqual(frame["raw"]["routers"], self.raw["routers"])
+        self.assertEqual(self.api_calls, 1)
+        self.assertEqual(self.effect_count, 0)
+        self.assertFalse(self.route_file.exists())
+
+    def test_applied_api_response_must_be_complete_bounded_and_successful(self) -> None:
+        valid = json.dumps(self.raw).encode()
+        for response, exit_code, unavailable in (
+            (valid + b" " * (transport.MAX_TRAEFIK_API_BYTES - len(valid)), 0, False),
+            (valid + b" " * transport.MAX_TRAEFIK_API_BYTES, 0, True),
+            (valid[:-1], 0, True),
+            (valid, 1, True),
+            (b"", 1, True),
+        ):
+            with self.subTest(size=len(response), exit_code=exit_code):
+                self.api_response, self.api_exit = response, exit_code
+                if unavailable:
+                    with self.assertRaises(NativeSourceUnavailable):
+                        self.client.read()
+                else:
+                    self.assertEqual(self.client.read()["raw"]["routers"], self.raw["routers"])
+                self.assertEqual(self.effect_count, 0)
+                self.assertFalse(self.route_file.exists())
+                self.assertLessEqual(self.api_output_sizes[-1], transport.MAX_TRAEFIK_API_BYTES + 1)
+
+    def test_applied_api_denial_and_timeout_never_start_a_writer_or_retry(self) -> None:
+        for denied in (True, False):
+            with self.subTest(denied=denied):
+                self.deny_api, self.timeout_api = denied, not denied
+                calls = self.api_calls
+                with self.assertRaises(
+                    NativeSourceAuthorizationDenied if denied else NativeSourceUnavailable
+                ):
+                    self.publish(self.plan.new_backend, self.plan.old_backend)
+                self.assertEqual(self.api_calls, calls + 1)
+                self.assertEqual(self.effect_count, 0)
+                self.assertFalse(self.route_file.exists())
 
     def test_restart_between_host_inspection_and_exec_refuses_the_inner_write(self) -> None:
         attempt = self.fenced_attempt(self.plan.new_backend)
