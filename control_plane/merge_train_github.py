@@ -2432,11 +2432,25 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             body={"labels": [normalized_label]},
         )
 
+    def candidate_block_label_events(
+        self, *, repository: str, number: int, label: str
+    ) -> list[dict[str, object]]:
+        from control_plane.merge_train_github_block_recovery import block_label_events
+
+        return block_label_events(self, repository=repository, number=number, label=label)
+
+    def candidate_block_application(
+        self, *, candidate: MergeTrainBatchCandidateRecord, policy: MergeTrainRepositoryPolicy
+    ) -> dict[str, object]:
+        from control_plane.merge_train_github_block_recovery import candidate_block_application
+
+        return candidate_block_application(self, candidate=candidate, policy=policy)
+
     def recover_candidate_block(
         self,
         *,
         candidate: MergeTrainBatchCandidateRecord,
-        feedback: "MergeTrainPrFeedbackRecord",
+        feedback: "MergeTrainPrFeedbackRecord | None",
         policy: MergeTrainRepositoryPolicy,
         expected_head_sha: str,
         mutate: bool,

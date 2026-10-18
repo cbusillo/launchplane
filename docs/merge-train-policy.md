@@ -605,23 +605,46 @@ other eligible work. Applied-block PR feedback explains the failure and how to r
 For a service-recorded isolated candidate failure, push the fix on a different
 head, wait for green current-head checks, and post the weighed review with
 `gh-pr.py comment --reviewed-head FULL_SHA`. Between candidates, the controller
-can clear its old block after verifying the singleton failed candidate and its
-delivered scheduler feedback against the current block-label event. The labeler
-must be the trusted automation actor that delivered the recorded feedback; a
-later reapplication (including within the same timestamp), an intervening label
-removal, a manual label, missing provenance or changed policy keeps
-the hold. No agent removes that label by hand. The controller reports
-`recover_candidate_block`, records the failed record and both source heads,
-and updates its PR feedback. Run the ordinary checked `gh-pr.py ready` after
-recovery; clearing the block does not enqueue, admit or merge the PR.
+can clear its old block and report `recover_candidate_block`. Then run the
+ordinary checked `gh-pr.py ready`; recovery does not enqueue, admit or merge.
+Do not remove the failed-candidate label by hand to route the PR. Other queue
+blocks and admin holds retain their existing release path and never acquire
+automatic recovery from an unrelated candidate failure.
+
+The controller persists its source-head-bound block decision before applying
+the label, including the previous label event ID. It then confirms the applied
+label event ID. A lost label reply reconciles only through that exact saved
+native lease; ordinary discovery never adopts an abandoned pending intent.
+Recovery requires the confirmed event and exactly one subsequent label event by
+trusted automation. A removal or reapplication is a
+new hold, including within the same timestamp. Feedback delivery is not proof
+of the effect and need not succeed first. Legacy controller outcome receipts,
+including workflow and deferred deliveries, can supply the old failed record;
+the exact closed, unmerged generated batch PR supplies GitHub-side chronology.
+No comparison depends on agreement between the service clock and GitHub's clock.
+A generic or unattributable hold remains held rather than acquiring invented
+provenance. A policy publish for another target does not invalidate proof; the
+existing per-target execution-binding comparison still preserves real changes
+to this target's merge policy.
 
 The same blocked head never qualifies, including after a green rerun. Recovery
 also refuses pending, failing or unreadable current-head evidence, conflicting
-or unknown mergeability, stale/missing/unweighed review, a renewed review request
-or engineering wait, drafts, a different base, forks and unresolved required
-review conversations. The controller rechecks the head and latest label event
-before its leased removal; a provider refusal or uncertain result retains the
-normal reconciliation fence. It never changes policy or identity to clear a hold.
+or unknown mergeability, stale/missing/unweighed review, a renewed review request,
+drafts, a different base, forks and unresolved required review conversations.
+Review request/receipt parsing follows the catalog's producer contract, including
+creation ordering and edited receipts. Receipts and renewed requests accept
+the allowed PR author and writers authorized by the existing Ready-handoff
+policy; recovery grants no new role or identity. Client preview acceptance is requested
+from PR notes by the preview reconciler, independently of a ready handoff; a
+Client-review PR waits for that current-head check before recovery. An old
+waiting handoff is not a new model-review request.
+
+The controller rechecks the head and label history before leased removal.
+Unavailable proof preserves the hold while unrelated queue work proceeds;
+rate limits and authorization failures retain their normal handling. A lost
+removal reply is observed under the saved native lease checkpoint and emits
+waiting feedback without another DELETE. Dry-run recovery includes the ordinary
+queue preview as well as its proposed recovery step.
 
 Within-major dependency updates admitted through the required-label exception use
 current-head check and mergeability evidence for holds, rather than acquiring a

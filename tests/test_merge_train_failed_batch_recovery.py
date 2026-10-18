@@ -172,6 +172,8 @@ class FailedBatchRecoveryTests(unittest.TestCase):
         )
         store.write_merge_train_batch_candidate_record(record)
         client = Mock(wraps=self.client)
+        client.candidate_block_label_events.return_value = []
+        client.candidate_block_application.return_value = {"status": "applied", "event_id": 1}
         client.read_merge_train_snapshot.return_value = self.snapshot
         client.read_base_check_status.return_value = base_status
         client.probe_batch_entry_conflicts.return_value = conflicts
@@ -200,7 +202,7 @@ class FailedBatchRecoveryTests(unittest.TestCase):
             recorded_at="2026-10-03T12:01:00Z",
             trace_id="recovery",
             mutate=mutate,
-            lease=Mock(),
+            lease=Mock(record=Mock(updated_at=self.candidate.updated_at)),
         )
         assert result is not None
         return result
@@ -648,6 +650,8 @@ class FailedBatchRecoveryTests(unittest.TestCase):
         lease: Any = None,
     ) -> dict[str, object]:
         client = Mock(wraps=self.client)
+        client.candidate_block_label_events.return_value = []
+        client.candidate_block_application.return_value = {"status": "applied", "event_id": 1}
         if not observe_checks:
             client.observe_batch_candidate_checks.return_value = self.candidate
         client.read_candidate_check_failures.return_value = (
@@ -673,7 +677,11 @@ class FailedBatchRecoveryTests(unittest.TestCase):
             trace_id="fresh-plan",
             recorded_at="2026-10-03T12:02:00Z",
             lease=lease
-            or Mock(owner="test", acquisition_token="test", record=Mock(ordinary_job_binding=None)),
+            or Mock(
+                owner="test",
+                acquisition_token="test",
+                record=Mock(ordinary_job_binding=None, updated_at=self.candidate.updated_at),
+            ),
             snapshot=self.snapshot,
         )
 
@@ -1016,7 +1024,9 @@ class FailedBatchRecoveryTests(unittest.TestCase):
                 )
                 client.read_merge_train_snapshot.side_effect = (removed, snapshot)
                 client.probe_batch_entry_conflicts.return_value = (hold,)
-                lease = Mock(record=Mock(ordinary_job_binding=None))
+                lease = Mock(
+                    record=Mock(ordinary_job_binding=None, updated_at=self.candidate.updated_at)
+                )
 
                 def close_then_interrupt(*, candidate: MergeTrainBatchCandidate) -> None:
                     self.client.close_batch_pull_request(candidate=candidate)
@@ -1146,7 +1156,9 @@ class FailedBatchRecoveryTests(unittest.TestCase):
                 ).model_copy(update={"status": "superseded"})
             )
             before = store.list_merge_train_batch_candidate_records()
-            lease = Mock(record=Mock(ordinary_job_binding=None))
+            lease = Mock(
+                record=Mock(ordinary_job_binding=None, updated_at=self.candidate.updated_at)
+            )
             lease.checkpoint.side_effect = MergeTrainControllerLeaseLostError("expired")
             with self.assertRaises(MergeTrainControllerLeaseLostError):
                 self._fresh_plan(store, mutate=True, observe_checks=True, lease=lease)

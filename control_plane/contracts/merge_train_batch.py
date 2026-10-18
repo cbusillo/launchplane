@@ -417,6 +417,17 @@ class MergeTrainBatchLandingPlan(BaseModel):
         return self
 
 
+class MergeTrainCandidateBlockIntent(BaseModel):
+    """A controller decision, persisted before its label effect."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    label: str = Field(min_length=1)
+    prior_label_event_id: int = Field(ge=0)
+    applied_label_event_id: int | None = Field(default=None, ge=1)
+    source_failed_record_id: str = Field(min_length=1)
+
+
 class MergeTrainBatchCandidateRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -428,6 +439,10 @@ class MergeTrainBatchCandidateRecord(BaseModel):
     source: str
     updated_at: str
     candidate: MergeTrainBatchCandidate
+
+    block_intent: MergeTrainCandidateBlockIntent | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
     @model_validator(mode="after")
     def _validate_record(self) -> "MergeTrainBatchCandidateRecord":
@@ -648,9 +663,11 @@ def build_merge_train_batch_candidate_record(
     source: str,
     updated_at: str,
     ordinary_job_binding: OrdinaryAgentJobBinding | None = None,
+    block_intent: MergeTrainCandidateBlockIntent | None = None,
 ) -> MergeTrainBatchCandidateRecord:
     record_without_id = MergeTrainBatchCandidateRecord(
         record_id="pending",
+        block_intent=block_intent,
         ordinary_job_binding=ordinary_job_binding,
         source=source,
         updated_at=updated_at,
