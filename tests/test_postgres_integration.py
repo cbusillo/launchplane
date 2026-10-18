@@ -13807,3 +13807,37 @@ class RealPostgresTestingPublicationTests(unittest.TestCase):
             finally:
                 release.set()
                 fixture.doCleanups()
+
+
+class RealPostgresNativeTestingWorkerTests(unittest.TestCase):
+    def run_worker_case(self, name: str) -> None:
+        from tests import test_testing_rebuild_worker as worker_tests
+
+        with _head_postgres_database() as url:
+            fixture = worker_tests.NativeTestingWorkerTests()
+            fixture.database_url = url
+            fixture.setUp()
+            try:
+                getattr(fixture, name)()
+            finally:
+                fixture.doCleanups()
+
+    def test_same_address_publication_and_retirement(self) -> None:
+        self.run_worker_case(
+            "test_one_action_preserves_address_credentials_and_retires_only_after_publication"
+        )
+
+    def test_expired_queue_worker_resumes_original_observation(self) -> None:
+        self.run_worker_case(
+            "test_expired_native_worker_keeps_its_original_key_and_resumes_observation"
+        )
+
+    def test_lost_stop_exclusion_cannot_restart_retirement(self) -> None:
+        self.run_worker_case(
+            "test_lost_exclusion_reply_cannot_restart_stop_when_new_health_recovers"
+        )
+
+    def test_unknown_stop_is_observed_without_duplicate_dispatch(self) -> None:
+        self.run_worker_case(
+            "test_unknown_dispatched_stop_is_not_excluded_or_repeated_when_health_recovers"
+        )

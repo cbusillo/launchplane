@@ -70,3 +70,44 @@ class TestingPublicHealthTests(unittest.TestCase):
         health = read_public_testing_health(self.base_url, "/health")
         self.assertFalse(health.verified)
         self.assertEqual(health.status, "pending")
+
+    def private_health_exit_code(self) -> int:
+        import base64
+        import subprocess
+        import sys
+        from control_plane.dokploy.testing_retained_copy import RETAINED_PRIVATE_HEALTH_PROGRAM
+
+        spec = {
+            "port": self.server.server_port,
+            "path": "/health",
+            "identity": self.identity.model_dump(mode="json"),
+        }
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                RETAINED_PRIVATE_HEALTH_PROGRAM,
+                base64.b64encode(json.dumps(spec).encode()).decode(),
+            ],
+            capture_output=True,
+            env={"PYTHONNOUSERSITE": "1"},
+            timeout=10,
+            check=False,
+        )
+        return result.returncode
+
+    def test_private_probe_requires_the_original_runtime_identity(self) -> None:
+        self.assertEqual(self.private_health_exit_code(), 0)
+        self.body = json.dumps(
+            {
+                "runtime_identity": self.identity.model_copy(
+                    update={"artifact_id": "foreign-build"}
+                ).model_dump(mode="json")
+            }
+        ).encode()
+        self.assertNotEqual(self.private_health_exit_code(), 0)
+
+    def test_private_probe_does_not_follow_a_redirect(self) -> None:
+        self.status = 302
+        self.assertNotEqual(self.private_health_exit_code(), 0)
+        self.assertEqual(self.requests, ["/health"])

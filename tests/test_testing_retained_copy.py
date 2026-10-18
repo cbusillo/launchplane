@@ -95,7 +95,9 @@ class RetainedTestingCopyTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             qualify_retained_copy(self.containers, self.spec)
 
-    def run_host(self, *, deny: bool = False) -> tuple[dict[str, Any], list[list[str]]]:
+    def run_host(
+        self, *, deny: bool = False, mode: str = "stop"
+    ) -> tuple[dict[str, Any], list[list[str]]]:
         import base64
         from contextlib import redirect_stdout
         import io
@@ -108,7 +110,8 @@ class RetainedTestingCopyTests(unittest.TestCase):
         payload = {
             **self.spec,
             **{key: original[key] for key in ("identity", "web_id", "resource_binding")},
-            "mode": "stop",
+            "mode": mode,
+            "health_path": "/launchplane/health",
         }
         commands: list[list[str]] = []
 
@@ -120,6 +123,18 @@ class RetainedTestingCopyTests(unittest.TestCase):
                 output = json.dumps(
                     [item for item in self.containers if item["Id"] in command[2:]]
                 ).encode()
+            elif command[1] == "exec":
+                self.assertEqual(command[2], original["web_id"])
+                spec = json.loads(base64.b64decode(command[-1]))
+                self.assertEqual(spec["identity"], original["identity"])
+                self.assertEqual(spec["path"], payload["health_path"])
+                configured = dict(
+                    item.split("=", 1)
+                    for item in self.containers[0]["Config"]["Env"]
+                    if "=" in item
+                )
+                self.assertEqual(spec["port"], int(configured["ODOO_HTTP_PORT"]))
+                output = b""
             elif command[1] == "stop":
                 self.assertEqual(command[-1], original["web_id"])
                 if deny:
@@ -168,3 +183,10 @@ class RetainedTestingCopyTests(unittest.TestCase):
         self.assertEqual(frame, {"type": "denied"})
         self.assertEqual(len([command for command in commands if command[1] == "stop"]), 1)
         self.assertEqual(self.containers[0]["State"]["Status"], "running")
+
+    def test_emitted_host_private_probe_uses_the_original_container_and_managed_port(self) -> None:
+        self.containers[0]["Config"]["Env"].append("ODOO_HTTP_PORT=8171")
+        frame, commands = self.run_host(mode="readiness")
+        self.assertTrue(frame["healthy"])
+        self.assertFalse(frame["stopped"])
+        self.assertFalse(any(command[1] == "stop" for command in commands))

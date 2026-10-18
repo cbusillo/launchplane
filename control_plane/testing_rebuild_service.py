@@ -23,6 +23,7 @@ from control_plane.contracts.product_profile_record import (
     product_context_owner_map,
 )
 from control_plane.contracts.runtime_identity import RuntimeIdentity
+from control_plane.contracts.testing_candidate_application import TestingCandidateApplicationPlan
 from control_plane.contracts.testing_candidate import (
     TestingCandidateAllocation,
     testing_candidate_namespace,
@@ -42,11 +43,13 @@ from control_plane.contracts.testing_rebuild import (
 from control_plane.dokploy import api, post_deploy, source
 from control_plane.dokploy.native_copy_stream import (
     require_registered_remote_server,
+    NativeSourceUnavailable,
     NativeSourceAuthorizationDenied,
 )
 from control_plane.dokploy.testing_retained_copy import retained_copy_operation
 from control_plane.dokploy.testing_route import (
     TestingLaneRoute,
+    TestingRoutePending,
     compile_testing_route,
     observe_testing_route,
     testing_route_id,
@@ -56,6 +59,7 @@ from control_plane.lane_usage import evaluate_lane_usage
 from control_plane.odoo_testing_usage import read_odoo_testing_usage
 from control_plane.provider_operations import (
     ProviderEvidenceLease,
+    DurableProviderOperationResult,
     ProviderMutationOutcome,
     ProviderObservation,
     ProviderOperationLease,
@@ -72,6 +76,8 @@ from control_plane.testing_candidate_application import (
     candidate_private_readiness,
     abandon_candidate_application,
     candidate_restore_terminal,
+    candidate_build_terminal,
+    CandidateObservationUnavailable,
 )
 from control_plane.testing_candidate_runtime import (
     CandidateSource,
@@ -92,6 +98,7 @@ from control_plane.testing_serving_copy import published_testing_copy
 from control_plane.workflows.generic_web_deploy_provider import generic_web_provider_target_key
 from control_plane.workflows.testing_rebuild import (
     TestingRebuildPreparationFailure,
+    TestingRebuildObservationUnavailable,
     execute_testing_rebuild,
 )
 
@@ -424,24 +431,13 @@ class NativeTestingRebuildExecution:
             adapter.operation,
             adapter.intent,
         )
-        self.host, self.token = source.read_dokploy_config(
-            control_plane_root=self.root, database_url=self.store.database_url
-        )
+        self.host: str
+        self.token: str
         self.inputs: TestingCandidateRuntimeInputs | None = None
         self.allocation: TestingCandidateAllocation
         self.plan: TestingRebuildPlan
         self.route: TestingLaneRoute
-        self.transport = DokployTestingRouteTransport(
-            host=self.host,
-            token=self.token,
-            server_id=self.intent.server_id,
-            old_project=self.intent.project,
-            product=self.operation.product,
-            context=self.operation.context,
-            public_host=str(urlsplit(self.base_url).hostname),
-            entrypoints=self.intent.public_entrypoints,
-            old_runtime_identity=self.intent.old.runtime_identity,
-        )
+        self.transport: DokployTestingRouteTransport
         self.publication: TestingPublicationPlan | None = None
 
     @property
@@ -620,9 +616,67 @@ class NativeTestingRebuildExecution:
             "independent_candidate_projects": projects,
         }
 
+    def build_plan(
+        self, allocation: TestingCandidateAllocation, app_plan: TestingCandidateApplicationPlan
+    ) -> TestingRebuildPlan:
+        if (app_plan.artifact.artifact_id, app_plan.artifact.source_commit) != (
+            self.operation.request.artifact_id,
+            self.operation.request.source_git_ref,
+        ):
+            raise ValueError("Candidate differs from the original admitted artifact/source pair.")
+        new = TestingCopy(
+            copy_id=allocation.namespace,
+            target_id=allocation.compose_id,
+            private_url=f"http://{allocation.namespace}:{self.intent.profile.runtime_port}",
+            resource_binding=allocation.resources_binding_sha256,
+            runtime_identity=app_plan.runtime_identity,
+        )
+        return TestingRebuildPlan(
+            operation_id=self.operation.operation_id,
+            product=self.operation.product,
+            context=self.operation.context,
+            base_url=self.base_url,
+            route_id=testing_route_id(self.operation.product, self.operation.context),
+            authority_digest=self.intent.digest,
+            source=app_plan.source,
+            source_reference=""
+            if app_plan.source == "empty"
+            else app_plan.native_source.binding_sha256
+            if app_plan.native_source is not None
+            else canonical_json_sha256(app_plan.upstream_source),
+            old=self.intent.old,
+            new=new,
+        )
+
     def run(self) -> TestingRebuildRecord:
-        existing_publication = read_publication(self.store, self.publication_key)
         allocation = self.store.read_testing_candidate(self.adapter.namespace)
+        if allocation is not None and allocation.application is not None:
+            historical_plan = self.build_plan(allocation, allocation.application.plan)
+            try:
+                historical = self.adapter.checkpoints.load(historical_plan)
+            except FileNotFoundError:
+                pass
+            else:
+                if historical.plan != historical_plan:
+                    raise ValueError("The original rebuild plan changed.")
+                if historical.step in {"complete", "failed"}:
+                    self.allocation, self.plan = allocation, historical_plan
+                    return historical
+        self.host, self.token = source.read_dokploy_config(
+            control_plane_root=self.root, database_url=self.store.database_url
+        )
+        self.transport = DokployTestingRouteTransport(
+            host=self.host,
+            token=self.token,
+            server_id=self.intent.server_id,
+            old_project=self.intent.project,
+            product=self.operation.product,
+            context=self.operation.context,
+            public_host=str(urlsplit(self.base_url).hostname),
+            entrypoints=self.intent.public_entrypoints,
+            old_runtime_identity=self.intent.old.runtime_identity,
+        )
+        existing_publication = read_publication(self.store, self.publication_key)
         if existing_publication is None:
             self.guard()
             if allocation is None:
@@ -692,29 +746,7 @@ class NativeTestingRebuildExecution:
                     source=rebuild_source(self.operation),
                 )
         self.allocation = allocation
-        new = TestingCopy(
-            copy_id=allocation.namespace,
-            target_id=allocation.compose_id,
-            private_url=f"http://{allocation.namespace}:{self.intent.profile.runtime_port}",
-            resource_binding=allocation.resources_binding_sha256,
-            runtime_identity=app_plan.runtime_identity,
-        )
-        self.plan = TestingRebuildPlan(
-            operation_id=self.operation.operation_id,
-            product=self.operation.product,
-            context=self.operation.context,
-            base_url=self.base_url,
-            route_id=testing_route_id(self.operation.product, self.operation.context),
-            authority_digest=self.intent.digest,
-            source=app_plan.source,
-            source_reference=""
-            if app_plan.source == "empty"
-            else app_plan.native_source.binding_sha256
-            if app_plan.native_source is not None
-            else canonical_json_sha256(app_plan.upstream_source),
-            old=self.intent.old,
-            new=new,
-        )
+        self.plan = self.build_plan(allocation, app_plan)
         if self.publication is not None:
             self.route = self.publication.route
         else:
@@ -724,7 +756,7 @@ class NativeTestingRebuildExecution:
                 context=self.operation.context,
                 host=self.plan.host,
                 old_backend=self.plan.old.private_url,
-                new_backend=new.private_url,
+                new_backend=self.plan.new.private_url,
                 raw=frame["raw"],
                 public_entrypoints=self.intent.public_entrypoints,
                 owned_document=json.loads(frame["owned_file"])
@@ -750,8 +782,27 @@ class NativeTestingRebuildExecution:
                 lease=self.lease,
                 guard=self.guard,
             )
-        except ValueError:
+        except (ValueError, api.DokployDeploymentFailed, api.DokployScheduleExecutionFailed):
             current = self.store.read_testing_candidate(self.allocation.namespace)
+            if (
+                current is not None
+                and current.application is not None
+                and current.application.phase == "deploying"
+            ):
+                evidence = candidate_build_terminal(
+                    host=self.host, token=self.token, record=current
+                )
+                if evidence.rsplit(":", 1)[-1] in api._DEPLOYMENT_FAILURE_STATUSES:
+                    self.allocation = abandon_candidate_application(
+                        root=self.root,
+                        store=self.store,
+                        namespace=current.namespace,
+                        lease=self.lease,
+                        guard=self.guard,
+                    )
+                    raise TestingRebuildPreparationFailure(
+                        copy_id=plan.new.copy_id, evidence_id=evidence
+                    ) from None
             if (
                 current is not None
                 and current.application is not None
@@ -915,10 +966,70 @@ class NativeTestingRebuildExecution:
             ),
         )
 
+    def retirement_exclusion(self, plan: TestingRebuildPlan) -> TestingCopyReadiness | None:
+        stop = self.store.read_idempotency_record(
+            scope=REBUILD_SCOPE,
+            route_path=REBUILD_ROUTE + ":effect",
+            idempotency_key=self.operation.operation_id + ":retire-old",
+        )
+        if (
+            stop is None
+            or stop.state != "completed"
+            or stop.response_payload.get("not_dispatched") is not True
+        ):
+            return None
+        if (
+            stop.provider_effect_started_at
+            or stop.provider_target_key != self.adapter.target_key() + ":retire-old"
+            or stop.request_fingerprint
+            != canonical_json_sha256({"intent": self.intent.digest, "phase": "retire-old"})
+        ):
+            raise ValueError("The original stop exclusion has different physical custody.")
+        proof = retained_copy_operation(
+            host=self.host,
+            token=self.token,
+            server_id=self.intent.server_id,
+            payload={
+                **self.retained_payload("readiness"),
+                "health_path": self.intent.profile.health_path,
+            },
+        )
+        if proof.get("healthy") is not True:
+            raise NativeTestingRebuildPending(
+                "The excluded retirement needs fresh retained-copy health."
+            )
+        return TestingCopyReadiness(
+            copy_id=plan.old.copy_id,
+            host=plan.host,
+            observed_at=datetime.now(UTC),
+            runtime_identity=plan.old.runtime_identity,
+            healthy=True,
+            evidence_id=stop.record_id + ":private-health:" + str(proof["web_id"]),
+        )
+
     def unstarted_retirement(self, plan: TestingRebuildPlan) -> TestingCopyReadiness | None:
-        # An unknown or denied original stop is never retried or cleared merely
-        # because the old process still appears running.
-        return None
+        # Exclude all outstanding retirement writes before releasing the lane's
+        # original fence. Unknown dispatched effects are observed, never retried.
+        for phase in ("disable-old-auto-deploy", "retire-old"):
+            prior = self.store.read_idempotency_record(
+                scope=REBUILD_SCOPE,
+                route_path=REBUILD_ROUTE + ":effect",
+                idempotency_key=self.operation.operation_id + ":" + phase,
+            )
+            if prior is not None and prior.provider_effect_started_at:
+                if phase == "retire-old":
+                    return None
+                self.run_effect(
+                    phase,
+                    lambda: self.old_provider().get("autoDeploy") is False,
+                    lambda dispatch: None,
+                    reconcile_only=True,
+                )
+            elif prior is None or prior.state != "completed":
+                self.run_effect(
+                    phase, lambda: False, lambda dispatch: None, exclude_undispatched=True
+                )
+        return self.retirement_exclusion(plan)
 
     def run_effect(
         self,
@@ -927,7 +1038,8 @@ class NativeTestingRebuildExecution:
         execute: Callable[[Callable[[Callable[[], None]], None]], object],
         *,
         reconcile_only: bool = False,
-    ) -> None:
+        exclude_undispatched: bool = False,
+    ) -> DurableProviderOperationResult:
         parent = self
 
         class Effect:
@@ -943,6 +1055,8 @@ class NativeTestingRebuildExecution:
                 provider_effect_phase: str,
                 reconciliation_key: str,
             ) -> ProviderObservation:
+                if exclude_undispatched:
+                    return ProviderObservation("unknown" if provider_effect_phase else "absent")
                 if present():
                     return ProviderObservation("present", 200)
                 return ProviderObservation("unknown" if provider_effect_phase else "absent")
@@ -950,6 +1064,14 @@ class NativeTestingRebuildExecution:
             def apply(
                 self, provider_operation_key: str, lease: ProviderOperationLease
             ) -> ProviderMutationOutcome:
+                if exclude_undispatched:
+                    parent.guard(parent.plan)
+                    lease.assert_current()
+                    return ProviderMutationOutcome(
+                        200,
+                        {"not_dispatched": True, "cause": "candidate_public_health_failed"},
+                        provider_effect_performed=False,
+                    )
                 if present():
                     return ProviderMutationOutcome(200, provider_effect_performed=False)
 
@@ -970,6 +1092,8 @@ class NativeTestingRebuildExecution:
             idempotency_key=self.operation.operation_id + ":" + phase,
         )
         assert isinstance(self.lease, ProviderEvidenceLease)
+        if exclude_undispatched and prior is not None and prior.provider_effect_started_at:
+            raise NativeTestingRebuildPending("A dispatched retirement effect cannot be excluded.")
         result = run_durable_provider_operation(
             store=self.store,
             scope=REBUILD_SCOPE,
@@ -989,6 +1113,13 @@ class NativeTestingRebuildExecution:
         )
         if result.status not in {"completed", "adopted", "replayed"}:
             raise NativeTestingRebuildPending("The original rebuild effect requires observation.")
+        if not exclude_undispatched and (
+            result.response_payload.get("not_dispatched") is True or not present()
+        ):
+            raise NativeTestingRebuildPending(
+                "The original effect was excluded or its outcome changed."
+            )
+        return result
 
 
 def rebuild_result(
@@ -1074,6 +1205,15 @@ def execute_native_testing_rebuild(
             authorize=authorize,
             lease_owner=lease_owner,
         )
+    except (
+        CandidateObservationUnavailable,
+        NativeSourceUnavailable,
+        TestingRoutePending,
+        TestingRebuildObservationUnavailable,
+    ) as error:
+        raise NativeTestingRebuildPending(
+            "The original candidate needs another observation."
+        ) from error
     except api.DokployRequestFailed as error:
         if error.status_code in {401, 403}:
             raise NativeSourceAuthorizationDenied(str(error)) from error

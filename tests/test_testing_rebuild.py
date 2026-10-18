@@ -74,6 +74,7 @@ class TestingProvider:
         self.pending_switch = False
         self.refuse_stop = False
         self.stop_refused_before_dispatch = False
+        self.stop_excluded = False
         self.lose_stop_reply = False
         self.old_running = True
         self.actions: list[str] = []
@@ -192,9 +193,18 @@ class TestingProvider:
         if self.lose_stop_reply:
             raise TimeoutError("fixture stop reply lost")
 
+    def retirement_exclusion(self, plan: TestingRebuildPlan) -> TestingCopyReadiness | None:
+        if not self.stop_excluded:
+            return None
+        return self.old_readiness(plan)
+
     def unstarted_retirement(self, plan: TestingRebuildPlan) -> TestingCopyReadiness | None:
         if not self.stop_refused_before_dispatch or not self.old_running:
             return None
+        self.stop_excluded = True
+        return self.old_readiness(plan)
+
+    def old_readiness(self, plan: TestingRebuildPlan) -> TestingCopyReadiness:
         return TestingCopyReadiness(
             copy_id=plan.old.copy_id,
             host=self.host,
@@ -698,3 +708,27 @@ class TestingRebuildTests(unittest.TestCase):
         ):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 TestingRebuildPlan.model_validate({**self.plan.model_dump(), **changes})
+
+    def test_interrupted_retirement_exclusion_preserves_rollback_decision_after_health_recovers(
+        self,
+    ) -> None:
+        self.provider.refuse_stop = True
+        with self.assertRaises(PermissionError):
+            self.run_rebuild()
+        self.provider.bad_public = True
+        original = self.provider.unstarted_retirement
+
+        def lost(plan: TestingRebuildPlan) -> TestingCopyReadiness | None:
+            original(plan)
+            self.provider.bad_public = False
+            raise TimeoutError("fixture lost stop-exclusion receipt")
+
+        with (
+            patch.object(self.provider, "unstarted_retirement", side_effect=lost),
+            self.assertRaises(TimeoutError),
+        ):
+            self.run_rebuild()
+        self.assertEqual(self.run_rebuild().step, "failed")
+        self.assertTrue(self.provider.old_running)
+        self.assertEqual(self.provider.serving, self.plan.old)
+        self.assertNotIn("retire", self.provider.actions)

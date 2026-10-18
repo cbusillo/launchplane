@@ -822,6 +822,13 @@ physical target aliases and resource/credential isolation. Storage qualification
 runs before application execution. A resumed populated candidate uses its
 original custody and private proof instead of requiring empty storage again.
 
+The restore intent distinguishes a new workflow with no dispatched effect from
+an older or unknown dispatch. A crash before the first effect can continue the
+original workflow; unknown intents are observed without repeating it. A known
+terminal failed build or restore can be abandoned while retaining candidate
+custody and the old serving selection. Historical terminal receipts replay
+without fresh runtime resolution or provider credential reads.
+
 Route writes and retirement have separate original-effect fences within the
 lane operation. A lost reply is observed before continuation; an old or absent
 outcome does not permit a blind duplicate. A crashed queue worker resumes

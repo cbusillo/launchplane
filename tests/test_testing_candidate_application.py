@@ -548,3 +548,105 @@ class CandidateApplicationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.inputs(persisted)
         self.fixture.assert_serving_unchanged()
+
+    def test_crash_after_restore_intent_before_any_effect_resumes_the_original_workflow(
+        self,
+    ) -> None:
+        self.execution()
+        write = self.store.compare_and_write_testing_candidate
+
+        def crash(
+            previous: TestingCandidateAllocation | None, updated: TestingCandidateAllocation
+        ) -> None:
+            write(previous, updated)
+            if (
+                previous is not None
+                and previous.application is not None
+                and previous.application.phase == "deployed"
+                and updated.application is not None
+                and updated.application.phase == "restoring"
+            ):
+                raise TimeoutError("fixture ended after restore intent")
+
+        with (
+            patch.object(self.store, "compare_and_write_testing_candidate", side_effect=crash),
+            self.assertRaises(TimeoutError),
+        ):
+            self.prepare_application()
+        self.assertEqual(self.effects, ["configure", "deploy"])
+        resumed = self.prepare_application()
+        assert resumed.application is not None
+        self.assertEqual(resumed.application.phase, "prepared")
+        self.assertEqual(self.effects, ["configure", "deploy", "restore"])
+        self.fixture.assert_serving_unchanged()
+
+    def test_failed_original_build_can_be_abandoned_without_running_a_restore(self) -> None:
+        self.execution()
+        self.lose = "deploy"
+        with self.assertRaises(TimeoutError):
+            self.prepare_application()
+        self.deployments[0]["status"] = "error"
+        with self.assertRaises(api.DokployDeploymentFailed):
+            self.prepare_application()
+        abandoned = application.abandon_candidate_application(
+            root=self.root,
+            store=self.store,
+            namespace=self.allocation.namespace,
+            lease=self.execution_lease,
+            guard=self.fixture.guard,
+        )
+        assert abandoned.application is not None
+        self.assertEqual(abandoned.application.phase, "abandoned")
+        self.assertEqual(self.effects, ["configure", "deploy"])
+        self.assertEqual(abandoned.compose_id, self.allocation.compose_id)
+        self.fixture.assert_serving_unchanged()
+
+    def test_older_restore_intent_without_dispatch_evidence_stays_unknown(self) -> None:
+        self.execution()
+        write = self.store.compare_and_write_testing_candidate
+
+        def legacy_crash(
+            previous: TestingCandidateAllocation | None, updated: TestingCandidateAllocation
+        ) -> None:
+            if (
+                previous is not None
+                and previous.application is not None
+                and previous.application.phase == "deployed"
+                and updated.application is not None
+                and updated.application.phase == "restoring"
+            ):
+                legacy = updated.model_copy(
+                    update={
+                        "application": updated.application.model_copy(
+                            update={"restore_workflow_started": None}
+                        )
+                    }
+                )
+                write(previous, legacy)
+                raise TimeoutError("fixture older writer has no dispatch marker")
+            write(previous, updated)
+
+        with (
+            patch.object(
+                self.store, "compare_and_write_testing_candidate", side_effect=legacy_crash
+            ),
+            self.assertRaises(TimeoutError),
+        ):
+            self.prepare_application()
+        with self.assertRaises(application.CandidateObservationUnavailable):
+            self.prepare_application()
+        current = self.store.read_testing_candidate(self.allocation.namespace)
+        assert current is not None and current.application is not None
+        with self.assertRaises(ValueError):
+            self.store.compare_and_write_testing_candidate(
+                current,
+                current.model_copy(
+                    update={
+                        "application": current.application.model_copy(
+                            update={"restore_workflow_started": False}
+                        )
+                    }
+                ),
+            )
+        self.assertEqual(self.effects, ["configure", "deploy"])
+        self.fixture.assert_serving_unchanged()

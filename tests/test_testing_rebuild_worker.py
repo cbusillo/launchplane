@@ -20,7 +20,7 @@ from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.testing_rebuild import TestingCopy
 from control_plane.dokploy.testing_route import route_document
 from control_plane.dokploy.testing_route_transport import DokployTestingRouteTransport
-from control_plane.dokploy import post_deploy, api
+from control_plane.dokploy import post_deploy, api, source
 from control_plane.odoo_testing_usage import OdooTestingUsage
 from control_plane.testing_publication_storage import read_snapshot
 from tests import test_testing_publication as publication_tests
@@ -28,11 +28,29 @@ from tests import test_testing_route as route_tests
 
 
 class NativeTestingWorkerTests(unittest.TestCase):
+    database_url = ""
+
     def setUp(self) -> None:
         self.fixture = publication_tests.TestingPublicationTests()
+        self.fixture.database_url = self.database_url
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
         self.store, self.root = self.fixture.store, self.fixture.fixture.root
+        # The storage fixture begins with a stranded legacy queue item. These
+        # worker cases model an admitted rebuild after the previous item ended.
+        for previous in self.store.list_odoo_stable_target_replacement_operation_records():
+            if previous.status == "reconciliation_required":
+                finished = datetime.now(UTC).isoformat()
+                self.store.write_odoo_stable_target_replacement_operation_record(
+                    previous.model_copy(
+                        update={
+                            "status": "fail",
+                            "phase": "failed",
+                            "updated_at": finished,
+                            "finished_at": finished,
+                        }
+                    )
+                )
         candidate = self.fixture.candidate
         assert candidate.application is not None and candidate.application.prepared is not None
         self.app = candidate.application
@@ -97,6 +115,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.effects: list[str] = []
         self.fail_public = False
         self.fail_after_stop = False
+        self.old_private_healthy = True
         self.authorize = Mock()
         self.old_provider: dict[str, Any] = {
             "composeId": self.intent.old.target_id,
@@ -177,7 +196,10 @@ class NativeTestingWorkerTests(unittest.TestCase):
             if self.fail_after_stop:
                 self.fail_after_stop = False
                 raise TimeoutError("fixture lost retirement reply")
-        return dict(self.retained)
+        result = dict(self.retained)
+        if kwargs["payload"]["mode"] == "readiness":
+            result["healthy"] = self.old_private_healthy
+        return result
 
     def route_read(self) -> dict[str, Any]:
         return {
@@ -189,7 +211,8 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self, plan: Any, backend: str, *, expected_backend: str, dispatch_guard: Any
     ) -> None:
         def publish() -> None:
-            self.assertEqual(self.current(), self.fixture.before)
+            if backend == plan.new_backend:
+                self.assertEqual(self.current(), self.fixture.before)
             self.assertFalse(self.retained["stopped"])
             self.effects.append("switch-new" if backend == plan.new_backend else "switch-old")
             self.owned = route_document(plan, backend)
@@ -470,3 +493,133 @@ class NativeTestingWorkerTests(unittest.TestCase):
             self.execute()
         request.assert_called_once()
         self.assertEqual(self.effects, [])
+
+    def test_terminal_preparation_receipt_replays_without_new_provider_or_runtime_reads(
+        self,
+    ) -> None:
+        from control_plane.workflows.testing_rebuild import TestingRebuildPreparationFailure
+
+        apply = service.NativeTestingRebuildAdapter.apply
+
+        def lost(adapter: service.NativeTestingRebuildAdapter, key: str, lease: Any) -> Any:
+            apply(adapter, key, lease)
+            raise TimeoutError("fixture lost logical completion")
+
+        with (
+            patch.object(
+                service.NativeTestingRebuildExecution,
+                "prepare",
+                side_effect=TestingRebuildPreparationFailure(
+                    copy_id=self.fixture.candidate.namespace,
+                    evidence_id="fixture-terminal-candidate-job",
+                ),
+            ),
+            patch.object(
+                service.NativeTestingRebuildAdapter, "apply", autospec=True, side_effect=lost
+            ),
+            self.assertRaises(TimeoutError),
+        ):
+            self.execute()
+        with (
+            patch.object(
+                service,
+                "candidate_runtime_inputs",
+                side_effect=AssertionError(
+                    "Historical receipts do not recompile mutable runtime inputs"
+                ),
+            ),
+            patch.object(
+                source,
+                "read_dokploy_config",
+                side_effect=AssertionError(
+                    "Historical receipts do not resolve provider credentials"
+                ),
+            ),
+        ):
+            self.assertEqual(self.execute().deploy_status, "fail")
+        self.assertEqual(self.effects, [])
+
+    def test_unknown_public_health_keeps_observing_the_same_candidate_without_retirement(
+        self,
+    ) -> None:
+        unknown = self.fixture.health.model_copy(
+            update={"verified": False, "status": "pending", "observed_runtime_identity": None}
+        )
+        with (
+            patch.object(service, "read_public_testing_health", return_value=unknown),
+            self.assertRaises(service.NativeTestingRebuildPending),
+        ):
+            self.execute()
+        self.assertEqual(self.effects, ["switch-new"])
+        self.assertFalse(self.retained["stopped"])
+        self.assertEqual(self.current(), self.fixture.before)
+        self.assertEqual(self.execute().deploy_status, "pass")
+        self.assertEqual(self.effects, ["switch-new", "stop-old"])
+
+    def test_failed_health_after_a_crash_before_retirement_excludes_stop_then_restores_old(
+        self,
+    ) -> None:
+        with (
+            patch.object(
+                service.NativeTestingRebuildExecution,
+                "retire_old",
+                side_effect=TimeoutError("fixture ended before old stop"),
+            ),
+            self.assertRaises(TimeoutError),
+        ):
+            self.execute()
+        self.fail_public = True
+        self.assertEqual(self.execute().deploy_status, "fail")
+        self.assertEqual(self.effects, ["switch-new", "switch-old"])
+        self.assertFalse(self.retained["stopped"])
+        self.assertEqual(self.current(), self.fixture.before)
+
+    def test_lost_exclusion_reply_cannot_restart_stop_when_new_health_recovers(self) -> None:
+        with (
+            patch.object(
+                service.NativeTestingRebuildExecution,
+                "retire_old",
+                side_effect=TimeoutError("fixture ended before old stop"),
+            ),
+            self.assertRaises(TimeoutError),
+        ):
+            self.execute()
+        self.fail_public = True
+        observe = service.NativeTestingRebuildExecution.retirement_exclusion
+
+        def lost(executor: service.NativeTestingRebuildExecution, plan: Any) -> Any:
+            proof = observe(executor, plan)
+            if proof is not None:
+                self.fail_public = False
+                raise TimeoutError("fixture lost exclusion reply")
+            return proof
+
+        with (
+            patch.object(
+                service.NativeTestingRebuildExecution,
+                "retirement_exclusion",
+                autospec=True,
+                side_effect=lost,
+            ),
+            self.assertRaises(TimeoutError),
+        ):
+            self.execute()
+        self.old_private_healthy = False
+        with self.assertRaises(service.NativeTestingRebuildPending):
+            self.execute()
+        self.old_private_healthy = True
+        self.assertEqual(self.execute().deploy_status, "fail")
+        self.assertEqual(self.effects, ["switch-new", "switch-old"])
+        self.assertFalse(self.retained["stopped"])
+
+    def test_unknown_dispatched_stop_is_not_excluded_or_repeated_when_health_recovers(self) -> None:
+        self.fail_after_stop = True
+        with self.assertRaises(TimeoutError):
+            self.execute()
+        self.fail_public = True
+        with self.assertRaises(service.NativeTestingRebuildPending):
+            self.execute()
+        self.assertEqual(self.effects, ["switch-new", "stop-old"])
+        self.fail_public = False
+        self.assertEqual(self.execute().deploy_status, "pass")
+        self.assertEqual(self.effects, ["switch-new", "stop-old"])

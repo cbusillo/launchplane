@@ -78,6 +78,15 @@ class TestingRebuildProvider(Protocol):
         """Drain/stop the old copy idempotently; retain its storage and custody."""
         ...
 
+    def retirement_exclusion(self, plan: TestingRebuildPlan) -> TestingCopyReadiness | None:
+        """Read a prior terminal stop exclusion and fresh old-copy health.
+
+        No exclusion returns None. A known exclusion with unavailable health
+        stays pending, so an interrupted recovery cannot restart that stop.
+        This method never creates an exclusion or dispatches a command.
+        """
+        ...
+
     def unstarted_retirement(self, plan: TestingRebuildPlan) -> TestingCopyReadiness | None:
         """Return fresh old-copy health only after excluding the original stop.
 
@@ -279,17 +288,25 @@ def execute_testing_rebuild(
             provider.guard(plan)
             observation = provider.current_route(plan)
             _route(observation, plan, plan.new)
-            try:
-                _serving(observation, plan, plan.new, clock())
-            except TestingRebuildHealthFailure:
-                recovery = None
-                if record.retirement_started:
-                    recovery = provider.unstarted_retirement(plan)
-                    if recovery is None or (recovery.copy_id, recovery.host) != (
-                        plan.old.copy_id,
-                        plan.host,
-                    ):
-                        raise
+            # The provider's original terminal exclusion is durable even if
+            # its reply was lost before the rolling-back checkpoint committed.
+            recovery = provider.retirement_exclusion(plan) if record.retirement_started else None
+            rollback = recovery is not None
+            if not rollback:
+                try:
+                    _serving(observation, plan, plan.new, clock())
+                except TestingRebuildHealthFailure:
+                    rollback = True
+                    if record.retirement_started:
+                        recovery = provider.unstarted_retirement(plan)
+                        if recovery is None:
+                            raise TestingRebuildObservationUnavailable(
+                                "The original retirement is not proven excluded."
+                            )
+            if rollback:
+                if recovery is not None:
+                    if (recovery.copy_id, recovery.host) != (plan.old.copy_id, plan.host):
+                        raise ValueError("Retirement recovery belongs to another copy or address.")
                     require_fresh_readiness(
                         observed_at=recovery.observed_at,
                         now=clock(),

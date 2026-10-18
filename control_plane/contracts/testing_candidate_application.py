@@ -164,9 +164,18 @@ class TestingCandidateApplication(FrozenRecord):
     restore_schedule_id: str = ""
     restore_previous_deployments: tuple[str, ...] = ()
     workflow_evidence: dict[str, str] = Field(default_factory=dict)
+    restore_workflow_started: bool | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
     @model_validator(mode="after")
     def validate_progress(self) -> Self:
+        if self.restore_workflow_started is not None and self.phase not in {
+            "restoring",
+            "prepared",
+            "abandoned",
+        }:
+            raise ValueError("Restore dispatch evidence requires its restore intent.")
         if self.phase in {"deployed", "restoring", "prepared"} and not self.deployment_id:
             raise ValueError("Candidate execution requires its original deployment receipt.")
         if self.prepared is not None and (
@@ -184,6 +193,15 @@ class TestingCandidateApplication(FrozenRecord):
     def require_successor(self, previous: Self) -> None:
         if (
             self.plan != previous.plan
+            or previous.restore_workflow_started is not None
+            and (
+                self.restore_workflow_started is None
+                or previous.restore_workflow_started
+                and not self.restore_workflow_started
+            )
+            or previous.restore_workflow_started is None
+            and previous.phase == "restoring"
+            and self.restore_workflow_started is False
             or previous.deployment_id
             and self.deployment_id != previous.deployment_id
             or previous.restore_schedule_id

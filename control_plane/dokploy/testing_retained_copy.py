@@ -100,10 +100,28 @@ def qualify_retained_copy(containers: list[dict[str, Any]], spec: dict[str, Any]
     }
 
 
+RETAINED_PRIVATE_HEALTH_PROGRAM = r"""
+import base64,json,sys
+from urllib.request import HTTPRedirectHandler,ProxyHandler,Request,build_opener
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self,req,fp,code,msg,headers,newurl):
+        return None
+spec=json.loads(base64.b64decode(sys.argv[1],validate=True))
+url='http://127.0.0.1:'+str(spec['port'])+spec['path']
+with build_opener(ProxyHandler({}),NoRedirect()).open(Request(url,method='GET'),timeout=5) as response:
+    assert response.geturl()==url and 200<=response.status<300
+    payload=json.loads(response.read(262144).decode())
+assert isinstance(payload,dict) and payload.get('runtime_identity')==spec['identity']
+"""
+
+
 def retained_copy_host_program() -> str:
     return (
         "import base64,json,subprocess,sys\nfrom typing import Any\n"
         + inspect.getsource(qualify_retained_copy)
+        + "\nHEALTH_PROGRAM="
+        + repr(RETAINED_PRIVATE_HEALTH_PROGRAM)
+        + "\n"
         + r"""
 
 def docker(*arguments):
@@ -129,6 +147,17 @@ try:
         result=qualify_retained_copy(inventory(),spec)
         if not result['stopped']:
             raise RuntimeError('Retained testing process is not stopped')
+    elif spec['mode']=='readiness':
+        if result['stopped'] or not spec.get('identity') or not spec.get('health_path','').startswith('/'):
+            raise ValueError('Retained private health requires the original running process')
+        web=next(item for item in inventory() if item['Id']==result['web_id'])
+        environment=dict(item.split('=',1) for item in web['Config'].get('Env',[]) if '=' in item)
+        port=environment.get('ODOO_HTTP_PORT') or '8069'
+        if not port.isdigit() or not 0<int(port)<65536:
+            raise ValueError('Retained private health port is invalid')
+        health={'port':int(port),'path':spec['health_path'],'identity':spec['identity']}
+        docker('exec',result['web_id'],'python3','-c',HEALTH_PROGRAM,base64.b64encode(json.dumps(health).encode()).decode())
+        result['healthy']=True
     elif spec['mode']!='read':
         raise ValueError('Unsupported retained testing operation')
     print(sys.argv[2]+json.dumps(result),flush=True)
