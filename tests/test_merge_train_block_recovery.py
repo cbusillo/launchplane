@@ -15,7 +15,7 @@ from control_plane.contracts.merge_train_batch import (
 )
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from control_plane.contracts.merge_train_pr_feedback_record import MergeTrainPrFeedbackRecord
-from control_plane.merge_train import build_merge_train_dry_run_result
+from control_plane.merge_train import MergeTrainBlockResult, build_merge_train_dry_run_result
 from control_plane.merge_train_controller_run_once import (
     MergeTrainControllerRunOnceEnvelope,
     _advance_from_live_snapshot,
@@ -708,8 +708,9 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
             adoptable_active_actions=(MERGE_TRAIN_CONTROLLER_ACTIVE_ACTION,),
         )
         lease = MergeTrainControllerLeaseContext(record=state, record_store=self.store)
+        failed_check_name = "integration"
         failure_details: dict[str, object] = {
-            "failed_checks": [{"name": "integration", "conclusion": "failure"}]
+            "failed_checks": [{"name": failed_check_name, "conclusion": "failure"}]
         }
 
         def produce() -> Any:
@@ -739,9 +740,11 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
             self.assertNotIn("controller_reconciliation_status", produced)
             from control_plane.merge_train_controller_feedback import build_feedback_payloads
 
-            self.assertEqual(
-                build_feedback_payloads(response={"result": produced})[0]["event"], "waiting"
-            )
+            feedback = build_feedback_payloads(response={"result": produced})[0]
+            self.assertEqual(feedback["event"], "waiting")
+            self.assertIn(failed_check_name, str(feedback["message"]))
+            block = MergeTrainBlockResult.model_validate(produced["block_result"])
+            self.assertEqual(block.pull_request_number, self.old.number)
             lease.release()
         self.current = fixed
         self.snapshot = self.snapshot.model_copy(update={"pull_requests": (fixed,)})

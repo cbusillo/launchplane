@@ -264,10 +264,9 @@ def _feedback_message(
     if result.get("reason_code") == "candidate_block_confirmation_pending":
         if result.get("controller_reconciliation_status") != "required":
             return (
-                "Launchplane saved its successful failed-candidate label write and is "
-                "waiting for GitHub's event proof. Other eligible pull requests can "
-                "proceed; later recovery rechecks the original write and current head "
-                "without repeating the label write."
+                _isolated_failure_message(result)
+                + "\n\nLaunchplane saved the successful block write and is waiting for "
+                "GitHub's event proof; it will not repeat the label write."
             )
         return (
             "Launchplane is waiting for GitHub to confirm its saved failed-candidate "

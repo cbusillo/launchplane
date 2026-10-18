@@ -849,7 +849,9 @@ def _resume_merge_train_controller_state(
                 lease=lease,
             )
             if confirmed == "pending":
-                return _pending_candidate_block_result(intent_record)
+                return _pending_candidate_block_result(
+                    intent_record, lease.record.step_payload.get("block_failure_details")
+                )
             if confirmed is not None:
                 return {
                     "repository": request.repository,
@@ -6063,7 +6065,9 @@ def _plan_failed_candidate_replacement(
     return result
 
 
-def _pending_candidate_block_result(record: MergeTrainBatchCandidateRecord) -> dict[str, object]:
+def _pending_candidate_block_result(
+    record: MergeTrainBatchCandidateRecord, failure_details: object
+) -> dict[str, object]:
     result: dict[str, object] = {
         "repository": record.candidate.repository,
         "base_branch": record.candidate.base_branch,
@@ -6078,6 +6082,17 @@ def _pending_candidate_block_result(record: MergeTrainBatchCandidateRecord) -> d
             controller_reconciliation_status="required",
             reconciliation_detail="retryable:candidate_block_confirmation_pending",
         )
+    else:
+        result["details"] = failure_details if isinstance(failure_details, dict) else {}
+        result["block_result"] = {
+            "status": "blocked",
+            "repository": record.candidate.repository,
+            "base_branch": record.candidate.base_branch,
+            "pull_request_number": record.candidate.entries[0].pull_request_number,
+            "blocked_label": record.block_intent.label,
+            "train_should_continue": True,
+            "detail": "The successful candidate block write is awaiting provider event proof.",
+        }
     return result
 
 
@@ -6275,7 +6290,7 @@ def _block_failed_candidate_culprit(
             lease=lease,
         )
         if confirmed == "pending":
-            return _pending_candidate_block_result(intent)
+            return _pending_candidate_block_result(intent, details)
         if confirmed is None:
             result.pop("merge_train_batch_candidate_record_id", None)
             result["reason_code"] = "candidate_block_changed"
