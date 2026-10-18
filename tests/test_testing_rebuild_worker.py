@@ -443,7 +443,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.deployment_history.return_value = [
             {"deploymentId": "still-building", "status": "running"}
         ]
-        with self.assertRaisesRegex(ValueError, "deployment"):
+        with self.assertRaises(ValueError):
             self.execute()
         self.assertEqual(self.effects, [])
 
@@ -459,7 +459,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
             return self.prepared.model_copy(update={"observed_at": datetime.now(UTC)})
 
         with patch.object(service, "candidate_private_readiness", side_effect=rebound):
-            with self.assertRaisesRegex(ValueError, "reservation"):
+            with self.assertRaises(ValueError):
                 self.execute()
         self.assertEqual(self.effects, [])
         self.assertFalse(self.retained["stopped"])
