@@ -34,7 +34,7 @@ from control_plane.workflows.generic_web_preview import (
 from control_plane.workflows.preview_lifecycle_cleanup import build_preview_lifecycle_cleanup_record
 from tests.http_app_test_support import _local_operator_bearer_config
 from tests.support.auth import _identity, _local_operator_policy, _StubVerifier
-from tests.support.http import request
+from tests.support.http import LIFESPAN_HANG_DEADLINE_SECONDS, lifespan_client, request
 from tests.support.profiles import _product_profile_payload
 
 
@@ -674,16 +674,20 @@ class LegacyPreviewReconciliationTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         started = threading.Event()
         release = threading.Event()
+        finished = threading.Event()
 
         def slow_destroy(**_: object) -> tuple[dict[str, str], dict[str, object]]:
             started.set()
-            if not release.wait(5):
-                raise ValueError("fixture timed out")
-            return {}, {"destroy_status": "pass", "destroy_outcome": "destroyed"}
+            try:
+                if not release.wait(LIFESPAN_HANG_DEADLINE_SECONDS):
+                    raise ValueError("fixture timed out")
+                return {}, {"destroy_status": "pass", "destroy_outcome": "destroyed"}
+            finally:
+                finished.set()
 
         async def destroy() -> Any:
             return await request(
-                self.app,
+                client,
                 "POST",
                 "/v1/drivers/generic-web/preview-destroy",
                 headers={
@@ -700,29 +704,40 @@ class LegacyPreviewReconciliationTests(unittest.IsolatedAsyncioTestCase):
                 },
             )
 
-        with patch(
-            "control_plane.http_routes.generic_web.apply_generic_web_preview_destroy_result",
-            side_effect=slow_destroy,
-        ) as driver:
-            task = asyncio.create_task(destroy())
-            try:
-                self.assertTrue(await asyncio.to_thread(started.wait, 3))
-                health = await asyncio.wait_for(request(self.app, "GET", "/v1/health"), 2)
-                self.assertEqual(health.status_code, 200)
-                duplicate = await asyncio.wait_for(destroy(), 2)
-                self.assertEqual(duplicate.status_code, 409, duplicate.text)
-                task.cancel()
-                await asyncio.sleep(0)
-                duplicate = await asyncio.wait_for(destroy(), 2)
-                self.assertEqual(duplicate.status_code, 409, duplicate.text)
-            finally:
-                release.set()
-            with self.assertRaises(asyncio.CancelledError):
-                await asyncio.wait_for(task, 5)
-            replay = await destroy()
-            self.assertEqual(replay.status_code, 202, replay.text)
-            self.assertTrue(replay.json()["replayed"])
-            driver.assert_called_once()
+        async with (
+            lifespan_client(self.app) as client,
+            asyncio.timeout(LIFESPAN_HANG_DEADLINE_SECONDS),
+        ):
+            with patch(
+                "control_plane.http_routes.generic_web.apply_generic_web_preview_destroy_result",
+                side_effect=slow_destroy,
+            ) as driver:
+                # Prove ordering against an explicitly held provider, not host latency.
+                # One lifespan models concurrent requests to the same running service.
+                task = asyncio.create_task(destroy())
+                try:
+                    self.assertTrue(
+                        await asyncio.to_thread(started.wait, LIFESPAN_HANG_DEADLINE_SECONDS)
+                    )
+                    health = await request(client, "GET", "/v1/health")
+                    self.assertEqual(health.status_code, 200)
+                    duplicate = await destroy()
+                    self.assertEqual(duplicate.status_code, 409, duplicate.text)
+                    self.assertFalse(finished.is_set())
+                    self.assertFalse(task.done())
+                    task.cancel()
+                    await asyncio.sleep(0)
+                    duplicate = await destroy()
+                    self.assertEqual(duplicate.status_code, 409, duplicate.text)
+                    self.assertFalse(finished.is_set())
+                finally:
+                    release.set()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+                replay = await destroy()
+                self.assertEqual(replay.status_code, 202, replay.text)
+                self.assertTrue(replay.json()["replayed"])
+                driver.assert_called_once()
 
     async def test_lifecycle_completion_keeps_service_available_and_scope_does_not_expand(
         self,
