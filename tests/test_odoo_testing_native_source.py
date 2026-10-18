@@ -89,6 +89,18 @@ class Connection:
 
 
 class NativeSourceTransportTests(unittest.TestCase):
+    def test_failed_frame_is_distinct_from_missing_transport_evidence(self) -> None:
+        connection = Connection()
+        connection.frame = {"type": "failed"}
+        with self.assertRaises(transport.NativeProgramFailed):
+            transport._read_program(
+                connection,
+                program="fixture read-only probe",
+                payload={},
+                timeout_seconds=5,
+                receive=lambda frame: None,
+            )
+
     def test_dispatch_guard_can_refuse_after_handshake_without_sending_the_program(self) -> None:
         connection = Connection()
         before_refusal: list[str] = []

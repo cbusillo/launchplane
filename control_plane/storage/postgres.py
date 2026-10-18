@@ -10262,6 +10262,39 @@ class PostgresRecordStore(HumanSessionStore):
             )
             from control_plane.testing_replacement_recovery import service_testing_operation
 
+            if current_record.is_native_testing_rebuild:
+                from control_plane.contracts.testing_rebuild import REBUILD_SCOPE, REBUILD_ROUTE
+
+                outer = session.scalar(
+                    self._idempotency_statement(
+                        scope=REBUILD_SCOPE,
+                        route_path=REBUILD_ROUTE,
+                        idempotency_key=current_record.operation_id,
+                    )
+                )
+                if (
+                    outer is not None
+                    and self._read_payload(
+                        model_type=LaunchplaneIdempotencyRecord, payload=outer.payload
+                    ).provider_effect_started_at
+                ):
+                    return False
+                child = session.scalar(
+                    select(LaunchplaneIdempotencyRow)
+                    .where(
+                        LaunchplaneIdempotencyRow.scope == REBUILD_SCOPE,
+                        LaunchplaneIdempotencyRow.route_path == REBUILD_ROUTE + ":effect",
+                        LaunchplaneIdempotencyRow.idempotency_key.startswith(
+                            current_record.operation_id + ":", autoescape=True
+                        ),
+                    )
+                    .limit(1)
+                )
+                if child is not None:
+                    # The original worker observes or reverses these effects.
+                    # A caller's generic cancellation cannot release their lane.
+                    return False
+
             if (
                 current_record.status == "reconciliation_required"
                 and service_testing_operation(current_record)

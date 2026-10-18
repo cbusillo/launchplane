@@ -711,8 +711,13 @@ images, runtime and copy identity, integration settings and the web-start gate,
 and verifies the testing-local credentials without signing in. The private HTTP
 health request bypasses proxy environment settings and refuses redirects. A
 read-only connection using the running web configuration checks the generated
-database password and the active local administrator's stored password hash;
-the running master password is also checked. Readiness never creates a session
+database password and the active local administrator's stored password hash.
+The login follows startup's trimmed value or `admin` default. Local database
+authentication failure is a failed candidate check, not a provider denial.
+The plaintext master value and database settings are checked for consistency
+with the running container environment. These local comparisons do not attest
+that a stored provider environment update was deployed; provider configuration,
+installed runtime identity and image are checked separately. Readiness never creates a session
 or login-history row, which would otherwise protect the new copy from its next
 rebuild. Passwords, hashes and raw program output stay private to the provider
 transport. This checks credential installation, not an interactive browser
@@ -765,6 +770,11 @@ its watched writable directory mount and private applied API. It reads only the
 lane-qualified dynamic filename. Publication rechecks the static configuration,
 provider state, current file digest and retained physical web identity, then uses
 the existing proxy container to write a temporary file and atomically rename it.
+Immediately before that writer, a forward publication also requires exactly one
+running web process owning the candidate alias on managed ingress, its expected
+project and its admitted runtime identity. A shared, missing, stopped or rebound
+alias refuses without touching the route. Inverse identity comparison excludes
+only the observation's deployment timestamp, as the runtime identity contract does.
 No application receives a provider credential or host mount. No global Traefik
 configuration, shared file, process or other product route is updated. The caller
 must hold and renew the original authorized lane/provider operation throughout,
@@ -774,6 +784,12 @@ the existing transport; there is no second writer or identity fallback.
 An absent reply does not prove the proxy writer stopped. The caller retains the
 original durable dispatch fence and continues observing it; an old file alone
 cannot exclude a still-running writer or authorize an inverse decision.
+A fixed publish program that exits before invoking the atomic writer returns an
+explicit `route_write_not_started` receipt. The caller can close that original
+child effect as excluded after verifying the old route. Once the writer may have
+started, a timeout or generic failed frame remains unknown; killing its Docker
+client does not prove that the daemon's exec has stopped. Permission denials
+remain denials and never become permission to retry.
 A written
 but partly/unapplied group stays pending without another dispatch. Public health
 and exact runtime identity remain the controller's separate proof before serving
@@ -850,9 +866,17 @@ provider identity. The shared service record store is required.
 
 An original intent retains the serving metadata, observed runtime, actual
 private backend, server and container/data custody before candidate writes.
-Every boundary rechecks the current authorization, exclusive execution and
-provider leases, staff hold, actual login/session use, protected-copy reports,
-physical target aliases and resource/credential isolation. Storage qualification
+Every boundary rechecks current authorization, exclusive execution and
+provider leases, protected-copy reports, physical target aliases and resource
+isolation. Forward admission also checks staff holds, profile/serving authority
+and actual login/session use immediately before the route effect is checkpointed.
+That original cutover admission is not re-qualified against downtime after the
+rebuild itself restores health or changes the monitor identity. A new forward
+effect still respects a current hold or changed authority. Observation and an
+inverse of the original route can proceed while preserving those changed
+records; publication's compare/write refuses to overwrite them. Such a refusal
+after effects began remains pending with its original intent and fences rather
+than becoming a terminal failure. Storage qualification
 runs before application execution. A resumed populated candidate uses its
 original custody and private proof instead of requiring empty storage again.
 Candidate reservations are rechecked before cutover, and unresolved predecessor
@@ -866,12 +890,34 @@ original workflow; unknown intents are observed without repeating it. A known
 terminal failed build or restore can be abandoned while retaining candidate
 custody and the old serving selection. Historical terminal receipts replay
 without fresh runtime resolution or provider credential reads.
+For private readiness, a received failed probe frame starts a persisted grace
+period using the target's deployment timeout. A failed probe after that period
+can report terminal failure only before any forward route dispatch and after
+fresh proof of the original terminal build/restore and retained private custody.
+The failed candidate remains retained, with its historic receipts intact; no
+container, volume or credential is removed. A lost connection, incomplete probe,
+running/unknown original job or permission denial cannot qualify that failure.
+The first failure timestamp cannot be reset to prolong the same operation.
 
 Route writes and retirement have separate original-effect fences within the
 lane operation. A lost reply is observed before continuation; an old or absent
 outcome does not permit a blind duplicate. A crashed queue worker resumes
 observation with the same operation and keys. Explicit provider permission
+failures are distinct from a fixed program's `route_write_not_started` receipt.
+That receipt completes the original forward child fence without a route effect;
+after verifying the old route, the rebuild reports failure and retains its copy.
+An interrupted worker reads that receipt without rechecking candidate readiness
+or starting another forward writer. For an inverse, the receipt proves only that
+the same original writer may be retried under its existing lease and guards.
+A lost frame or any failure after invoking the atomic writer proves no such
+exclusion and remains observation-only. Explicit provider permission
 failures remain authorization failures and are not retried as pending work.
+If effects have already begun, a denial holds the operation in
+`reconciliation_required`, preserving its denial code and lane exclusion without
+automatic worker replay. Generic cancellation cannot release a native rebuild
+with an outer dispatched effect or a child effect receipt. An unstarted request
+can still be cancelled; otherwise the original worker's observation/recovery
+path owns completion, not a caller assertion that the provider looks idle.
 Only after fresh public health and identity at the unchanged address and atomic
 canonical publication does retirement disable the predecessor's automatic
 deploys and call the existing [Compose stop API](https://docs.dokploy.com/docs/api/compose).
@@ -881,6 +927,10 @@ The host helper only reads custody and health. It shares the existing backing-pa
 inspection with copy/rehearsal code, including refusing bind aliases of testing
 volumes used by another project. A restarted process with the same runtime and
 data is still the same retained copy.
+If the original stop is proven never dispatched and rollback restores that copy,
+its recorded original automatic-deploy setting is restored through a separate
+effect fence after canonical publication. An unknown stop or an older intent
+without that original setting cannot silently qualify this recovery.
 
 The old copy does not need its passwords rotated or compared with production.
 The new private copy independently proves its testing-only generated credentials

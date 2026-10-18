@@ -13819,6 +13819,55 @@ class RealPostgresTestingPublicationTests(unittest.TestCase):
 
 
 class RealPostgresNativeTestingWorkerTests(unittest.TestCase):
+    def test_prewrite_failure_keeps_old_copy_and_is_terminal(self) -> None:
+        self.run_worker_case(
+            "test_route_writer_excluded_before_dispatch_fails_with_old_copy_serving"
+        )
+
+    def test_prewrite_exclusion_survives_interruption(self) -> None:
+        self.run_worker_case("test_completed_route_exclusion_resumes_without_private_readiness")
+
+    def test_inverse_retries_only_the_original_proven_unstarted_writer(self) -> None:
+        self.run_worker_case(
+            "test_inverse_prewrite_failure_retries_only_its_original_excluded_writer"
+        )
+
+    def test_private_failure_grace_and_original_jobs(self) -> None:
+        self.run_worker_case(
+            "test_terminal_private_probe_failure_is_bounded_and_keeps_old_copy_serving"
+        )
+
+    def test_inverse_restores_original_automatic_deploy_setting(self) -> None:
+        self.run_worker_case(
+            "test_rollback_restores_original_auto_deploy_after_excluding_unstarted_stop"
+        )
+
+    def test_pending_cutover_cannot_be_cancelled_and_original_observation_finishes(self) -> None:
+        self.run_worker_case(
+            "test_pending_native_effect_cannot_be_cancelled_and_original_observation_completes"
+        )
+
+    def test_post_effect_denial_holds_the_lane_without_another_attempt(self) -> None:
+        self.run_worker_case(
+            "test_post_effect_denial_keeps_the_lane_fenced_without_another_worker_attempt"
+        )
+
+    def test_interrupted_inverse_preserves_a_new_staff_hold(self) -> None:
+        self.run_worker_case(
+            "test_hold_after_interrupted_cutover_still_allows_original_inverse_on_resume"
+        )
+
+    def test_historical_use_completes_with_new_health_and_monitor_identity(self) -> None:
+        from tests.test_testing_rebuild_worker import NativeHistoricalUseTests
+
+        for name in unittest.defaultTestLoader.getTestCaseNames(NativeHistoricalUseTests):
+            with self.subTest(scenario=name), _head_postgres_database() as url:
+                fixture = NativeHistoricalUseTests(name)
+                fixture.database_url = url
+                result = unittest.TestResult()
+                fixture.run(result)
+                self.assertTrue(result.wasSuccessful(), (result.failures, result.errors))
+
     def test_delayed_route_writer_is_reconciled_before_private_health_failure(self) -> None:
         self.run_worker_case(
             "test_late_route_writer_cannot_be_overridden_while_its_original_outcome_is_unknown"

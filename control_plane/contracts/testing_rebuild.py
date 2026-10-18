@@ -11,6 +11,9 @@ from control_plane.contracts.prepared_public_site import FrozenRecord
 from control_plane.contracts.promotion_record import HealthcheckEvidence
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 
+REBUILD_SCOPE = "launchplane:testing-native-rebuild:v1"
+REBUILD_ROUTE = "worker:testing-native-rebuild"
+
 
 class TestingCopy(FrozenRecord):
     copy_id: str = Field(min_length=1)
@@ -134,8 +137,17 @@ class TestingRebuildRecord(FrozenRecord):
     publication_started: bool = False
     rollback_started: bool = False
     retirement_recovery: TestingCopyReadiness | None = None
-    error: Literal["", "candidate_public_health_failed", "candidate_preparation_failed"] = ""
+    error: Literal[
+        "",
+        "candidate_public_health_failed",
+        "candidate_preparation_failed",
+        "candidate_route_not_applied",
+        "candidate_private_readiness_failed",
+    ] = ""
     preparation_failure_evidence: str = Field(default="", exclude_if=lambda value: not value)
+    private_readiness_failed_at: datetime | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
     @model_validator(mode="after")
     def validate_checkpoint(self) -> Self:
@@ -149,15 +161,37 @@ class TestingRebuildRecord(FrozenRecord):
             != (self.plan.old.copy_id, self.plan.host, self.plan.old.runtime_identity)
         ):
             raise ValueError("Retirement recovery requires proof for this operation's old copy.")
-        for stamp in (self.began_at, self.updated_at, self.ended_at):
+        for stamp in (
+            self.began_at,
+            self.updated_at,
+            self.ended_at,
+            self.private_readiness_failed_at,
+        ):
             if stamp is not None and stamp.utcoffset() is None:
                 raise ValueError("Rebuild checkpoints require timezone-aware timestamps.")
         if self.updated_at < self.began_at or (
             self.ended_at is not None and not self.began_at <= self.ended_at <= self.updated_at
         ):
             raise ValueError("Rebuild checkpoint times are out of order.")
+        if (
+            self.private_readiness_failed_at is not None
+            and not self.began_at <= self.private_readiness_failed_at <= self.updated_at
+        ):
+            raise ValueError("The private probe failure must belong to this rebuild's lifetime.")
         preparation_failed = self.step == "failed" and self.error == "candidate_preparation_failed"
-        if bool(self.preparation_failure_evidence) != preparation_failed or (
+        private_failed = (
+            self.step == "failed" and self.error == "candidate_private_readiness_failed"
+        )
+        if private_failed and (
+            self.private_readiness_failed_at is None
+            or self.publication_started
+            or self.retirement_started
+            or self.rollback_started
+            or self.route is not None
+            and self.route.slot_id != self.plan.old.copy_id
+        ):
+            raise ValueError("Private readiness failure requires the original copy before cutover.")
+        if bool(self.preparation_failure_evidence) != (preparation_failed or private_failed) or (
             preparation_failed
             and any(
                 (
@@ -174,7 +208,7 @@ class TestingRebuildRecord(FrozenRecord):
                 "Preparation failure requires retained custody before any traffic effect."
             )
         if (
-            not preparation_failed
+            not (preparation_failed or private_failed)
             and self.step != "preparing"
             and (
                 self.preparation is None
@@ -184,7 +218,7 @@ class TestingRebuildRecord(FrozenRecord):
         ):
             raise ValueError("Rebuild progress requires its independent-copy receipt.")
         if (
-            not preparation_failed
+            not (preparation_failed or private_failed)
             and self.step not in {"preparing", "prepared"}
             and (
                 self.readiness is None

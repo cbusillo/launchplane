@@ -21,7 +21,7 @@ from control_plane.odoo_testing_restore import read_current_testing_generation
 from control_plane.testing_rebuild_service import (
     NativeTestingRebuildPending,
     execute_native_testing_rebuild,
-    native_testing_rebuild,
+    native_rebuild_effects_started,
 )
 
 from control_plane.contracts.odoo_stable_bootstrap import OdooStableBootstrapResult
@@ -2274,7 +2274,7 @@ def _execute_target_replacement_with_checkpoint(
         authorization_guard.authorize_execution()
         if _reconcile_deploy_is_held(record_store=record_store, operation=operation):
             raise _StaffTestingHoldError
-        if native_testing_rebuild(operation):
+        if operation.is_native_testing_rebuild:
             if not isinstance(record_store, PostgresRecordStore):
                 raise ValueError("Native testing rebuilds require the shared service record store.")
             result = execute_native_testing_rebuild(
@@ -2363,13 +2363,20 @@ def _execute_target_replacement_with_checkpoint(
             error,
         )
         finished_at = _utc_now_timestamp()
+        held_native_effects = (
+            operation.is_native_testing_rebuild
+            and isinstance(record_store, PostgresRecordStore)
+            and native_rebuild_effects_started(record_store, operation)
+        )
         terminal_operation = operation.model_copy(
             update={
-                "status": "fail",
-                "phase": "failed",
+                "status": "reconciliation_required" if held_native_effects else "fail",
+                "phase": operation.phase if held_native_effects else "failed",
                 "updated_at": finished_at,
-                "finished_at": finished_at,
-                "lease_owner": lease_owner,
+                "finished_at": "" if held_native_effects else finished_at,
+                "lease_owner": "" if held_native_effects else lease_owner,
+                "lease_expires_at": "" if held_native_effects else operation.lease_expires_at,
+                "heartbeat_at": "" if held_native_effects else operation.heartbeat_at,
                 "error_code": error.code,
                 "error_message": str(error),
             }
@@ -2379,7 +2386,7 @@ def _execute_target_replacement_with_checkpoint(
             isinstance(error, DrillPrerequisite)
             and error.code == "testing_storage_reconciliation_pending"
         )
-        rebuild_pending = native_testing_rebuild(operation) and isinstance(
+        rebuild_pending = operation.is_native_testing_rebuild and isinstance(
             error, (NativeTestingRebuildPending, TimeoutError)
         )
         if rebuild_pending:
@@ -2499,7 +2506,7 @@ def _retry_source_order_read(
     code: str = "lane_movement.source_order_unavailable",
     message: str = "Source history could not be read; retry before any provider write.",
 ) -> Any:
-    """Keep a no-effect source read refusal durable and available to the worker."""
+    """Keep source reads or the caller's fenced effect observation in the queue."""
     return operation.model_copy(
         update={
             "status": "pending",
