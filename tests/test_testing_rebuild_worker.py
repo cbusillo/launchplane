@@ -118,6 +118,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
             ),
             retained=self.retained,
             public_entrypoints=self.fixture.route.public_entrypoints,
+            old_auto_deploy=False,
         )
         routed = route_tests.TestingRouteTests()
         routed.setUp()
@@ -757,6 +758,41 @@ class NativeTestingWorkerTests(unittest.TestCase):
         with patch.object(api, "dokploy_request", side_effect=update):
             self.assertEqual(self.execute().deploy_status, "pass")
         self.assertEqual(self.effects, ["switch-new", "disable-old-auto-deploy", "stop-old"])
+
+    def test_rollback_restores_original_auto_deploy_after_excluding_unstarted_stop(self) -> None:
+        self.intent = self.intent.model_copy(update={"old_auto_deploy": True})
+        self.capture.return_value = self.intent
+        self.old_provider["autoDeploy"] = True
+        changes: list[bool] = []
+
+        def update(**kwargs: Any) -> dict[str, Any]:
+            self.assertEqual(kwargs["path"], "/api/compose.update")
+            enabled = kwargs["payload"]["autoDeploy"]
+            self.old_provider["autoDeploy"] = enabled
+            changes.append(enabled)
+            return dict(self.old_provider)
+
+        effect = service.NativeTestingRebuildExecution.run_effect
+
+        def before_stop(executor: Any, phase: str, *args: Any, **kwargs: Any) -> Any:
+            if phase == "retire-old":
+                raise TimeoutError("fixture ended before old stop dispatch")
+            return effect(executor, phase, *args, **kwargs)
+
+        with patch.object(api, "dokploy_request", side_effect=update):
+            with (
+                patch.object(service.NativeTestingRebuildExecution, "run_effect", before_stop),
+                self.assertRaises(TimeoutError),
+            ):
+                self.execute()
+            self.assertEqual(changes, [False])
+            self.fail_public = True
+            self.assertEqual(self.execute().deploy_status, "fail")
+        self.assertEqual(changes, [False, True])
+        self.assertTrue(self.old_provider["autoDeploy"])
+        self.assertEqual(self.current(), self.fixture.before)
+        self.assertEqual(self.effects, ["switch-new", "switch-old"])
+        self.assertFalse(self.retained["stopped"])
 
     def test_unknown_usage_does_not_require_a_down_lane_to_rebuild(self) -> None:
         with patch.object(

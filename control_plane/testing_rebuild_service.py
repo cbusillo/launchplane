@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from pydantic import Field
+
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.promotion_record import HealthcheckEvidence
 from control_plane.contracts.odoo_stable_target_replacement import (
@@ -125,6 +127,7 @@ class NativeTestingRebuildIntent(FrozenRecord):
     old: TestingCopy
     retained: dict[str, Any]
     public_entrypoints: tuple[str, ...]
+    old_auto_deploy: bool | None = Field(default=None, exclude_if=lambda value: value is None)
     recorded_template: dict[str, Any] | None = None
 
     @property
@@ -190,6 +193,8 @@ def capture_rebuild_intent(
         before.target.target_name,
     ) or not provider.get("appName"):
         raise ValueError("The actual testing target differs from its record.")
+    if type(provider.get("autoDeploy")) is not bool:
+        raise ValueError("The original testing automatic-deploy setting is unavailable.")
     server = require_registered_remote_server(provider.get("serverId"))
     project = str(provider["appName"])
     retained = retained_copy_operation(
@@ -269,6 +274,7 @@ def capture_rebuild_intent(
         ),
         retained=retained,
         public_entrypoints=points,
+        old_auto_deploy=provider["autoDeploy"],
         recorded_template=template,
     )
 
@@ -906,6 +912,59 @@ class NativeTestingRebuildExecution:
             now=datetime.now(UTC),
             observation=observation,
             inverse=desired == plan.old,
+        )
+        if desired == plan.old:
+            self.restore_old_auto_deploy(plan)
+
+    def restore_old_auto_deploy(self, plan: TestingRebuildPlan) -> None:
+        original_disable = self.store.read_idempotency_record(
+            scope=REBUILD_SCOPE,
+            route_path=REBUILD_ROUTE + ":effect",
+            idempotency_key=self.operation.operation_id + ":disable-old-auto-deploy",
+        )
+        if original_disable is None:
+            return
+        if (
+            original_disable.provider_target_key
+            != self.adapter.target_key() + ":disable-old-auto-deploy"
+            or original_disable.request_fingerprint
+            != canonical_json_sha256(
+                {"intent": self.intent.digest, "phase": "disable-old-auto-deploy"}
+            )
+        ):
+            raise ValueError("The original automatic-deploy effect has different custody.")
+        if (
+            original_disable.state == "completed"
+            and original_disable.response_payload.get("not_dispatched") is True
+        ):
+            return
+        if original_disable.state != "completed" or self.retirement_exclusion(plan) is None:
+            raise NativeTestingRebuildPending(
+                "Observe the original retirement before restoring deploys."
+            )
+        enabled = self.intent.old_auto_deploy
+        if enabled is None:
+            raise NativeTestingRebuildPending(
+                "The original automatic-deploy setting is unrecorded."
+            )
+
+        def restore(dispatch: Callable[[Callable[[], None]], None]) -> None:
+            def send() -> None:
+                api.dokploy_request(
+                    host=self.host,
+                    token=self.token,
+                    path="/api/compose.update",
+                    method="POST",
+                    payload={"composeId": self.intent.old.target_id, "autoDeploy": enabled},
+                )
+
+            dispatch(send)
+
+        self.run_effect(
+            "restore-old-auto-deploy",
+            lambda: self.old_provider().get("autoDeploy") is enabled,
+            restore,
+            recovery=True,
         )
 
     def retire_old(self, plan: TestingRebuildPlan) -> None:

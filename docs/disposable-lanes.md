@@ -919,6 +919,10 @@ The host helper only reads custody and health. It shares the existing backing-pa
 inspection with copy/rehearsal code, including refusing bind aliases of testing
 volumes used by another project. A restarted process with the same runtime and
 data is still the same retained copy.
+If the original stop is proven never dispatched and rollback restores that copy,
+its recorded original automatic-deploy setting is restored through a separate
+effect fence after canonical publication. An unknown stop or an older intent
+without that original setting cannot silently qualify this recovery.
 
 The old copy does not need its passwords rotated or compared with production.
 The new private copy independently proves its testing-only generated credentials
