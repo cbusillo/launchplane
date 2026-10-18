@@ -9,17 +9,18 @@
   },
   "scripts": {
     "build": "pnpm typecheck && vite build && node scripts/assert-production-fixtures.mjs",
-    "dev": "vite --host 127.0.0.1",
+    "dev": "pnpm generate:openapi-types && vite --host 127.0.0.1",
     "generate:agent-contract": "uv run launchplane service export-agent-contract --output ../contracts/agent-operator-contract.json",
     "generate:openapi": "uv run launchplane service export-openapi --output generated/openapi-canonical.json && node scripts/build-openapi-ui-schema.mjs && node scripts/generate-openapi-types.mjs && pnpm generate:agent-contract",
+    "generate:openapi-types": "node scripts/generate-openapi-types.mjs",
     "preview": "vite preview --host 127.0.0.1",
     "check:openapi-drift": "node scripts/check-openapi-drift.mjs",
     "test": "node --experimental-strip-types --import ./tests/register-typescript.mjs --test tests/*.test.mjs",
     "test:browser": "pnpm check:browser-timing && node scripts/prepare-browser-smoke.mjs && node --test tests/browser-support/*.test.mjs && node scripts/run-browser-smoke.mjs",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "pnpm generate:openapi-types && tsc --noEmit",
     "validate": "pnpm check:browser-timing && pnpm test && pnpm check:openapi-drift && pnpm build",
     "check:browser-timing": "node scripts/check-browser-timing.mjs && pnpm typecheck:browser-support",
-    "typecheck:browser-support": "tsc --project tsconfig.browser-support.json"
+    "typecheck:browser-support": "pnpm generate:openapi-types && tsc --project tsconfig.browser-support.json"
   },
   "dependencies": {
     "lucide-react": "1.54.0",

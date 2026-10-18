@@ -18,6 +18,7 @@ __pycache__
 **/*.pyd
 node_modules
 frontend/node_modules
+frontend/src/generated/openapi.ts
 control_plane/ui_static
 state
 tmp
