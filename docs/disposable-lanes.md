@@ -621,8 +621,15 @@ job IDs before the callback permits the trigger;
 continuation observes that one terminal job instead of triggering another.
 Private readiness then checks actual storage/network isolation, pinned installed
 images, runtime and copy identity, integration settings and the web-start gate,
-and authenticates with the testing-local credentials. Passwords and raw program
-output stay private to the provider transport.
+and verifies the testing-local credentials without signing in. The private HTTP
+health request bypasses proxy environment settings and refuses redirects. A
+read-only connection using the running web configuration checks the generated
+database password and the active local administrator's stored password hash;
+the running master password is also checked. Readiness never creates a session
+or login-history row, which would otherwise protect the new copy from its next
+rebuild. Passwords, hashes and raw program output stay private to the provider
+transport. This checks credential installation, not an interactive browser
+sign-in or Client acceptance.
 
 A terminal original build before restore dispatch, or a terminal restore, may
 be marked abandoned while keeping its candidate and custody records. A failed

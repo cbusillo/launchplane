@@ -3,25 +3,21 @@
 from control_plane._odoo_copy_runtime_guard import COPY_RUNTIME_INSPECTION_LIBRARY
 
 CANDIDATE_CONTAINER_PROBE = r"""
-import configparser, hashlib, hmac, json, os, sys
-from pathlib import Path
-from urllib.request import Request, build_opener, HTTPRedirectHandler
+import configparser, hmac, json, os, sys
+from urllib.request import Request, build_opener, HTTPRedirectHandler, ProxyHandler
 from urllib.parse import urlsplit
 spec = json.load(sys.stdin)
 class NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs):
         return None
-opener = build_opener(NoRedirect())
+opener = build_opener(ProxyHandler({}), NoRedirect())
 port = spec['http_port']
 if type(port) is not int or not 1 <= port <= 65535:
     raise RuntimeError('Candidate HTTP port is invalid')
 base = 'http://127.0.0.1:' + str(port)
 headers = {'Host': urlsplit(spec['base_url']).netloc}
-def request(path, data=None):
-    values = dict(headers)
-    if data is not None:
-        values['Content-Type'] = 'application/json'
-    with opener.open(Request(base + path, data=None if data is None else json.dumps(data).encode(), headers=values), timeout=15) as response:
+def request(path):
+    with opener.open(Request(base + path, headers=headers), timeout=15) as response:
         if response.status != 200:
             raise RuntimeError('Candidate HTTP readiness failed')
         return json.load(response)
@@ -34,17 +30,44 @@ if not isinstance(actual, dict):
 actual.pop('deployed_at', None)
 if actual != spec['runtime_identity']:
     raise RuntimeError('Candidate HTTP identity differs')
-result = request('/web/session/authenticate', {'jsonrpc':'2.0','method':'call','params':{'db':os.environ['ODOO_DB_NAME'],'login':os.environ['ODOO_ADMIN_LOGIN'],'password':os.environ['ODOO_ADMIN_PASSWORD']}})
-if not isinstance(result.get('result'), dict) or not result['result'].get('uid'):
-    raise RuntimeError('Candidate local login failed')
 config = configparser.ConfigParser(interpolation=None)
 if config.read(spec['web_config']) != [spec['web_config']]:
     raise RuntimeError('Candidate running config is unavailable')
-stored = config.get('options', 'admin_passwd')
+options = config['options']
+if (options.get('db_host') != 'database'
+        or options.get('db_name') != os.environ['ODOO_DB_NAME']
+        or options.get('db_user') != os.environ['ODOO_DB_USER']
+        or not hmac.compare_digest(options.get('db_password', ''), os.environ['ODOO_DB_PASSWORD'])):
+    raise RuntimeError('Candidate local database credential differs')
+# Never authenticate a web session here: a readiness login would manufacture
+# the sessions and login history that protect a lane from its next rebuild.
+import psycopg2
+from passlib.context import CryptContext
+context = CryptContext(schemes=['pbkdf2_sha512'])
+connection = psycopg2.connect(
+    host='database', port=options.get('db_port') or '5432',
+    dbname=options['db_name'], user=options['db_user'], password=options['db_password'],
+    connect_timeout=5,
+    options='-c default_transaction_read_only=on -c statement_timeout=10000',
+)
+try:
+    with connection.cursor() as cursor:
+        cursor.execute('SET TRANSACTION READ ONLY')
+        cursor.execute('SELECT password FROM res_users WHERE login = %s AND active',
+                       (os.environ['ODOO_ADMIN_LOGIN'],))
+        rows = cursor.fetchall()
+        if (len(rows) != 1 or not rows[0][0]
+                or not context.verify(os.environ['ODOO_ADMIN_PASSWORD'], rows[0][0])):
+            raise RuntimeError('Candidate local admin credential differs')
+finally:
+    try:
+        connection.rollback()
+    finally:
+        connection.close()
+stored = options['admin_passwd']
 password = os.environ['ODOO_MASTER_PASSWORD']
 if stored.startswith('$'):
-    from passlib.context import CryptContext
-    valid = CryptContext(schemes=['pbkdf2_sha512']).verify(password, stored)
+    valid = context.verify(password, stored)
 else:
     valid = hmac.compare_digest(password, stored)
 if not valid:
