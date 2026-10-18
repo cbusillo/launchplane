@@ -7,6 +7,7 @@ from control_plane.contracts.product_profile_record import (
     ProductLaneHealthMonitoringPolicy,
     ProductLaneProfile,
 )
+from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
 from control_plane.ingress_route_scope import (
     IngressRouteInstanceScopeError,
     validate_ingress_route_instance_scope,
@@ -55,6 +56,52 @@ def _profile(*, shared_prod_domain: bool = False) -> LaunchplaneProductProfileRe
 
 
 class IngressRouteInstanceScopeTests(unittest.TestCase):
+    def test_private_testing_scope_requires_its_active_endpoint_and_access_list(self) -> None:
+        profile = _profile()
+        profile = profile.model_copy(
+            update={
+                "lanes": (
+                    ProductLaneProfile(context="example", instance="testing"),
+                    profile.lanes[1],
+                )
+            }
+        )
+        endpoint = PrivateHealthEndpointRecord(
+            endpoint_key="testing-bridge",
+            product=profile.product,
+            context="example",
+            instance="testing",
+            url="https://private-testing.example.test/health",
+            updated_at=profile.updated_at,
+        )
+
+        def validate(
+            *, private_endpoints: tuple[PrivateHealthEndpointRecord, ...], access_list_id: int = 0
+        ) -> None:
+            validate_ingress_route_instance_scope(
+                profile=profile,
+                context="example",
+                instance="testing",
+                requested_domains=("private-testing.example.test",),
+                private_endpoints=private_endpoints,
+                access_list_id=access_list_id,
+            )
+
+        validate(private_endpoints=(endpoint,), access_list_id=1)
+        for update in ({"status": "disabled"}, {"product": "other"}, {"instance": "prod"}):
+            with self.subTest(update=update), self.assertRaises(IngressRouteInstanceScopeError):
+                validate(
+                    private_endpoints=(endpoint.model_copy(update=update),),
+                    access_list_id=1,
+                )
+        with self.assertRaises(IngressRouteInstanceScopeError):
+            validate(private_endpoints=(endpoint,))
+        with self.assertRaises(IngressRouteInstanceScopeError):
+            validate(
+                private_endpoints=(endpoint, endpoint.model_copy(update={"product": "other"})),
+                access_list_id=1,
+            )
+
     def test_accepts_domains_owned_by_exact_lane(self) -> None:
         validate_ingress_route_instance_scope(
             profile=_profile(),
@@ -62,6 +109,33 @@ class IngressRouteInstanceScopeTests(unittest.TestCase):
             instance="testing",
             requested_domains=("app-testing.example.test",),
         )
+
+    def test_private_endpoint_on_another_port_does_not_break_public_scope(self) -> None:
+        profile = _profile()
+        endpoint = PrivateHealthEndpointRecord(
+            endpoint_key="testing-alternate-port",
+            product=profile.product,
+            context="example",
+            instance="testing",
+            url="https://private-testing.example.test:8443/health",
+            updated_at=profile.updated_at,
+        )
+        validate_ingress_route_instance_scope(
+            profile=profile,
+            context="example",
+            instance="testing",
+            requested_domains=("app-testing.example.test",),
+            private_endpoints=(endpoint,),
+        )
+        with self.assertRaises(IngressRouteInstanceScopeError):
+            validate_ingress_route_instance_scope(
+                profile=profile,
+                context="example",
+                instance="testing",
+                requested_domains=("private-testing.example.test",),
+                private_endpoints=(endpoint,),
+                access_list_id=1,
+            )
 
     def test_rejects_missing_lane(self) -> None:
         with self.assertRaisesRegex(
