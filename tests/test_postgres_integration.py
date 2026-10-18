@@ -1769,6 +1769,398 @@ class RealPostgresNoTargetRetirementTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RealPostgresSchemaIntegrationTests(unittest.TestCase):
+    def test_profile_cas_and_final_allocation_publication_serialize_in_both_orders(self) -> None:
+        from contextlib import nullcontext
+
+        from control_plane.application_state_volume_retention import require_state_volume_owner
+        from control_plane.contracts.idempotency_record import (
+            format_launchplane_mutation_timestamp,
+            parse_launchplane_mutation_timestamp,
+        )
+        from control_plane.storage.product_authority_bundle import (
+            ProductAuthorityBundle,
+            ProviderTargetWrite,
+        )
+
+        for mutation_mode in ("ordinary", "new", "retry"):
+            for profile_wins in (True, False):
+                with (
+                    self.subTest(mutation_mode=mutation_mode, profile_wins=profile_wins),
+                    _store_for_fresh_head_database() as store,
+                ):
+                    profile = _product_profile().model_copy(
+                        update={
+                            "lanes": (ProductLaneProfile(context="allocation", instance="testing"),)
+                        }
+                    )
+                    store.write_product_profile_record(profile)
+                    replacement = profile.model_copy(update={"lanes": ()})
+                    writer = PostgresRecordStore(database_url=store.database_url)
+                    self.addCleanup(writer.close)
+                    reservation = store.reserve_mutation(
+                        scope="allocation-publication",
+                        route_path="/allocation",
+                        idempotency_key="original-key",
+                        request_fingerprint="saved-plan",
+                        lease_owner="allocation-worker",
+                    ).record
+                    assert reservation is not None
+                    mutation = (
+                        _db_only_mutation(
+                            lease_owner="profile-worker",
+                            idempotency_key="profile-change",
+                            response_trace_id="profile-change",
+                        )
+                        if mutation_mode != "ordinary"
+                        else None
+                    )
+                    retry_clock = None
+                    if mutation_mode == "retry":
+                        assert mutation is not None
+                        previous = writer.reserve_mutation(
+                            scope=mutation.scope,
+                            route_path=mutation.route_path,
+                            idempotency_key=mutation.idempotency_key,
+                            request_fingerprint=mutation.request_fingerprint,
+                            lease_owner="previous-worker",
+                        ).record
+                        assert previous is not None
+                        retry_clock = format_launchplane_mutation_timestamp(
+                            parse_launchplane_mutation_timestamp(
+                                previous.lease_expires_at, field_name="lease_expires_at"
+                            )
+                            + timedelta(seconds=1)
+                        )
+                    target = DokployTargetRecord(
+                        context="allocation",
+                        instance="testing",
+                        target_type="application",
+                        updated_at=profile.updated_at,
+                    )
+                    identity = DokployTargetIdRecord(
+                        context=target.context,
+                        instance=target.instance,
+                        target_id="fresh-allocation",
+                        updated_at=target.updated_at,
+                    )
+                    bundle = ProductAuthorityBundle(
+                        dokploy_targets=(target,),
+                        dokploy_target_ids=(identity,),
+                        provider_target_writes=(
+                            ProviderTargetWrite(
+                                record=ProviderTargetRecord.from_dokploy_records(
+                                    target_record=target, target_id_record=identity
+                                ),
+                                expected_absent=True,
+                            ),
+                        ),
+                    )
+                    locked = threading.Event()
+                    attempted = threading.Event()
+                    release = threading.Event()
+                    loser_pid: list[int] = []
+
+                    def lock_writer(original: Any, winner: bool, session: Any) -> None:
+                        if not winner:
+                            loser_pid.append(session.scalar(text("SELECT pg_backend_pid()")))
+                            attempted.set()
+                        original(session)
+                        if winner:
+                            locked.set()
+                            if not release.wait(10):
+                                raise TimeoutError("Allocation authority writer was not released.")
+
+                    def checkpoint() -> None:
+                        require_state_volume_owner(
+                            store, product=profile.product, context=target.context
+                        )
+                        if store.read_product_profile_record(profile.product) != profile:
+                            raise ValueError("The saved allocation profile changed.")
+
+                    def publish() -> bool:
+                        try:
+                            with store.provider_evidence_guard(
+                                lambda: reservation, authority_checkpoint=checkpoint
+                            ):
+                                store.write_product_authority_bundle(bundle)
+                        except ValueError:
+                            return False
+                        return True
+
+                    def change_profile() -> str:
+                        with (
+                            patch.object(
+                                writer, "_database_mutation_timestamp", return_value=retry_clock
+                            )
+                            if retry_clock is not None
+                            else nullcontext()
+                        ):
+                            return writer.compare_and_write_product_profile_record(
+                                expected_record=profile,
+                                replacement_record=replacement,
+                                mutation=mutation,
+                            ).status
+
+                    publication_lock = store._lock_product_authority_bundle_write
+                    profile_lock = writer._lock_product_authority_bundle_write
+                    profile_acquisitions = 0
+
+                    def lock_profile(session: Any) -> None:
+                        nonlocal profile_acquisitions
+                        profile_acquisitions += 1
+                        if profile_wins and mutation_mode == "retry" and profile_acquisitions == 1:
+                            # The duplicate reservation insert rolls this first
+                            # transaction back; pause the actual reclaim instead.
+                            profile_lock(session)
+                            return
+                        lock_writer(profile_lock, profile_wins, session)
+
+                    with (
+                        patch.object(
+                            store,
+                            "_lock_product_authority_bundle_write",
+                            side_effect=lambda session: lock_writer(
+                                publication_lock, not profile_wins, session
+                            ),
+                        ),
+                        patch.object(
+                            writer,
+                            "_lock_product_authority_bundle_write",
+                            side_effect=lock_profile,
+                        ),
+                        ThreadPoolExecutor(max_workers=2) as workers,
+                    ):
+                        first = workers.submit(change_profile if profile_wins else publish)
+                        try:
+                            self.assertTrue(locked.wait(5))
+                            second = workers.submit(publish if profile_wins else change_profile)
+                            self.assertTrue(attempted.wait(5))
+                            deadline = time.monotonic() + 5
+                            blocked = False
+                            while not second.done() and time.monotonic() < deadline:
+                                with store._engine.connect() as observer:
+                                    blocked = bool(
+                                        observer.scalar(
+                                            text("SELECT cardinality(pg_blocking_pids(:pid)) > 0"),
+                                            {"pid": loser_pid[0]},
+                                        )
+                                    )
+                                if blocked:
+                                    break
+                                time.sleep(0.01)
+                            self.assertTrue(
+                                blocked, "The competing writer never waited in PostgreSQL"
+                            )
+                        finally:
+                            release.set()
+                        profile_result, published = (
+                            (first.result(timeout=10), second.result(timeout=10))
+                            if profile_wins
+                            else (second.result(timeout=10), first.result(timeout=10))
+                        )
+                    self.assertEqual(profile_result, "written")
+                    self.assertEqual(published, not profile_wins)
+                    self.assertEqual(
+                        store.read_product_profile_record(profile.product), replacement
+                    )
+                    if profile_wins:
+                        with self.assertRaises(FileNotFoundError):
+                            store.read_provider_target_record(
+                                context_name=target.context, instance_name=target.instance
+                            )
+                    else:
+                        self.assertEqual(
+                            store.read_provider_target_record(
+                                context_name=target.context, instance_name=target.instance
+                            ).target_id,
+                            identity.target_id,
+                        )
+
+    def test_state_volume_retention_and_guarded_adoption_serialize_in_both_orders(self) -> None:
+        from control_plane.application_state_volume_retention import (
+            require_state_volume_retention_eligibility,
+            state_volume_plan_is_retained,
+        )
+        from control_plane.storage.product_authority_bundle import (
+            ProductAuthorityBundle,
+            ProviderTargetWrite,
+        )
+        from tests.test_application_state_volume_retention import (
+            ApplicationStateVolumeRetentionTests,
+        )
+
+        for retention_wins in (True, False):
+            with (
+                self.subTest(retention_wins=retention_wins),
+                _head_postgres_database() as database_url,
+            ):
+
+                class RetentionFixture(ApplicationStateVolumeRetentionTests):
+                    def database_url(self) -> str:
+                        return database_url
+
+                fixture = RetentionFixture()
+                try:
+                    fixture.setUp()
+                    fixture.store.write_product_profile_record(
+                        _product_profile().model_copy(
+                            update={
+                                "product": fixture.intent["product"],
+                                "lanes": (
+                                    ProductLaneProfile(
+                                        context=fixture.intent["request"]["context"],
+                                        instance="testing",
+                                    ),
+                                ),
+                            }
+                        )
+                    )
+                    known_application_id = "allocation-app"
+                    checkpointed = fixture.store.checkpoint_mutation_provider_effect(
+                        reservation=fixture.reservation,
+                        effect_phase=json.dumps({"application": known_application_id}),
+                    ).record
+                    assert checkpointed is not None
+                    fixture.reservation = checkpointed
+                    fixture.save_progress()
+                    from control_plane.application_state_volume_retention import (
+                        state_volume_custody_sha256,
+                    )
+
+                    fixture.digest = state_volume_custody_sha256(fixture.store, fixture.reservation)
+                    adoption_store = PostgresRecordStore(database_url=database_url)
+                    fixture.addCleanup(adoption_store.close)
+                    target = DokployTargetRecord(
+                        context=fixture.intent["request"]["context"],
+                        instance="testing",
+                        target_type="application",
+                        target_name=fixture.intent["target_marker"],
+                        source_type="raw",
+                        updated_at=fixture.reservation.updated_at,
+                        source_label="test:state-volume-adoption",
+                    )
+                    target_id = DokployTargetIdRecord(
+                        context=target.context,
+                        instance=target.instance,
+                        target_id=known_application_id,
+                        updated_at=target.updated_at,
+                        source_label=target.source_label,
+                    )
+                    bundle = ProductAuthorityBundle(
+                        dokploy_targets=(target,),
+                        dokploy_target_ids=(target_id,),
+                        provider_target_writes=(
+                            ProviderTargetWrite(
+                                record=ProviderTargetRecord.from_dokploy_records(
+                                    target_record=target, target_id_record=target_id
+                                ),
+                                expected_absent=True,
+                            ),
+                        ),
+                    )
+                    winner_locked = threading.Event()
+                    loser_attempted = threading.Event()
+                    release_winner = threading.Event()
+                    retention_lock = fixture.store._lock_product_authority_bundle_write
+                    adoption_lock = adoption_store._lock_product_authority_bundle_write
+
+                    def hold_winner() -> None:
+                        winner_locked.set()
+                        if not release_winner.wait(timeout=10):
+                            raise TimeoutError("Timed out releasing state-volume authority writer.")
+
+                    def retention_authority_lock(session: Any) -> None:
+                        if not retention_wins:
+                            loser_attempted.set()
+                        retention_lock(session)
+                        if retention_wins:
+                            hold_winner()
+
+                    def adoption_authority_lock(session: Any) -> None:
+                        if retention_wins:
+                            loser_attempted.set()
+                        adoption_lock(session)
+                        if not retention_wins:
+                            hold_winner()
+
+                    def require_original_allocation_unbound() -> None:
+                        require_state_volume_retention_eligibility(
+                            fixture.store,
+                            product=fixture.intent["product"],
+                            context=target.context,
+                            application_id=known_application_id,
+                        )
+
+                    def retain() -> bool:
+                        with fixture.expired():
+                            try:
+                                fixture.retain(checkpoint=require_original_allocation_unbound)
+                            except ValueError:
+                                return False
+                        return True
+
+                    def adopt() -> bool:
+                        try:
+                            with adoption_store.provider_evidence_guard(
+                                lambda: fixture.reservation
+                            ):
+                                adoption_store.write_product_authority_bundle(bundle)
+                        except ValueError:
+                            return False
+                        return True
+
+                    with (
+                        patch.object(
+                            fixture.store,
+                            "_lock_product_authority_bundle_write",
+                            side_effect=retention_authority_lock,
+                        ),
+                        patch.object(
+                            adoption_store,
+                            "_lock_product_authority_bundle_write",
+                            side_effect=adoption_authority_lock,
+                        ),
+                        ThreadPoolExecutor(max_workers=2) as executor,
+                    ):
+                        winner = executor.submit(retain if retention_wins else adopt)
+                        try:
+                            self.assertTrue(winner_locked.wait(timeout=10))
+                            loser = executor.submit(adopt if retention_wins else retain)
+                            self.assertTrue(loser_attempted.wait(timeout=10))
+                        finally:
+                            release_winner.set()
+                        self.assertTrue(winner.result(timeout=10))
+                        self.assertFalse(loser.result(timeout=10))
+                    if retention_wins:
+                        self.assertEqual(fixture.read().state, "completed")
+                        self.assertTrue(
+                            state_volume_plan_is_retained(
+                                fixture.store, fixture.scope, fixture.intent["plan_id"]
+                            )
+                        )
+                        for read in (
+                            fixture.store.read_dokploy_target_record,
+                            fixture.store.read_dokploy_target_id_record,
+                            fixture.store.read_provider_target_record,
+                        ):
+                            with self.assertRaises(FileNotFoundError):
+                                read(context_name=target.context, instance_name=target.instance)
+                    else:
+                        self.assertEqual(fixture.read(), fixture.reservation)
+                        self.assertFalse(
+                            state_volume_plan_is_retained(
+                                fixture.store, fixture.scope, fixture.intent["plan_id"]
+                            )
+                        )
+                        self.assertEqual(
+                            fixture.store.read_dokploy_target_id_record(
+                                context_name=target.context, instance_name=target.instance
+                            ).target_id,
+                            target_id.target_id,
+                        )
+                finally:
+                    fixture.doCleanups()
+
     def test_notification_policy_id_cannot_be_claimed_by_two_scopes(self) -> None:
         from control_plane.contracts.public_ingress_monitoring import (
             NotificationPolicyScopeConflict,

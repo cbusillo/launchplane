@@ -249,6 +249,14 @@ different, partial or missing target refuses. The replaced provider resource is
 left in place for a supported retirement. Image delivery and runtime settings
 then follow the ordinary event-driven testing deploy.
 
+The optional `state_volume_path` uses that same first-testing application
+boundary. It accepts only a new service-named volume on the new application,
+never a selected existing volume, mount, host path or production target. A saved
+service plan binds the caller, target intent, placement and current lane
+authority. Durable original-key execution retains partial effects and blocks
+duplicate creates; readback is observational. See the
+[storage request and recovery contract](dokploy-service-deployments.md#testing-application-state-volume).
+
 Other agent identities retain their scoped policy rules. No grant or credential
 is installed, and general setup, production, backup and promotion authority do
 not change.

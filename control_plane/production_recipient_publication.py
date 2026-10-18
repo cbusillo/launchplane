@@ -17,10 +17,7 @@ from control_plane.contracts.production_backup_authority import ProductionBackup
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
-from control_plane.contracts.idempotency_record import (
-    LaunchplaneIdempotencyRecord,
-    parse_launchplane_mutation_timestamp,
-)
+from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.integration_allowances import canonical_sha256
@@ -421,40 +418,7 @@ def require_publication_lease(
 ) -> None:
     if expected is None:
         return
-    row = session.scalar(
-        store._idempotency_statement(
-            scope=expected.scope,
-            route_path=expected.route_path,
-            idempotency_key=expected.idempotency_key,
-            for_update=True,
-        )
-    )
-    current = LaunchplaneIdempotencyRecord.model_validate(row.payload) if row is not None else None
-    if (
-        current is None
-        or current.state != "running"
-        or any(
-            getattr(current, key) != getattr(expected, key)
-            for key in (
-                "record_id",
-                "scope",
-                "route_path",
-                "idempotency_key",
-                "request_fingerprint",
-                "lease_owner",
-                "attempt",
-                "provider_target_key",
-                "reconciliation_key",
-            )
-        )
-        or parse_launchplane_mutation_timestamp(
-            current.lease_expires_at, field_name="lease_expires_at"
-        )
-        <= parse_launchplane_mutation_timestamp(
-            store._database_mutation_timestamp(session), field_name="observed_at"
-        )
-    ):
-        raise ValueError("The publication worker no longer owns its execution lease.")
+    store.require_current_provider_execution(session, expected)
 
 
 def republication_snapshot(
