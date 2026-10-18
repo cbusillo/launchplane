@@ -13702,6 +13702,15 @@ class RealPostgresOdooUpgradeRehearsalTests(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get(POSTGRES_TEST_URL_ENV), "PostgreSQL integration URL required")
 class RealPostgresTestingCandidateTests(unittest.TestCase):
+    def test_candidate_capture_rechecks_aliases_before_storage_dispatch(self) -> None:
+        from tests.test_testing_candidate_allocation import TestingCandidateTests
+
+        fixture = TestingCandidateTests()
+        fixture.database_url = self.enterContext(_head_postgres_database())
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.test_alias_added_after_capture_refuses_the_next_provider_checkpoint()
+
     def test_candidate_capture_also_fences_legacy_lane_aliases(self) -> None:
         from tests.test_testing_candidate_allocation import TestingCandidateTests
 

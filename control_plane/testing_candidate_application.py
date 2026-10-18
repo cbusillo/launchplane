@@ -322,11 +322,6 @@ def prepare_candidate_application(
             checkpoint()
             if phase in {"post_deploy_target_update", "post_deploy_deploy_trigger"}:
                 raise ValueError("Candidate runtime inputs must be complete before deployment.")
-            if (
-                record.application is not None
-                and record.application.restore_workflow_started is not True
-            ):
-                save(restore_workflow_started=True)
             if phase == post_deploy.ODOO_POST_DEPLOY_SCHEDULE_TRIGGER:
                 target_payload = payload()
                 schedule_type, lookup_id, _, _ = post_deploy._resolve_dokploy_schedule_runtime(
@@ -347,13 +342,19 @@ def prepare_candidate_application(
                 schedule_id = api.schedule_key(schedule) if schedule is not None else ""
                 if not schedule_id or post_deploy._has_running_schedule_deployment(schedule):
                     raise ValueError("Candidate restore schedule is unavailable or already active.")
+                # The provider cannot trigger until this callback returns.
+                # Complete every refusing check, including the effect lease,
+                # before one CAS records the original dispatch receipt.
+                lease.checkpoint_effect(phase)
                 save(
+                    restore_workflow_started=True,
                     restore_schedule_id=schedule_id,
                     restore_previous_deployments=tuple(
                         api.deployment_key(item)
                         for item in post_deploy._schedule_deployments(schedule)
                     ),
                 )
+                return
             lease.checkpoint_effect(phase)
 
         def native(spec: dict[str, object], server_id: str) -> dict[str, object]:
@@ -446,7 +447,15 @@ def candidate_restore_terminal(
 
 def candidate_build_terminal(*, host: str, token: str, record: TestingCandidateAllocation) -> str:
     app = record.application
-    if app is None or app.restore_schedule_id or app.phase != "deploying":
+    if (
+        app is None
+        or app.restore_schedule_id
+        or not (
+            app.phase == "deploying"
+            or app.phase == "restoring"
+            and app.restore_workflow_started is False
+        )
+    ):
         raise ValueError("Build abandonment requires the original pre-restore deployment intent.")
     deployments = api.list_deployments_for_target(
         host=host,
@@ -504,6 +513,9 @@ def abandon_candidate_application(
     evidence = (
         candidate_build_terminal(host=host, token=token, record=record)
         if app.phase == "deploying"
+        or app.phase == "restoring"
+        and app.restore_workflow_started is False
+        and not app.restore_schedule_id
         else candidate_restore_terminal(
             host=host, token=token, record=record, require_success=False
         )

@@ -639,7 +639,12 @@ The rebuild candidate allocator keeps custody in
 bound to the original operation, intent and serving target. This record is
 separate from the lane's current generation. Allocation creates a private
 project/environment/compose and independent local volumes without changing
-the lane profile, target records, runtime values, inventory or public address.
+the lane profile, canonical target records, runtime values, serving inventory or
+public address. It does create a physical provider-target reservation under the
+candidate namespace. Audit and backfill recognize that reservation only while its
+identity matches durable candidate custody, using the same rule for rehearsal
+reservations. They neither invent a serving target pair nor block unrelated
+backfill for a valid reservation; an orphan or mismatched reservation stays blocked.
 The target is reserved in the existing physical provider registry in the same
 transaction as its candidate custody; another lane cannot adopt it.
 Compatibility target-ID records are also fenced, both at capture and before
@@ -691,16 +696,25 @@ Before each provider effect the caller rechecks its exclusive operation lease,
 authority, holds, usage and physical custody. Configuration and deployment
 intent are persisted first. A continuation only accepts the exact configuration
 or the uniquely titled original deployment. An absent or ambiguous effect stays
-unknown. Restore dispatch records the original schedule and prior job IDs;
+unknown. Disabled schedule setup and native artifact preparation do not attest
+restore dispatch. Native preparation reuses its existing immutable capture and
+receiver-chunk readback. After all checks and the provider-effect lease succeed,
+one compare/write records restore dispatch with the original schedule and prior
+job IDs before the callback permits the trigger;
 continuation observes that one terminal job instead of triggering another.
 Private readiness then checks actual storage/network isolation, pinned installed
 images, runtime and copy identity, integration settings and the web-start gate,
 and authenticates with the testing-local credentials. Passwords and raw program
 output stay private to the provider transport.
 
-A failed terminal restore may be marked abandoned while keeping its candidate
-and custody records. This action does not stop or remove either copy. Running,
-absent and ambiguous provider jobs cannot be abandoned or redispatched. The
+A terminal original build before restore dispatch, or a terminal restore, may
+be marked abandoned while keeping its candidate and custody records. A failed
+setup with explicit undispatched evidence can therefore resume its original
+setup or retain the private copy without starting a job. This action does not
+stop or remove either copy. Once restore dispatch started, running, absent and
+ambiguous provider jobs cannot be abandoned or redispatched. Older records
+without dispatch evidence remain unknown; they cannot be reset to undispatched.
+The
 service worker must preserve their original-key recovery path. A prepared copy
 is still private: stable-route switching, atomic serving publication, old-copy
 retirement and the service/UI action are separate stages under #3963. This

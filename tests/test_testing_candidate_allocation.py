@@ -13,6 +13,8 @@ from control_plane.contracts.testing_candidate import (
 )
 from control_plane.dokploy import api, source, sandbox_placement
 from control_plane.provider_operations import ProviderOperationLease
+from control_plane.workflows.provider_target_audit import audit_provider_targets
+from control_plane.workflows.provider_target_backfill import backfill_provider_targets
 from control_plane import testing_candidate_allocation as candidate
 from control_plane.workflows.dokploy_target_adoption import (
     PROJECT_CREATE_PATH,
@@ -155,6 +157,46 @@ class TestingCandidateTests(unittest.TestCase):
                 )
             )
 
+    def test_custodied_candidate_is_a_complete_reservation_not_a_missing_serving_pair(self) -> None:
+        allocation = self.prepare()
+        audit = audit_provider_targets(self.store, context_name=allocation.namespace)
+        self.assertTrue(audit.ok)
+        self.assertTrue(all(item.severity == "ok" for item in audit.findings))
+        before = self.store.list_physical_provider_target_records()
+        backfill = backfill_provider_targets(
+            self.store, apply=True, context_name=allocation.namespace
+        )
+        self.assertTrue(backfill.ok)
+        self.assertEqual(self.store.list_physical_provider_target_records(), before)
+        self.assert_serving_unchanged()
+
+    def test_candidate_reservation_does_not_block_unrelated_backfill_apply(self) -> None:
+        from tests.test_provider_target_backfill import (
+            _dokploy_target_record,
+            _dokploy_target_id_record,
+        )
+
+        self.prepare()
+        self.store.write_dokploy_target_record(_dokploy_target_record(context="unrelated"))
+        self.store.write_dokploy_target_id_record(_dokploy_target_id_record(context="unrelated"))
+        result = backfill_provider_targets(self.store, apply=True)
+        self.assertTrue(result.ok)
+        self.assertIsNotNone(
+            self.store.read_provider_target_record(context_name="unrelated", instance_name="prod")
+        )
+        self.assert_serving_unchanged()
+
+    def test_orphaned_candidate_reservation_keeps_audit_and_backfill_blocked(self) -> None:
+        allocation = self.prepare()
+        row = self.store.read_provider_target_record(
+            context_name=allocation.namespace, instance_name="testing-candidate"
+        )
+        self.store.write_provider_target_record(row.model_copy(update={"target_id": "orphan"}))
+        self.assertFalse(audit_provider_targets(self.store, context_name=allocation.namespace).ok)
+        self.assertFalse(
+            backfill_provider_targets(self.store, apply=True, context_name=allocation.namespace).ok
+        )
+
     def test_lost_creation_reply_preserves_old_copy_and_never_repeats_effect(self) -> None:
         def lost(**kwargs: object) -> dict[str, str]:
             response = self.provider(**kwargs)
@@ -274,7 +316,7 @@ class TestingCandidateTests(unittest.TestCase):
         self.assert_serving_unchanged()
 
     def test_alias_added_after_capture_refuses_the_next_provider_checkpoint(self) -> None:
-        def readback(**kwargs: object) -> dict[str, str]:
+        def prepare_storage(**kwargs: object) -> dict[str, str]:
             self.store.write_dokploy_target_id_record(
                 DokployTargetIdRecord(
                     context="foreign-context",
@@ -288,7 +330,7 @@ class TestingCandidateTests(unittest.TestCase):
             checkpoint()
             self.fail("An aliased candidate cannot dispatch storage work.")
 
-        self.storage.side_effect = readback
+        self.storage.side_effect = prepare_storage
         with self.assertRaises(ValueError):
             self.prepare()
         record = self.store.read_testing_candidate(self.allocation.namespace)
