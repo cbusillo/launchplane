@@ -1368,9 +1368,11 @@ or identity. The scheduler records `authorization_denied` against the original
 admission revision, with no queued operation, so an unchanged poll cannot repeat
 that denied read. A failed physical/copy inspection supplies no resource proof.
 The fixed host program reports actual Docker-daemon authority refusals as denied
-in all inspection modes. A command failing inside the container, including a
-local file permission or database-password failure, remains a failed operation;
-it does not claim that the provider denied its identity.
+in its inspection modes; this does not describe storage maintenance's per-copy
+deferral handling. A command failing inside the container, including a local file
+permission or database-password failure, remains a non-denial: a failed operation,
+or UNKNOWN occupancy for the login-history read after resource checks pass. It
+does not claim that the provider denied its identity.
 This also applies when Launchplane's own stop or stalled operation caused the
 downtime: excluding that cause would recreate a repair deadlock. The original
 database is retained and the already-opened new-copy gate below still protects
