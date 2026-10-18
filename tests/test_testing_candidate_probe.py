@@ -110,14 +110,16 @@ class CandidateHostProbeTests(unittest.TestCase):
         with patch("subprocess.run", side_effect=self.command):
             return cast(dict[str, object], self.program(self.spec))
 
-    def failure_frame(self) -> dict[str, object]:
+    def failure_frame(self, side_effect: object | None = None) -> dict[str, object]:
         import sys
 
         output = io.StringIO()
         encoded = base64.b64encode(json.dumps(self.spec).encode()).decode()
         with (
             patch.object(sys, "argv", ["probe", encoded, "frame:"]),
-            patch("subprocess.run", side_effect=self.command),
+            patch(
+                "subprocess.run", side_effect=self.command if side_effect is None else side_effect
+            ),
             redirect_stdout(output),
             self.assertRaises(SystemExit),
         ):
@@ -148,22 +150,7 @@ class CandidateHostProbeTests(unittest.TestCase):
                 setattr(self, field, original)
 
     def test_provider_permission_refusal_remains_a_denial_on_the_wire(self) -> None:
-        import sys
-
-        output = io.StringIO()
-        encoded = base64.b64encode(json.dumps(self.spec).encode()).decode()
-        with (
-            patch.object(sys, "argv", ["probe", encoded, "frame:"]),
-            patch("subprocess.run", side_effect=PermissionError("fixture denied")),
-            redirect_stdout(output),
-            self.assertRaises(SystemExit),
-        ):
-            exec(
-                compile(probe.CANDIDATE_HOST_PROBE, "<candidate-probe>", "exec"),
-                {"__name__": "__main__"},
-            )
-        frame = json.loads(output.getvalue().removeprefix("frame:"))
-        self.assertEqual(frame["type"], "denied")
+        self.assertEqual(self.failure_frame(PermissionError("fixture denied")), {"type": "denied"})
 
     def test_bad_database_password_is_a_failed_probe_not_a_provider_denial(self) -> None:
         container_probe = CandidateContainerProbeTests()
@@ -194,6 +181,7 @@ class CandidateHostProbeTests(unittest.TestCase):
     def test_docker_daemon_refusal_during_readback_remains_denied(self) -> None:
         for error in (
             b"permission denied while trying to connect to the Docker daemon socket",
+            b"permission denied while trying to connect to the docker API at unix:///socket",
             b"Error response from daemon: authorization denied by plugin: fixture",
             b"Error response from daemon: unauthorized",
             b"Error response from daemon: access denied",

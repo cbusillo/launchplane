@@ -418,10 +418,17 @@ class TestingRouteTransportTests(unittest.TestCase):
 
     def test_permission_denial_is_propagated_without_an_alternate_writer(self) -> None:
         self.deny = True
-        with self.assertRaises(NativeSourceAuthorizationDenied):
-            self.publish(self.plan.old_backend, self.plan.old_backend)
-        self.assertEqual(self.effect_count, 1)
-        self.assertFalse(self.route_file.exists())
+        for message in (
+            b"permission denied while trying to connect to the Docker daemon socket",
+            b"permission denied while trying to connect to the docker API at unix:///socket",
+        ):
+            with self.subTest(message=message):
+                self.denial_message = message
+                self.effect_count = 0
+                with self.assertRaises(NativeSourceAuthorizationDenied):
+                    self.publish(self.plan.old_backend, self.plan.old_backend)
+                self.assertEqual(self.effect_count, 1)
+                self.assertFalse(self.route_file.exists())
 
     def test_retired_old_copy_still_allows_observation_of_current_healthy_route(self) -> None:
         self.publish(self.plan.new_backend, self.plan.old_backend)
