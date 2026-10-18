@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.workflows.provider_target_reservations import custody_backed_provider_reservation
 
 
 ProviderTargetBackfillStatus = Literal[
@@ -136,6 +137,11 @@ def backfill_provider_targets(
             continue
         inspected_route_count += 1
         item = _plan_backfill_route(
+            custody_reservation=(
+                target_record is None
+                and target_id_record is None
+                and custody_backed_provider_reservation(record_store, physical_record)
+            ),
             context=context,
             instance=instance,
             physical_record=physical_record,
@@ -244,12 +250,22 @@ def _create_provider_target_record(
 
 def _plan_backfill_route(
     *,
+    custody_reservation: bool = False,
     context: str,
     instance: str,
     physical_record: ProviderTargetRecord | None,
     target_record: DokployTargetRecord | None,
     target_id_record: DokployTargetIdRecord | None,
 ) -> ProviderTargetBackfillItem:
+    if custody_reservation:
+        return _item(
+            context=context,
+            instance=instance,
+            status="skipped-exists",
+            severity="ok",
+            detail="independent custody-backed reservation needs no serving records",
+            physical_record=physical_record,
+        )
     if physical_record is not None and physical_record.provider_id != "dokploy":
         return _item(
             context=context,

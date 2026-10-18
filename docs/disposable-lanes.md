@@ -556,7 +556,12 @@ The rebuild candidate allocator keeps custody in
 bound to the original operation, intent and serving target. This record is
 separate from the lane's current generation. Allocation creates a private
 project/environment/compose and independent local volumes without changing
-the lane profile, target records, runtime values, inventory or public address.
+the lane profile, canonical target records, runtime values, serving inventory or
+public address. It does create a physical provider-target reservation under the
+candidate namespace. Audit and backfill recognize that reservation only while its
+identity matches durable candidate custody, using the same rule for rehearsal
+reservations. They neither invent a serving target pair nor block unrelated
+backfill for a valid reservation; an orphan or mismatched reservation stays blocked.
 The target is reserved in the existing physical provider registry in the same
 transaction as its candidate custody; another lane cannot adopt it.
 Compatibility target-ID records are also fenced, both at capture and before
