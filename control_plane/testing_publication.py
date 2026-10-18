@@ -32,6 +32,7 @@ from control_plane.testing_candidate_allocation import candidate_resources
 from control_plane.testing_candidate_runtime import (
     neutralized_candidate_overrides,
     candidate_authority_sha256,
+    candidate_runtime_fences,
 )
 
 
@@ -87,7 +88,7 @@ def plan_testing_publication(
         }
     )
     old_runtime = before.runtime
-    env = serving_runtime_values(candidate, old_runtime)
+    env = serving_runtime_values(candidate, old_runtime, runtime_port=profile.runtime_port)
     runtime = RuntimeEnvironmentRecord(
         scope="instance",
         context=candidate.context,
@@ -246,7 +247,11 @@ def require_original_candidate_inputs(plan: TestingPublicationPlan) -> None:
         )
     if plan.after.runtime is None or canonical_json_sha256(
         plan.after.runtime.env
-    ) != canonical_json_sha256(serving_runtime_values(plan.candidate, plan.before.runtime)):
+    ) != canonical_json_sha256(
+        serving_runtime_values(
+            plan.candidate, plan.before.runtime, runtime_port=plan.profile.runtime_port
+        )
+    ):
         raise ValueError(
             "Publication must retain resource selection without materialized passwords."
         )
@@ -297,7 +302,10 @@ def require_original_candidate_inputs(plan: TestingPublicationPlan) -> None:
 
 
 def serving_runtime_values(
-    candidate: TestingCandidateAllocation, record: RuntimeEnvironmentRecord | None
+    candidate: TestingCandidateAllocation,
+    record: RuntimeEnvironmentRecord | None,
+    *,
+    runtime_port: int,
 ) -> dict[str, str | int | float | bool]:
     app = candidate.application
     assert app is not None
@@ -305,5 +313,5 @@ def serving_runtime_values(
     for name in (*app.plan.omitted_runtime_keys, *FRESH_TESTING_LOCAL_CREDENTIAL_KEYS):
         env.pop(name, None)
     env.update(candidate_resources(candidate).volumes)
-    env.update({"ODOO_PROJECT_NAME": candidate.namespace, "ODOO_STACK_NAME": candidate.namespace})
+    env.update(candidate_runtime_fences(candidate, runtime_port=runtime_port))
     return env
