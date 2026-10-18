@@ -25985,7 +25985,7 @@ def create_launchplane_fastapi_app(
                 context=_LAUNCHPLANE_SERVICE_CONTEXT,
             )
         )
-        can_plan_target = setup_request.mode == "dry-run" and (
+        can_plan_target = setup_request.mode != "apply" and (
             can_setup_target
             or resolved_authz_policy_runtime.allows(
                 identity=identity,
@@ -26012,7 +26012,7 @@ def create_launchplane_fastapi_app(
             )
         else:
             authorized = can_setup_target if setup_request.mode == "apply" else can_plan_target
-        role_only_setup = not authorized and setup_request.mode == "dry-run" and bool(lane_owner)
+        role_only_setup = not authorized and setup_request.mode != "apply" and bool(lane_owner)
         if role_only_setup:
             authorized = resolved_authz_policy_runtime.allows(
                 identity=identity,
@@ -26101,6 +26101,57 @@ def create_launchplane_fastapi_app(
                     code="idempotency_key_required",
                     message="Dokploy target setup apply requires an Idempotency-Key header.",
                 )
+        if setup_request.state_volume_path:
+            from control_plane.application_state_volume import ApplicationStateVolumeAdapter
+
+            try:
+                adapter = ApplicationStateVolumeAdapter.prepare(
+                    resolved_control_plane_root,
+                    database_store,
+                    setup_request,
+                    idempotency_scope(identity),
+                    trace_id,
+                    lane_owner,
+                )
+                if setup_request.mode == "dry-run":
+                    return accepted_evidence_response(
+                        trace_id=trace_id, records={}, result=adapter.plan_result()
+                    )
+                if setup_request.mode == "readback":
+                    return accepted_evidence_response(
+                        trace_id=trace_id,
+                        records={},
+                        result=adapter.readback(idempotency_key.strip()),
+                    )
+
+                def volume_operation(store: PostgresRecordStore) -> DurableProviderOperationResult:
+                    return run_durable_provider_operation(
+                        store=store,
+                        scope=idempotency_scope(identity),
+                        route_path=_DOKPLOY_TARGET_SETUP_ROUTE,
+                        idempotency_key=idempotency_key.strip(),
+                        request_fingerprint=adapter.reconciliation_key(),
+                        lease_owner=trace_id,
+                        response_trace_id=trace_id,
+                        adapter=adapter,
+                        original_intent=adapter.intent,
+                    )
+
+                return await run_provider_operation_http(
+                    record_store=database_store,
+                    route_path=_DOKPLOY_TARGET_SETUP_ROUTE,
+                    trace_id=trace_id,
+                    operation=volume_operation,
+                    in_progress_message="Application storage setup is running under its original key.",
+                    reconcile_message="Preserve the original key and storage plan; inspect readback before recovery.",
+                )
+            except (ValueError, FileNotFoundError) as error:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="application_state_volume_unqualified",
+                    message=str(error),
+                ) from error
         (
             normalized_key,
             payload_fingerprint,

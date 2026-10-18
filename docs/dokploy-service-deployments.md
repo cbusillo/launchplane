@@ -148,6 +148,48 @@ setup should use the deployed service route or admin workflow instead. It
 still leaves runtime env, managed secrets, volumes, ports, and health behavior
 as explicit setup rather than inferred provider state.
 
+### Testing application state volume
+
+`POST /v1/dokploy-targets/setup`, `operation: create-application`, optionally
+accepts `state_volume_path`, the product's reviewed absolute container state
+directory. This option creates only a new testing application in a new project
+and environment on the supplied server. Existing target replacement keeps the
+usual exact `expected_current_provider_target`, never-deployed evidence,
+isolation-staging hold and deployment lock. It accepts no volume name, host
+path, mount id, existing application id or caller-selected `app_name`.
+
+Start with `mode: dry-run`. The service saves only planning evidence in the DB
+and returns `state_volume_plan_id`, `plan_sha256`, the exact target intent and
+`state_volume: {name, mount_path}`. The service generates the new volume and
+application names. No provider resource is created by a dry run. Keep the
+private request and response together. For `mode: apply`, add the returned
+`state_volume_plan_id`, `expected_plan_sha256: <plan_sha256>`, the normal setup
+confirmation and reason, and an `Idempotency-Key`. The same caller must use the
+saved plan. Changed input, lane authority, ownership or provider binding refuses
+before effects. A fresh dry run is needed after an intentional change.
+
+The durable provider runner fences the lane and records each creation phase.
+The new application must have empty mounts and match its generated identity and
+reviewed placement. Its single named volume is attached and independently read
+back before the application becomes the tracked target. The ordinary image and
+runtime-input update path preserves this mount across testing deployments.
+Creation does not deploy an artifact, copy state, or prove runtime retention.
+
+Use `mode: readback` with the unchanged private request, original plan/digest and
+original `Idempotency-Key` for observational recovery evidence. Readback reports
+`operation_state`, `provider_effect_phase` and `configuration_matches`, and
+never creates a resource or adopts a record. Repeating **apply with the original
+key** may finish record adoption when independent readback proves the original
+mount exists. It never repeats resource creation after an uncertain response.
+If a project, environment or application response is lost before all identities
+are known, or the mount is absent or changed, the operation stays unresolved with
+its known resource ids and pending phase. Preserve that evidence for supported
+reconciliation; a different key or plan cannot bypass the lane reservation.
+Do not delete or recreate partially created resources to retry this setup.
+
+This option is service-only. The local/bootstrap CLI has no storage apply path.
+Actual state retention and isolation still require testing-lane qualification.
+
 Product repos may document these expected facts, but they must not store live
 Launchplane product profiles, target ids, provider credentials, or lifecycle
 records as repo-local authority.

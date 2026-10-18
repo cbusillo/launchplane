@@ -172,7 +172,7 @@ class DokployTargetSetupEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = Field(default=1, ge=1)
-    mode: Literal["dry-run", "apply"] = "dry-run"
+    mode: Literal["dry-run", "apply", "readback"] = "dry-run"
     operation: Literal[
         "adopt",
         "create-application",
@@ -205,6 +205,9 @@ class DokployTargetSetupEnvelope(BaseModel):
     domains: tuple[str, ...] = ()
     runtime_port: int | None = Field(default=None, ge=1, le=65535)
     deploy_timeout_seconds: int | None = Field(default=None, ge=1)
+    state_volume_path: str = ""
+    state_volume_plan_id: str = ""
+    expected_plan_sha256: str = ""
     expected_current_provider_target: DeployedTargetReference | None = None
     expected_current_provider_target_fingerprint: str = Field(default="", max_length=256)
     replaces_operation_id: str = ""
@@ -235,6 +238,12 @@ class DokployTargetSetupEnvelope(BaseModel):
         self.source_type = self.source_type.strip() or "raw"
         self.compose_path = self.compose_path.strip() or "docker-compose.yml"
         self.custom_git_branch = self.custom_git_branch.strip()
+        if self.state_volume_path or self.state_volume_plan_id or self.expected_plan_sha256:
+            from control_plane.application_state_volume import validate_volume_request
+
+            validate_volume_request(self)
+        elif self.mode == "readback":
+            raise ValueError("Setup readback requires an original state-volume plan.")
         if self.replaces_operation_id and (
             self.operation != "create-compose"
             or self.instance != "testing"
@@ -535,7 +544,14 @@ def execute_dokploy_target_setup(
     disposable_before_create: Callable[[str], None] | None = None,
     disposable_placement: tuple[str, str] | None = None,
     director_source_completion: bool = False,
+    application_mutate: Callable[
+        [str, str, str, dict[str, dokploy_api.JsonValue]], dict[str, dokploy_api.JsonValue]
+    ]
+    | None = None,
 ) -> dict[str, object]:
+    if request.state_volume_path and application_mutate is None:
+        raise ValueError("State-volume creation requires its reviewed durable service operation.")
+
     def mutate_setup(
         host: str, token: str, path: str, payload: dict[str, dokploy_api.JsonValue]
     ) -> dict[str, dokploy_api.JsonValue]:
@@ -690,9 +706,8 @@ def execute_dokploy_target_setup(
             source_label=CREATE_APPLICATION_SOURCE_LABEL,
             policies=_replaced_target_policies(record_store, request),
             apply=apply_changes,
-            mutate_provider=mutate_setup
-            if disposable_checkpoint
-            else mutate_dokploy_payload_for_target_setup,
+            mutate_provider=application_mutate
+            or (mutate_setup if disposable_checkpoint else mutate_dokploy_payload_for_target_setup),
             fetch_target_payload=fetch_setup
             if disposable_checkpoint
             else fetch_dokploy_target_payload_for_setup,

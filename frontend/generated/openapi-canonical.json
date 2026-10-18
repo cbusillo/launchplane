@@ -6275,6 +6275,11 @@
             "title": "Expected Current Provider Target Fingerprint",
             "type": "string"
           },
+          "expected_plan_sha256": {
+            "default": "",
+            "title": "Expected Plan Sha256",
+            "type": "string"
+          },
           "healthcheck_path": {
             "default": "",
             "title": "Healthcheck Path",
@@ -6288,7 +6293,8 @@
             "default": "dry-run",
             "enum": [
               "dry-run",
-              "apply"
+              "apply",
+              "readback"
             ],
             "title": "Mode",
             "type": "string"
@@ -6368,6 +6374,16 @@
           "source_type": {
             "default": "raw",
             "title": "Source Type",
+            "type": "string"
+          },
+          "state_volume_path": {
+            "default": "",
+            "title": "State Volume Path",
+            "type": "string"
+          },
+          "state_volume_plan_id": {
+            "default": "",
+            "title": "State Volume Plan Id",
             "type": "string"
           },
           "target_id": {
