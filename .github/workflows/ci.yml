@@ -705,9 +705,12 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: browser-smoke-${{ github.run_attempt }}-${{ matrix.shard }}
+          # Artifacts belong to this immutable workflow run/head. A failed-job
+          # rerun replaces only its own leg and retains successful siblings.
+          name: browser-smoke-${{ matrix.shard }}
           path: tmp/browser-smoke
           if-no-files-found: error
+          overwrite: true
           retention-days: 14
 
   frontend_browser_smoke_evidence:
@@ -757,7 +760,7 @@ jobs:
       - name: Download browser shard evidence
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: browser-smoke-${{ github.run_attempt }}-*
+          pattern: browser-smoke-*
           path: tmp/browser-smoke
           merge-multiple: true
 
