@@ -115,6 +115,7 @@
     "openapi": {
       "export": "uv run launchplane service export-openapi --output frontend/generated/openapi-canonical.json",
       "frontendGenerate": "pnpm --dir frontend generate:openapi",
+      "frontendTypes": "pnpm --dir frontend generate:openapi-types",
       "frontendDrift": "pnpm --dir frontend check:openapi-drift"
     },
     "agentContract": {
