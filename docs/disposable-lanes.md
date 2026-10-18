@@ -679,6 +679,69 @@ effects; recover with the original operation rather than clearing custody or
 reusing its target. Local SQLite tests exercise record semantics; the matching
 PostgreSQL integration cases qualify the actual database path in CI.
 
+## Private candidate build and copy preparation
+
+Candidate application preparation binds an admitted artifact and source to the
+allocation before provider configuration. It reads the existing three generated
+testing-local credentials. Secret selection happens before version lookup and
+decryption, so other managed runtime secrets are never materialized for this
+copy. It does not rotate passwords or write the serving runtime, profile,
+overrides, inventory, target or current-generation records.
+
+The rendered candidate has independent storage, a pinned image, no public
+hostname/router or host ports, and a namespace-qualified private ingress alias.
+Its database and runner remain on the internal data network. The existing
+SQL-before-registry restore runner handles production copies and upstream
+copies; the existing bootstrap handles an empty database. Projected overrides
+remove integration connections and retain the lane's public address. A candidate
+uses its own manual host schedule, so preparation cannot replace the serving
+lane's data-workflow schedule.
+
+Before each provider effect the caller rechecks its exclusive operation lease,
+authority, holds, usage and physical custody. Configuration and deployment
+intent are persisted first. A continuation only accepts the exact configuration
+or the uniquely titled original deployment. An absent or ambiguous effect stays
+unknown. Disabled schedule setup and native artifact preparation do not attest
+restore dispatch. Native preparation reuses its existing immutable capture and
+receiver-chunk readback. After all checks and the provider-effect lease succeed,
+one compare/write records restore dispatch with the original schedule and prior
+job IDs before the callback permits the trigger;
+continuation observes that one terminal job instead of triggering another.
+Private readiness then checks actual storage/network isolation, pinned installed
+images, runtime and copy identity, integration settings and the web-start gate,
+and verifies the testing-local credentials without signing in. The private HTTP
+health request bypasses proxy environment settings and refuses redirects. A
+read-only connection using the running web configuration checks the generated
+database password and the active local administrator's stored password hash.
+The login follows startup's trimmed value or `admin` default. Local database
+authentication failure is a failed candidate check, not a provider denial.
+The plaintext master value and database settings are checked for consistency
+with the running container environment. These local comparisons do not attest
+that a stored provider environment update was deployed; provider configuration,
+installed runtime identity and image are checked separately. Readiness never creates a session
+or login-history row, which would otherwise protect the new copy from its next
+rebuild. Passwords, hashes and raw program output stay private to the provider
+transport. This checks credential installation, not an interactive browser
+sign-in or Client acceptance.
+
+A terminal original build before restore dispatch, or a terminal restore, may
+be marked abandoned while keeping its candidate and custody records. A failed
+setup with explicit undispatched evidence can therefore resume its original
+setup or retain the private copy without starting a job. This action does not
+stop or remove either copy. Once restore dispatch started, running, absent and
+ambiguous provider jobs cannot be abandoned or redispatched. Older records
+without dispatch evidence remain unknown; they cannot be reset to undispatched.
+The
+service worker must preserve their original-key recovery path. A prepared copy
+is still private: stable-route switching, atomic serving publication, old-copy
+retirement and the service/UI action are separate stages under #3963. This
+source component does not activate them or establish live CM proof.
+
+Maintenance uses the original candidate operation and its stored receipts.
+Rollback retains candidate application intent, storage and physical reservations;
+it does not clear fences or adopt a candidate as the serving lane. No schema
+migration is added beyond the candidate custody table.
+
 ## Service collection
 
 `collect` on the observation API resolves existing service sources itself:

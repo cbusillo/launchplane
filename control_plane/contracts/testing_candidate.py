@@ -7,6 +7,7 @@ from pydantic import Field, model_validator
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.prepared_public_site import FrozenRecord
+from control_plane.contracts.testing_candidate_application import TestingCandidateApplication
 
 
 class TestingCandidateAllocation(FrozenRecord):
@@ -23,6 +24,9 @@ class TestingCandidateAllocation(FrozenRecord):
     effect: Literal["", "project_id", "environment_id", "compose_id", "storage"] = ""
     resources_binding_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
     created_at: datetime
+    application: TestingCandidateApplication | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
     @model_validator(mode="after")
     def validate_custody(self) -> Self:
@@ -50,6 +54,23 @@ class TestingCandidateAllocation(FrozenRecord):
             raise ValueError("Candidate effect requires its recorded parent custody.")
         if self.resources_binding_sha256 and not self.compose_id:
             raise ValueError("Candidate storage requires its recorded target.")
+        if self.application is not None:
+            plan = self.application.plan
+            if not self.resources_binding_sha256 or (
+                plan.product,
+                plan.context,
+                plan.operation_id,
+                plan.namespace,
+                plan.target_id,
+            ) != (self.product, self.context, self.operation_id, self.namespace, self.compose_id):
+                raise ValueError(
+                    "Candidate application requires this allocation's qualified storage."
+                )
+            if (
+                plan.generation is not None
+                and plan.generation.resources_binding_sha256 != self.resources_binding_sha256
+            ):
+                raise ValueError("Copy generation differs from this candidate's storage receipt.")
         return self
 
     def require_successor(self, previous: Self) -> None:
@@ -59,12 +80,17 @@ class TestingCandidateAllocation(FrozenRecord):
             "compose_id",
             "effect",
             "resources_binding_sha256",
+            "application",
         }
         if self.model_dump(exclude=mutable) != previous.model_dump(exclude=mutable):
             raise ValueError("Candidate allocation cannot replace its original lane or intent.")
-        for field in mutable - {"effect"}:
+        for field in mutable - {"effect", "application"}:
             if getattr(previous, field) and getattr(self, field) != getattr(previous, field):
                 raise ValueError("Recorded candidate custody is immutable.")
+        if previous.application is not None:
+            if self.application is None:
+                raise ValueError("Candidate continuation cannot discard its application intent.")
+            self.application.require_successor(previous.application)
         phases = ("", "project_id", "environment_id", "compose_id", "storage")
         if phases.index(self.effect) < phases.index(previous.effect):
             raise ValueError("Candidate cannot forget a dispatched effect.")
