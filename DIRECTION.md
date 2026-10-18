@@ -37,6 +37,10 @@ regression, not by restating the code or its wording.
 Only an admin or Launchplane merges. Clients can veto a change, never merge
 one.
 
+Each change a Client will see gets that Client's approval on the change
+itself. Release acceptance is the final check that nothing major is wrong,
+not a review of every change.
+
 Launchplane records each product's Client and runs every production release
 through the same gated path: verified backup, release record, post-deploy
 checks, automatic rollback. Who accepts a release is set in
@@ -59,6 +63,11 @@ An agent asks the Director before:
 Everything else is ordinary engineering and needs no ceremony, including
 work on products that are not live. The overall direction owns the rule for
 testing and preview lanes.
+
+The Director's agents work under one standing permission that covers
+everything these stop boundaries and the overall direction's do not name. A
+refused write that hits no stop boundary is a tool defect, fixed at the
+work's priority, not a new operation or a question.
 
 The overall direction owns who may read and plan, including Client agents.
 
