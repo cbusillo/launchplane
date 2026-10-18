@@ -480,7 +480,7 @@ class CandidateApplicationTests(unittest.TestCase):
             self.inputs(persisted, "production")
         self.fixture.assert_serving_unchanged()
 
-    def test_global_runtime_change_cannot_rebind_an_original_candidate(self) -> None:
+    def test_undelivered_global_change_does_not_rebind_or_block_candidate(self) -> None:
         allocation = self.allocate()
         original = self.inputs(allocation)
         persisted = allocation.model_copy(
@@ -490,6 +490,25 @@ class CandidateApplicationTests(unittest.TestCase):
         self.store.write_runtime_environment_record(
             RuntimeEnvironmentRecord(
                 scope="global", env={"ODOO_WORKERS": "3"}, updated_at=self.profile.updated_at
+            )
+        )
+        resumed = self.inputs(persisted)
+        self.assertEqual(resumed.plan, original.plan)
+        self.assertEqual(resumed.runtime_environment, original.runtime_environment)
+
+    def test_delivered_context_change_cannot_rebind_an_original_candidate(self) -> None:
+        allocation = self.allocate()
+        original = self.inputs(allocation)
+        persisted = allocation.model_copy(
+            update={"application": TestingCandidateApplication(plan=original.plan)}
+        )
+        self.store.compare_and_write_testing_candidate(allocation, persisted)
+        self.store.write_runtime_environment_record(
+            RuntimeEnvironmentRecord(
+                scope="context",
+                context=self.fixture.context,
+                env={"ODOO_WORKERS": "3"},
+                updated_at=self.profile.updated_at,
             )
         )
         self.fixture.before = self.fixture.authority()

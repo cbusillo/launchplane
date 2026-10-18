@@ -267,7 +267,7 @@ def candidate_runtime_inputs(
     runtime_selection = RuntimeEnvironmentSetExpectation(
         contexts=(allocation.context,),
         instances=((allocation.context, "testing"),),
-        include_global=True,
+        include_global=False,
         records=(),
     )
     authority_binding = canonical_json_sha256(
