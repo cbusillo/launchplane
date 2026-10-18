@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+from datetime import datetime
 from email.message import Message
 from io import BytesIO
 from typing import Any, cast
@@ -32,6 +33,7 @@ from tempfile import TemporaryDirectory
 
 _REPO = "example/product"
 _BOT = 41
+_LABELS = completion._DEFAULT_LABELS
 
 
 def _wait(state: str = "clear") -> str:
@@ -71,7 +73,7 @@ class PlanningProvider:
             "state_reason": "completed",
             "user": {"id": _BOT, "login": "example-bot[bot]"},
             "body": "<!-- github-plan:managed-provenance -->\n" + _wait(),
-            "labels": [{"name": "plan"}, {"name": "plan:active"}, {"name": "bug"}],
+            "labels": [{"name": _LABELS[key]} for key in ("plan", "active")] + [{"name": "bug"}],
         }
         self.comments: list[dict[str, Any]] = []
         self.blockers: list[dict[str, Any]] = []
@@ -84,6 +86,7 @@ class PlanningProvider:
         self.missing_project_item = False
         self.references = [7]
         self.merged = True
+        self.merged_at: Any = "2026-09-30T23:59:00Z"
         self.drop_label_write = False
 
     def request(self, *, path: str, method: str = "GET", body: Any = None, **_kwargs: Any) -> Any:
@@ -97,6 +100,7 @@ class PlanningProvider:
                             "object": {"text": json.dumps(self.config)},
                             "pullRequest": {
                                 "merged": self.merged,
+                                "mergedAt": self.merged_at,
                                 "baseRefName": "main",
                                 "mergeCommit": {"oid": "landed"},
                                 "closingIssuesReferences": {
@@ -197,7 +201,7 @@ class PlanningCompletionTests(TestCase):
         self.comment_mock = self.comment.start()
         self.addCleanup(self.comment.stop)
 
-    def record(self) -> MergeTrainPrFeedbackRecord:
+    def record(self, *, recorded_at: str = "2026-10-01T00:00:00Z") -> MergeTrainPrFeedbackRecord:
         return build_merge_train_pr_feedback_record(
             request=MergeTrainPrFeedbackEnvelope(
                 repository=_REPO,
@@ -208,7 +212,7 @@ class PlanningCompletionTests(TestCase):
             policy_key="test",
             policy_sha256="digest",
             token="fixture",
-            recorded_at="2026-10-01T00:00:00Z",
+            recorded_at=recorded_at,
             response_trace_id="test",
             planning_author_ids=(_BOT,),
         )
@@ -218,7 +222,8 @@ class PlanningCompletionTests(TestCase):
         record = self.record()
         self.assertEqual(record.delivery_status, "delivered")
         self.assertEqual(
-            {label["name"] for label in self.provider.issue["labels"]}, {"plan", "plan:done", "bug"}
+            {label["name"] for label in self.provider.issue["labels"]},
+            {_LABELS["plan"], _LABELS["done"], "bug"},
         )
         self.assertEqual(self.provider.issue["state"], before["state"])
         self.assertEqual(self.provider.issue["body"], before["body"])
@@ -276,7 +281,7 @@ class PlanningCompletionTests(TestCase):
             self.assertTrue(_receipt(record)["ok"])
             self.assertEqual(
                 {label["name"] for label in self.provider.issue["labels"]},
-                {"plan", "plan:done", "bug"},
+                {_LABELS["plan"], _LABELS["done"], "bug"},
             )
 
     def test_direct_controller_landing_queues_cleanup_for_idle_worker_without_caller_return(
@@ -360,7 +365,7 @@ class PlanningCompletionTests(TestCase):
             saved = store.list_merge_train_pr_feedback_records(repository=_REPO)
             self.assertTrue(_receipt(saved[0])["ok"])
             self.assertNotIn(
-                "plan:active", {label["name"] for label in self.provider.issue["labels"]}
+                _LABELS["active"], {label["name"] for label in self.provider.issue["labels"]}
             )
 
     def test_standalone_landing_persists_completion_before_returning(self) -> None:
@@ -509,7 +514,9 @@ class PlanningCompletionTests(TestCase):
         )
         self.assertEqual(retry.delivery_status, "delivered")
         self.assertTrue(_receipt(retry)["ok"])
-        self.assertNotIn("plan:active", {label["name"] for label in self.provider.issue["labels"]})
+        self.assertNotIn(
+            _LABELS["active"], {label["name"] for label in self.provider.issue["labels"]}
+        )
 
     def test_retry_cannot_reuse_an_author_retired_by_current_policy(self) -> None:
         self.provider.fail_labels = True
@@ -525,7 +532,7 @@ class PlanningCompletionTests(TestCase):
         self.assertEqual(retry.delivery_status, "failed")
         self.assertFalse(retry.retryable)
         self.assertFalse(self.provider.writes)
-        self.assertIn("plan:active", {label["name"] for label in self.provider.issue["labels"]})
+        self.assertIn(_LABELS["active"], {label["name"] for label in self.provider.issue["labels"]})
 
     def test_waits_reporters_and_unfinished_native_prerequisites_are_preserved(self) -> None:
         original = copy.deepcopy(self.provider.issue)
@@ -600,20 +607,23 @@ class PlanningCompletionTests(TestCase):
                     record = self.record()
                 self.assertEqual(
                     {label["name"] for label in self.provider.issue["labels"]},
-                    {"plan", "plan:done", "bug"},
+                    {_LABELS["plan"], _LABELS["done"], "bug"},
                 )
                 self.assertEqual(held.issue, before)
                 self.assertFalse(held.writes)
                 self.assertEqual(record.delivery_status, "failed")
-                self.assertEqual(record.retryable, reason == "open")
-                self.comment_mock.assert_not_called()
+                self.assertEqual(record.retryable, reason in {"open", "reopened"})
+                self.assertEqual(self.comment_mock.called, reason not in {"open", "reopened"})
                 with TemporaryDirectory() as directory:
                     store = FilesystemRecordStore(Path(directory))
                     store.write_merge_train_pr_feedback_record(record)
                     saved = store.list_merge_train_pr_feedback_records(repository=_REPO)[0]
                     self.assertEqual(
                         {item["number"]: item["status"] for item in _receipt(saved)["issues"]},
-                        {8: "pending" if reason == "open" else "review", 7: "reconciled"},
+                        {
+                            8: "pending" if reason in {"open", "reopened"} else "review",
+                            7: "reconciled",
+                        },
                     )
 
     def test_failed_metadata_or_project_readback_is_never_delivered(self) -> None:
@@ -647,7 +657,8 @@ class PlanningCompletionTests(TestCase):
 
         with patch.object(completion, "github_api_request", side_effect=request):
             record = self.record()
-        self.assertEqual(attempts, [f"/repos/{_REPO}/issues/7/labels"])
+        self.assertEqual(len(attempts), 1)
+        self.assertTrue(attempts[0].startswith(f"/repos/{_REPO}/issues/7/"))
         self.assertEqual(other.issue, before)
         self.assertFalse(other.writes)
         self.assertEqual(record.delivery_status, "failed")
@@ -661,6 +672,201 @@ class PlanningCompletionTests(TestCase):
         self.provider.references = []
         self.assertEqual(self.record().delivery_status, "delivered")
         self.assertFalse(self.provider.writes)
+
+    def test_reopened_projection_has_a_bounded_pending_window(self) -> None:
+        self.provider.issue.update(state="open", state_reason="reopened")
+        record = self.record()
+        self.assertTrue(record.retryable)
+        self.assertFalse(self.provider.writes)
+        self.comment_mock.assert_not_called()
+        deadline = (
+            datetime.fromisoformat(self.provider.merged_at.replace("Z", "+00:00"))
+            + completion.PROJECTION_GRACE
+        )
+        held = deliver_merge_train_pr_feedback_record(
+            record=record,
+            token="fixture",
+            attempted_at=deadline.isoformat(),
+            planning_author_ids=(_BOT,),
+        )
+        self.assertEqual(held.delivery_status, "failed")
+        self.assertFalse(held.retryable)
+        self.assertFalse(_receipt(held)["ok"])
+        self.assertEqual(held.comment_id, 3)
+        self.assertIn(
+            "Planning reconciliation is incomplete", self.comment_mock.call_args.kwargs["body"]
+        )
+        self.assertFalse(self.provider.writes)
+
+    def test_reopened_source_can_finish_during_projection_grace(self) -> None:
+        self.provider.issue.update(state="open", state_reason="reopened")
+        record = self.record()
+        self.assertTrue(record.retryable)
+        self.provider.issue.update(state="closed", state_reason="completed")
+        result = deliver_merge_train_pr_feedback_record(
+            record=record,
+            token="fixture",
+            attempted_at="2026-10-01T00:02:00Z",
+            planning_author_ids=(_BOT,),
+        )
+        self.assertEqual(result.delivery_status, "delivered")
+        self.assertTrue(_receipt(result)["ok"])
+
+    def test_invalid_or_future_merge_time_never_starts_pending_retries(self) -> None:
+        self.provider.issue["state"] = "open"
+        for timestamp in (None, "invalid", "2026-11-01T00:00:00Z"):
+            with self.subTest(timestamp=timestamp):
+                self.provider.merged_at = timestamp
+                result = self.record()
+                self.assertFalse(result.retryable)
+                self.assertFalse(self.provider.writes)
+                self.comment_mock.assert_not_called()
+
+    def test_pending_source_cannot_hide_a_terminal_hold_indefinitely(self) -> None:
+        self.provider.references = [7, 8]
+        self.provider.issue["state"] = "open"
+        held = PlanningProvider()
+        held.issue.update(number=8, node_id="issue8")
+        held.comments = [{"user": {"id": _BOT}, "body": _wait("waiting")}]
+
+        def request(*, path: str, **kwargs: Any) -> Any:
+            provider = held if path.startswith(f"/repos/{_REPO}/issues/8") else self.provider
+            return provider.request(path=path, **kwargs)
+
+        with patch.object(completion, "github_api_request", side_effect=request):
+            result = self.record()
+            self.assertTrue(result.retryable)
+            self.comment_mock.assert_not_called()
+            deadline = (
+                datetime.fromisoformat(self.provider.merged_at.replace("Z", "+00:00"))
+                + completion.PROJECTION_GRACE
+            )
+            terminal = deliver_merge_train_pr_feedback_record(
+                record=result,
+                token="fixture",
+                attempted_at=deadline.isoformat(),
+                planning_author_ids=(_BOT,),
+            )
+        self.assertFalse(terminal.retryable)
+        self.assertEqual(
+            {item["number"]: item["status"] for item in _receipt(terminal)["issues"]},
+            {7: "review", 8: "review"},
+        )
+        self.assertTrue(self.comment_mock.called)
+        self.assertFalse(self.provider.writes)
+        self.assertFalse(held.writes)
+
+    def test_graphql_failure_classification_requires_transient_evidence(self) -> None:
+        for errors, retryable, rate_limited in (
+            ([{"type": "RATE_LIMITED"}], True, True),
+            ([{"extensions": {"code": "SERVICE_UNAVAILABLE"}}], True, False),
+            ([{"type": "TIMEOUT"}], True, False),
+            ([{"type": "INTERNAL"}], True, False),
+            ([{"type": "FORBIDDEN"}, {"type": "RATE_LIMITED"}], False, False),
+            ([{"message": "unknown"}], False, False),
+        ):
+            with self.subTest(errors=errors):
+                with patch.object(
+                    completion, "github_api_request", return_value={"errors": errors}
+                ):
+                    result = self.record()
+                self.assertEqual(result.delivery_status, "failed")
+                self.assertEqual(result.retryable, retryable)
+                self.assertEqual(bool(result.provider_retry_at), rate_limited)
+                self.assertFalse(self.provider.writes)
+                self.comment_mock.assert_not_called()
+
+    def test_later_global_provider_failure_preserves_verified_source_receipt(self) -> None:
+        for failure in ("read", "project", "write", "malformed"):
+            with self.subTest(failure=failure), TemporaryDirectory() as directory:
+                self.provider = PlanningProvider()
+                self.provider.references = [7, 8]
+                other = PlanningProvider()
+                other.issue.update(number=8, node_id="issue8")
+                if failure == "project":
+                    self.provider.config = {"planning": {"projects": {"default_project": 2}}}
+
+                def request(
+                    *, path: str, method: str = "GET", body: Any = None, **kwargs: Any
+                ) -> Any:
+                    variables = (body or {}).get("variables", {})
+                    source = path.startswith(f"/repos/{_REPO}/issues/8")
+                    if failure == "malformed" and source and "/comments?" in path:
+                        return {"incomplete": True}
+                    if (failure == "read" and source and method == "GET") or (
+                        failure == "write" and source and method != "GET"
+                    ):
+                        error = click.ClickException("temporary provider failure")
+                        error.__cause__ = URLError("offline")
+                        raise error
+                    if failure == "project" and variables.get("issue") == "issue8":
+                        return {"errors": [{"type": "RATE_LIMITED"}]}
+                    provider = other if source else self.provider
+                    return provider.request(path=path, method=method, body=body, **kwargs)
+
+                with patch.object(completion, "github_api_request", side_effect=request):
+                    result = self.record()
+                self.assertEqual(result.retryable, failure != "malformed")
+                self.comment_mock.assert_not_called()
+                store = FilesystemRecordStore(Path(directory))
+                store.write_merge_train_pr_feedback_record(result)
+                saved = store.list_merge_train_pr_feedback_records(repository=_REPO)[0]
+                self.assertFalse(_receipt(saved)["ok"])
+                self.assertEqual(
+                    {item["number"]: item["status"] for item in _receipt(saved)["issues"]},
+                    {7: "reconciled", 8: "interrupted"},
+                )
+
+    def test_upsert_programming_errors_surface_for_every_feedback_kind(self) -> None:
+        for event in ("queued", "blocked", "completed"):
+            for error in (KeyError, TypeError, ValueError):
+                with self.subTest(event=event, error=error):
+                    with patch(
+                        "control_plane.merge_train_pr_feedback.upsert_github_issue_comment",
+                        side_effect=error("bug"),
+                    ):
+                        with self.assertRaises(error):
+                            build_merge_train_pr_feedback_record(
+                                request=MergeTrainPrFeedbackEnvelope(
+                                    repository=_REPO, pull_request_number=9, event=event
+                                ),
+                                policy_key="test",
+                                policy_sha256="digest",
+                                token="fixture",
+                                recorded_at="2026-10-01T00:00:00Z",
+                                response_trace_id="test",
+                                planning_author_ids=(_BOT,),
+                            )
+
+    def test_terminal_hold_comment_provider_failure_can_retry_publication(self) -> None:
+        self.provider.comments = [{"user": {"id": _BOT}, "body": _wait("waiting")}]
+        error = click.ClickException("comment provider unavailable")
+        error.__cause__ = URLError("offline")
+        self.comment_mock.side_effect = error
+        result = self.record()
+        self.assertTrue(result.retryable)
+        self.assertFalse(_receipt(result)["ok"])
+        self.comment_mock.side_effect = None
+        retry = deliver_merge_train_pr_feedback_record(
+            record=result,
+            token="fixture",
+            attempted_at="2026-10-01T00:02:00Z",
+            planning_author_ids=(_BOT,),
+        )
+        self.assertEqual(retry.delivery_status, "failed")
+        self.assertFalse(retry.retryable)
+        self.assertEqual(retry.comment_id, 3)
+        self.assertEqual(retry.comment_markdown.count("Planning reconciliation is incomplete"), 1)
+
+    def test_malformed_reconciliation_is_recorded_without_publishing(self) -> None:
+        with patch(
+            "control_plane.merge_train_pr_feedback.reconcile_completed_change",
+            side_effect=ValueError("bad evidence"),
+        ):
+            result = self.record()
+        self.assertEqual(result.delivery_status, "failed")
+        self.assertFalse(result.retryable)
+        self.comment_mock.assert_not_called()
 
     def test_unmerged_change_cannot_drive_metadata(self) -> None:
         self.provider.merged = False

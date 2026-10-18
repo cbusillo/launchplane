@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import quote
 
@@ -26,13 +27,14 @@ _DEFAULT_LABELS = {
     "done": "plan:done",
 }
 _MARKER = "<!-- github-plan:wait "
+PROJECTION_GRACE = timedelta(minutes=15)
 _QUERY = """
 query($owner: String!, $name: String!, $number: Int!, $after: String, $config: String!) {
   repository(owner: $owner, name: $name) {
     defaultBranchRef { name }
     object(expression: $config) { ... on Blob { text } }
     pullRequest(number: $number) {
-      merged baseRefName mergeCommit { oid }
+      merged mergedAt baseRefName mergeCommit { oid }
       closingIssuesReferences(first: 100, after: $after) {
         nodes { number repository { nameWithOwner } }
         pageInfo { hasNextPage endCursor }
@@ -59,7 +61,24 @@ class PlanningCompletionPending(PlanningCompletionFailure):
     """GitHub has not yet projected the keyword closure after the merge."""
 
 
-class _IssueProjectReview(PlanningCompletionReview):
+class PlanningCompletionSourceReview(PlanningCompletionReview):
+    """All sources were visited; landed feedback may report their terminal holds."""
+
+
+class PlanningCompletionProviderFailure(PlanningCompletionFailure):
+    """An explicitly classified GraphQL failure, including HTTP-200 errors."""
+
+    def __init__(self, message: str, *, retryable: bool, rate_limited: bool = False) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+        self.rate_limited = rate_limited
+
+
+class _IssueReview(PlanningCompletionReview):
+    """A deliberate hold on this source, rather than a provider failure."""
+
+
+class _IssueProjectReview(_IssueReview):
     """Project membership evidence is missing for this source only."""
 
 
@@ -88,7 +107,36 @@ def _graphql(token: str, query: str, variables: dict[str, Any]) -> dict[str, Any
         )
     )
     if response.get("errors"):
-        raise PlanningCompletionReview("Planning completion GraphQL read or write was incomplete.")
+        errors = response["errors"]
+        codes = set()
+        if isinstance(errors, list):
+            for error in errors:
+                if isinstance(error, dict):
+                    codes.add(str(error.get("type", "")).upper())
+                    extensions = error.get("extensions")
+                    if isinstance(extensions, dict):
+                        codes.add(str(extensions.get("code", "")).upper())
+        denied = bool(
+            codes & {"FORBIDDEN", "UNAUTHORIZED", "UNAUTHENTICATED", "INSUFFICIENT_SCOPES"}
+        )
+        transient = (
+            bool(
+                codes
+                & {
+                    "RATE_LIMITED",
+                    "SERVICE_UNAVAILABLE",
+                    "TIMEOUT",
+                    "INTERNAL",
+                    "INTERNAL_SERVER_ERROR",
+                }
+            )
+            and not denied
+        )
+        raise PlanningCompletionProviderFailure(
+            "Planning completion GraphQL read or write was incomplete.",
+            retryable=transient,
+            rate_limited=transient and "RATE_LIMITED" in codes,
+        )
     return _object(response.get("data"))
 
 
@@ -132,13 +180,11 @@ def _wait_records(text: str) -> list[dict[str, Any]]:
             continue
         match = re.fullmatch(re.escape(_MARKER) + r"(.*?) -->", line)
         if not match:
-            raise PlanningCompletionReview(
-                "Planning completion needs a valid structured wait review."
-            )
+            raise _IssueReview("Planning completion needs a valid structured wait review.")
         try:
             record = _object(json.loads(match[1]))
         except ValueError as error:
-            raise PlanningCompletionReview(
+            raise _IssueReview(
                 "Planning completion needs a valid structured wait review."
             ) from error
         if (
@@ -165,9 +211,7 @@ def _wait_records(text: str) -> list[dict[str, Any]]:
                 )
                 or (record["state"] == "review" and record["waits"])
             ):
-                raise PlanningCompletionReview(
-                    "Planning completion needs a valid structured wait review."
-                )
+                raise _IssueReview("Planning completion needs a valid structured wait review.")
             for wait in record["waits"]:
                 if (
                     not isinstance(wait, dict)
@@ -176,12 +220,10 @@ def _wait_records(text: str) -> list[dict[str, Any]]:
                         not isinstance(value, str) or not value.strip() for value in wait.values()
                     )
                 ):
-                    raise PlanningCompletionReview(
-                        "Planning completion needs a valid structured wait review."
-                    )
+                    raise _IssueReview("Planning completion needs a valid structured wait review.")
         records.append(record)
     if len(records) > 1:
-        raise PlanningCompletionReview("Planning completion found ambiguous structured waits.")
+        raise _IssueReview("Planning completion found ambiguous structured waits.")
     return records
 
 
@@ -200,9 +242,7 @@ def _require_clear_wait(
         if found:
             selected = found[0]
     if selected is None or selected["state"] != "clear":
-        raise PlanningCompletionReview(
-            "Planning completion preserves an unresolved or unreviewed wait."
-        )
+        raise _IssueReview("Planning completion preserves an unresolved or unreviewed wait.")
 
 
 def _labels(issue: dict[str, Any]) -> set[str]:
@@ -213,14 +253,6 @@ def _labels(issue: dict[str, Any]) -> set[str]:
 
 
 def _require_completed(issue: dict[str, Any]) -> None:
-    if issue.get("state") == "open" and "pull_request" not in issue:
-        if issue.get("state_reason") == "reopened":
-            raise PlanningCompletionReview(
-                "Planning completion preserves a reopened finish line for owning review."
-            )
-        raise PlanningCompletionPending(
-            "Planning completion is waiting for GitHub's keyword closure projection."
-        )
     if (
         issue.get("state") != "closed"
         or issue.get("state_reason") != "completed"
@@ -229,6 +261,27 @@ def _require_completed(issue: dict[str, Any]) -> None:
         raise PlanningCompletionReview(
             "Planning completion preserves an open or non-completed finish line."
         )
+
+
+def _timestamp(value: object) -> datetime:
+    if not isinstance(value, str):
+        raise ValueError("planning completion requires an aware merge timestamp")
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("planning completion requires an aware merge timestamp")
+    return parsed.astimezone(timezone.utc)
+
+
+def _require_projection(issue: dict[str, Any], merged_at: datetime, attempted_at: datetime) -> None:
+    if issue.get("state") == "open" and "pull_request" not in issue:
+        if attempted_at < merged_at + PROJECTION_GRACE:
+            raise PlanningCompletionPending(
+                "Planning completion is waiting for GitHub's keyword closure projection."
+            )
+        raise _IssueReview(
+            "Planning completion preserves a still-open finish line after its projection grace; owning review required."
+        )
+    _require_completed(issue)
 
 
 def _prepare_project(
@@ -343,6 +396,7 @@ def reconcile_completed_change(
     number: int,
     token: str,
     trusted_author_ids: tuple[int, ...],
+    attempted_at: str,
 ) -> dict[str, Any]:
     """Return a receipt only after every discovered keyword-closed plan is read back."""
     owner, name = repository.split("/", 1)
@@ -350,6 +404,8 @@ def reconcile_completed_change(
     references: list[int] = []
     config: dict[str, Any] = {}
     landing = None
+    merged_at = None
+    attempted = _timestamp(attempted_at)
     for _ in range(10):
         data = _graphql(
             token,
@@ -365,18 +421,21 @@ def reconcile_completed_change(
         repo = _object(data.get("repository"))
         pull = _object(repo.get("pullRequest"))
         sha = _object(pull.get("mergeCommit") or {}).get("oid")
+        observed_merge_time = _timestamp(pull["mergedAt"])
         if (
             pull.get("merged") is not True
             or pull.get("baseRefName") != base_branch
             or _object(repo.get("defaultBranchRef")).get("name") != base_branch
             or not sha
+            or observed_merge_time > attempted
         ):
             raise PlanningCompletionReview(
                 "Planning completion requires a confirmed default-branch landing."
             )
-        if landing is not None and landing != sha:
+        if landing is not None and (landing != sha or merged_at != observed_merge_time):
             raise PlanningCompletionReview("Planning completion landing changed during its read.")
         landing = sha
+        merged_at = observed_merge_time
         blob = repo.get("object")
         if blob is not None:
             config = _object(json.loads(_object(blob)["text"]))
@@ -410,79 +469,104 @@ def reconcile_completed_change(
     outcomes: list[dict[str, Any]] = []
     review_reasons: list[str] = []
     pending_reasons: list[str] = []
-    for issue_number in dict.fromkeys(references):
-        path = f"/repos/{repository}/issues/{issue_number}"
-        issue = _object(github_api_request(path=path, token=token))
-        names = _labels(issue)
-        if not names.intersection(labels.values()):
-            outcomes.append({"number": issue_number, "status": "not_planning_issue"})
-            continue
-        try:
-            if _object(issue.get("user")).get(
-                "id"
-            ) not in trusted_author_ids or "<!-- github-plan:managed-provenance -->" not in str(
-                issue.get("body") or ""
+    issue_number = None
+    try:
+        for issue_number in dict.fromkeys(references):
+            path = f"/repos/{repository}/issues/{issue_number}"
+            issue = _object(github_api_request(path=path, token=token))
+            names = _labels(issue)
+            if not names.intersection(labels.values()):
+                outcomes.append({"number": issue_number, "status": "not_planning_issue"})
+                continue
+            try:
+                if _object(issue.get("user")).get(
+                    "id"
+                ) not in trusted_author_ids or "<!-- github-plan:managed-provenance -->" not in str(
+                    issue.get("body") or ""
+                ):
+                    raise _IssueReview(
+                        f"Planning completion preserves reporter-owned issue #{issue_number}."
+                    )
+                comments = _pages(token, path + "/comments")
+                _require_clear_wait(issue, comments, set(trusted_author_ids), owner)
+                assert merged_at is not None
+                _require_projection(issue, merged_at, attempted)
+                blockers = _pages(token, path + "/dependencies/blocked_by")
+                children = _pages(token, path + "/sub_issues")
+                if any(item.get("state") != "closed" for item in [*blockers, *children]):
+                    raise _IssueReview(
+                        f"Planning completion preserves unfinished prerequisites for #{issue_number}."
+                    )
+                fresh = _object(github_api_request(path=path, token=token))
+                if fresh != issue or _pages(token, path + "/comments") != comments:
+                    raise _IssueReview(
+                        "Planning completion issue changed before metadata reconciliation."
+                    )
+            except PlanningCompletionPending as error:
+                pending_reasons.append(f"#{issue_number}: {error.message}")
+                outcomes.append(
+                    {"number": issue_number, "status": "pending", "reason": error.message}
+                )
+                continue
+            except _IssueReview as error:
+                review_reasons.append(f"#{issue_number}: {error.message}")
+                outcomes.append(
+                    {"number": issue_number, "status": "review", "reason": error.message}
+                )
+                continue
+            try:
+                prepared_project = _prepare_project(
+                    token, issue, _object(config.get("planning", {})), owner
+                )
+            except _IssueProjectReview as error:
+                review_reasons.append(f"#{issue_number}: {error.message}")
+                outcomes.append(
+                    {"number": issue_number, "status": "review", "reason": error.message}
+                )
+                continue
+            # A held source does not block other eligible sources in this PR. Provider
+            # failures during metadata writes still stop delivery and use its existing
+            # retry/denial handling; they are not treated as another source's hold.
+            _sync_project(token, prepared_project)
+            if labels["done"] not in names:
+                github_api_request(
+                    path=path + "/labels",
+                    token=token,
+                    method="POST",
+                    body={"labels": [labels["done"]]},
+                )
+            for label in sorted(names & stale):
+                github_api_request(
+                    path=path + "/labels/" + quote(label, safe=""), token=token, method="DELETE"
+                )
+            verified = _object(github_api_request(path=path, token=token))
+            _require_completed(verified)
+            if (
+                _labels(verified) & stale
+                or labels["done"] not in _labels(verified)
+                or verified.get("body") != issue.get("body")
+                or _pages(token, path + "/comments") != comments
             ):
                 raise PlanningCompletionReview(
-                    f"Planning completion preserves reporter-owned issue #{issue_number}."
+                    "Planning completion metadata readback did not match."
                 )
-            comments = _pages(token, path + "/comments")
-            _require_clear_wait(issue, comments, set(trusted_author_ids), owner)
-            _require_completed(issue)
-            blockers = _pages(token, path + "/dependencies/blocked_by")
-            children = _pages(token, path + "/sub_issues")
-            if any(item.get("state") != "closed" for item in [*blockers, *children]):
-                raise PlanningCompletionReview(
-                    f"Planning completion preserves unfinished prerequisites for #{issue_number}."
-                )
-            fresh = _object(github_api_request(path=path, token=token))
-            if fresh != issue or _pages(token, path + "/comments") != comments:
-                raise PlanningCompletionReview(
-                    "Planning completion issue changed before metadata reconciliation."
-                )
-        except PlanningCompletionPending as error:
-            pending_reasons.append(f"#{issue_number}: {error.message}")
-            outcomes.append({"number": issue_number, "status": "pending", "reason": error.message})
-            continue
-        except PlanningCompletionReview as error:
-            review_reasons.append(f"#{issue_number}: {error.message}")
-            outcomes.append({"number": issue_number, "status": "review", "reason": error.message})
-            continue
-        try:
-            prepared_project = _prepare_project(
-                token, issue, _object(config.get("planning", {})), owner
-            )
-        except _IssueProjectReview as error:
-            review_reasons.append(f"#{issue_number}: {error.message}")
-            outcomes.append({"number": issue_number, "status": "review", "reason": error.message})
-            continue
-        # A held source does not block other eligible sources in this PR. Provider
-        # failures during metadata writes still stop delivery and use its existing
-        # retry/denial handling; they are not treated as another source's hold.
-        _sync_project(token, prepared_project)
-        if labels["done"] not in names:
-            github_api_request(
-                path=path + "/labels", token=token, method="POST", body={"labels": [labels["done"]]}
-            )
-        for label in sorted(names & stale):
-            github_api_request(
-                path=path + "/labels/" + quote(label, safe=""), token=token, method="DELETE"
-            )
-        verified = _object(github_api_request(path=path, token=token))
-        _require_completed(verified)
-        if (
-            _labels(verified) & stale
-            or labels["done"] not in _labels(verified)
-            or verified.get("body") != issue.get("body")
-            or _pages(token, path + "/comments") != comments
-        ):
-            raise PlanningCompletionReview("Planning completion metadata readback did not match.")
-        outcomes.append({"number": issue_number, "status": "reconciled"})
+            outcomes.append({"number": issue_number, "status": "reconciled"})
+    except (click.ClickException, KeyError, TypeError, ValueError) as error:
+        # Keep verified earlier sources even if the next provider operation fails.
+        # An interrupted source is never presented as reconciled or safe to replay.
+        outcomes.append({"number": issue_number, "status": "interrupted", "reason": str(error)})
+        receipt = {"ok": False, "landing_sha": landing, "issues": outcomes}
+        if isinstance(error, PlanningCompletionFailure):
+            error.receipt = receipt
+            raise
+        failure = PlanningCompletionFailure(str(error), receipt=receipt)
+        # Retry/denial classification consumes the original transport cause.
+        raise failure from error.__cause__
     incomplete = {"ok": False, "landing_sha": landing, "issues": outcomes}
     if pending_reasons:
         raise PlanningCompletionPending(
             "; ".join([*pending_reasons, *review_reasons]), receipt=incomplete
         )
     if review_reasons:
-        raise PlanningCompletionReview("; ".join(review_reasons), receipt=incomplete)
+        raise PlanningCompletionSourceReview("; ".join(review_reasons), receipt=incomplete)
     return {"ok": True, "landing_sha": landing, "issues": outcomes}

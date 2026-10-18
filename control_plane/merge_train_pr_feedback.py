@@ -19,6 +19,9 @@ from control_plane.workflows.launchplane import upsert_github_issue_comment
 from control_plane.merge_train_planning_completion import (
     PlanningCompletionFailure,
     PlanningCompletionPending,
+    PlanningCompletionProviderFailure,
+    PlanningCompletionSourceReview,
+    PlanningCompletionReview,
     reconcile_completed_change,
 )
 from control_plane.merge_train_controller_feedback import build_feedback_payloads
@@ -27,12 +30,30 @@ from control_plane.contracts.merge_train_policy import MergeTrainRepositoryPolic
 
 
 PLANNING_RECEIPT_PREFIX = "<!-- launchplane-planning-reconciliation "
+_PLANNING_NOTE_START = "<!-- launchplane-planning-review:start -->"
+_PLANNING_NOTE_END = "<!-- launchplane-planning-review:end -->"
 
 
-def _planning_comment(body: str, receipt: object) -> str:
+def _planning_comment(body: str, receipt: object, *, review: str = "") -> str:
     controller_body = re.sub(
         r"(?m)^" + re.escape(PLANNING_RECEIPT_PREFIX) + r"[^\n]* -->\n?", "", body
     ).rstrip()
+    controller_body = re.sub(
+        re.escape(_PLANNING_NOTE_START) + r".*?" + re.escape(_PLANNING_NOTE_END),
+        "",
+        controller_body,
+        flags=re.DOTALL,
+    ).rstrip()
+    if review:
+        controller_body += (
+            "\n\n"
+            + _PLANNING_NOTE_START
+            + "\nPlanning reconciliation is incomplete and needs owning-agent review. "
+            + "The merge landed; source planning metadata has not all been verified.\n\n"
+            + review
+            + "\n"
+            + _PLANNING_NOTE_END
+        )
     return (
         controller_body
         + "\n\n"
@@ -296,6 +317,7 @@ def deliver_merge_train_pr_feedback_record(
         )
     else:
         owner, repo = record.repository.split("/", 1)
+        source_review = None
         try:
             # Completion is persisted/retried by this same native feedback path,
             # including scheduler landings with no surviving workstation driver.
@@ -308,14 +330,31 @@ def deliver_merge_train_pr_feedback_record(
                 changes["comment_markdown"] = _planning_comment(
                     record.comment_markdown, {"ok": False, "status": "incomplete"}
                 )
-                receipt = reconcile_completed_change(
-                    repository=record.repository,
-                    base_branch=record.base_branch,
-                    number=record.pull_request_number,
-                    token=token,
-                    trusted_author_ids=planning_author_ids,
+                try:
+                    receipt = reconcile_completed_change(
+                        repository=record.repository,
+                        base_branch=record.base_branch,
+                        number=record.pull_request_number,
+                        token=token,
+                        trusted_author_ids=planning_author_ids,
+                        attempted_at=attempted_at,
+                    )
+                except PlanningCompletionSourceReview as exc:
+                    if exc.receipt is None:
+                        raise PlanningCompletionReview(
+                            "Planning completion source review is missing its receipt."
+                        ) from exc
+                    source_review = exc
+                    receipt = exc.receipt
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise PlanningCompletionReview(
+                        "Planning completion received malformed provider evidence; owning-agent review required."
+                    ) from exc
+                changes["comment_markdown"] = _planning_comment(
+                    record.comment_markdown,
+                    receipt,
+                    review=source_review.message if source_review else "",
                 )
-                changes["comment_markdown"] = _planning_comment(record.comment_markdown, receipt)
             comment = upsert_github_issue_comment(
                 owner=owner,
                 repo=repo,
@@ -326,11 +365,12 @@ def deliver_merge_train_pr_feedback_record(
                 skip_unchanged=True,
             )
             changes.update(
-                delivery_status="delivered",
+                delivery_status="failed" if source_review else "delivered",
                 delivery_action=comment["action"],
                 comment_id=comment["comment_id"],
                 comment_url=comment["comment_url"],
                 retryable=False,
+                error_message=source_review.message if source_review else "",
             )
         except click.ClickException as exc:
             if isinstance(exc, PlanningCompletionFailure) and exc.receipt is not None:
@@ -346,12 +386,6 @@ def deliver_merge_train_pr_feedback_record(
                 retryable=retryable,
                 retry_at=retry_at,
                 provider_retry_at=provider_retry_at,
-            )
-        except (KeyError, TypeError, ValueError):
-            changes.update(
-                delivery_status="failed",
-                error_message="Planning completion received malformed provider evidence; owning-agent review required.",
-                retryable=False,
             )
     return record.model_copy(update=changes)
 
@@ -387,6 +421,9 @@ def _delivery_retry(
         error, PlanningCompletionPending
     )
     rate_limited = False
+    if isinstance(error, PlanningCompletionProviderFailure):
+        transient = error.retryable
+        rate_limited = error.rate_limited
     deadlines = [
         _timestamp(attempted_at) + timedelta(seconds=min(60 * 2 ** min(attempts - 1, 4), 900))
     ]

@@ -2155,17 +2155,27 @@ metadata-write failures still stop that delivery through existing retry/denial
 handling.
 Issue-specific Project membership gaps are preflight holds, so they also preserve
 only that issue. Unresolvable Project configuration, permissions, mutations and
-readback failures stop delivery. Saved receipts for source holds retain successful
-source readbacks and the held-source reasons. A deliberately reopened issue needs
-owning review rather than indefinite closure-projection retries; use the existing
-catalog reconciliation route after its finish line and wait review are resolved.
+readback failures stop delivery. Saved receipts retain successful source readbacks
+even when a later source's provider operation fails; that source is marked
+interrupted. Once every source has been visited and only terminal source holds
+remain, the landed PR comment is published with a visible incomplete-planning
+note and a failed, nonretryable receipt. This preserves landing feedback without
+claiming all source metadata is complete. Pending projection and global/provider
+failures still withhold the comment.
 
 Provider failures use terminal feedback's existing retry and quota backoff.
-GitHub's delayed keyword-closure projection also waits for a later feedback
-attempt. A real wait, incomplete prerequisite, cross-repository closing link,
+Explicit transient GraphQL errors, including HTTP-200 rate-limit responses, use
+that same retry path; authorization denial takes precedence. Unknown GraphQL
+failures need review. GitHub's delayed keyword-closure projection waits only within
+15 minutes of the verified PR merge time. This includes an issue reopened before
+a later merge whose new closure has not projected yet. Any still-open source
+after that window requires owning review and stays unchanged. Missing, invalid,
+inconsistent or future merge timestamps fail closed. A real wait, incomplete prerequisite, cross-repository closing link,
 untrusted author, malformed evidence or readback mismatch leaves a failed
-receipt for owning-agent review. This failure does not undo the landing or
-block another repository's train. Permission failures remain failures, without
+receipt for owning-agent review. This failure does not undo the landing. Queueing
+does no GitHub IO, but metadata delivery adds requests to the serial scheduler;
+latency can delay later targets and shared App quota can affect other repositories.
+Permission failures remain failures, without
 a credential or identity fallback. Configured Projects require the existing
 token's Projects capability; no new grant is requested by this path.
 An owning agent can review these cases and use the catalog's supported
