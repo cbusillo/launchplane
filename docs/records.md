@@ -323,6 +323,16 @@ cannot be overwritten after planning. Lane-summary reads hold a shared bundle
 guard while assembling their multi-record view, so a bundle commit cannot split
 one response across the old and new authority graphs.
 
+Every product-profile writer, including compare-and-write without target
+expectations, takes the authority guard before locking its mutation reservation
+or profile row. Duplicate-reservation retries use the same order. This keeps
+retirement, driver and ownership changes serialized with final target adoption;
+the bounded never-live classification wait still returns `history_busy` on
+contention. Provider evidence, publication and allocation progress share one
+store-level execution check that locks the current reservation and checks its
+stable identity and database-time expiry. Progress separately checks its effect
+phase; heartbeat renewal alone does not invalidate that identity.
+
 Runtime read-modify-write producers also carry the original complete record or
 an expected-absent precondition. Product config, onboarding, and the explicit
 runtime repair commands check it under the same bundle guard and row lock.

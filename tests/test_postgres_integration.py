@@ -1769,6 +1769,213 @@ class RealPostgresNoTargetRetirementTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RealPostgresSchemaIntegrationTests(unittest.TestCase):
+    def test_profile_cas_and_final_allocation_publication_serialize_in_both_orders(self) -> None:
+        from contextlib import nullcontext
+
+        from control_plane.application_state_volume_retention import require_state_volume_owner
+        from control_plane.contracts.idempotency_record import (
+            format_launchplane_mutation_timestamp,
+            parse_launchplane_mutation_timestamp,
+        )
+        from control_plane.storage.product_authority_bundle import (
+            ProductAuthorityBundle,
+            ProviderTargetWrite,
+        )
+
+        for mutation_mode in ("ordinary", "new", "retry"):
+            for profile_wins in (True, False):
+                with (
+                    self.subTest(mutation_mode=mutation_mode, profile_wins=profile_wins),
+                    _store_for_fresh_head_database() as store,
+                ):
+                    profile = _product_profile().model_copy(
+                        update={
+                            "lanes": (ProductLaneProfile(context="allocation", instance="testing"),)
+                        }
+                    )
+                    store.write_product_profile_record(profile)
+                    replacement = profile.model_copy(update={"lanes": ()})
+                    writer = PostgresRecordStore(database_url=store.database_url)
+                    self.addCleanup(writer.close)
+                    reservation = store.reserve_mutation(
+                        scope="allocation-publication",
+                        route_path="/allocation",
+                        idempotency_key="original-key",
+                        request_fingerprint="saved-plan",
+                        lease_owner="allocation-worker",
+                    ).record
+                    assert reservation is not None
+                    mutation = (
+                        _db_only_mutation(
+                            lease_owner="profile-worker",
+                            idempotency_key="profile-change",
+                            response_trace_id="profile-change",
+                        )
+                        if mutation_mode != "ordinary"
+                        else None
+                    )
+                    retry_clock = None
+                    if mutation_mode == "retry":
+                        assert mutation is not None
+                        previous = writer.reserve_mutation(
+                            scope=mutation.scope,
+                            route_path=mutation.route_path,
+                            idempotency_key=mutation.idempotency_key,
+                            request_fingerprint=mutation.request_fingerprint,
+                            lease_owner="previous-worker",
+                        ).record
+                        assert previous is not None
+                        retry_clock = format_launchplane_mutation_timestamp(
+                            parse_launchplane_mutation_timestamp(
+                                previous.lease_expires_at, field_name="lease_expires_at"
+                            )
+                            + timedelta(seconds=1)
+                        )
+                    target = DokployTargetRecord(
+                        context="allocation",
+                        instance="testing",
+                        target_type="application",
+                        updated_at=profile.updated_at,
+                    )
+                    identity = DokployTargetIdRecord(
+                        context=target.context,
+                        instance=target.instance,
+                        target_id="fresh-allocation",
+                        updated_at=target.updated_at,
+                    )
+                    bundle = ProductAuthorityBundle(
+                        dokploy_targets=(target,),
+                        dokploy_target_ids=(identity,),
+                        provider_target_writes=(
+                            ProviderTargetWrite(
+                                record=ProviderTargetRecord.from_dokploy_records(
+                                    target_record=target, target_id_record=identity
+                                ),
+                                expected_absent=True,
+                            ),
+                        ),
+                    )
+                    locked = threading.Event()
+                    attempted = threading.Event()
+                    release = threading.Event()
+                    loser_pid: list[int] = []
+
+                    def lock_writer(original: Any, winner: bool, session: Any) -> None:
+                        if not winner:
+                            loser_pid.append(session.scalar(text("SELECT pg_backend_pid()")))
+                            attempted.set()
+                        original(session)
+                        if winner:
+                            locked.set()
+                            if not release.wait(10):
+                                raise TimeoutError("Allocation authority writer was not released.")
+
+                    def checkpoint() -> None:
+                        require_state_volume_owner(
+                            store, product=profile.product, context=target.context
+                        )
+                        if store.read_product_profile_record(profile.product) != profile:
+                            raise ValueError("The saved allocation profile changed.")
+
+                    def publish() -> bool:
+                        try:
+                            with store.provider_evidence_guard(
+                                lambda: reservation, authority_checkpoint=checkpoint
+                            ):
+                                store.write_product_authority_bundle(bundle)
+                        except ValueError:
+                            return False
+                        return True
+
+                    def change_profile() -> str:
+                        with (
+                            patch.object(
+                                writer, "_database_mutation_timestamp", return_value=retry_clock
+                            )
+                            if retry_clock is not None
+                            else nullcontext()
+                        ):
+                            return writer.compare_and_write_product_profile_record(
+                                expected_record=profile,
+                                replacement_record=replacement,
+                                mutation=mutation,
+                            ).status
+
+                    publication_lock = store._lock_product_authority_bundle_write
+                    profile_lock = writer._lock_product_authority_bundle_write
+                    profile_acquisitions = 0
+
+                    def lock_profile(session: Any) -> None:
+                        nonlocal profile_acquisitions
+                        profile_acquisitions += 1
+                        if profile_wins and mutation_mode == "retry" and profile_acquisitions == 1:
+                            # The duplicate reservation insert rolls this first
+                            # transaction back; pause the actual reclaim instead.
+                            profile_lock(session)
+                            return
+                        lock_writer(profile_lock, profile_wins, session)
+
+                    with (
+                        patch.object(
+                            store,
+                            "_lock_product_authority_bundle_write",
+                            side_effect=lambda session: lock_writer(
+                                publication_lock, not profile_wins, session
+                            ),
+                        ),
+                        patch.object(
+                            writer,
+                            "_lock_product_authority_bundle_write",
+                            side_effect=lock_profile,
+                        ),
+                        ThreadPoolExecutor(max_workers=2) as workers,
+                    ):
+                        first = workers.submit(change_profile if profile_wins else publish)
+                        try:
+                            self.assertTrue(locked.wait(5))
+                            second = workers.submit(publish if profile_wins else change_profile)
+                            self.assertTrue(attempted.wait(5))
+                            deadline = time.monotonic() + 5
+                            blocked = False
+                            while not second.done() and time.monotonic() < deadline:
+                                with store._engine.connect() as observer:
+                                    blocked = bool(
+                                        observer.scalar(
+                                            text("SELECT cardinality(pg_blocking_pids(:pid)) > 0"),
+                                            {"pid": loser_pid[0]},
+                                        )
+                                    )
+                                if blocked:
+                                    break
+                                time.sleep(0.01)
+                            self.assertTrue(
+                                blocked, "The competing writer never waited in PostgreSQL"
+                            )
+                        finally:
+                            release.set()
+                        profile_result, published = (
+                            (first.result(timeout=10), second.result(timeout=10))
+                            if profile_wins
+                            else (second.result(timeout=10), first.result(timeout=10))
+                        )
+                    self.assertEqual(profile_result, "written")
+                    self.assertEqual(published, not profile_wins)
+                    self.assertEqual(
+                        store.read_product_profile_record(profile.product), replacement
+                    )
+                    if profile_wins:
+                        with self.assertRaises(FileNotFoundError):
+                            store.read_provider_target_record(
+                                context_name=target.context, instance_name=target.instance
+                            )
+                    else:
+                        self.assertEqual(
+                            store.read_provider_target_record(
+                                context_name=target.context, instance_name=target.instance
+                            ).target_id,
+                            identity.target_id,
+                        )
+
     def test_state_volume_retention_and_guarded_adoption_serialize_in_both_orders(self) -> None:
         from control_plane.application_state_volume_retention import (
             require_state_volume_retention_eligibility,

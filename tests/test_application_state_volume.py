@@ -734,6 +734,63 @@ class ApplicationStateVolumeTests(_DirectorTestingSetupFixture):
         self.assertFalse(self.store.list_held_provider_target_reservations())
         self.assert_production_unchanged()
 
+    async def test_pre_effect_busy_refusal_preserves_code_and_does_not_hold_the_lane(self) -> None:
+        from contextlib import nullcontext
+
+        await self.plan()
+        with patch.object(
+            self.store, "testing_replacement_execution_lock", return_value=nullcontext(None)
+        ):
+            busy = await self.post()
+        self.assertEqual(busy.status_code, 409, busy.text)
+        self.assertEqual(busy.json()["error"]["code"], "application_state_volume_lane_busy")
+        self.provider.assert_not_called()
+        self.assertFalse(self.store.list_held_provider_target_reservations())
+        retry = await self.post()
+        self.assertEqual(retry.status_code, 202, retry.text)
+
+    async def test_pre_effect_owner_refusal_preserves_code(self) -> None:
+        from control_plane.application_state_volume import ApplicationStateVolumeAdapter
+
+        await self.plan()
+        checkpoint = ApplicationStateVolumeAdapter.checkpoint
+        retiring = self.profile.model_copy(
+            update={
+                "lifecycle_state": "retiring",
+                "preview": self.profile.preview.model_copy(update={"enabled": False}),
+            }
+        )
+
+        def retire_before_checkpoint(adapter: ApplicationStateVolumeAdapter) -> None:
+            self.store.write_product_profile_record(retiring)
+            checkpoint(adapter)
+
+        with patch.object(
+            ApplicationStateVolumeAdapter, "checkpoint", new=retire_before_checkpoint
+        ):
+            result = await self.post()
+        self.assertEqual(result.status_code, 409, result.text)
+        self.assertEqual(result.json()["error"]["code"], "application_state_volume_owner_changed")
+        self.provider.assert_not_called()
+        self.assertFalse(self.store.list_held_provider_target_reservations())
+
+    async def test_completed_adoption_retention_returns_its_caller_action(self) -> None:
+        await self.plan()
+        success = await self.post()
+        self.assertEqual(success.status_code, 202, success.text)
+        readback = (await self.post(mode="readback")).json()["result"]
+        calls = self.provider.call_count
+        retained = await self.post(
+            retain_state_volume_allocation=True,
+            expected_state_volume_custody_sha256=readback["custody_sha256"],
+        )
+        self.assertEqual(retained.status_code, 409, retained.text)
+        self.assertEqual(
+            retained.json()["error"]["code"], "application_state_volume_already_adopted"
+        )
+        self.assertFalse(self.store.list_held_provider_target_reservations())
+        self.assertEqual(self.provider.call_count, calls)
+
     async def test_authority_change_at_final_commit_refuses_and_preserves_custody(self) -> None:
         from datetime import timedelta
         from control_plane.contracts.idempotency_record import (

@@ -5835,16 +5835,17 @@ class PostgresRecordStore(HumanSessionStore):
             ):
                 if not authority_row:
                     self._begin_serialized_write(session)
-                self._require_current_provider_evidence(session, reservation_reader())
+                self.require_current_provider_execution(session, reservation_reader())
             if isinstance(row, LaunchplaneOdooInstanceOverrideRow):
                 self._merge_odoo_override_row(session, row)
             else:
                 session.merge(row)
             session.commit()
 
-    def _require_current_provider_evidence(
+    def require_current_provider_execution(
         self, session: Any, expected: LaunchplaneIdempotencyRecord
-    ) -> None:
+    ) -> LaunchplaneIdempotencyRecord:
+        """Lock and validate execution identity against its current database expiry."""
         held_row = session.scalar(
             self._idempotency_statement(
                 scope=expected.scope,
@@ -5883,6 +5884,7 @@ class PostgresRecordStore(HumanSessionStore):
             )
         ):
             raise ValueError("Provider operation no longer owns this evidence write.")
+        return current
 
     @contextmanager
     def provider_evidence_guard(
@@ -6308,7 +6310,7 @@ class PostgresRecordStore(HumanSessionStore):
                 self._provider_evidence_context, "reservation_reader", None
             )
             if reservation_reader is not None:
-                self._require_current_provider_evidence(session, reservation_reader())
+                self.require_current_provider_execution(session, reservation_reader())
             authority_checkpoint = getattr(
                 self._provider_evidence_context, "authority_checkpoint", None
             )
@@ -26029,7 +26031,10 @@ class PostgresRecordStore(HumanSessionStore):
             statement = statement.with_for_update()
         if mutation is None:
             with self._session_factory() as session:
-                self._begin_serialized_write(session)
+                if not self._begin_product_profile_compare_write(
+                    session, require_never_live_history=require_never_live_history
+                ):
+                    return ProductProfileCompareWriteResult(status="history_busy")
                 return self._compare_and_write_product_profile_locked(
                     session=session,
                     statement=statement,
@@ -26043,7 +26048,10 @@ class PostgresRecordStore(HumanSessionStore):
 
         reservation_insert_error: IntegrityError | None = None
         with self._session_factory() as session:
-            self._begin_serialized_write(session)
+            if not self._begin_product_profile_compare_write(
+                session, require_never_live_history=require_never_live_history
+            ):
+                return ProductProfileCompareWriteResult(status="history_busy")
             observed_at = self._database_mutation_timestamp(session)
             stored_reservation = build_launchplane_mutation_reservation(
                 scope=mutation.scope,
@@ -26080,7 +26088,10 @@ class PostgresRecordStore(HumanSessionStore):
                 )
 
         with self._session_factory() as session:
-            self._begin_serialized_write(session)
+            if not self._begin_product_profile_compare_write(
+                session, require_never_live_history=require_never_live_history
+            ):
+                return ProductProfileCompareWriteResult(status="history_busy")
             reservation_row = session.scalar(
                 self._idempotency_statement(
                     scope=mutation.scope,
@@ -26164,6 +26175,30 @@ class PostgresRecordStore(HumanSessionStore):
                 require_never_live_history=require_never_live_history,
             )
 
+    def _begin_product_profile_compare_write(
+        self, session: Any, *, require_never_live_history: bool
+    ) -> bool:
+        """Acquire authority before reservation/profile rows, including retries."""
+        self._begin_serialized_write(session)
+        try:
+            if require_never_live_history and self.database_dialect_name == "postgresql":
+                session.execute(
+                    text(
+                        "SET LOCAL lock_timeout = "
+                        f"'{NEVER_LIVE_CLASSIFICATION_LOCK_TIMEOUT_SECONDS}s'"
+                    )
+                )
+            self._lock_product_authority_bundle_write(session)
+        except DBAPIError as error:
+            if not require_never_live_history or getattr(error.orig, "sqlstate", None) not in {
+                "55P03",
+                "40P01",
+            }:
+                raise
+            session.rollback()
+            return False
+        return True
+
     def _compare_and_write_product_profile_locked(
         self,
         *,
@@ -26180,7 +26215,6 @@ class PostgresRecordStore(HumanSessionStore):
         require_never_live_history: bool = False,
     ) -> ProductProfileCompareWriteResult:
         if expected_provider_targets or expected_dokploy_targets or expected_dokploy_target_ids:
-            self._lock_product_authority_bundle_write(session)
             target_expectations_match = (
                 self._provider_target_expectations_match(
                     session=session,
@@ -26202,14 +26236,6 @@ class PostgresRecordStore(HumanSessionStore):
                 return ProductProfileCompareWriteResult(status="changed")
         try:
             if require_never_live_history:
-                if self._engine.dialect.name == "postgresql":
-                    session.execute(
-                        text(
-                            "SET LOCAL lock_timeout = "
-                            f"'{NEVER_LIVE_CLASSIFICATION_LOCK_TIMEOUT_SECONDS}s'"
-                        )
-                    )
-                self._lock_product_authority_bundle_write(session)
                 if self._engine.dialect.name == "postgresql":
                     # Include concurrent history insertions, not only existing rows.
                     tables = ", ".join(

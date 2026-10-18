@@ -11,6 +11,7 @@ from control_plane.application_state_volume import (
     ROUTE,
     _normalized,
     state_volume_target_key,
+    state_volume_allocation_names,
 )
 from control_plane.application_state_volume_retention import (
     checkpoint_state_volume_progress,
@@ -57,11 +58,7 @@ class ApplicationStateVolumeRetentionTests(unittest.TestCase):
             "binding": "fixture-binding",
             "provider_host": "https://provider.example.invalid",
             "plan_id": plan_id,
-            "volume_name": "lp-testing-state-" + plan_id,
-            "app_name": "lp-testing-app-" + plan_id + "-state",
-            "project_marker": "lp-testing-project-" + plan_id,
-            "environment_marker": "lp-testing-environment-" + plan_id,
-            "target_marker": "lp-testing-target-" + plan_id,
+            **state_volume_allocation_names(plan_id),
         }
         self.intent["plan_sha256"] = request_fingerprint(self.intent)
         self.scope = "terminal-agent:retention-fixture"

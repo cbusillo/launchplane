@@ -17,12 +17,6 @@ def require_state_volume_retention_eligibility(
     store: PostgresRecordStore, *, product: str, context: str, application_id: str
 ) -> None:
     """Check current lane ownership and untracked custody under the authority lock."""
-    from control_plane.authz_candidate_preparation import (
-        is_exclusive_product_lane_context,
-        product_context_owners,
-    )
-
-    profile = store.read_product_profile_record(product)
     try:
         current = store.read_provider_target_record(context_name=context, instance_name="testing")
     except FileNotFoundError:
@@ -32,12 +26,23 @@ def require_state_volume_retention_eligibility(
             "application_state_volume_already_adopted",
             "Original allocation is already tracked; use original-key recovery.",
         )
+    require_state_volume_owner(store, product=product, context=context)
+
+
+def require_state_volume_owner(store: PostgresRecordStore, *, product: str, context: str) -> None:
+    """Require the active exclusive owner for a state-volume allocation."""
+    from control_plane.authz_candidate_preparation import (
+        is_exclusive_product_lane_context,
+        product_context_owners,
+    )
+
+    profile = store.read_product_profile_record(product)
     if profile.lifecycle_state != "active" or not is_exclusive_product_lane_context(
         context=context, product=product, owners=product_context_owners(store)
     ):
         raise StateVolumeRefusal(
             "application_state_volume_owner_changed",
-            "Retaining storage custody requires its current active exclusive owner.",
+            "Storage custody requires its current active exclusive owner.",
         )
 
 
@@ -132,42 +137,13 @@ def checkpoint_state_volume_progress(
         raise ValueError("Allocation progress requires its live setup reservation.")
     with store._session_factory() as session:
         store._begin_serialized_write(session)
-        row = session.scalar(
-            store._idempotency_statement(
-                scope=reservation.scope,
-                route_path=ROUTE,
-                idempotency_key=reservation.idempotency_key,
-                for_update=True,
-            )
-        )
-        if row is None:
-            raise ValueError("Original allocation custody is unavailable.")
-        current = LaunchplaneIdempotencyRecord.model_validate(row.payload)
+        current = store.require_current_provider_execution(session, reservation)
         if (
-            current.state != "running"
-            or any(
-                getattr(current, field) != getattr(reservation, field)
-                for field in (
-                    "record_id",
-                    "scope",
-                    "route_path",
-                    "idempotency_key",
-                    "request_fingerprint",
-                    "lease_owner",
-                    "attempt",
-                    "provider_target_key",
-                    "reconciliation_key",
-                )
-            )
-            or current.provider_effect_phase != phase
+            current.provider_effect_phase != phase
             or current.provider_effect_started_at != reservation.provider_effect_started_at
         ):
             raise ValueError("Allocation progress requires the current execution lease.")
         now = store._database_mutation_timestamp(session)
-        if parse_launchplane_mutation_timestamp(
-            current.lease_expires_at, field_name="lease_expires_at"
-        ) <= parse_launchplane_mutation_timestamp(now, field_name="observed_at"):
-            raise ValueError("The original allocation execution lease expired.")
         original = store._original_mutation_intent(session, current, for_update=True)
         request = DokployTargetSetupEnvelope.model_validate(
             {**original.get("request", {}), "mode": "dry-run"}
@@ -251,6 +227,7 @@ def retain_state_volume_allocation(
         PLAN_ROUTE,
         ROUTE,
         state_volume_target_key,
+        state_volume_allocation_names,
         validate_volume_request,
     )
     from control_plane.dokploy_target_setup_http import DokployTargetSetupEnvelope
@@ -261,16 +238,15 @@ def retain_state_volume_allocation(
     request = DokployTargetSetupEnvelope.model_validate({**original["request"], "mode": "dry-run"})
     validate_volume_request(request)
     plan_id = original.get("plan_id")
+    if not isinstance(plan_id, str):
+        raise ValueError("Retention requires an original application state-volume allocation.")
+    names = state_volume_allocation_names(plan_id)
     if (
         reservation.route_path != ROUTE
         or reservation.provider_target_key != state_volume_target_key(request.context)
         or reservation.reconciliation_key != original.get("plan_sha256")
         or reservation.request_fingerprint != original.get("plan_sha256")
-        or not isinstance(plan_id, str)
-        or len(plan_id) != 32
-        or any(character not in "0123456789abcdef" for character in plan_id)
-        or original.get("volume_name") != "lp-testing-state-" + plan_id
-        or original.get("app_name") != "lp-testing-app-" + plan_id + "-state"
+        or any(original.get(name) != value for name, value in names.items())
     ):
         raise ValueError("Retention requires an original application state-volume allocation.")
     result: dict[str, object] = {
@@ -345,6 +321,11 @@ def retain_state_volume_allocation(
             receipt = current.response_payload.get("result", {})
             if not isinstance(receipt, dict):
                 raise ValueError("A completed allocation cannot be retained.")
+            if receipt.get("allocation_state") != "retained_uncertain":
+                raise StateVolumeRefusal(
+                    "application_state_volume_already_adopted",
+                    "Original allocation is completed; use its original-key receipt.",
+                )
             reviewed_digest = receipt.get("reviewed_custody_sha256")
             if not isinstance(reviewed_digest, str) or (
                 supplied_digest != expected_custody_sha256

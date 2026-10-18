@@ -38,6 +38,18 @@ MOUNT_CREATE = "/api/mounts.create"
 LANE_LOCK_PREFIX = "testing-target-setup:"
 
 
+def state_volume_allocation_names(plan_id: str) -> dict[str, str]:
+    if not re.fullmatch(r"[a-f0-9]{32}", plan_id):
+        raise ValueError("Storage allocation requires its service-generated plan identity.")
+    return {
+        "volume_name": "lp-testing-state-" + plan_id,
+        "app_name": "lp-testing-app-" + plan_id + "-state",
+        "project_marker": "lp-testing-project-" + plan_id,
+        "environment_marker": "lp-testing-environment-" + plan_id,
+        "target_marker": "lp-testing-target-" + plan_id,
+    }
+
+
 def state_volume_target_key(context: str) -> str:
     return f"application-state-setup:{context}:testing"
 
@@ -165,11 +177,7 @@ class ApplicationStateVolumeAdapter:
                 "binding": _binding(store, request.context),
                 "provider_host": host,
                 "plan_id": allocation,
-                "volume_name": "lp-testing-state-" + allocation,
-                "app_name": "lp-testing-app-" + allocation + "-state",
-                "project_marker": "lp-testing-project-" + allocation,
-                "environment_marker": "lp-testing-environment-" + allocation,
-                "target_marker": "lp-testing-target-" + allocation,
+                **state_volume_allocation_names(allocation),
             }
             intent["plan_sha256"] = request_fingerprint(intent)
             store.write_idempotency_record(
@@ -241,7 +249,9 @@ class ApplicationStateVolumeAdapter:
 
     def checkpoint(self) -> None:
         from control_plane.dokploy_target_setup_http import require_empty_testing_target_creation
+        from control_plane.application_state_volume_retention import require_state_volume_owner
 
+        require_state_volume_owner(self.store, product=self.product, context=self.request.context)
         require_empty_testing_target_creation(self.store, self.request, product=self.product)
         host, _token = source.read_dokploy_config(control_plane_root=self.root)
         if (
@@ -263,7 +273,7 @@ class ApplicationStateVolumeAdapter:
         host, token = source.read_dokploy_config(control_plane_root=self.root)
         self._application_name(app_name)
         if host != self.intent["provider_host"]:
-            raise ValueError("Provider binding changed.")
+            raise InventoryUnavailable("provider_binding_changed")
         for other in self.store.list_physical_provider_target_records():
             if other.target_id == application_id and (other.context, other.instance) != (
                 self.request.context,
@@ -515,9 +525,6 @@ class ApplicationStateVolumeAdapter:
         try:
             data = json.loads(phase) if phase else {}
             if all(data.get(key) for key in ("application", "environment", "app_name")):
-                host, _token = source.read_dokploy_config(control_plane_root=self.root)
-                if host != self.intent["provider_host"]:
-                    raise InventoryUnavailable("provider_binding_changed")
                 live = self._live(data["application"], data["environment"], data["app_name"])
                 evidence = "matches" if self._mount_matches(live) else "differs"
         except (
@@ -722,7 +729,9 @@ class ApplicationStateVolumeAdapter:
                 ) as check,
             ):
                 if check is None or lane_check is None:
-                    raise ValueError("Testing executor is busy.")
+                    raise StateVolumeRefusal(
+                        "application_state_volume_lane_busy", "Testing executor is busy."
+                    )
 
                 def execution_check() -> None:
                     check()
@@ -782,7 +791,9 @@ class ApplicationStateVolumeAdapter:
         except Exception as error:
             if not started and not phase:
                 raise ProviderMutationRejectedError(
-                    ValueError("Testing storage plan refused before effects.")
+                    error
+                    if isinstance(error, StateVolumeRefusal)
+                    else ValueError("Testing storage plan refused before effects.")
                 ) from error
             raise ProviderMutationUnknownError(
                 "Creation may have taken effect; retain the original key and storage plan for readback/recovery."
