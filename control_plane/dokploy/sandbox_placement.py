@@ -7,6 +7,10 @@ import re
 from control_plane.dokploy import api, source
 
 
+class IsolatedPlacementObservationRequired(ValueError):
+    """A dispatched create lacks its identity; observe the original operation."""
+
+
 def create_isolated_placement(
     root: Path,
     *,
@@ -85,7 +89,9 @@ def create_isolated_placement(
         )
         identifier = (response or {}).get(response_key)
         if not isinstance(identifier, str) or not identifier.strip():
-            raise ValueError("Isolated creation is uncertain; use original-key observation.")
+            raise IsolatedPlacementObservationRequired(
+                "Isolated creation is uncertain; use original-key observation."
+            )
         record_identity(field, identifier)
         identities[field] = identifier
 
