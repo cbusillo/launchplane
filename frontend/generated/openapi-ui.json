@@ -8839,6 +8839,107 @@
         "summary": "Lookup Original"
       }
     },
+    "/v1/products/{product}/testing-rebuild/operations/{operation_id}/resume": {
+      "post": {
+        "operationId": "resume_testing_rebuild",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Operation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 256,
+              "minLength": 1,
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TestingRebuildResume"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TestingRebuildResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Resume Original"
+      }
+    },
     "/v1/release-review/decisions": {
       "post": {
         "operationId": "write_release_review_decision",
@@ -39665,6 +39766,11 @@
       "TestingRebuildOperationView": {
         "additionalProperties": false,
         "properties": {
+          "attempt": {
+            "minimum": 0,
+            "title": "Attempt",
+            "type": "integer"
+          },
           "instance": {
             "const": "testing",
             "default": "testing",
@@ -39693,6 +39799,7 @@
           }
         },
         "required": [
+          "attempt",
           "instance",
           "operation_id",
           "phase",
@@ -39789,6 +39896,27 @@
           "trace_id"
         ],
         "title": "TestingRebuildResponse",
+        "type": "object"
+      },
+      "TestingRebuildResume": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_attempt": {
+            "minimum": 0,
+            "title": "Expected Attempt",
+            "type": "integer"
+          },
+          "expected_updated_at": {
+            "minLength": 1,
+            "title": "Expected Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "expected_updated_at",
+          "expected_attempt"
+        ],
+        "title": "TestingRebuildResume",
         "type": "object"
       },
       "TestingRebuildSubmit": {

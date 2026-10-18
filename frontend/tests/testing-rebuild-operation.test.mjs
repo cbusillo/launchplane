@@ -1,18 +1,85 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { LaunchplaneApiError } from "../src/api.ts";
-import { readTestingRebuildAttempt, runTestingRebuild, saveTestingRebuildAttempt } from "../src/testing-rebuild-operation.ts";
+import { readTestingRebuildAttempt, runTestingRebuild, resumeTestingRebuildAttempt, saveTestingRebuildAttempt } from "../src/testing-rebuild-operation.ts";
 
 const original = { product: "example", key: "original-click", payload: {
   artifact_id: "verified-build", source_git_ref: "c".repeat(40), data_source_mode: "empty", reason: "Fresh testing copy",
 } };
 const receipt = (status, operationId = "native-original") => ({ trace_id: "trace", operation: {
-  product: original.product, instance: "testing", operation_id: operationId, status, phase: status === "pass" ? "completed" : "running", updated_at: "2026-10-17T00:00:00Z",
+  product: original.product, instance: "testing", operation_id: operationId, status, phase: status === "pass" ? "completed" : "running", updated_at: "2026-10-17T00:00:00Z", attempt: 1,
 } });
 
 function dependencies(overrides = {}) {
   return { submit: async () => receipt("pending"), lookup: async () => receipt("pending"), read: async () => receipt("pass"), wait: async () => {}, persist: () => {}, progress: () => {}, ...overrides };
 }
+
+test("explicit resume uses the held revision, original operation and original request key", async () => {
+  const held = receipt("reconciliation_required").operation;
+  const saved = { ...original, operationId: held.operation_id };
+  let writes = 0;
+  const result = await resumeTestingRebuildAttempt(saved, held, {
+    resume: async (product, id, payload, options) => {
+      writes++;
+      assert.equal(product, original.product);
+      assert.equal(id, saved.operationId);
+      assert.equal(options.idempotencyKey, original.key);
+      assert.deepEqual(payload, { expected_updated_at: held.updated_at, expected_attempt: held.attempt });
+      return receipt("pending");
+    }, persist: () => assert.fail("A successful resume does not replace the original request"),
+  });
+  assert.equal(result.operation.operation_id, saved.operationId);
+  assert.equal(writes, 1);
+});
+
+test("denied resume retains the original and needs a fresh read before another explicit action", async () => {
+  const held = receipt("reconciliation_required").operation;
+  let saved = { ...original, operationId: held.operation_id };
+  let writes = 0;
+  const resume = {
+    resume: async () => {
+      writes++;
+      if (writes === 1) throw new LaunchplaneApiError("Resume denied", 403, "resume-denial", "authorization_denied");
+      return receipt("pending");
+    }, persist: value => { saved = value; },
+  };
+  await assert.rejects(resumeTestingRebuildAttempt(saved, held, resume));
+  assert.equal(saved.resumeNeedsRead, true);
+  assert.equal(saved.key, original.key);
+  assert.equal(saved.operationId, held.operation_id);
+  assert.deepEqual(saved.payload, original.payload);
+  await assert.rejects(resumeTestingRebuildAttempt(saved, held, resume));
+  assert.equal(writes, 1);
+  await runTestingRebuild(saved, dependencies({
+    submit: async () => assert.fail("A fresh read cannot submit"),
+    read: async () => receipt("reconciliation_required"),
+    persist: value => { saved = value; },
+  }));
+  assert.equal(saved.resumeNeedsRead, false);
+  assert.equal(writes, 1);
+  await resumeTestingRebuildAttempt(saved, held, resume);
+  assert.equal(writes, 2);
+});
+
+test("a lost or foreign resume reply retains the original handle and only allows observation", async () => {
+  const held = receipt("reconciliation_required").operation;
+  for (const response of [new Error("Resume reply lost"), receipt("pending", "foreign")]) {
+    let saved = { ...original, operationId: held.operation_id };
+    let writes = 0;
+    await assert.rejects(resumeTestingRebuildAttempt(saved, held, {
+      resume: async () => { writes++; if (response instanceof Error) throw response; return response; },
+      persist: value => { saved = value; },
+    }));
+    assert.equal(saved.operationId, held.operation_id);
+    assert.equal(saved.resumeNeedsRead, true);
+    await runTestingRebuild(saved, dependencies({
+      submit: async () => assert.fail("Recovery is read-only"),
+      persist: value => { saved = value; },
+    }));
+    assert.equal(writes, 1);
+    assert.equal(saved.operationId, held.operation_id);
+  }
+});
 
 test("one click submits once, persists the accepted id and only polls that operation", async () => {
   let writes = 0;

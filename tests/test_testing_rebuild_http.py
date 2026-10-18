@@ -33,7 +33,7 @@ from tests.http_app_test_support import (
 from tests.support.http import LIFESPAN_HANG_DEADLINE_SECONDS, lifespan_client, request
 
 
-class TestingRebuildHttpTests(unittest.IsolatedAsyncioTestCase):
+class TestingRebuildHttpFixture(unittest.TestCase):
     def setUp(self) -> None:
         self.fixture = worker_tests.NativeTestingWorkerTests()
         self.fixture.setUp()
@@ -104,6 +104,8 @@ class TestingRebuildHttpTests(unittest.IsolatedAsyncioTestCase):
             headers.pop("X-CSRF-Token", None)
         return await request(self.app, method, path or self.url, headers=headers, payload=payload)
 
+
+class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsyncioTestCase):
     async def test_read_only_preflight_does_not_admit_artifact_or_candidate(self) -> None:
         before = self.store.list_odoo_stable_target_replacement_operation_records()
         response = await self.call("GET", path=self.url + "/inputs")

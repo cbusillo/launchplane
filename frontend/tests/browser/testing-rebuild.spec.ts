@@ -1,6 +1,6 @@
 import { expect, test, waitForState } from "./state";
 
-for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-observed", "session-unavailable", "watch-denied", "denied", "stale-build", "preflight-unavailable"] as const) {
+for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-observed", "session-unavailable", "watch-denied", "denied", "stale-build", "preflight-unavailable", "held-resume", "held-resume-denied", "held-resume-lost-reply"] as const) {
   test(`testing rebuild keeps its address and original request after ${outcome} @responsive`, async ({ page }, testInfo) => {
     await page.goto("/ui/products?fixture=empty");
     const fixtures = await page.evaluate(async () => {
@@ -22,6 +22,11 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-o
     let reads = 0;
     let lookups = 0;
     let sessionUnavailable = false;
+    const heldOutcome = outcome.startsWith("held-resume");
+    const heldUpdatedAt = new Date().toISOString();
+    const heldAttempt = 1;
+    const resumes: Record<string, unknown>[] = [];
+    let resumed = false;
     await page.route("**/v1/**", route => route.fulfill({ status: 503, json: { error: { code: "fixture_unavailable", message: "Other evidence is unavailable in this isolated journey." } } }));
     await page.route("**/v1/auth/session", route => sessionUnavailable
       ? route.fulfill({ status: 503, json: { trace_id: "session-unavailable", error: { code: "session_unavailable", message: "Session lookup unavailable." } } })
@@ -35,7 +40,7 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-o
       artifact_id: "current-verified-build", source_git_ref: selectedCommit, data_source_mode: new URL(route.request().url()).searchParams.get("data_source_mode"),
       observed_at: new Date().toISOString(), candidate_verification: "pending",
     } }));
-    const receipt = (status: string) => ({ trace_id: "rebuild-trace", operation: { product: environment.product, instance: "testing", operation_id: "native-original", status, phase: status === "pass" ? "completed" : "running", updated_at: new Date().toISOString() } });
+    const receipt = (status: string) => ({ trace_id: "rebuild-trace", operation: { product: environment.product, instance: "testing", operation_id: "native-original", status, phase: status === "pass" ? "completed" : "running", updated_at: status === "reconciliation_required" ? heldUpdatedAt : new Date().toISOString(), attempt: heldAttempt } });
     await page.route("**/v1/products/atlas-commerce/testing-rebuild", async route => {
       expect(route.request().headers()["x-csrf-token"]).toBe(csrfToken);
       writes.push({ key: route.request().headers()["idempotency-key"], body: route.request().postDataJSON() });
@@ -53,8 +58,20 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-o
     });
     await page.route("**/v1/products/atlas-commerce/testing-rebuild/operations/native-original", route => {
       polled = true; reads++;
+      if (heldOutcome && !resumed) return route.fulfill({ json: receipt("reconciliation_required") });
       if (outcome === "watch-denied" && reads === 1) return route.fulfill({ status: 403, json: { trace_id: "read-denied", error: { code: "authorization_denied", message: "Watching is temporarily denied." } } });
       return route.fulfill({ json: receipt("pass") });
+    });
+    await page.route("**/v1/products/atlas-commerce/testing-rebuild/operations/native-original/resume", route => {
+      expect(route.request().headers()["x-csrf-token"]).toBe(csrfToken);
+      expect(route.request().headers()["idempotency-key"]).toBe(writes[0].key);
+      const payload = route.request().postDataJSON();
+      resumes.push(payload);
+      expect(payload).toEqual({ expected_updated_at: heldUpdatedAt, expected_attempt: heldAttempt });
+      if (outcome === "held-resume-denied" && resumes.length === 1) return route.fulfill({ status: 403, json: { trace_id: "resume-denial", error: { code: "authorization_denied", message: "Resuming this request is denied." } } });
+      resumed = true;
+      if (outcome === "held-resume-lost-reply") return route.abort();
+      return route.fulfill({ json: receipt("pending") });
     });
     await page.goto("/ui/products/atlas-commerce/environments/testing/actions");
     const panel = page.getByRole("region", { name: "Rebuild testing at the same address" });
@@ -121,12 +138,34 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-o
     } else {
       await waitForState(() => page.evaluate(() => JSON.parse(sessionStorage.getItem("launchplane:testing-rebuild:atlas-commerce") ?? "null")?.operationId)).toBe("native-original");
       await page.clock.runFor(2500);
+      if (heldOutcome) {
+        await expect(panel.getByRole("button", { name: "Resume this rebuild", exact: true })).toBeEnabled();
+        await page.reload();
+        await expect(panel.getByRole("button", { name: "Resume this rebuild", exact: true })).toBeEnabled();
+        expect(resumes.length).toBe(0);
+        await panel.screenshot({ path: testInfo.outputPath("testing-rebuild-held.png") });
+        await panel.getByRole("button", { name: "Resume this rebuild", exact: true }).click();
+        if (outcome !== "held-resume") {
+          await expect(panel.getByRole("status")).toContainText("Read the original operation");
+          await expect(panel.getByRole("button", { name: "Resume this rebuild", exact: true })).toBeDisabled();
+          expect(resumes.length).toBe(1);
+          await panel.screenshot({ path: testInfo.outputPath("testing-rebuild-resume-needs-read.png") });
+          await panel.getByRole("button", { name: "Resume watching this rebuild", exact: true }).click();
+          if (outcome === "held-resume-denied") {
+            await expect(panel.getByRole("button", { name: "Resume this rebuild", exact: true })).toBeEnabled();
+            expect(resumes.length).toBe(1);
+            await panel.getByRole("button", { name: "Resume this rebuild", exact: true }).click();
+          }
+        }
+        expect(writes.length).toBe(1);
+      }
       if (outcome === "watch-denied") {
         await expect(panel.getByRole("button", { name: "Resume watching this rebuild" })).toBeEnabled();
         expect(writes.length).toBe(1);
         await page.reload();
       }
       await expect(panel.getByRole("status")).toContainText("Testing rebuilt and verified healthy at the same address.");
+      if (heldOutcome) expect(resumes.length).toBe(outcome === "held-resume-denied" ? 2 : 1);
       expect(polled).toBe(true);
       expect(writes[0].body.data_source_mode).toBe(selectedSource);
       expect(writes[0].body).not.toHaveProperty("instance");

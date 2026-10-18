@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { inspectTestingRebuild, readTestingRebuild, submitTestingRebuild, lookupTestingRebuild, LaunchplaneApiError } from "./api";
+import { inspectTestingRebuild, readTestingRebuild, submitTestingRebuild, lookupTestingRebuild, resumeTestingRebuild, LaunchplaneApiError } from "./api";
 import { waitFor } from "./odoo-release-operation";
-import { readTestingRebuildAttempt, runTestingRebuild, saveTestingRebuildAttempt, type TestingRebuildAttempt } from "./testing-rebuild-operation";
+import { readTestingRebuildAttempt, runTestingRebuild, resumeTestingRebuildAttempt, saveTestingRebuildAttempt, type TestingRebuildAttempt } from "./testing-rebuild-operation";
 import type { ProductEnvironmentDetail, TestingRebuildPreflight, TestingRebuildResponse, TestingRebuildSubmit } from "./generated/openapi.ts";
 
 export function TestingRebuildPanel({ detail, fixtureMode, onRefresh }: {
@@ -62,6 +62,7 @@ export function TestingRebuildPanel({ detail, fixtureMode, onRefresh }: {
       if (controller.signal.aborted) return;
       const status = response.operation.status;
       setMessage(status === "pass" ? "Testing rebuilt and verified healthy at the same address."
+        : status === "reconciliation_required" ? "This rebuild is held. Resume checks your permissions and continues the same rebuild."
         : "The rebuild stopped. Check the lane health and operation evidence before continuing.");
       if (["pass", "fail", "cancelled", "superseded"].includes(status)) {
         saveTestingRebuildAttempt(detail.product, null); setAttempt(null); setPreflight(null); onRefresh();
@@ -77,6 +78,26 @@ export function TestingRebuildPanel({ detail, fixtureMode, onRefresh }: {
     } finally {
       if (abort.current === controller) { abort.current = null; setBusy(false); }
     }
+  }
+
+  async function resumeOriginal() {
+    const selected = readTestingRebuildAttempt(detail.product);
+    if (!selected || !result || abort.current || fixtureMode) return;
+    const controller = new AbortController(); abort.current = controller;
+    setBusy(true); setMessage("Checking your permissions to resume this rebuild…");
+    let resumed: TestingRebuildResponse | null = null;
+    try {
+      resumed = await resumeTestingRebuildAttempt(selected, result.operation, {
+        resume: resumeTestingRebuild,
+        persist: value => { saveTestingRebuildAttempt(detail.product, value); setAttempt(value); },
+      }, controller.signal);
+      if (!controller.signal.aborted) setResult(resumed);
+    } catch (error) {
+      if (!controller.signal.aborted) setMessage(`${error instanceof Error ? error.message : "The resume outcome is unknown."} Read the original operation before another resume.`);
+    } finally {
+      if (abort.current === controller) { abort.current = null; setBusy(false); }
+    }
+    if (resumed && !controller.signal.aborted) void rebuild(selected);
   }
 
   const locked = fixtureMode || busy || !!attempt;
@@ -96,6 +117,7 @@ export function TestingRebuildPanel({ detail, fixtureMode, onRefresh }: {
     <details><summary>Reason (optional edit)</summary><label className="promotion-field"><span>Reason</span><input value={attempt?.payload.reason ?? reason} disabled={locked} maxLength={1000} onChange={event => setReason(event.target.value)} /></label></details>
     {inspectionError && !attempt ? <button type="button" className="secondary-button" disabled={busy || fixtureMode} onClick={() => setRefresh(value => value + 1)}>Refresh inspection</button> : null}
     {attempt && !attempt.denied ? <button type="button" className="secondary-button" disabled={busy || fixtureMode} onClick={() => void rebuild(attempt)}>{attempt.operationId ? "Resume watching this rebuild" : attempt.readOnlyRecovery ? "Find the original rebuild" : "Recover this request"}</button> : null}
+    {attempt?.operationId && !attempt.denied && result?.operation.status === "reconciliation_required" ? <button type="button" className="primary-button" disabled={busy || fixtureMode || attempt.resumeNeedsRead} onClick={() => void resumeOriginal()}>Resume this rebuild</button> : null}
     {attempt?.denied ? <p>This request was denied and will not be submitted again. The denial needs to be resolved before rebuilding.</p> : null}
     {attempt?.denied ? <button type="button" className="secondary-button" disabled={busy || fixtureMode} onClick={() => {
       saveTestingRebuildAttempt(detail.product, null); setAttempt(null); setPreflight(null); setMessage(""); setRefresh(value => value + 1);

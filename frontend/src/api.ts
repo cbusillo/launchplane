@@ -5,7 +5,7 @@ import type {
   LogoutPayload,
   ProductListPayload,
 } from "./types";
-import type { InspectTestingRebuildData, InspectTestingRebuildResponse, ReadTestingRebuildResponse, SubmitTestingRebuildData, SubmitTestingRebuildResponse, LookupTestingRebuildData, LookupTestingRebuildResponse } from "./generated/openapi.ts";
+import type { InspectTestingRebuildData, InspectTestingRebuildResponse, ReadTestingRebuildResponse, SubmitTestingRebuildData, SubmitTestingRebuildResponse, LookupTestingRebuildData, LookupTestingRebuildResponse, ResumeTestingRebuildData, ResumeTestingRebuildResponse } from "./generated/openapi.ts";
 import type {
   ApplyProductionBackupAuthorityData,
   ApplyProductionBackupAuthorityResponse,
@@ -855,6 +855,11 @@ export function lookupTestingRebuild(product: string, payload: LookupTestingRebu
   };
   return requestJson(request.url.replace("{product}", encodeURIComponent(product)), "POST", request.body,
     options.signal, options.idempotencyKey);
+}
+
+export function resumeTestingRebuild(product: string, operationId: string, payload: ResumeTestingRebuildData["body"], options: BrowserOperationOptions): Promise<ResumeTestingRebuildResponse> {
+  const path = BROWSER_WRITE_ROUTES.testingRebuildResume.replace("{product}", encodeURIComponent(product)).replace("{operation_id}", encodeURIComponent(operationId));
+  return requestJson(path, "POST", payload, options.signal, options.idempotencyKey, options.onDispatch);
 }
 
 export function readOdooProdPromotionOperation(

@@ -1,6 +1,6 @@
 import { LaunchplaneApiError } from "./api";
 import type { BrowserOperationOptions, BrowserOperationStorage } from "./browser-operation";
-import type { SubmitTestingRebuildData, TestingRebuildResponse } from "./generated/openapi.ts";
+import type { SubmitTestingRebuildData, TestingRebuildResponse, TestingRebuildOperationView, ResumeTestingRebuildData } from "./generated/openapi.ts";
 
 export interface TestingRebuildAttempt {
   product: string;
@@ -10,6 +10,7 @@ export interface TestingRebuildAttempt {
   denied?: boolean;
   dispatchStarted?: boolean;
   readOnlyRecovery?: boolean;
+  resumeNeedsRead?: boolean;
 }
 
 export function saveTestingRebuildAttempt(product: string, attempt: TestingRebuildAttempt | null, storage: BrowserOperationStorage = sessionStorage) {
@@ -31,7 +32,8 @@ export function readTestingRebuildAttempt(product: string, storage: BrowserOpera
       && (attempt.operationId === undefined || typeof attempt.operationId === "string" && !!attempt.operationId.trim())
       && (attempt.denied === undefined || typeof attempt.denied === "boolean")
       && (attempt.dispatchStarted === undefined || typeof attempt.dispatchStarted === "boolean")
-      && (attempt.readOnlyRecovery === undefined || typeof attempt.readOnlyRecovery === "boolean")) {
+      && (attempt.readOnlyRecovery === undefined || typeof attempt.readOnlyRecovery === "boolean")
+      && (attempt.resumeNeedsRead === undefined || typeof attempt.resumeNeedsRead === "boolean")) {
       // Older saved denials did not distinguish a write refusal from a failed
       // recovery/read. Preserve their key and allow only lookup, never a write.
       return attempt.dispatchStarted === undefined
@@ -54,6 +56,7 @@ interface TestingRebuildDependencies {
 export async function runTestingRebuild(attempt: TestingRebuildAttempt, dependencies: TestingRebuildDependencies, signal?: AbortSignal): Promise<TestingRebuildResponse> {
   if (attempt.denied) throw new Error("This request was denied. It will not be submitted again.");
   const previouslyDispatched = !!attempt.dispatchStarted;
+  const readingOriginal = !!attempt.operationId;
   attempt = { ...attempt, dispatchStarted: previouslyDispatched };
   dependencies.persist(attempt);
   const onDispatch = () => {
@@ -88,11 +91,38 @@ export async function runTestingRebuild(attempt: TestingRebuildAttempt, dependen
       || !response.operation.operation_id || attempt.operationId && response.operation.operation_id !== attempt.operationId) {
       throw new Error("The response does not identify this testing rebuild. Keep the original request for inspection.");
     }
-    attempt = { ...attempt, operationId: response.operation.operation_id };
+    attempt = { ...attempt, operationId: response.operation.operation_id, ...(readingOriginal ? { resumeNeedsRead: false } : {}) };
     dependencies.persist(attempt);
     dependencies.progress(response);
     if (!["pending", "running"].includes(response.operation.status)) return response;
     await dependencies.wait(2500, signal);
     response = await dependencies.read(attempt.product, attempt.operationId!, signal);
+  }
+}
+
+export async function resumeTestingRebuildAttempt(
+  attempt: TestingRebuildAttempt,
+  operation: TestingRebuildOperationView,
+  dependencies: {
+    resume: (product: string, operationId: string, payload: ResumeTestingRebuildData["body"], options: BrowserOperationOptions) => Promise<TestingRebuildResponse>;
+    persist: (attempt: TestingRebuildAttempt) => void;
+  },
+  signal?: AbortSignal,
+): Promise<TestingRebuildResponse> {
+  if (!attempt.operationId || attempt.denied || attempt.resumeNeedsRead || operation.operation_id !== attempt.operationId
+    || operation.product !== attempt.product || operation.instance !== "testing" || operation.status !== "reconciliation_required") {
+    throw new Error("Read the original held rebuild before resuming it.");
+  }
+  try {
+    const response = await dependencies.resume(attempt.product, attempt.operationId, {
+      expected_updated_at: operation.updated_at, expected_attempt: operation.attempt,
+    }, { idempotencyKey: attempt.key, signal });
+    if (response.operation.operation_id !== attempt.operationId || response.operation.product !== attempt.product || response.operation.instance !== "testing") {
+      throw new Error("The resume response does not identify the original rebuild.");
+    }
+    return response;
+  } catch (error) {
+    dependencies.persist({ ...attempt, resumeNeedsRead: true });
+    throw error;
   }
 }

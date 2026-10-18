@@ -5116,6 +5116,7 @@ export type TestingHoldRehearsal = {
 };
 
 export type TestingRebuildOperationView = {
+    attempt: number;
     instance: 'testing';
     operation_id: string;
     phase: string;
@@ -5140,6 +5141,11 @@ export type TestingRebuildPreflight = {
 export type TestingRebuildResponse = {
     operation: TestingRebuildOperationView;
     trace_id: string;
+};
+
+export type TestingRebuildResume = {
+    expected_attempt: number;
+    expected_updated_at: string;
 };
 
 export type TestingRebuildSubmit = {
@@ -7692,6 +7698,34 @@ export type LookupTestingRebuildResponses = {
 };
 
 export type LookupTestingRebuildResponse = LookupTestingRebuildResponses[keyof LookupTestingRebuildResponses];
+
+export type ResumeTestingRebuildData = {
+    body: TestingRebuildResume;
+    headers: {
+        'Idempotency-Key': string;
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path: {
+        product: string;
+        operation_id: string;
+    };
+    query?: never;
+    url: '/v1/products/{product}/testing-rebuild/operations/{operation_id}/resume';
+};
+
+export type ResumeTestingRebuildErrors = {
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ResumeTestingRebuildError = ResumeTestingRebuildErrors[keyof ResumeTestingRebuildErrors];
+
+export type ResumeTestingRebuildResponses = {
+    200: TestingRebuildResponse;
+};
+
+export type ResumeTestingRebuildResponse = ResumeTestingRebuildResponses[keyof ResumeTestingRebuildResponses];
 
 export type WriteReleaseReviewDecisionData = {
     body: ReleaseReviewDecisionEnvelope;

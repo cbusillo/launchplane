@@ -20,8 +20,11 @@ from control_plane.contracts.odoo_stable_target_replacement_operation import (
 )
 from control_plane.drivers.native_routes import _descriptor_driver_route_authz_action
 from control_plane.durable_operation_authorization import (
+    DurableOperationAuthorizationCaptureError,
+    DurableOperationAuthorizationDeniedError,
     capture_durable_operation_authorization,
     read_active_authz_policy_record,
+    durable_operation_caller_identity,
 )
 from control_plane.http_routes.mutation_support import idempotency_scope, request_fingerprint
 from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
@@ -44,6 +47,7 @@ from control_plane.service_auth import GitHubHumanIdentity, LaunchplaneIdentity
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_rebuild_preflight import TestingRebuildPreflight, inspect_testing_rebuild
 from control_plane.testing_rebuild_service import TestingRebuildRefused
+from control_plane.testing_rebuild_resume import TestingRebuildResumeRefused, caller_binding
 from control_plane.workflows.ship import utc_now_timestamp
 
 TestingRebuildSource = Literal["empty", "production_restore", "upstream_restore"]
@@ -75,6 +79,14 @@ class TestingRebuildOperationView(BaseModel):
     status: str
     phase: str
     updated_at: str
+    attempt: int = Field(ge=0)
+
+
+class TestingRebuildResume(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_updated_at: str = Field(min_length=1)
+    expected_attempt: int = Field(ge=0)
 
 
 class TestingRebuildResponse(BaseModel):
@@ -152,6 +164,7 @@ def register_testing_rebuild_routes(
                 status=operation.status,
                 phase=operation.phase,
                 updated_at=operation.updated_at,
+                attempt=operation.attempt,
             ),
         )
 
@@ -391,6 +404,110 @@ def register_testing_rebuild_routes(
             )
         return response(original, trace_id)
 
+    def resume_original(
+        product: Annotated[str, Path(min_length=1)],
+        operation_id: Annotated[str, Path(min_length=1)],
+        payload: TestingRebuildResume,
+        identity: Annotated[LaunchplaneIdentity, Depends(dependencies.mutation_identity)],
+        record_store: Annotated[object, Depends(common.get_record_store)],
+        idempotency_key: Annotated[
+            str, Header(alias="Idempotency-Key", min_length=1, max_length=256)
+        ],
+    ) -> TestingRebuildResponse:
+        trace_id = common.next_trace_id()
+        try:
+            caller = caller_binding(durable_operation_caller_identity(identity))
+        except (TypeError, DurableOperationAuthorizationDeniedError) as error:
+            raise common.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="The original non-workflow caller is required to resume this request.",
+            ) from error
+        if not isinstance(record_store, PostgresRecordStore):
+            raise common.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message="Testing rebuild storage is unavailable.",
+            )
+        try:
+            original = record_store.read_odoo_stable_target_replacement_operation_record(
+                operation_id
+            )
+            if (
+                original.product != product
+                or not original.is_native_testing_rebuild
+                or original.idempotency_key != idempotency_key.strip()
+                or original.authorization is None
+            ):
+                raise FileNotFoundError(operation_id)
+            try:
+                if caller_binding(original.authorization.caller) != caller:
+                    raise FileNotFoundError(operation_id)
+            except DurableOperationAuthorizationDeniedError as error:
+                raise FileNotFoundError(operation_id) from error
+        except FileNotFoundError as error:
+            raise common.http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message="This original testing request was not found.",
+            ) from error
+        now = utc_now_timestamp()
+        try:
+            policy_record = read_active_authz_policy_record(record_store)
+        except (LookupError, TypeError) as error:
+            raise common.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="authorization_provenance_unavailable",
+                message="The current authorization policy is unavailable.",
+            ) from error
+        try:
+            authorization = capture_durable_operation_authorization(
+                identity=identity,
+                action=action,
+                product=original.product,
+                context=original.context,
+                instances=("testing",),
+                policy_record=policy_record,
+                authorized_at=now,
+            )
+            resumed = record_store.resume_native_testing_rebuild(
+                operation=original,
+                authorization=authorization,
+                expected_updated_at=payload.expected_updated_at,
+                expected_attempt=payload.expected_attempt,
+                trace_id=trace_id,
+                now=now,
+            )
+        except (
+            DurableOperationAuthorizationCaptureError,
+            DurableOperationAuthorizationDeniedError,
+        ) as error:
+            raise common.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Fresh authority from the original caller is required to resume this testing request.",
+            ) from error
+        except TestingRebuildResumeRefused as error:
+            raise common.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="testing_rebuild_resume_conflict",
+                message="This held revision cannot resume. Read the original operation again.",
+            ) from error
+        return response(resumed, trace_id)
+
+    app.add_api_route(
+        TESTING_REBUILD_ROUTE + "/operations/{operation_id}/resume",
+        resume_original,
+        methods=["POST"],
+        operation_id="resume_testing_rebuild",
+        response_model=TestingRebuildResponse,
+    )
     app.add_api_route(
         TESTING_REBUILD_ROUTE + "/inputs",
         inspect,

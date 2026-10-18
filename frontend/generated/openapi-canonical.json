@@ -51104,6 +51104,11 @@
       "TestingRebuildOperationView": {
         "additionalProperties": false,
         "properties": {
+          "attempt": {
+            "minimum": 0.0,
+            "title": "Attempt",
+            "type": "integer"
+          },
           "instance": {
             "const": "testing",
             "default": "testing",
@@ -51136,7 +51141,8 @@
           "product",
           "status",
           "phase",
-          "updated_at"
+          "updated_at",
+          "attempt"
         ],
         "title": "TestingRebuildOperationView",
         "type": "object"
@@ -51224,6 +51230,27 @@
           "operation"
         ],
         "title": "TestingRebuildResponse",
+        "type": "object"
+      },
+      "TestingRebuildResume": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_attempt": {
+            "minimum": 0.0,
+            "title": "Expected Attempt",
+            "type": "integer"
+          },
+          "expected_updated_at": {
+            "minLength": 1,
+            "title": "Expected Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "expected_updated_at",
+          "expected_attempt"
+        ],
+        "title": "TestingRebuildResume",
         "type": "object"
       },
       "TestingRebuildSubmit": {
@@ -94420,6 +94447,107 @@
         "summary": "Read Operation"
       }
     },
+    "/v1/products/{product}/testing-rebuild/operations/{operation_id}/resume": {
+      "post": {
+        "operationId": "resume_testing_rebuild",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Operation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 256,
+              "minLength": 1,
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TestingRebuildResume"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TestingRebuildResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Resume Original"
+      }
+    },
     "/v1/products/{product}/testing-replacement-bootstrap": {
       "post": {
         "operationId": "prepare_fresh_testing_bootstrap",
@@ -101110,6 +101238,7 @@
     "/v1/products/{product}/environments/{environment}/promotion/workflow-dispatch": "dispatch_product_promotion_workflow",
     "/v1/products/{product}/testing-rebuild": "submit_testing_rebuild",
     "/v1/products/{product}/testing-rebuild/lookup": "lookup_testing_rebuild",
+    "/v1/products/{product}/testing-rebuild/operations/{operation_id}/resume": "resume_testing_rebuild",
     "/v1/release-review/decisions": "write_release_review_decision",
     "/v1/release-review/urgent-openings": "open_urgent_release_review",
     "/v1/service/delivery/apply-receipt": "read_service_delivery_apply_receipt",

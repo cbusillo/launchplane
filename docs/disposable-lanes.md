@@ -903,11 +903,12 @@ check with no effect can end without locking the lane indefinitely. Unexpected
 post-dispatch errors, including lost execution locks and malformed observations,
 remain pending on the original keys. Real authorization denials stay denied.
 
-Required recovery work remains in #4016 (explicit authorized resumption of the
-same denied operation) and #4017 (managed-host outcome evidence for an interrupted
-writer). The native source PR remains held from ready until these continuations
-are integrated and reviewed. Neither clearing a queue/browser record nor replaying
-an unknown writer is a supported substitute; #3963 is incomplete.
+An explicit resume of the same held operation is described below (#4016).
+Required recovery work remains in #4017 (managed-host outcome evidence for an
+interrupted writer). The native source PR remains held from ready until these
+continuations are integrated and reviewed. Neither clearing a queue/browser
+record nor replaying an unknown writer is a supported substitute; #3963 is
+incomplete.
 Candidate reservations are rechecked before cutover, and unresolved predecessor
 deployments refuse further effects. Whole-project retirement requires only the
 owned Odoo services in that project, not an unrelated application sharing its
@@ -1032,6 +1033,33 @@ without trying an older candidate or misreporting an identity denial.
 The source feature
 requires normal train delivery and service activation; its tests and mocked
 browser journey do not establish CM health or rebuild timing.
+
+`POST /v1/products/{product}/testing-rebuild/operations/{operation_id}/resume`
+explicitly resumes a held native rebuild. It requires the original request's
+`Idempotency-Key`, the observed `expected_updated_at` and `expected_attempt`, and
+fresh authority for the existing target-replacement action from the original
+caller. A signed-in human is bound by immutable GitHub ID; a supported terminal
+or local caller must retain its original identity type, subject and token label.
+A workflow or service identity cannot substitute. Cookie callers also need the
+normal Origin/CSRF evidence. This action creates no authorization grant.
+
+Under the existing lane and row locks, resume records its fresh authorization
+and prior held error in an audit receipt, and queues the same operation in one
+transaction. It preserves the original request, build, source, operation ID,
+request key and all provider dispatch fences. Another operation holding the lane
+or a changed held revision refuses the transition. Repeating the same resume receipt returns
+the current original operation without resetting a running worker. The worker
+rechecks current authority and observes existing effects before continuing.
+This is not the legacy denied-operation fence-release flow: it releases no
+provider fence and grants no alternate identity a replay.
+
+The browser offers **Resume this rebuild** only for a known held operation.
+Reload and sign-in recovery only read that operation; neither resumes it.
+After a denied or lost resume reply, the browser retains the request and requires
+a fresh operation read before another explicit resume. An unknown original
+route writer still waits for managed-host outcome proof (#4017); resume does not
+make an old route file or a timeout proof that dispatch was excluded.
+
 The worker regression executes a second application's configure/deploy/initialize
 stages and same-address adoption, then the ordinary replacement and post-deploy
 workflows for a newer artifact. It verifies retained route, storage, generated

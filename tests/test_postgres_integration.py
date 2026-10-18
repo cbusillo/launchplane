@@ -13818,6 +13818,30 @@ class RealPostgresTestingPublicationTests(unittest.TestCase):
                 fixture.doCleanups()
 
 
+class RealPostgresTestingRebuildResumeTests(unittest.TestCase):
+    def run_resume_case(self, name: str) -> None:
+        from tests.test_testing_rebuild_resume import TestingRebuildResumeTests
+
+        with _head_postgres_database() as url:
+            fixture = TestingRebuildResumeTests(name)
+            fixture.database_url = url
+            result = unittest.TestResult()
+            fixture.run(result)
+            self.assertTrue(result.wasSuccessful(), (result.failures, result.errors))
+
+    def test_concurrent_requests_share_the_original_queue_transition(self) -> None:
+        self.run_resume_case("test_concurrent_resume_calls_share_one_queue_transition")
+
+    def test_receipt_failure_preserves_the_held_queue_item(self) -> None:
+        self.run_resume_case("test_resume_receipt_failure_rolls_back_the_queue_transition")
+
+    def test_another_lane_owner_keeps_the_original_held(self) -> None:
+        self.run_resume_case("test_another_active_lane_owner_prevents_resume")
+
+    def test_fresh_authorization_observes_the_same_route_before_retirement(self) -> None:
+        self.run_resume_case("test_original_worker_continues_without_another_route_dispatch")
+
+
 class RealPostgresNativeTestingWorkerTests(unittest.TestCase):
     def test_profile_edit_during_cutover_preserves_original_publication(self) -> None:
         self.run_worker_case(
