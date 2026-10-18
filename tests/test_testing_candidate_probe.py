@@ -8,9 +8,10 @@ import os
 from pathlib import Path
 import subprocess
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from typing import Any, cast
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, Mock, patch
 from urllib.request import Request
 
 from control_plane import testing_candidate_probe as probe
@@ -144,7 +145,12 @@ class CandidateContainerProbeTests(unittest.TestCase):
         self.temporary = TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.config = Path(self.temporary.name) / "odoo.conf"
-        self.config.write_text("[options]\nadmin_passwd = local-master-fixture\n")
+        self.config_text = (
+            "[options]\nadmin_passwd = local-master-fixture\n"
+            "db_host = database\ndb_name = candidate\ndb_user = local-user\n"
+            "db_password = local-database-fixture\n"
+        )
+        self.config.write_text(self.config_text)
         self.identity = {"deployment_record_id": "candidate-build"}
         self.spec = {
             "base_url": "https://testing.example.invalid",
@@ -153,7 +159,19 @@ class CandidateContainerProbeTests(unittest.TestCase):
             "web_config": str(self.config),
         }
         self.health_identity = dict(self.identity)
-        self.uid = 42
+        self.rows = [("encoded-local-admin",)]
+        self.connection = MagicMock()
+        self.cursor = self.connection.cursor.return_value.__enter__.return_value
+        self.cursor.fetchall.side_effect = lambda: self.rows
+        self.driver = SimpleNamespace(connect=Mock(return_value=self.connection))
+        self.context = Mock()
+        self.context.verify.side_effect = lambda password, stored: (
+            (password, stored)
+            in {
+                ("local-login-fixture", "encoded-local-admin"),
+                ("local-master-fixture", "$encoded-local-master"),
+            }
+        )
         self.requests: list[Request] = []
 
     def response(self, request: Any, **kwargs: Any) -> Any:
@@ -162,28 +180,36 @@ class CandidateContainerProbeTests(unittest.TestCase):
         if request.full_url.endswith("/launchplane/health"):
             payload = {"runtime_identity": self.health_identity}
         else:
-            params = json.loads(request.data)["params"]
-            self.assertEqual(
-                params, {"db": "candidate", "login": "tester", "password": "local-login-fixture"}
-            )
-            payload = {"result": {"uid": self.uid}}
+            # Model the old endpoint's successful response so the regression
+            # fails on its POST rather than on an unsupported test fixture.
+            payload = {"result": {"uid": 42}}
         result = io.BytesIO(json.dumps(payload).encode())
         result.status = 200  # type: ignore[attr-defined]
         return result
 
     def run_probe(self) -> str:
-        from unittest.mock import Mock
-
         opener = Mock()
         opener.open.side_effect = self.response
         output = io.StringIO()
         with (
-            patch("urllib.request.build_opener", return_value=opener),
+            patch("urllib.request.build_opener", return_value=opener) as build,
+            patch.dict(
+                "sys.modules",
+                {
+                    "psycopg2": self.driver,
+                    "passlib": SimpleNamespace(),
+                    "passlib.context": SimpleNamespace(
+                        CryptContext=Mock(return_value=self.context)
+                    ),
+                },
+            ),
             patch("sys.stdin", io.StringIO(json.dumps(self.spec))),
             patch.dict(
                 os.environ,
                 {
                     "ODOO_DB_NAME": "candidate",
+                    "ODOO_DB_USER": "local-user",
+                    "ODOO_DB_PASSWORD": "local-database-fixture",
                     "ODOO_ADMIN_LOGIN": "tester",
                     "ODOO_ADMIN_PASSWORD": "local-login-fixture",
                     "ODOO_MASTER_PASSWORD": "local-master-fixture",
@@ -192,9 +218,10 @@ class CandidateContainerProbeTests(unittest.TestCase):
             redirect_stdout(output),
         ):
             exec(compile(probe.CANDIDATE_CONTAINER_PROBE, "<candidate-container>", "exec"), {})
+        self.handlers = build.call_args.args
         return output.getvalue()
 
-    def test_health_and_real_local_signin_use_only_loopback_with_stable_host(self) -> None:
+    def test_health_and_local_credentials_use_only_loopback_with_stable_host(self) -> None:
         output = self.run_probe()
         self.assertEqual(output.strip(), "candidate_credentials_verified=true")
         self.assertTrue(
@@ -210,16 +237,78 @@ class CandidateContainerProbeTests(unittest.TestCase):
         )
         self.assertNotIn("local-login-fixture", output)
         self.assertNotIn("local-master-fixture", output)
+        self.assertNotIn("local-database-fixture", output)
 
-    def test_wrong_http_identity_login_or_master_credential_refuses(self) -> None:
+    def test_readiness_does_not_create_authenticated_use(self) -> None:
+        self.run_probe()
+        self.run_probe()
+        self.assertTrue(all(request.get_method() == "GET" for request in self.requests))
+        self.assertEqual(
+            self.cursor.execute.call_args_list[-2].args, ("SET TRANSACTION READ ONLY",)
+        )
+        self.assertEqual(self.cursor.execute.call_args.args[1], ("tester",))
+        self.assertEqual(self.connection.commit.call_count, 0)
+        self.assertEqual(self.connection.rollback.call_count, 2)
+        self.assertEqual(self.connection.close.call_count, 2)
+        self.assertIn(
+            "default_transaction_read_only=on", self.driver.connect.call_args.kwargs["options"]
+        )
+
+    def test_wrong_http_identity_admin_or_master_credential_refuses(self) -> None:
         self.health_identity = {"deployment_record_id": "other"}
         with self.assertRaises(RuntimeError):
             self.run_probe()
         self.health_identity = dict(self.identity)
-        self.uid = 0
+        self.rows = [("encoded-other-admin",)]
         with self.assertRaises(RuntimeError):
             self.run_probe()
-        self.uid = 42
-        self.config.write_text("[options]\nadmin_passwd = wrong-master\n")
+        self.rows = [("encoded-local-admin",)]
+        self.config.write_text(self.config_text.replace("local-master-fixture", "wrong-master"))
         with self.assertRaises(RuntimeError):
             self.run_probe()
+
+    def test_missing_or_ambiguous_admin_refuses_and_closes_read_only_connection(self) -> None:
+        for rows in ([], [("",)], self.rows * 2):
+            with self.subTest(rows=len(rows)):
+                self.rows = rows
+                with self.assertRaises(RuntimeError):
+                    self.run_probe()
+                self.connection.rollback.assert_called()
+                self.connection.close.assert_called()
+
+    def test_database_config_drift_refuses_before_connecting(self) -> None:
+        for before, after in (
+            ("database", "outside-db"),
+            ("candidate", "other-database"),
+            ("local-user", "other-user"),
+            ("local-database-fixture", "other-password"),
+        ):
+            with self.subTest(field=before):
+                self.config.write_text(self.config_text.replace(before, after))
+                with self.assertRaises(RuntimeError):
+                    self.run_probe()
+        self.driver.connect.assert_not_called()
+
+    def test_database_authentication_refusal_propagates(self) -> None:
+        self.driver.connect.side_effect = PermissionError("fixture authentication refused")
+        with self.assertRaises(PermissionError):
+            self.run_probe()
+
+    def test_hashed_master_credential_is_checked_without_changing_it(self) -> None:
+        self.config.write_text(
+            self.config_text.replace("local-master-fixture", "$encoded-local-master")
+        )
+        self.run_probe()
+        self.context.verify.assert_any_call("local-master-fixture", "$encoded-local-master")
+
+    def test_proxy_environment_cannot_redirect_the_private_health_request(self) -> None:
+        from urllib.request import ProxyHandler
+
+        with patch.dict(os.environ, {"http_proxy": "http://outside.invalid:8080"}):
+            self.run_probe()
+        proxies = [
+            cast(Any, handler).proxies
+            for handler in self.handlers
+            if isinstance(handler, ProxyHandler)
+        ]
+        self.assertEqual(proxies, [{}])
