@@ -383,7 +383,9 @@ class OdooStableTargetReplacementPlan(BaseModel):
     expected_artifact_id: str = ""
     expected_source_git_ref: str = ""
     allow_empty_data: bool = False
-    data_source_mode: Literal["existing", "empty", "upstream_restore"] = "existing"
+    data_source_mode: Literal["existing", "empty", "upstream_restore", "production_restore"] = (
+        "existing"
+    )
     approval_issue_url: str = ""
     destructive_backup_required: bool = False
     retired_provider_keys: tuple[str, ...] = ()

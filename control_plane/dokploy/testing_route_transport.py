@@ -109,7 +109,7 @@ def selected_raw(raw, host, points):
     for name,item in routers.items():
         if not isinstance(item,dict) or not isinstance(item.get('entryPoints'),list):
             raise RuntimeError('Applied router inventory is incomplete')
-        if not set(item['entryPoints']) & set(points) or not host_rule_may_match(str(item.get('rule') or ''),host):
+        if (points and not set(item['entryPoints']) & set(points)) or not host_rule_may_match(str(item.get('rule') or ''),host):
             continue
         selected[name]={key:item[key] for key in ('rule','service','entryPoints','priority','middlewares','tls','status') if key in item}
         provider=name.rsplit('@',1)[-1]
@@ -281,6 +281,8 @@ class DokployTestingRouteTransport:
         expected_backend: str,
         dispatch_guard: Callable[[Callable[[], None]], None],
     ) -> None:
+        if not self.payload["entrypoints"]:
+            raise ValueError("Testing publication requires its discovered entrypoints to be bound.")
         if (plan.route_id, plan.host) != (
             self.payload["route_id"],
             self.payload["host"],

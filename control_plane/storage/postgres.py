@@ -10708,6 +10708,22 @@ class PostgresRecordStore(HumanSessionStore):
             row = session.get(LaunchplaneTestingCandidateRow, namespace)
             return TestingCandidateAllocation.model_validate(row.payload) if row else None
 
+    def find_testing_candidate_by_target(self, target_id: str) -> TestingCandidateAllocation | None:
+        with self._session_factory() as session:
+            rows = tuple(
+                session.scalars(
+                    select(LaunchplaneTestingCandidateRow)
+                    .where(
+                        LaunchplaneTestingCandidateRow.payload["compose_id"].as_string()
+                        == target_id
+                    )
+                    .limit(2)
+                )
+            )
+            if len(rows) > 1:
+                raise ValueError("The physical testing candidate has ambiguous custody.")
+            return TestingCandidateAllocation.model_validate(rows[0].payload) if rows else None
+
     def compare_and_write_testing_candidate(
         self, expected: TestingCandidateAllocation | None, replacement: TestingCandidateAllocation
     ) -> None:

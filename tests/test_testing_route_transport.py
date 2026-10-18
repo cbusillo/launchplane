@@ -192,6 +192,15 @@ class TestingRouteTransportTests(unittest.TestCase):
             self.plan, backend, expected_backend=expected, dispatch_guard=self.guard
         )
 
+    def test_initial_read_discovers_actual_host_entrypoints_without_assuming_names(self) -> None:
+        self.client.payload["entrypoints"] = ()
+        observed = self.client.read()
+        self.assertEqual(set(observed["raw"]["routers"]), set(self.raw["routers"]))
+        self.assertEqual(self.effect_count, 0)
+        with self.assertRaises(ValueError):
+            self.publish(self.plan.old_backend, self.plan.old_backend)
+        self.assertEqual(self.effect_count, 0)
+
     def test_native_atomic_migration_switch_and_switchback_keep_other_files_and_old_copy(
         self,
     ) -> None:
