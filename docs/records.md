@@ -155,12 +155,14 @@ LAUNCHPLANE_DATABASE_URL=postgresql+psycopg://... uv run python -m control_plane
 Do not run `alembic upgrade head` directly against the shared service database
 during a staged rollout. The release's migration target is
 `SCHEMA_MIGRATION_TARGET_REVISION` in `control_plane/storage/schema_migration.py`,
-currently the checked-in head (`EXPECTED_ALEMBIC_HEAD_REVISION` in
-`control_plane/storage/schema_invariants.py`). Older revisions are accepted only
-as serialized migration sources; the runtime compatibility set
-(`RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS`) holds only that head. After the
-database reaches the head, rollback is supported only to an image that
-understands it. The runtime status route reports the observed database
+currently held at the revision before the prepared retired-delivery table drop.
+The runtime compatibility set (`RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS`) accepts
+both that revision and the prepared migration head. Applying the drop requires
+the separate approval and backup qualification in the
+[prepared-retirement procedure](operations.md#prepared-retired-delivery-table-migration).
+Other older revisions are accepted only as serialized migration sources.
+Rollback requires an image that understands the installed schema. The runtime
+status route reports the observed database
 revision, the image's runtime compatibility set, and its migration target so
 deployment verification can enforce this boundary.
 

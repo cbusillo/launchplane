@@ -2733,9 +2733,9 @@ class PostgresRecordStoreTests(unittest.TestCase):
             database_url = _sqlite_database_url(database_path)
             config = _alembic_config(database_url)
 
-            from control_plane.storage.schema_adoption import LEGACY_BASELINE_REVISION
+            from control_plane.storage.schema_invariants import PRE_RETIREMENT_ALEMBIC_REVISION
 
-            alembic_command.upgrade(config, LEGACY_BASELINE_REVISION)
+            alembic_command.upgrade(config, PRE_RETIREMENT_ALEMBIC_REVISION)
             alembic_command.downgrade(config, "base")
 
             store = PostgresRecordStore(database_url=database_url)

@@ -31,6 +31,7 @@ from control_plane.storage.schema_invariants import (
     EXPECTED_ALEMBIC_HEAD_REVISION,
     PRE_RETIREMENT_ALEMBIC_REVISION,
     _canonical_predicate_expression,
+    _migration_head,
 )
 from control_plane.storage.schema_migration import (
     alembic_config,
@@ -42,6 +43,14 @@ from control_plane.storage.schema_migration import (
 
 
 class SchemaMigrationTests(unittest.TestCase):
+    def test_prepared_retirement_refuses_unreconciled_later_migration(self) -> None:
+        with patch(
+            "control_plane.storage.schema_invariants.ScriptDirectory.get_current_head",
+            return_value="subsequent_additive_migration",
+        ):
+            with self.assertRaises(ValueError):
+                _migration_head()
+
     def test_landing_retry_migration_preserves_roots_and_allows_bounded_successors(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_url = (

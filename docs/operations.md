@@ -5068,8 +5068,12 @@ Issue #2437's migration `e7c1d5e9a3b6` removes only the 22 tables named by
 and a green PR do not authorize applying the drop to the shared database.
 The candidate runtime accepts either revision and retains expiry/key-retirement,
 activation/history/policy maintenance, custody evidence and native train fences.
-Further schema changes must reconcile this held migration before advancing the
-startup target.
+While this hold is active, schema initialization refuses a migration graph whose
+head has advanced beyond this prepared revision. A later schema change must
+reconcile the hold, runtime compatibility and supported migration targets in the
+same change. Keep an independently approved application path for the destructive
+step; advancing an unrelated additive migration does not authorize it. Lifting
+the hold requires the shared-data/release approval below.
 
 Before application, obtain the Director's explicit shared-data/release approval
 on #2437. From the approved Launchplane host and exact reviewed image, verify

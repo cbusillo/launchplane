@@ -25,6 +25,12 @@ def _migration_head() -> str:
     head = ScriptDirectory(str(Path(__file__).parent / "migrations")).get_current_head()
     if head is None:
         raise ValueError("Launchplane migration graph has no head.")
+    if head != retired_delivery.revision:
+        raise ValueError(
+            "The prepared retired-delivery migration hold must be reconciled before "
+            "advancing the migration head. See docs/operations.md#prepared-retired-"
+            "delivery-table-migration for the supported continuation and approval boundary."
+        )
     return head
 
 

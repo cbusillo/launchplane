@@ -279,7 +279,11 @@ from control_plane.storage.schema_invariants import (
     PRE_RETIREMENT_ALEMBIC_REVISION,
     verify_postgres_schema_invariants,
 )
-from control_plane.storage.schema_migration import migrate_schema, schema_migration_action
+from control_plane.storage.schema_migration import (
+    SCHEMA_MIGRATION_TARGET_REVISION,
+    migrate_schema,
+    schema_migration_action,
+)
 from control_plane.tenant_repository_classification import (
     TenantRepositoryClassificationConflictError,
 )
@@ -3545,8 +3549,8 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
             finally:
                 store.close()
 
-        self.assertEqual(migrated_revision, PRE_RETIREMENT_ALEMBIC_REVISION)
-        self.assertEqual(observed_revision, PRE_RETIREMENT_ALEMBIC_REVISION)
+        self.assertEqual(migrated_revision, SCHEMA_MIGRATION_TARGET_REVISION)
+        self.assertEqual(observed_revision, SCHEMA_MIGRATION_TARGET_REVISION)
 
     def test_owner_review_policy_defaults_backfill_on_postgres(self) -> None:
         with _isolated_postgres_database() as database_url:
