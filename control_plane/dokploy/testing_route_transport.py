@@ -40,6 +40,11 @@ from control_plane.dokploy.testing_route import (
 
 TRAEFIK_DYNAMIC_DIRECTORY = "/etc/dokploy/traefik/dynamic"
 TRAEFIK_STATIC_CONFIGURATION = "/etc/traefik/traefik.yml"
+MAX_TRAEFIK_API_BYTES = 2_000_000
+READ_TRAEFIK_API = r"""set -eu
+set -o pipefail
+wget -q -T 10 -Y off -O - http://127.0.0.1:8080/api/rawdata | head -c "$1"
+"""
 
 
 class TestingRouteWriteNotStarted(NativeSourceUnavailable):
@@ -49,8 +54,7 @@ class TestingRouteWriteNotStarted(NativeSourceUnavailable):
 def testing_route_host_program() -> str:
     """The emitted host program uses the same conservative rule evaluator."""
     return (
-        "import base64,hashlib,ipaddress,json,os,re,subprocess,sys\nfrom typing import Any\n"
-        "from urllib.request import ProxyHandler,build_opener\n"
+        "import base64,hashlib,json,os,re,subprocess,sys\nfrom typing import Any\n"
         "from urllib.parse import urlsplit\n"
         + inspect.getsource(host_rule_may_match)
         + "\n"
@@ -71,6 +75,10 @@ def testing_route_host_program() -> str:
         + repr(ALLOCATE_TESTING_ROUTE_LOCK)
         + "\nCSP="
         + repr(TESTING_CONNECTION_CSP)
+        + "\nMAX_API_BYTES="
+        + repr(MAX_TRAEFIK_API_BYTES)
+        + "\nAPI_READER="
+        + repr(READ_TRAEFIK_API)
         + r"""
 
 def docker(*arguments, stdin=None):
@@ -214,12 +222,14 @@ def main(spec):
         if outcome not in {'applied','excluded','busy','unknown','retired'}:
             raise RuntimeError('The original route execution outcome is unavailable')
         return {'type':'complete','writer_outcome':outcome,'execution_custody':custody,**binding}
-    address=proxy.get('NetworkSettings',{}).get('Networks',{}).get('dokploy-network',{}).get('IPAddress')
-    if not isinstance(address,str) or not ipaddress.ip_address(address).is_private:
-        raise RuntimeError('Managed proxy API endpoint is unavailable')
+    network_mode=proxy.get('HostConfig',{}).get('NetworkMode','')
+    if not isinstance(proxy_networks,dict) or not isinstance(proxy_networks.get('dokploy-network'),dict) or not isinstance(network_mode,str) or network_mode=='host' or network_mode.startswith('container:'):
+        raise RuntimeError('Managed proxy requires managed ingress in its own network namespace')
     static=docker('exec',proxy['Id'],'cat',STATIC).decode()
-    with build_opener(ProxyHandler({})).open('http://'+address+':8080/api/rawdata',timeout=10) as response:
-        raw=json.loads(response.read(2000000))
+    response=docker('exec',proxy['Id'],'sh','-c',API_READER,'_',str(MAX_API_BYTES+1))
+    if len(response)>MAX_API_BYTES:
+        raise RuntimeError('Managed proxy API response exceeds its bound')
+    raw=json.loads(response)
     raw=selected_raw(raw,spec['host'],spec['entrypoints'])
     name=spec['route_id']+'.yml'
     file_read=docker('exec',proxy['Id'],'sh','-c','set -eu; p="$1/$2"; test ! -L "$1"; test ! -L "$p"; if test -e "$p"; then test -f "$p"; printf "present\\n"; cat "$p"; else printf "absent\\n"; fi','_',DIRECTORY,name).decode()
