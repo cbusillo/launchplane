@@ -13827,6 +13827,11 @@ class RealPostgresNativeTestingWorkerTests(unittest.TestCase):
             "test_one_action_preserves_address_credentials_and_retires_only_after_publication"
         )
 
+    def test_second_rebuild_preserves_the_address_and_private_deployment_alias(self) -> None:
+        self.run_worker_case(
+            "test_second_rebuild_uses_published_copy_and_preserves_later_deployment_route"
+        )
+
     def test_expired_queue_worker_resumes_original_observation(self) -> None:
         self.run_worker_case(
             "test_expired_native_worker_keeps_its_original_key_and_resumes_observation"

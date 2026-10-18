@@ -1,7 +1,7 @@
-"""Read and stop one recorded testing web process, retaining its database and data."""
+"""Read testing copy custody and private health without a provider mutation."""
 
-from collections.abc import Callable
 import inspect
+from control_plane._odoo_copy_runtime_guard import VOLUME_BACKING_INSPECTION_LIBRARY
 from typing import Any
 
 from control_plane.dokploy.native_copy_stream import _read_remote
@@ -18,6 +18,11 @@ def qualify_retained_copy(containers: list[dict[str, Any]], spec: dict[str, Any]
         for item in containers
         if (item.get("Config", {}).get("Labels") or {}).get("com.docker.compose.project") == project
     ]
+    services = [item["Config"]["Labels"].get("com.docker.compose.service") for item in members]
+    if len(set(services)) != len(services) or any(
+        service not in {"web", "database", "script-runner"} for service in services
+    ):
+        raise ValueError("Retained testing project contains an unowned service")
     web_members = [
         item
         for item in members
@@ -44,8 +49,6 @@ def qualify_retained_copy(containers: list[dict[str, Any]], spec: dict[str, Any]
         raise ValueError("Retained testing runtime is not an isolated local database consumer")
     if spec.get("identity") is not None and identity != spec["identity"]:
         raise ValueError("Retained testing runtime changed")
-    if spec.get("web_id") and web["Id"] != spec["web_id"]:
-        raise ValueError("Retained testing web process changed")
     resources = []
     for member, destination in ((web, "/volumes/data"), (database, "/var/lib/postgresql/data")):
         mounts = [
@@ -58,45 +61,53 @@ def qualify_retained_copy(containers: list[dict[str, Any]], spec: dict[str, Any]
             or not mounts[0].get("Name")
         ):
             raise ValueError("Retained testing data custody is unavailable")
-        resources.append(
-            {"container": member["Id"], "destination": destination, "volume": mounts[0]["Name"]}
-        )
+        resources.append({"destination": destination, "volume": mounts[0]["Name"]})
     volumes = {item["volume"] for item in resources}
     if len(volumes) != len(resources):
         raise ValueError("Retained testing resources are shared")
-    local_keys = ("ODOO_DB_PASSWORD", "ODOO_ADMIN_PASSWORD", "ODOO_MASTER_PASSWORD")
-    passwords = {environment[key] for key in local_keys if environment.get(key)}
-    if len(passwords) != len(local_keys):
-        raise ValueError("Retained testing local credentials are unavailable or reused")
+    for member in members:
+        configured = dict(
+            item.split("=", 1) for item in member.get("Config", {}).get("Env", []) if "=" in item
+        )
+        if configured.get("PLATFORM_INSTANCE") not in (None, "", "testing"):
+            raise ValueError("The testing project contains another lane's process")
+        for mount in member.get("Mounts", []):
+            if mount.get("RW", True):
+                if mount.get("Type") != "volume" or not mount.get("Name"):
+                    raise ValueError("Testing retirement requires qualified named writable storage")
+                volumes.add(mount["Name"])
     for other in containers:
         other_project = (other.get("Config", {}).get("Labels") or {}).get(
             "com.docker.compose.project"
         )
-        if other_project == project:
-            continue
-        if any(item.get("Name") in volumes for item in other.get("Mounts", [])):
+        if other_project != project and any(
+            item.get("Name") in volumes for item in other.get("Mounts", [])
+        ):
             raise ValueError("Retained testing storage is shared outside its project")
-        if other_project in spec.get("independent_candidate_projects", []):
-            continue
-        other_environment = dict(
-            item.split("=", 1) for item in other.get("Config", {}).get("Env", []) if "=" in item
-        )
-        if any(password in value for password in passwords for value in other_environment.values()):
-            raise ValueError("Retained testing credentials are shared outside the admitted copies")
     binding = hashlib.sha256(
-        json.dumps(resources, sort_keys=True, separators=(",", ":")).encode()
+        json.dumps(
+            {"data": resources, "writable_volumes": sorted(volumes)},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
     ).hexdigest()
     if spec.get("resource_binding") and spec["resource_binding"] != binding:
         raise ValueError("Retained testing data custody changed")
     state = web.get("State", {}).get("Status")
-    if state not in {"running", "exited"}:
-        raise ValueError("Retained testing web state is unknown")
+    states = [item.get("State", {}).get("Status") for item in members]
+    if any(
+        value not in {"running", "exited", "created", "paused", "restarting", "dead"}
+        for value in states
+    ):
+        raise ValueError("Retained testing process state is unknown")
     return {
         "type": "complete",
         "web_id": web["Id"],
         "identity": identity,
         "resource_binding": binding,
-        "stopped": state == "exited",
+        "stopped": all(value in {"exited", "created"} for value in states),
+        "web_stopped": state in {"exited", "created", "paused"},
+        "volumes": sorted(volumes),
     }
 
 
@@ -117,7 +128,8 @@ assert isinstance(payload,dict) and payload.get('runtime_identity')==spec['ident
 
 def retained_copy_host_program() -> str:
     return (
-        "import base64,json,subprocess,sys\nfrom typing import Any\n"
+        "import base64,hashlib,json,subprocess,sys\nfrom typing import Any\nfrom pathlib import Path\n"
+        + VOLUME_BACKING_INSPECTION_LIBRARY
         + inspect.getsource(qualify_retained_copy)
         + "\nHEALTH_PROGRAM="
         + repr(RETAINED_PRIVATE_HEALTH_PROGRAM)
@@ -138,17 +150,15 @@ def inventory():
 
 try:
     spec=json.loads(base64.b64decode(sys.argv[1],validate=True))
-    result=qualify_retained_copy(inventory(),spec)
-    if spec['mode']=='stop':
-        if not spec.get('web_id') or not spec.get('resource_binding') or not spec.get('identity'):
-            raise ValueError('Retirement requires original physical custody')
-        if not result['stopped']:
-            docker('stop','--time','30',result['web_id'])
-        result=qualify_retained_copy(inventory(),spec)
-        if not result['stopped']:
-            raise RuntimeError('Retained testing process is not stopped')
-    elif spec['mode']=='readiness':
-        if result['stopped'] or not spec.get('identity') or not spec.get('health_path','').startswith('/'):
+    containers=inventory()
+    result=qualify_retained_copy(containers,spec)
+    own={item['Id'] for item in containers if (item.get('Config',{}).get('Labels') or {}).get('com.docker.compose.project')==spec['project']}
+    backings=inspect_volume_backings(result['volumes'],containers,own)
+    result['physical_binding']=hashlib.sha256(json.dumps({'logical':result['resource_binding'],'backings':backings},sort_keys=True,separators=(',',':')).encode()).hexdigest()
+    if spec.get('physical_binding') and result['physical_binding']!=spec['physical_binding']:
+        raise ValueError('Retained testing backing storage changed')
+    if spec['mode']=='readiness':
+        if result['web_stopped'] or not spec.get('identity') or not spec.get('health_path','').startswith('/'):
             raise ValueError('Retained private health requires the original running process')
         web=next(item for item in inventory() if item['Id']==result['web_id'])
         environment=dict(item.split('=',1) for item in web['Config'].get('Env',[]) if '=' in item)
@@ -176,7 +186,6 @@ def retained_copy_operation(
     token: str,
     server_id: str,
     payload: dict[str, Any],
-    dispatch_guard: Callable[[Callable[[], None]], None] | None = None,
 ) -> dict[str, Any]:
     frames: list[dict[str, Any]] = []
     _read_remote(
@@ -187,7 +196,6 @@ def retained_copy_operation(
         payload=payload,
         receive=frames.append,
         timeout_seconds=180,
-        dispatch_guard=dispatch_guard,
     )
     if len(frames) != 1 or frames[0].get("type") != "complete":
         raise ValueError("Retained testing custody is unverified.")

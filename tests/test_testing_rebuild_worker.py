@@ -18,9 +18,18 @@ from control_plane.contracts.odoo_stable_target_replacement_operation import (
 )
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.testing_rebuild import TestingCopy
-from control_plane.dokploy.testing_route import route_document
+from control_plane.contracts.testing_candidate import testing_candidate_namespace
+from control_plane.contracts.testing_candidate_application import TestingCandidatePrepared
+from control_plane.dokploy.testing_route import route_document, compile_testing_route
 from control_plane.dokploy.testing_route_transport import DokployTestingRouteTransport
 from control_plane.dokploy import post_deploy, api, source
+from control_plane import testing_candidate_application as candidate_application
+from control_plane.testing_candidate_allocation import candidate_resources
+from control_plane.testing_candidate_runtime import candidate_runtime_inputs
+from control_plane.testing_serving_copy import (
+    published_testing_copy,
+    render_maintained_testing_copy,
+)
 from control_plane.odoo_testing_usage import OdooTestingUsage
 from control_plane.testing_publication_storage import read_snapshot
 from tests import test_testing_publication as publication_tests
@@ -87,7 +96,9 @@ class NativeTestingWorkerTests(unittest.TestCase):
             "web_id": "old-web-id",
             "identity": self.original_identity.model_dump(mode="json"),
             "resource_binding": "retained-data",
+            "physical_binding": "retained-physical-data",
             "stopped": False,
+            "web_stopped": False,
             "type": "complete",
         }
         self.intent = service.NativeTestingRebuildIntent(
@@ -100,7 +111,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
                 copy_id=candidate.serving_target_id,
                 target_id=candidate.serving_target_id,
                 private_url=self.fixture.route.old_backend,
-                resource_binding=self.retained["resource_binding"],
+                resource_binding=self.retained["physical_binding"],
                 runtime_identity=self.original_identity,
             ),
             retained=self.retained,
@@ -123,6 +134,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
             "appName": self.intent.project,
             "serverId": self.intent.server_id,
             "autoDeploy": False,
+            "composeType": "docker-compose",
         }
         self.enterContext(
             patch.object(
@@ -136,11 +148,16 @@ class NativeTestingWorkerTests(unittest.TestCase):
             )
         )
 
+        self.capture_function = service.capture_rebuild_intent
         self.capture = self.enterContext(
             patch.object(service, "capture_rebuild_intent", return_value=self.intent)
         )
         self.enterContext(
             patch.object(service, "retained_copy_operation", side_effect=self.physical)
+        )
+        self.enterContext(patch.object(api, "dokploy_request", side_effect=self.provider_request))
+        self.deployment_history = self.enterContext(
+            patch.object(api, "list_deployments_for_target", return_value=[])
         )
         self.enterContext(
             patch.object(
@@ -180,22 +197,27 @@ class NativeTestingWorkerTests(unittest.TestCase):
             self.store, product=self.operation.product, context=self.operation.context
         )
 
+    def provider_request(self, **kwargs: Any) -> dict[str, Any]:
+        self.assertEqual(kwargs["path"], "/api/compose.stop")
+        self.assertEqual(kwargs["payload"]["composeId"], self.intent.old.target_id)
+        self.assertIsNotNone(self.owned)
+        self.assertEqual(self.current().target_id.target_id, self.fixture.candidate.compose_id)
+        self.assertFalse(self.fail_public)
+        self.effects.append("stop-old")
+        self.retained["stopped"] = self.retained["web_stopped"] = True
+        # The Docker provider removes stopped containers' routers. Retaining
+        # their synthetic enabled routers would describe a different host.
+        self.raw["routers"] = {
+            name: router
+            for name, router in self.raw["routers"].items()
+            if not name.endswith("@docker")
+        }
+        if self.fail_after_stop:
+            self.fail_after_stop = False
+            raise TimeoutError("fixture lost retirement reply")
+        return {}
+
     def physical(self, **kwargs: Any) -> dict[str, Any]:
-        if kwargs["payload"]["mode"] == "stop":
-
-            def stop() -> None:
-                self.assertIsNotNone(self.owned)
-                self.assertEqual(
-                    self.current().target_id.target_id, self.fixture.candidate.compose_id
-                )
-                self.assertFalse(self.fail_public)
-                self.effects.append("stop-old")
-                self.retained["stopped"] = True
-
-            kwargs["dispatch_guard"](stop)
-            if self.fail_after_stop:
-                self.fail_after_stop = False
-                raise TimeoutError("fixture lost retirement reply")
         result = dict(self.retained)
         if kwargs["payload"]["mode"] == "readiness":
             result["healthy"] = self.old_private_healthy
@@ -205,6 +227,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
         return {
             "raw": deepcopy(self.raw),
             "owned_file": json.dumps(self.owned) if self.owned is not None else None,
+            "old_endpoints": (self.intent.old.private_url,),
         }
 
     def switch(
@@ -273,6 +296,173 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertEqual(self.effects, ["switch-new", "switch-old"])
         self.assertFalse(self.retained["stopped"])
         self.assertEqual(self.current(), self.fixture.before)
+
+    def test_second_rebuild_uses_published_copy_and_preserves_later_deployment_route(self) -> None:
+        import yaml
+
+        self.assertEqual(self.execute().deploy_status, "pass")
+        first = self.fixture.candidate
+        previous = published_testing_copy(self.store, product=first.product, context=first.context)
+        assert previous is not None
+        before = self.current()
+        secrets = self.store.list_secret_records()
+        operation_id = "second-native-rebuild"
+        namespace = testing_candidate_namespace(first.product, first.context, operation_id)
+        candidate = first.model_copy(
+            update={
+                "operation_id": operation_id,
+                "namespace": namespace,
+                "serving_target_id": first.compose_id,
+                "project_id": "second-project",
+                "environment_id": "second-environment",
+                "compose_id": "second-compose",
+                "application": None,
+                "resources_binding_sha256": "",
+            }
+        )
+        candidate = candidate.model_copy(
+            update={"resources_binding_sha256": candidate_resources(candidate).binding_sha256}
+        )
+        self.store.compare_and_write_testing_candidate(None, candidate)
+        inputs = candidate_runtime_inputs(
+            root=self.root,
+            store=self.store,
+            allocation=candidate,
+            artifact_id=self.operation.request.artifact_id,
+            source="empty",
+        )
+        app_fixture = self.fixture.fixture
+        app_fixture.allocation, app_fixture.compiled = candidate, inputs
+        app_fixture.fixture.allocation = candidate
+        app_fixture.fixture.before = app_fixture.fixture.authority()
+        app_fixture.effects.clear()
+        app_fixture.provider_state.update(
+            composeId=candidate.compose_id,
+            environmentId=candidate.environment_id,
+            name=namespace,
+            appName=namespace,
+            composeFile="",
+            env="",
+        )
+        app_fixture.deployments.clear()
+        app_fixture.restore_deployments.clear()
+        app_fixture.restored = False
+        self.original_identity = self.app.plan.runtime_identity
+        self.retained.update(
+            identity=self.original_identity.model_dump(mode="json"),
+            resource_binding="first-copy-data",
+            physical_binding="first-copy-backing",
+            stopped=False,
+            web_stopped=False,
+        )
+        self.old_provider.update(
+            composeId=first.compose_id, name=first.namespace, appName=first.namespace
+        )
+        self.intent = self.intent.model_copy(
+            update={
+                "before": before,
+                "project": first.namespace,
+                "old": TestingCopy(
+                    copy_id=first.compose_id,
+                    target_id=first.compose_id,
+                    private_url=previous.plan.route.new_backend,
+                    resource_binding=self.retained["physical_binding"],
+                    runtime_identity=self.original_identity,
+                ),
+            }
+        )
+        self.capture.side_effect = self.capture_function
+        self.operation = self.operation.model_copy(
+            update={"operation_id": operation_id, "idempotency_key": operation_id}
+        )
+        self.fixture.before, self.fixture.candidate = before, candidate
+        self.fixture.route = compile_testing_route(
+            product=first.product,
+            context=first.context,
+            host=previous.plan.route.host,
+            old_backend=previous.plan.route.new_backend,
+            new_backend=f"http://{namespace}:{previous.plan.profile.runtime_port}",
+            raw=self.raw,
+            public_entrypoints=previous.plan.route.public_entrypoints,
+            owned_document=self.owned,
+            recorded_template=previous.plan.route.template,
+        )
+        self.app = self.app.model_copy(update={"plan": inputs.plan})
+        self.deployment_history.side_effect = lambda **kw: (
+            list(app_fixture.deployments) if kw["target_id"] == candidate.compose_id else []
+        )
+
+        def ready(**_: Any) -> TestingCandidatePrepared:
+            self.assertTrue(app_fixture.restored)
+            return TestingCandidatePrepared(
+                plan_sha256=inputs.plan.digest,
+                runtime_identity=inputs.plan.runtime_identity,
+                private_endpoint=self.fixture.route.new_backend,
+                deployment_id="candidate-deployment",
+                source_witness="empty:" + inputs.plan.digest,
+                integration_isolation_verified=True,
+                credentials_verified=True,
+                observed_at=datetime.now(UTC),
+            )
+
+        def request(**kw: Any) -> Any:
+            if kw["path"] == "/api/deployment.allByType" or (
+                kw["path"] == "/api/compose.update"
+                and kw["payload"]["composeId"] == candidate.compose_id
+            ):
+                return app_fixture.configure(**kw)
+            return self.provider_request(**kw)
+
+        with (
+            patch.object(api, "dokploy_request", side_effect=request),
+            patch.object(candidate_application, "candidate_private_readiness", side_effect=ready),
+            patch.object(service, "candidate_private_readiness", side_effect=ready),
+        ):
+            self.assertEqual(self.execute().deploy_status, "pass")
+        self.assertEqual(app_fixture.effects, ["configure", "deploy", "restore"])
+        self.assertEqual(self.effects, ["switch-new", "stop-old"] * 2)
+        current = self.current()
+        self.assertEqual(current.binding.domains, before.binding.domains)
+        self.assertEqual(self.store.list_secret_records(), secrets)
+        publication = published_testing_copy(
+            self.store, product=candidate.product, context=candidate.context
+        )
+        assert publication is not None
+        compose = yaml.safe_load(
+            render_maintained_testing_copy(
+                publication, image_reference=inputs.plan.image_reference, hold_web=True
+            )
+        )
+        web = compose["services"]["web"]
+        self.assertFalse(web.get("ports"))
+        self.assertTrue(
+            any(namespace in network.get("aliases", []) for network in web["networks"].values())
+        )
+
+    def test_active_old_deployment_refuses_before_candidate_or_route_effects(self) -> None:
+        self.deployment_history.return_value = [
+            {"deploymentId": "still-building", "status": "running"}
+        ]
+        with self.assertRaisesRegex(ValueError, "deployment"):
+            self.execute()
+        self.assertEqual(self.effects, [])
+
+    def test_candidate_custody_changed_after_private_proof_prevents_cutover(self) -> None:
+        def rebound(**_: Any) -> Any:
+            candidate = self.fixture.candidate
+            reservation = self.store.read_provider_target_record(
+                context_name=candidate.namespace, instance_name="testing-candidate"
+            )
+            self.store.write_provider_target_record(
+                reservation.model_copy(update={"target_id": "foreign-target"})
+            )
+            return self.prepared.model_copy(update={"observed_at": datetime.now(UTC)})
+
+        with patch.object(service, "candidate_private_readiness", side_effect=rebound):
+            with self.assertRaisesRegex(ValueError, "reservation"):
+                self.execute()
+        self.assertEqual(self.effects, [])
+        self.assertFalse(self.retained["stopped"])
 
     def test_lost_stop_reply_is_observed_without_a_second_stop(self) -> None:
         self.fail_after_stop = True
@@ -361,43 +551,12 @@ class NativeTestingWorkerTests(unittest.TestCase):
             )
             self.assertFalse(terminal.finished_at if isinstance(response, Exception) else False)
 
-    def test_retained_credential_peers_come_from_this_lanes_publication_custody(self) -> None:
-        self.execute()
-        with patch.object(
-            api, "fetch_dokploy_target_payload", return_value=dict(self.old_provider)
-        ):
-            peers = service.retained_testing_projects(
-                self.store,
-                before=self.current(),
-                product=self.operation.product,
-                context=self.operation.context,
-                host="provider.invalid",
-                token="fixture",
-                server_id=self.intent.server_id,
-            )
-        self.assertEqual(peers, (self.intent.project,))
-        foreign = self.fixture.before.target_id.model_copy(
-            update={"context": "foreign", "instance": "prod"}
-        )
-        self.store.write_dokploy_target_id_record(foreign)
-        with (
-            patch.object(api, "fetch_dokploy_target_payload", return_value=dict(self.old_provider)),
-            self.assertRaises(ValueError),
-        ):
-            service.retained_testing_projects(
-                self.store,
-                before=self.current(),
-                product=self.operation.product,
-                context=self.operation.context,
-                host="provider.invalid",
-                token="fixture",
-                server_id=self.intent.server_id,
-            )
-
     def test_automatic_old_deploys_are_disabled_only_after_the_new_copy_is_selected(self) -> None:
         self.old_provider["autoDeploy"] = True
 
         def update(**kwargs: Any) -> dict[str, Any]:
+            if kwargs["path"] == "/api/compose.stop":
+                return self.provider_request(**kwargs)
             self.assertEqual(kwargs["payload"]["composeId"], self.intent.old.target_id)
             self.assertEqual(self.current().target_id.target_id, self.fixture.candidate.compose_id)
             self.assertFalse(self.retained["stopped"])
@@ -621,5 +780,26 @@ class NativeTestingWorkerTests(unittest.TestCase):
             self.execute()
         self.assertEqual(self.effects, ["switch-new", "stop-old"])
         self.fail_public = False
+        self.assertEqual(self.execute().deploy_status, "pass")
+        self.assertEqual(self.effects, ["switch-new", "stop-old"])
+
+    def test_provider_reply_does_not_retire_until_every_old_service_is_observed_stopped(
+        self,
+    ) -> None:
+        def partial(**kwargs: Any) -> dict[str, Any]:
+            result = self.provider_request(**kwargs)
+            self.retained["stopped"] = False  # web stopped, another old service is still running
+            return result
+
+        with (
+            patch.object(api, "dokploy_request", side_effect=partial),
+            self.assertRaises(service.NativeTestingRebuildPending),
+        ):
+            self.execute()
+        self.assertTrue(self.retained["web_stopped"])
+        with self.assertRaises(service.NativeTestingRebuildPending):
+            self.execute()
+        self.assertEqual(self.effects, ["switch-new", "stop-old"])
+        self.retained["stopped"] = True
         self.assertEqual(self.execute().deploy_status, "pass")
         self.assertEqual(self.effects, ["switch-new", "stop-old"])

@@ -119,7 +119,6 @@ class NativeTestingRebuildIntent(FrozenRecord):
     old: TestingCopy
     retained: dict[str, Any]
     public_entrypoints: tuple[str, ...]
-    credential_peer_projects: tuple[str, ...] = ()
     recorded_template: dict[str, Any] | None = None
 
     @property
@@ -140,90 +139,6 @@ def rebuild_source(operation: OdooStableTargetReplacementOperationRecord) -> Can
     if not native_testing_rebuild(operation) or operation.request.data_source_mode not in modes:
         raise ValueError("A native rebuild requires its explicit testing source.")
     return modes[operation.request.data_source_mode]
-
-
-def retained_testing_projects(
-    store: PostgresRecordStore,
-    *,
-    before: TestingServingSnapshot,
-    product: str,
-    context: str,
-    host: str,
-    token: str,
-    server_id: str,
-) -> tuple[str, ...]:
-    """Only this lane's published predecessor chain can share its local passwords.
-
-    Storage sharing is never excused. Retained copies preserve data and the same
-    generated credentials deliberately; a second rebuild must recognize their
-    recorded physical custody rather than require password rotation or deletion.
-    """
-    binding = before.binding
-    key = binding.source.source_versions.get("testing_publication", "") if binding else ""
-    seen: set[str] = set()
-    projects: set[str] = set()
-    while key:
-        if key in seen:
-            raise ValueError("The retained testing publication chain contains a cycle.")
-        seen.add(key)
-        receipt = read_publication(store, key)
-        if (
-            receipt is None
-            or receipt.state != "applied"
-            or (receipt.plan.candidate.product, receipt.plan.candidate.context)
-            != (product, context)
-        ):
-            raise ValueError("Retained testing publication custody is unavailable.")
-        prior = receipt.plan.before
-        target_id = prior.target_id.target_id
-        if any(item.target_id == target_id for item in store.list_dokploy_target_id_records()):
-            raise ValueError("A retained testing credential peer aliases a serving lane.")
-        aliases = [
-            item
-            for item in store.list_provider_target_records()
-            if (item.provider_id, item.target_category, item.target_id)
-            == ("dokploy", "compose", target_id)
-        ]
-        retained_context = (
-            "lp-testing-retained-"
-            + canonical_json_sha256({"product": product, "context": context, "target": target_id})[
-                :32
-            ]
-        )
-        for item in aliases:
-            if (item.context, item.instance) == (
-                retained_context,
-                "retained",
-            ) and item == prior.provider.model_copy(
-                update={
-                    "context": retained_context,
-                    "instance": "retained",
-                    "source_label": "service:testing-rebuild-retained",
-                }
-            ):
-                continue
-            candidate = store.find_testing_candidate_by_target(target_id)
-            if candidate is None or (
-                candidate.product,
-                candidate.context,
-                candidate.namespace,
-                "testing-candidate",
-            ) != (product, context, item.context, item.instance):
-                raise ValueError("A retained testing credential peer has foreign physical custody.")
-        if not aliases:
-            raise ValueError("A retained testing credential peer lost physical custody.")
-        actual = api.fetch_dokploy_target_payload(
-            host=host, token=token, target_type="compose", target_id=target_id
-        )
-        if (actual.get("name"), actual.get("serverId")) != (
-            prior.target.target_name,
-            server_id,
-        ) or not actual.get("appName"):
-            raise ValueError("A retained testing credential peer changed placement.")
-        projects.add(str(actual["appName"]))
-        binding = prior.binding
-        key = binding.source.source_versions.get("testing_publication", "") if binding else ""
-    return tuple(sorted(projects))
 
 
 def capture_rebuild_intent(
@@ -266,15 +181,6 @@ def capture_rebuild_intent(
         raise ValueError("The actual testing target differs from its record.")
     server = require_registered_remote_server(provider.get("serverId"))
     project = str(provider["appName"])
-    peers = retained_testing_projects(
-        store,
-        before=before,
-        product=operation.product,
-        context=operation.context,
-        host=host,
-        token=token,
-        server_id=server,
-    )
     retained = retained_copy_operation(
         host=host,
         token=token,
@@ -283,7 +189,6 @@ def capture_rebuild_intent(
             "mode": "read",
             "project": project,
             "context": operation.context,
-            "independent_candidate_projects": peers,
         },
     )
     identity = RuntimeIdentity.model_validate(retained["identity"])
@@ -344,11 +249,10 @@ def capture_rebuild_intent(
             copy_id=before.target_id.target_id,
             target_id=before.target_id.target_id,
             private_url=possible[0],
-            resource_binding=retained["resource_binding"],
+            resource_binding=retained["physical_binding"],
             runtime_identity=identity,
         ),
         retained=retained,
-        credential_peer_projects=peers,
         public_entrypoints=points,
         recorded_template=template,
     )
@@ -463,6 +367,14 @@ class NativeTestingRebuildExecution:
         current_target = self.store.read_dokploy_target_id_record(
             context_name=self.operation.context, instance_name="testing"
         ).target_id
+        candidate = self.store.read_testing_candidate(self.adapter.namespace)
+        if candidate is not None and candidate.compose_id:
+            if current_target == candidate.compose_id:
+                published_testing_copy(
+                    self.store, product=self.operation.product, context=self.operation.context
+                )
+            else:
+                require_candidate_target_custody(self.store, candidate)
         if any(
             item.target_id in {self.intent.old.target_id, current_target}
             and (item.context, item.instance) != (self.operation.context, "testing")
@@ -508,7 +420,7 @@ class NativeTestingRebuildExecution:
             payload=self.retained_payload("read"),
         )
         retiring_original = False
-        if retained["stopped"] and plan is not None:
+        if retained["web_stopped"] and plan is not None:
             checkpoint = self.adapter.checkpoints.load(plan)
             stop = self.store.read_idempotency_record(
                 scope=REBUILD_SCOPE,
@@ -546,6 +458,19 @@ class NativeTestingRebuildExecution:
             ),
         ):
             raise ValueError("The retained testing copy still has a data workflow.")
+        deployments = api.list_deployments_for_target(
+            host=self.host,
+            token=self.token,
+            target_type="compose",
+            target_id=self.intent.old.target_id,
+            require_complete=True,
+        )
+        if any(
+            api.deployment_status(item)
+            not in api._DEPLOYMENT_SUCCESS_STATUSES | api._DEPLOYMENT_FAILURE_STATUSES
+            for item in deployments
+        ):
+            raise ValueError("The retained testing copy still has an unresolved deployment.")
 
     @property
     def publication_key(self) -> str:
@@ -564,6 +489,8 @@ class NativeTestingRebuildExecution:
             target_type="compose",
             target_id=self.intent.old.target_id,
         )
+        if provider.get("composeType") != "docker-compose":
+            raise ValueError("Native retirement requires a Docker Compose testing target.")
         if (
             provider.get("composeId"),
             provider.get("name"),
@@ -579,41 +506,13 @@ class NativeTestingRebuildExecution:
         return provider
 
     def retained_payload(self, mode: str) -> dict[str, Any]:
-        peers = retained_testing_projects(
-            self.store,
-            before=self.intent.before,
-            product=self.operation.product,
-            context=self.operation.context,
-            host=self.host,
-            token=self.token,
-            server_id=self.intent.server_id,
-        )
-        if peers != self.intent.credential_peer_projects:
-            raise ValueError("The original retained testing credential peers changed custody.")
-        projects = list(peers)
-        candidate = self.store.read_testing_candidate(self.adapter.namespace)
-        if candidate is not None and candidate.compose_id:
-            provider = api.fetch_dokploy_target_payload(
-                host=self.host,
-                token=self.token,
-                target_type="compose",
-                target_id=candidate.compose_id,
-            )
-            if (provider.get("name"), provider.get("environmentId"), provider.get("serverId")) != (
-                candidate.namespace,
-                candidate.environment_id,
-                candidate.server_id,
-            ) or not provider.get("appName"):
-                raise ValueError("The admitted independent candidate changed placement.")
-            projects.append(str(provider["appName"]))
         return {
             "mode": mode,
             "project": self.intent.project,
             "context": self.operation.context,
             "identity": self.intent.retained["identity"],
-            "web_id": self.intent.retained["web_id"],
-            "resource_binding": self.intent.old.resource_binding,
-            "independent_candidate_projects": projects,
+            "resource_binding": self.intent.retained["resource_binding"],
+            "physical_binding": self.intent.old.resource_binding,
         }
 
     def build_plan(
@@ -947,6 +846,16 @@ class NativeTestingRebuildExecution:
             lambda: self.old_provider().get("autoDeploy") is False,
             disable_auto_deploy,
         )
+
+        def stop_compose() -> None:
+            api.dokploy_request(
+                host=self.host,
+                token=self.token,
+                path="/api/compose.stop",
+                method="POST",
+                payload={"composeId": self.intent.old.target_id},
+            )
+
         self.run_effect(
             "retire-old",
             lambda: bool(
@@ -957,13 +866,7 @@ class NativeTestingRebuildExecution:
                     payload=self.retained_payload("read"),
                 )["stopped"]
             ),
-            lambda dispatch: retained_copy_operation(
-                host=self.host,
-                token=self.token,
-                server_id=self.intent.server_id,
-                payload=self.retained_payload("stop"),
-                dispatch_guard=dispatch,
-            ),
+            lambda dispatch: dispatch(stop_compose),
         )
 
     def retirement_exclusion(self, plan: TestingRebuildPlan) -> TestingCopyReadiness | None:

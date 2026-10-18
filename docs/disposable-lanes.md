@@ -821,6 +821,10 @@ provider leases, staff hold, actual login/session use, protected-copy reports,
 physical target aliases and resource/credential isolation. Storage qualification
 runs before application execution. A resumed populated candidate uses its
 original custody and private proof instead of requiring empty storage again.
+Candidate reservations are rechecked before cutover, and unresolved predecessor
+deployments refuse further effects. Whole-project retirement requires only the
+owned Odoo services in that project, not an unrelated application sharing its
+project label.
 
 The restore intent distinguishes a new workflow with no dispatched effect from
 an older or unknown dispatch. A crash before the first effect can continue the
@@ -836,10 +840,18 @@ observation with the same operation and keys. Explicit provider permission
 failures remain authorization failures and are not retried as pending work.
 Only after fresh public health and identity at the unchanged address and atomic
 canonical publication does retirement disable the predecessor's automatic
-deploys and stop its recorded web process. Its database, volumes and custody
-remain. Other retained copies may share the lane's generated passwords only
-when the lane's publication chain and physical reservations prove their custody;
-shared storage is always refused.
+deploys and call the existing [Compose stop API](https://docs.dokploy.com/docs/api/compose).
+Readback requires every service in the old testing project to be stopped. Its
+provider object, containers, volumes and custody remain; no volume is deleted.
+The host helper only reads custody and health. It shares the existing backing-path
+inspection with copy/rehearsal code, including refusing bind aliases of testing
+volumes used by another project. A restarted process with the same runtime and
+data is still the same retained copy.
+
+The old copy does not need its passwords rotated or compared with production.
+The new private copy independently proves its testing-only generated credentials
+and connection isolation before receiving traffic. Existing current local secret
+versions are preserved, including across successive rebuilds.
 
 Ordinary deploys of a published native copy preserve its private backend alias,
 local database coordinates and recorded restore witness. Credential selection
@@ -853,6 +865,12 @@ fully stopped initial legacy predecessor, a complete second-rebuild/next-deploy
 rehearsal and CM testing proof remain under #3963. The legacy local apply command
 is not a live-service fallback. No CM or production mutation is proved by these
 source tests.
+The worker regression executes a second application's configure/deploy/initialize
+stages and same-address adoption, then checks later-deploy alias rendering; it
+preseeds qualified storage and does not constitute a live host rehearsal.
+Continuing native-route refresh is tracked in [#3995](https://github.com/cbusillo/launchplane/issues/3995).
+Scheduled native restores, retained-copy maintenance and capacity integration
+are tracked in [#3996](https://github.com/cbusillo/launchplane/issues/3996).
 
 ## Service collection
 
