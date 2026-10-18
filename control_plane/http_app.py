@@ -10296,8 +10296,8 @@ def create_launchplane_fastapi_app(
                 code="testing_rebuild_observation_required",
                 message=(
                     "The original testing rebuild has provider effects to observe. "
-                    "Keep its request and operation ID; the existing worker resumes "
-                    "its original cutover or recovery instead of releasing the lane."
+                    "Keep its original request and operation ID for reconciliation. "
+                    "Cancellation cannot release its fenced effects."
                 ),
             )
         raise _launchplane_http_error(
