@@ -17,7 +17,7 @@ from control_plane.contracts.product_profile_record import (
     product_config_requirement_applies_to_lane,
 )
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
-from control_plane.dokploy.docker_errors import docker_daemon_authorization_denied
+from control_plane.docker_errors import docker_daemon_authorization_denied
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 

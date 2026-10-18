@@ -16,7 +16,7 @@ import yaml
 from control_plane.contracts.runtime_identity import RuntimeIdentity, parse_runtime_identity_payload
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.dokploy.compose import TESTING_CONNECTION_CSP
-from control_plane.dokploy.docker_errors import docker_daemon_authorization_denied
+from control_plane.docker_errors import docker_daemon_authorization_denied
 from control_plane.dokploy.native_copy_stream import _read_remote, NativeSourceUnavailable
 from control_plane.dokploy.route_rules import host_rule_may_match
 from control_plane.dokploy.testing_route import (

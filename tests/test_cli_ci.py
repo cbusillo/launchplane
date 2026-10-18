@@ -16,6 +16,22 @@ from control_plane.cli_ci import (
 from control_plane.unittest_sharding import UnittestShardingError, iter_test_target_ids
 
 
+class ColdStartupTests(unittest.TestCase):
+    def test_cli_help_starts_without_preloaded_provider_modules(self) -> None:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-c",
+                "from control_plane.cli import main; main(['--help'])",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+
 class PostgresIntegrationCommandTests(unittest.TestCase):
     @patch("control_plane.cli_ci.subprocess.run")
     def test_postgres_integration_runs_every_real_postgres_module(self, run: MagicMock) -> None:

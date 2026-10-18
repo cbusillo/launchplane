@@ -3,7 +3,7 @@
 import inspect
 
 from control_plane._odoo_copy_runtime_guard import COPY_RUNTIME_INSPECTION_LIBRARY
-from control_plane.dokploy.docker_errors import docker_daemon_authorization_denied
+from control_plane.docker_errors import docker_daemon_authorization_denied
 
 CANDIDATE_CONTAINER_PROBE = r"""
 import configparser, hmac, json, os, sys
