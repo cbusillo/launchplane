@@ -1,8 +1,10 @@
 """The ordinary replacement action admits a native rebuild only on testing."""
 
+import os
+from typing import Any
 import unittest
 import yaml
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from control_plane import secrets
 from control_plane.contracts.secret_record import SecretVersion
 from control_plane.storage.postgres import PostgresRecordStore
@@ -18,7 +20,165 @@ from control_plane.contracts.testing_publication import TestingPublicationRecord
 
 from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementApplyRequest,
+    OdooStableTargetReplacementRequest,
 )
+from control_plane.workflows.odoo_stable_target_replacement import (
+    build_odoo_stable_target_replacement_plan,
+)
+from control_plane.workflows import odoo_stable_target_replacement as maintenance
+from control_plane.dokploy import api, compose, post_deploy
+from control_plane.contracts.runtime_identity import COMPOSE_IMAGE_REFERENCE_ENV_KEYS
+from control_plane.workflows.runtime_identity_health import HealthcheckPass
+from control_plane.workflows.odoo_verification import (
+    OdooVerificationEvidence,
+    OdooVerificationResult,
+)
+
+
+def exercise_published_copy_maintenance(
+    case: unittest.TestCase, fixture: publication_tests.TestingPublicationTests
+) -> None:
+    """Run ordinary replacement/post-deploy with mocked provider IO and build ordering."""
+    publication = published_testing_copy(
+        fixture.store, product=fixture.candidate.product, context=fixture.candidate.context
+    )
+    assert publication is not None
+    app = fixture.fixture
+    candidate = fixture.candidate
+    artifact = app.artifact.model_copy(
+        update={
+            "artifact_id": "later-build",
+            "source_commit": "e" * 40,
+            "image": app.artifact.image.model_copy(update={"digest": "sha256:" + "c" * 64}),
+        }
+    )
+    fixture.store.write_artifact_manifest(artifact)
+    before = fixture.current()
+    credentials = fixture.store.list_secret_records()
+    provider = app.provider_state
+    checkpoint = Mock()
+
+    def fetch(**kwargs: Any) -> Any:
+        case.assertEqual(kwargs["target_id"], candidate.compose_id)
+        return dict(provider)
+
+    def request(**kwargs: Any) -> Any:
+        if kwargs["path"] == "/api/domain.byComposeId":
+            case.assertEqual(kwargs["query"]["composeId"], candidate.compose_id)
+            return []
+        if kwargs["path"] == "/api/docker.getContainersByAppNameMatch":
+            case.assertEqual(kwargs["query"]["appName"], candidate.namespace)
+            return [
+                {
+                    "containerId": "web",
+                    "name": candidate.namespace + "-web-1",
+                    "state": "running",
+                }
+            ]
+        if kwargs["path"] == "/api/docker.getConfig":
+            return {
+                "Config": {"Labels": {}},
+                "NetworkSettings": {"Networks": {"dokploy-network": {}}},
+            }
+        case.fail("Unexpected provider operation")
+
+    def sync(**kwargs: Any) -> Any:
+        case.assertEqual(kwargs["compose_id"], candidate.compose_id)
+        provider["composeFile"] = kwargs["compose_file"]
+        return {"applied": "true"}
+
+    def env(**kwargs: Any) -> None:
+        case.assertEqual(kwargs["target_id"], candidate.compose_id)
+        provider["env"] = kwargs["env_text"]
+
+    def update(**kwargs: Any) -> Any:
+        case.assertEqual(kwargs["target_definition"].target_id, candidate.compose_id)
+        case.assertFalse(kwargs["run_destructive_restore"])
+        case.assertIsNone(kwargs["fresh_testing_generation"])
+        kwargs["before_provider_mutation"](post_deploy.ODOO_POST_DEPLOY_SCHEDULE_TRIGGER)
+        return {
+            "log_available": "true",
+            **dict.fromkeys(post_deploy.ODOO_MODULE_UPDATE_REQUIRED_READBACK_MARKERS, "true"),
+        }
+
+    base_url = app.compiled.plan.base_url
+    profile = fixture.store.read_product_profile_record(candidate.product)
+    with (
+        patch.dict(os.environ, {"LAUNCHPLANE_DATABASE_URL": fixture.store.database_url}),
+        patch.object(api, "fetch_dokploy_target_payload", side_effect=fetch),
+        patch.object(compose, "sync_dokploy_compose_raw_source", side_effect=sync),
+        patch.object(
+            compose,
+            "fetch_dokploy_converted_compose_file",
+            side_effect=lambda **_: provider["composeFile"],
+        ),
+        patch.object(api, "update_dokploy_target_env", side_effect=env),
+        patch.object(api, "trigger_deployment"),
+        patch.object(api, "wait_for_target_deployment"),
+        patch.object(maintenance, "require_forward_lane_build"),
+        patch.object(maintenance, "require_forward_build"),
+        patch.object(post_deploy, "run_compose_post_deploy_update", side_effect=update),
+        patch.object(
+            maintenance,
+            "verify_odoo_stable_readiness",
+            return_value=OdooVerificationResult(
+                health_status="pass",
+                canonical_status="skipped",
+                logo_status="skipped",
+                evidence=OdooVerificationEvidence(
+                    base_url=base_url, health_url=base_url + profile.health_path
+                ),
+            ),
+        ),
+        patch.object(
+            maintenance,
+            "wait_for_runtime_identity_healthcheck_with_retry",
+            side_effect=lambda **kw: HealthcheckPass(
+                payload={
+                    "runtime_identity": kw["expected_runtime_identity"].model_dump(mode="json")
+                }
+            ),
+        ),
+    ):
+        result = maintenance.execute_odoo_stable_target_replacement_apply(
+            control_plane_root=app.root,
+            record_store=fixture.store,
+            request=OdooStableTargetReplacementApplyRequest(
+                product=candidate.product,
+                instance="testing",
+                artifact_id=artifact.artifact_id,
+                source_git_ref=artifact.source_commit,
+                verify_canonical=False,
+                verify_logo=False,
+            ),
+            dokploy_request=request,
+            provider_effect_checkpoint=checkpoint,
+        )
+    case.assertEqual(result.deploy_status, "pass", result.error_code)
+    checkpoint.assert_called()
+    current = fixture.current()
+    case.assertEqual(current.target_id, before.target_id)
+    case.assertEqual(current.binding, before.binding)
+    case.assertEqual(fixture.store.list_secret_records(), credentials)
+    case.assertIsNone(current.generation)
+    case.assertEqual(
+        published_testing_copy(fixture.store, product=candidate.product, context=candidate.context),
+        publication,
+    )
+    assert current.inventory is not None and current.inventory.artifact_identity is not None
+    case.assertEqual(current.inventory.artifact_identity.artifact_id, artifact.artifact_id)
+    delivered = api.parse_dokploy_env_text(str(provider["env"]))
+    image = artifact.image.repository + "@" + artifact.image.digest
+    case.assertTrue(all(delivered.get(key) == image for key in COMPOSE_IMAGE_REFERENCE_ENV_KEYS))
+    web = yaml.safe_load(provider["composeFile"])["services"]["web"]
+    case.assertFalse(web.get("ports"))
+    case.assertTrue(
+        any(
+            candidate.namespace in network.get("aliases", [])
+            for network in web["networks"].values()
+            if isinstance(network, dict)
+        )
+    )
 
 
 class NativeTestingRequestTests(unittest.TestCase):
@@ -174,6 +334,27 @@ class PublishedTestingCopyTests(unittest.TestCase):
         self.assertFalse(
             any(key.startswith("traefik.http.routers.") for key in web.get("labels", {}))
         )
+
+    def test_actual_ordinary_deploy_plan_accepts_an_adopted_empty_copy(self) -> None:
+        app = self.fixture.fixture
+        plan = build_odoo_stable_target_replacement_plan(
+            control_plane_root=app.root,
+            record_store=self.store,
+            request=OdooStableTargetReplacementRequest(
+                product=self.fixture.candidate.product,
+                instance="testing",
+                artifact_id=app.artifact.artifact_id,
+                source_git_ref=app.artifact.source_commit,
+            ),
+            dokploy_request=lambda **_: [],
+        )
+        self.assertEqual(plan.plan_status, "ready", plan.blocker_codes)
+        self.assertEqual(plan.expected_domain_hosts, ())
+        self.assertIsNone(self.fixture.current().generation)
+        self.assertEqual(self.select(), self.publication)
+
+    def test_next_ordinary_deploy_keeps_the_adopted_route_storage_and_credentials(self) -> None:
+        exercise_published_copy_maintenance(self, self.fixture)
 
     def test_empty_copy_remains_selected_across_later_build_inventory(self) -> None:
         self.assertIsNone(self.fixture.current().generation)

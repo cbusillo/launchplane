@@ -34,6 +34,7 @@ from control_plane.odoo_testing_usage import OdooTestingUsage
 from control_plane.testing_publication_storage import read_snapshot
 from tests import test_testing_publication as publication_tests
 from tests import test_testing_route as route_tests
+from tests.test_testing_rebuild_service import exercise_published_copy_maintenance
 
 
 class NativeTestingWorkerTests(unittest.TestCase):
@@ -438,6 +439,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertTrue(
             any(namespace in network.get("aliases", []) for network in web["networks"].values())
         )
+        exercise_published_copy_maintenance(self, self.fixture)
 
     def test_active_old_deployment_refuses_before_candidate_or_route_effects(self) -> None:
         self.deployment_history.return_value = [

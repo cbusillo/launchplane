@@ -78,7 +78,11 @@ from control_plane.contracts.product_profile_record import (
 )
 from control_plane.contracts.promotion_record import HealthcheckEvidence, PostDeployUpdateEvidence
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
-from control_plane.contracts.runtime_identity import RuntimeIdentity, runtime_identity_env
+from control_plane.contracts.runtime_identity import (
+    COMPOSE_IMAGE_REFERENCE_ENV_KEYS,
+    RuntimeIdentity,
+    runtime_identity_env,
+)
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.contracts.odoo_stable_target_replacement import (
@@ -221,7 +225,7 @@ ODOO_DISCARDED_LEGACY_PROVIDER_ENV = {"ODOO_WEB_COMMAND": "/odoo/odoo-bin"}
 ODOO_REPLACEMENT_DRIVER_ENV_KEYS = {
     "PLATFORM_CONTEXT",
     "PLATFORM_INSTANCE",
-    "DOCKER_IMAGE_REFERENCE",
+    *COMPOSE_IMAGE_REFERENCE_ENV_KEYS,
     "LAUNCHPLANE_RUNTIME_IDENTITY_JSON",
     "LAUNCHPLANE_DEPLOYMENT_RECORD_ID",
     "LAUNCHPLANE_ARTIFACT_ID",
@@ -2802,7 +2806,7 @@ def execute_odoo_stable_target_replacement_apply(
                 desired_env_map.pop(key, None)
         desired_env_map["PLATFORM_CONTEXT"] = plan.context
         desired_env_map["PLATFORM_INSTANCE"] = plan.instance
-        desired_env_map["DOCKER_IMAGE_REFERENCE"] = image_reference
+        desired_env_map.update(dict.fromkeys(COMPOSE_IMAGE_REFERENCE_ENV_KEYS, image_reference))
         desired_env_map.update(runtime_identity_env(runtime_identity))
         dokploy_api.update_dokploy_target_env(
             host=host,

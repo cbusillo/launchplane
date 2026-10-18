@@ -861,13 +861,16 @@ fresh private copy through the same rebuild action.
 
 This is staged integration under [#3987](https://github.com/cbusillo/launchplane/issues/3987),
 not live qualification. Signed-in and supported agent controls, recovery from a
-fully stopped initial legacy predecessor, a complete second-rebuild/next-deploy
+fully stopped initial legacy predecessor, a live host second-rebuild/next-deploy
 rehearsal and CM testing proof remain under #3963. The legacy local apply command
 is not a live-service fallback. No CM or production mutation is proved by these
 source tests.
 The worker regression executes a second application's configure/deploy/initialize
-stages and same-address adoption, then checks later-deploy alias rendering; it
-preseeds qualified storage and does not constitute a live host rehearsal.
+stages and same-address adoption, then the ordinary replacement and post-deploy
+workflows for a newer artifact. It verifies retained route, storage, generated
+credential versions, private alias and both contract-owned image references.
+Provider IO and build ordering are mocked, storage is prequalified, and this
+does not constitute a live host rehearsal.
 Continuing native-route refresh is tracked in [#3995](https://github.com/cbusillo/launchplane/issues/3995).
 Scheduled native restores, retained-copy maintenance and capacity integration
 are tracked in [#3996](https://github.com/cbusillo/launchplane/issues/3996).
