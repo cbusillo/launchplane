@@ -39,6 +39,7 @@ from control_plane.release_review import (
     require_unchanged_production_artifact,
     ProductionChangeRequiresPromotion,
 )
+from control_plane.testing_rebuild_resume import caller_binding
 
 
 ODOO_TARGET_REPLACEMENT_APPLY_ROUTE = "/v1/drivers/odoo/target-replacement-apply"
@@ -337,6 +338,8 @@ def build_odoo_target_replacement_apply_operation_record(
     created_at: str,
     authorization: DurableOperationAuthorization,
 ) -> OdooStableTargetReplacementOperationRecord:
+    if replacement_request.strategy == "replace-and-cutover":
+        caller_binding(authorization.caller)
     return OdooStableTargetReplacementOperationRecord(
         schema_version=2,
         operation_id=build_odoo_stable_target_replacement_operation_id(

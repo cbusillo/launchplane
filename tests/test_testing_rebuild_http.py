@@ -528,6 +528,60 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
             enqueue(idempotency_key="new-machine-request")
         self.assertEqual(self.fixture.effects, [])
 
+    async def test_native_admission_requires_a_caller_who_can_resume(self) -> None:
+        from control_plane.contracts.durable_operation_authorization import (
+            DurableOperationAuthorization,
+        )
+        from control_plane.durable_operation_authorization import (
+            DurableOperationAuthorizationDeniedError,
+        )
+
+        accepted = await self.call("POST", self.payload)
+        self.assertEqual(accepted.status_code, 200, accepted.json())
+        saved = self.store.read_odoo_stable_target_replacement_operation_record(
+            accepted.json()["operation"]["operation_id"]
+        )
+        assert saved.authorization is not None
+        workflow = DurableOperationAuthorization.model_validate(
+            {
+                **saved.authorization.model_dump(mode="json"),
+                "grant": "policy_rule",
+                "managed_set_id": "fixture-workflow-set",
+                "managed_rule_id": "fixture-workflow-rule",
+                "caller": {
+                    "identity_type": "github_actions",
+                    "subject": "fixture-workflow",
+                    "repository": "example/product",
+                    "workflow_ref": "example/product/.github/workflows/testing.yml@main",
+                },
+            }
+        )
+        # Historical receipts remain readable, without admitting another effect.
+        _, replayed = admission.enqueue_odoo_target_replacement_apply_operation(
+            record_store=self.store,
+            request=admission.OdooTargetReplacementApplyEnvelope(
+                product=saved.product, replacement=saved.request
+            ),
+            context=saved.context,
+            idempotency_key=saved.idempotency_key,
+            idempotency_scope=saved.idempotency_scope,
+            request_fingerprint=saved.request_fingerprint,
+            created_at=saved.created_at,
+            authorization=workflow,
+        )
+        self.assertEqual(replayed["operation_id"], saved.operation_id)
+        with self.assertRaises(DurableOperationAuthorizationDeniedError):
+            admission.build_odoo_target_replacement_apply_operation_record(
+                replacement_request=saved.request,
+                context=saved.context,
+                idempotency_key="new-workflow-request",
+                idempotency_scope=saved.idempotency_scope,
+                request_fingerprint=saved.request_fingerprint,
+                created_at=saved.created_at,
+                authorization=workflow,
+            )
+        self.assertEqual(self.fixture.effects, [])
+
     async def test_queue_race_reports_the_same_key_conflict_as_the_initial_lookup(self) -> None:
         accepted = await self.call("POST", self.payload)
         self.assertEqual(accepted.status_code, 200, accepted.json())

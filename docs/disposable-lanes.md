@@ -1152,9 +1152,12 @@ unchanged. Changing the label changes the caller; resume does not transfer a
 held request to that new identity or to an administrator.
 A workflow or service identity cannot substitute. Cookie callers also need the
 normal Origin/CSRF evidence. This action creates no authorization grant.
-An original workflow/service caller has no same-caller resume path here; its
-unresolved operation remains fenced. Independent successor recovery is tracked
-in #4013, without transferring its authority or claiming the old effect ended.
+New native rebuilds reject workflow/service original callers at admission,
+before creating an operation or dispatching an effect, using the same caller
+boundary as resume. Existing receipts still replay before this new-admission
+check. Historical workflow/service originals remain fenced; their independent
+successor recovery is tracked in #4013, without transferring authority or
+claiming the old effect ended.
 
 Under the existing lane and row locks, resume records its fresh authorization
 and prior held error in an audit receipt, and queues the same operation in one

@@ -5,6 +5,10 @@ from dataclasses import replace
 import unittest
 from unittest.mock import patch
 from httpx2 import Response
+from sqlalchemy import event
+from sqlalchemy.engine import Connection, Engine
+from sqlalchemy.sql.dml import Insert
+from typing import Any
 
 from control_plane import testing_rebuild_service as service
 from control_plane.contracts.promotion_record import HealthcheckEvidence
@@ -13,7 +17,6 @@ from control_plane.contracts.odoo_stable_bootstrap_operation import (
 )
 from control_plane.contracts.odoo_stable_bootstrap import OdooStableBootstrapRequest
 from control_plane.contracts.testing_rebuild import REBUILD_SCOPE, REBUILD_ROUTE
-from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.storage.postgres import LaunchplaneIdempotencyRow
 from control_plane.durable_operation_authorization import (
     capture_durable_operation_authorization,
@@ -271,16 +274,29 @@ class TestingRebuildResumeTests(unittest.IsolatedAsyncioTestCase):
     async def test_resume_receipt_failure_rolls_back_the_queue_transition(self) -> None:
         from control_plane.testing_rebuild_resume import RESUME_SCOPE
 
-        original = self.store._idempotency_row
-
-        def failed_receipt(record: LaunchplaneIdempotencyRecord) -> LaunchplaneIdempotencyRow:
-            if record.scope == RESUME_SCOPE:
+        def failed_receipt(
+            connection: Connection,
+            statement: Any,
+            multiparams: Any,
+            params: Any,
+            execution_options: Any,
+        ) -> None:
+            if (
+                isinstance(statement, Insert)
+                and statement.table.name == LaunchplaneIdempotencyRow.__tablename__
+                and any(
+                    isinstance(values, dict) and values.get("scope") == RESUME_SCOPE
+                    for values in (*multiparams, params)
+                )
+            ):
                 raise RuntimeError("Fixture resume receipt write failed")
-            return original(record)
 
-        with patch.object(self.store, "_idempotency_row", side_effect=failed_receipt):
+        event.listen(Engine, "before_execute", failed_receipt)
+        try:
             with self.assertRaises(RuntimeError):
                 await self.resume()
+        finally:
+            event.remove(Engine, "before_execute", failed_receipt)
         self.assertEqual(
             self.store.read_odoo_stable_target_replacement_operation_record(self.held.operation_id),
             self.held,
