@@ -236,6 +236,7 @@ def capture_rebuild_intent(
                 context=operation.context,
                 host=str(urlsplit(lane.base_url).hostname),
                 old_backend=endpoint,
+                old_backend_addresses=tuple(endpoints),
                 new_backend=f"http://{namespace}:{profile.runtime_port}",
                 raw=raw,
                 public_entrypoints=points,
@@ -245,8 +246,11 @@ def capture_rebuild_intent(
         except ValueError:
             continue
         possible.append(endpoint)
-    if len(possible) != 1:
-        raise ValueError("Exactly one actual retained testing backend is required.")
+    if not possible:
+        raise ValueError("A physically verified retained testing DNS backend is required.")
+    # The host binds all these aliases to the same exact, unshared web process.
+    # An owned route already restricts this set to its recorded selected alias.
+    endpoint = sorted(possible)[0]
     return NativeTestingRebuildIntent(
         operation_id=operation.operation_id,
         profile=profile,
@@ -256,7 +260,7 @@ def capture_rebuild_intent(
         old=TestingCopy(
             copy_id=before.target_id.target_id,
             target_id=before.target_id.target_id,
-            private_url=possible[0],
+            private_url=endpoint,
             resource_binding=retained["physical_binding"],
             runtime_identity=identity,
         ),
@@ -281,8 +285,6 @@ def check_testing_rebuild_protection(
         )
     safety = store.read_disposable_lane_safety(operation.product, operation.context, "testing")
     if safety is not None:
-        if safety.usage == "in_use":
-            raise TestingRebuildRefused("testing_in_use", "Someone is using this testing lane.")
         if safety.data == "only_copy":
             raise TestingRebuildRefused(
                 "testing_needed_copy", "Testing holds the only needed copy of data."
@@ -298,14 +300,15 @@ def check_testing_rebuild_protection(
         control_plane_root=root,
         database_url=store.database_url,
     )
+    reported_usage = "in_use" if safety is not None and safety.usage == "in_use" else usage.usage
     decision = evaluate_lane_usage(
         store,
         profile=intent.profile,
         target=target,
         target_id=intent.before.target_id,
         instance="testing",
-        usage=usage.usage,
-        require_unused=False,
+        usage=reported_usage,
+        require_unused=reported_usage != "unknown",
     )
     if decision.protected:
         raise TestingRebuildRefused("testing_in_use", "Someone is using this testing lane.")
@@ -556,6 +559,7 @@ class NativeTestingRebuildExecution:
 
     def run(self) -> TestingRebuildRecord:
         allocation = self.store.read_testing_candidate(self.adapter.namespace)
+        historical: TestingRebuildRecord | None = None
         if allocation is not None and allocation.application is not None:
             historical_plan = self.build_plan(allocation, allocation.application.plan)
             try:
@@ -583,6 +587,45 @@ class NativeTestingRebuildExecution:
             old_runtime_identity=self.intent.old.runtime_identity,
         )
         existing_publication = read_publication(self.store, self.publication_key)
+        if historical is not None and historical.step == "switching":
+            dispatched = self.store.read_idempotency_record(
+                scope=REBUILD_SCOPE,
+                route_path=REBUILD_ROUTE + ":effect",
+                idempotency_key=self.operation.operation_id
+                + ":route:"
+                + historical.plan.new.copy_id,
+            )
+            if dispatched is not None and dispatched.provider_effect_started_at:
+                # A failed candidate/guard must not end this operation while its
+                # original proxy writer could still move traffic later. Observe
+                # that dispatch before any preparation/readiness continuation.
+                self.adapter.authorize("testing_rebuild_observe")
+                if existing_publication is None:
+                    raise NativeTestingRebuildPending("The original route receipt is unavailable.")
+                frame = self.transport.read()
+                try:
+                    backend = observe_testing_route(
+                        existing_publication.plan.route,
+                        frame["raw"],
+                        json.loads(frame["owned_file"])
+                        if frame["owned_file"] is not None
+                        else None,
+                    )
+                except ValueError as error:
+                    raise NativeTestingRebuildPending(
+                        "Continue observing the original dispatched route."
+                    ) from error
+                if backend != historical.plan.new.private_url:
+                    raise NativeTestingRebuildPending(
+                        "The original route writer has not selected its successor."
+                    )
+                self.route = existing_publication.plan.route
+                self.switch(
+                    historical.plan,
+                    historical.plan.old,
+                    historical.plan.new,
+                    reconcile_only=True,
+                )
         if existing_publication is None:
             self.guard()
             if allocation is None:
@@ -662,6 +705,7 @@ class NativeTestingRebuildExecution:
                 context=self.operation.context,
                 host=self.plan.host,
                 old_backend=self.plan.old.private_url,
+                old_backend_addresses=tuple(frame["old_endpoints"]),
                 new_backend=self.plan.new.private_url,
                 raw=frame["raw"],
                 public_entrypoints=self.intent.public_entrypoints,

@@ -1,6 +1,7 @@
 """Lane-owned testing traffic over retained Docker routes and disposable copies."""
 
 from copy import deepcopy
+from ipaddress import ip_address
 import json
 from typing import Any, Self
 from urllib.parse import urlsplit
@@ -27,6 +28,7 @@ class TestingLaneRoute(FrozenRecord):
     new_backend: str
     template: dict[str, Any]
     legacy_routers: dict[str, dict[str, Any]]
+    legacy_backend: str = ""
     public_entrypoints: tuple[str, ...] = Field(min_length=1)
 
     @field_validator("template", "legacy_routers", mode="before")
@@ -56,8 +58,25 @@ class TestingLaneRoute(FrozenRecord):
                 or parsed.fragment
             ):
                 raise ValueError("Testing traffic requires its qualified private HTTP origins.")
-        if not self.template.get("http", {}).get("routers"):
+            try:
+                ip_address(parsed.hostname)
+            except ValueError:
+                pass
+            else:
+                raise ValueError("Owned testing traffic requires stable private DNS aliases.")
+        http = self.template.get("http", {})
+        routers = http.get("routers")
+        if not isinstance(routers, dict) or not routers:
             raise ValueError("Testing traffic requires an owned route template.")
+        if set(http.get("services", {})) != {self.route_id} or any(
+            not isinstance(router, dict)
+            or router.get("rule") != f"Host(`{self.host}`)"
+            or router.get("service") != self.route_id
+            or not router.get("entryPoints")
+            or not set(router["entryPoints"]) <= set(self.public_entrypoints)
+            for router in routers.values()
+        ):
+            raise ValueError("Testing route template crosses its admitted host or service.")
         return self
 
 
@@ -71,7 +90,15 @@ def router_configuration(router: dict[str, Any]) -> dict[str, Any]:
     """Only applied behavior belongs in a route comparison, never status counters."""
     configuration: dict[str, Any] = {
         key: router[key]
-        for key in ("rule", "service", "entryPoints", "priority", "middlewares", "tls")
+        for key in (
+            "rule",
+            "ruleSyntax",
+            "service",
+            "entryPoints",
+            "priority",
+            "middlewares",
+            "tls",
+        )
         if key in router
     }
     configuration.setdefault("middlewares", [])
@@ -126,12 +153,27 @@ def applied_service_backend(raw: dict[str, Any], service: str, provider: str) ->
     return str(servers[0]["url"])
 
 
+def redirects_to_https(raw: dict[str, Any], router: dict[str, Any]) -> bool:
+    for reference in router.get("middlewares", []):
+        if not isinstance(reference, str):
+            raise ValueError("Testing predecessor middleware is malformed.")
+        reference = reference if "@" in reference else reference + "@docker"
+        middleware = raw.get("middlewares", {}).get(reference)
+        if (
+            isinstance(middleware, dict)
+            and middleware.get("redirectScheme", {}).get("scheme") == "https"
+        ):
+            return True
+    return False
+
+
 def compile_testing_route(
     *,
     product: str,
     context: str,
     host: str,
     old_backend: str,
+    old_backend_addresses: tuple[str, ...] = (),
     new_backend: str,
     raw: dict[str, Any],
     public_entrypoints: tuple[str, ...],
@@ -150,6 +192,15 @@ def compile_testing_route(
         for name, router in matches.items()
         if name.endswith("@docker")
     }
+    legacy_backends = {
+        applied_service_backend(raw, str(matches[name].get("service") or ""), "docker")
+        for name in legacy
+    }
+    if len(legacy_backends) > 1 or any(
+        backend not in {old_backend, *old_backend_addresses} for backend in legacy_backends
+    ):
+        raise ValueError("Docker predecessor differs from its physically verified copy.")
+    legacy_backend = next(iter(legacy_backends), "")
     if owned_document is not None:
         if recorded_template is None:
             raise ValueError("Owned testing route requires its recorded template authority.")
@@ -162,6 +213,7 @@ def compile_testing_route(
             new_backend=new_backend,
             template=recorded_template,
             legacy_routers=legacy,
+            legacy_backend=legacy_backend,
             public_entrypoints=public_entrypoints,
         )
         if owned_document != route_document(plan, old_backend):
@@ -173,9 +225,7 @@ def compile_testing_route(
     routers: dict[str, Any] = {}
     services: dict[str, Any] = {}
     connection_middleware = identifier + "-connections"
-    owned_middlewares: dict[str, Any] = {
-        connection_middleware: {"headers": {"contentSecurityPolicy": TESTING_CONNECTION_CSP}}
-    }
+    owned_middlewares: dict[str, Any] = {}
     used_entrypoints: set[str] = set()
     for index, (name, router) in enumerate(sorted(matches.items())):
         configuration = router_configuration(router)
@@ -185,7 +235,7 @@ def compile_testing_route(
             router.get("status") != "enabled"
             or rule not in exact_rules
             or applied_service_backend(raw, str(router.get("service") or ""), "docker")
-            != old_backend
+            != legacy_backend
         ):
             raise ValueError("Testing predecessor is not the exact healthy lane backend.")
         points = tuple(router["entryPoints"])
@@ -217,10 +267,16 @@ def compile_testing_route(
             ):
                 raise ValueError("Testing predecessor has unsupported copy-owned middleware.")
             # This managed public header must survive retirement of its Docker producer.
-            clone = identifier + "-connections"
-            owned_middlewares[clone] = {"headers": current["headers"]}
-            middlewares.append(clone + "@file")
-        if connection_middleware + "@file" not in middlewares:
+            owned_middlewares[connection_middleware] = {"headers": current["headers"]}
+            middlewares.append(connection_middleware + "@file")
+        if not redirects_to_https(raw, router):
+            owned_middlewares[connection_middleware] = {
+                "headers": {"contentSecurityPolicy": TESTING_CONNECTION_CSP}
+            }
+        if (
+            not redirects_to_https(raw, router)
+            and connection_middleware + "@file" not in middlewares
+        ):
             middlewares.append(connection_middleware + "@file")
         tls = configuration.get("tls")
         if tls is not None and (
@@ -237,6 +293,8 @@ def compile_testing_route(
             middlewares=tuple(middlewares),
         )
         desired = document["http"]["routers"][identifier]
+        if "ruleSyntax" in configuration:
+            desired["ruleSyntax"] = configuration["ruleSyntax"]
         if tls is not None:
             desired["tls"] = dict(tls)
         desired["priority"] = priority + 1
@@ -257,6 +315,7 @@ def compile_testing_route(
             }
         },
         legacy_routers=legacy,
+        legacy_backend=legacy_backend,
         public_entrypoints=public_entrypoints,
     )
     observe_testing_route(plan, raw, None)
@@ -284,7 +343,7 @@ def observe_testing_route(
             or router.get("status") != "enabled"
             or router_configuration(router) != plan.legacy_routers[name]
             or applied_service_backend(raw, str(router.get("service") or ""), "docker")
-            != plan.old_backend
+            != (plan.legacy_backend or plan.old_backend)
         ):
             raise ValueError("Foreign or changed testing router appeared.")
     present = names & set(matches)

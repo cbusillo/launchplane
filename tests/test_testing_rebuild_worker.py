@@ -225,10 +225,14 @@ class NativeTestingWorkerTests(unittest.TestCase):
         return result
 
     def route_read(self) -> dict[str, Any]:
+        endpoints = [] if self.retained["stopped"] else [self.intent.old.private_url]
+        legacy = self.raw["services"].get("old@docker")
+        if endpoints and legacy is not None:
+            endpoints.extend(item["url"] for item in legacy["loadBalancer"]["servers"])
         return {
             "raw": deepcopy(self.raw),
             "owned_file": json.dumps(self.owned) if self.owned is not None else None,
-            "old_endpoints": (self.intent.old.private_url,),
+            "old_endpoints": tuple(endpoints),
         }
 
     def switch(
@@ -273,6 +277,19 @@ class NativeTestingWorkerTests(unittest.TestCase):
             authorize=self.authorize,
             lease_owner="native-worker-fixture",
         )
+
+    def test_initial_capture_maps_the_observed_ip_to_one_of_its_physical_dns_names(self) -> None:
+        frame = self.route_read()
+        aliases = (self.intent.old.private_url, "http://old-testing-web-1:8069")
+        frame["old_endpoints"] = (*aliases, *frame["old_endpoints"])
+        with patch.object(DokployTestingRouteTransport, "read", return_value=frame):
+            captured = self.capture_function(
+                root=self.root, store=self.store, operation=self.operation
+            )
+        self.assertIn(captured.old.private_url, aliases)
+        self.assertEqual(captured.old.runtime_identity, self.original_identity)
+        self.assertEqual(self.effects, [])
+        self.assertEqual(self.current(), self.fixture.before)
 
     def test_one_action_preserves_address_credentials_and_retires_only_after_publication(
         self,
@@ -578,6 +595,45 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertEqual(self.current().target_id.target_id, self.fixture.candidate.compose_id)
         self.assertTrue(self.retained["stopped"])
 
+    def test_verified_down_checkpoint_allows_a_historical_login(self) -> None:
+        from tests.support.down_lanes import record_lane_health
+        from tests.support.disposable_lanes import record_safety
+
+        record_lane_health(
+            self.store, self.operation.product, self.operation.context, datetime.now(UTC)
+        )
+        self.intent = self.intent.model_copy(
+            update={"profile": self.store.read_product_profile_record(self.operation.product)}
+        )
+        self.capture.return_value = self.intent
+        with patch.object(
+            service,
+            "read_odoo_testing_usage",
+            return_value=OdooTestingUsage("in_use", True, True, "complete"),
+        ):
+            adapter = service.NativeTestingRebuildAdapter(
+                root=self.root,
+                store=self.store,
+                operation=self.operation,
+                intent=self.intent,
+                authorize=self.authorize,
+            )
+            executor = service.NativeTestingRebuildExecution(
+                adapter, Mock(spec=["assert_current"]), Mock()
+            )
+            executor.host, executor.token = "fixture-host", "fixture-token"
+            for recorded_use in ("unused", "in_use"):
+                with self.subTest(recorded_use=recorded_use):
+                    record_safety(
+                        self.store,
+                        self.operation.product,
+                        self.operation.context,
+                        "testing",
+                        usage=recorded_use,
+                    )
+                    executor.guard()
+        self.assertEqual(self.effects, [])
+
     def test_hold_or_positive_use_refuses_before_any_candidate_or_route_effect(self) -> None:
         from control_plane.contracts.dokploy_target_record import DokployTargetStaffTestingHold
 
@@ -707,6 +763,58 @@ class NativeTestingWorkerTests(unittest.TestCase):
         ):
             self.assertEqual(self.execute().deploy_status, "fail")
         self.assertEqual(self.effects, [])
+
+    def test_late_route_writer_cannot_be_overridden_while_its_original_outcome_is_unknown(
+        self,
+    ) -> None:
+        from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
+
+        pending: list[Any] = []
+
+        def delayed(plan: Any, backend: str, *, expected_backend: str, dispatch_guard: Any) -> None:
+            def send() -> None:
+                pending.append(
+                    lambda: self.switch(
+                        plan,
+                        backend,
+                        expected_backend=expected_backend,
+                        dispatch_guard=lambda write: write(),
+                    )
+                )
+                raise NativeSourceUnavailable("fixture proxy writer has not returned")
+
+            dispatch_guard(send)
+
+        with (
+            patch.object(DokployTestingRouteTransport, "publish", side_effect=delayed),
+            self.assertRaises(service.NativeTestingRebuildPending),
+        ):
+            self.execute()
+        self.assertEqual(self.effects, [])
+        self.assertEqual(self.current(), self.fixture.before)
+        with (
+            patch.object(
+                DokployTestingRouteTransport,
+                "publish",
+                side_effect=AssertionError("A still-pending writer cannot be replaced or inverted"),
+            ),
+            patch.object(
+                service.NativeTestingRebuildExecution,
+                "readiness",
+                side_effect=ValueError("fixture candidate failed while writer was pending"),
+            ),
+            self.assertRaises(service.NativeTestingRebuildPending),
+        ):
+            self.execute()
+        self.assertEqual(self.effects, [])
+        self.assertFalse(self.retained["stopped"])
+        self.assertEqual(len(pending), 1)
+        pending.pop()()
+        self.fail_public = True
+        self.assertEqual(self.execute().deploy_status, "fail")
+        self.assertEqual(self.effects, ["switch-new", "switch-old"])
+        self.assertEqual(self.current(), self.fixture.before)
+        self.assertFalse(self.retained["stopped"])
 
     def test_unknown_public_health_keeps_observing_the_same_candidate_without_retirement(
         self,

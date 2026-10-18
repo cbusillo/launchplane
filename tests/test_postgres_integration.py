@@ -13702,6 +13702,15 @@ class RealPostgresOdooUpgradeRehearsalTests(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get(POSTGRES_TEST_URL_ENV), "PostgreSQL integration URL required")
 class RealPostgresTestingCandidateTests(unittest.TestCase):
+    def test_candidate_capture_rechecks_aliases_before_storage_dispatch(self) -> None:
+        from tests.test_testing_candidate_allocation import TestingCandidateTests
+
+        fixture = TestingCandidateTests()
+        fixture.database_url = self.enterContext(_head_postgres_database())
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.test_alias_added_after_capture_refuses_the_next_provider_checkpoint()
+
     def test_candidate_capture_also_fences_legacy_lane_aliases(self) -> None:
         from tests.test_testing_candidate_allocation import TestingCandidateTests
 
@@ -13810,6 +13819,14 @@ class RealPostgresTestingPublicationTests(unittest.TestCase):
 
 
 class RealPostgresNativeTestingWorkerTests(unittest.TestCase):
+    def test_delayed_route_writer_is_reconciled_before_private_health_failure(self) -> None:
+        self.run_worker_case(
+            "test_late_route_writer_cannot_be_overridden_while_its_original_outcome_is_unknown"
+        )
+
+    def test_down_lane_qualifies_recorded_and_fresh_historical_use(self) -> None:
+        self.run_worker_case("test_verified_down_checkpoint_allows_a_historical_login")
+
     def run_worker_case(self, name: str) -> None:
         from tests import test_testing_rebuild_worker as worker_tests
 

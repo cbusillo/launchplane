@@ -176,6 +176,47 @@ class TestingRebuildHttpTests(unittest.IsolatedAsyncioTestCase):
             self.store.read_artifact_manifest(self.manifest.artifact_id)
         self.assertEqual(self.fixture.effects, [])
 
+    async def test_verified_down_historical_use_allows_preflight_and_the_same_queue(self) -> None:
+        from datetime import UTC, datetime
+        from control_plane import testing_rebuild_service as service
+        from control_plane.odoo_testing_usage import OdooTestingUsage
+        from tests.support.down_lanes import record_lane_health
+        from tests.support.disposable_lanes import record_safety
+
+        before = {
+            item.operation_id
+            for item in self.store.list_odoo_stable_target_replacement_operation_records(
+                product=self.product
+            )
+        }
+        record_lane_health(
+            self.store, self.product, self.fixture.operation.context, datetime.now(UTC)
+        )
+        record_safety(
+            self.store, self.product, self.fixture.operation.context, "testing", usage="in_use"
+        )
+        intent = self.fixture.intent.model_copy(
+            update={"profile": self.store.read_product_profile_record(self.product)}
+        )
+        with (
+            patch.object(preflight, "capture_rebuild_intent", return_value=intent),
+            patch.object(
+                service, "read_odoo_testing_usage", return_value=OdooTestingUsage("in_use")
+            ),
+        ):
+            inspected = await self.call("GET", path=self.url + "/inputs")
+            submitted = await self.call("POST", self.payload)
+        self.assertEqual(inspected.status_code, 200, inspected.json())
+        self.assertTrue(submitted.is_success, submitted.json())
+        self.assertEqual(self.fixture.effects, [])
+        operations = self.store.list_odoo_stable_target_replacement_operation_records(
+            product=self.product
+        )
+        operation_id = submitted.json()["operation"]["operation_id"]
+        self.assertEqual({item.operation_id for item in operations} - before, {operation_id})
+        operation = next(item for item in operations if item.operation_id == operation_id)
+        self.assertTrue(operation.is_native_testing_rebuild)
+
     async def test_provider_read_denial_keeps_trace_and_does_not_enqueue(self) -> None:
         from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 

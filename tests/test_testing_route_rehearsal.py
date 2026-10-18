@@ -17,12 +17,12 @@ from control_plane.dokploy.testing_route import (
     observe_testing_route,
     route_document,
     TestingRoutePending,
+    TestingLaneRoute,
 )
 from control_plane.dokploy.testing_route_transport import (
     ATOMIC_TESTING_ROUTE_WRITER,
     TRAEFIK_DYNAMIC_DIRECTORY,
 )
-from control_plane.dokploy.traefik_cutover import atomic_publish_route_file
 
 
 def docker(*arguments: str, content: bytes | None = None) -> str:
@@ -40,8 +40,7 @@ def docker(*arguments: str, content: bytes | None = None) -> str:
 )
 class TestingRouteRehearsalTests(unittest.TestCase):
     def test_owned_route_switch_and_inverse_keep_public_requests_serving(self) -> None:
-        Path("state").mkdir(exist_ok=True)
-        with TemporaryDirectory(dir=Path("state")) as directory:
+        with TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             prefix = "lp-testing-route-" + uuid4().hex[:12]
             network, proxy_network = prefix + "-data", prefix + "-proxy"
@@ -105,9 +104,11 @@ class TestingRouteRehearsalTests(unittest.TestCase):
                     new_backend=new_url,
                     raw=raw,
                     public_entrypoints=("web",),
-                ).model_copy(update={"legacy_routers": {}})
+                )
+                plan = TestingLaneRoute.model_validate(
+                    {**plan.model_dump(), "legacy_routers": {}, "legacy_backend": ""}
+                )
                 route_file = root / (plan.route_id + ".yml")
-                atomic_publish_route_file(route_file, route_document(plan, old_url))
                 proxy = prefix + "-traefik"
                 docker(
                     "run",
@@ -130,6 +131,23 @@ class TestingRouteRehearsalTests(unittest.TestCase):
                     "--entrypoints.web.address=:80",
                 )
                 containers.append(proxy)
+                initial = json.dumps(
+                    route_document(plan, old_url), sort_keys=True, separators=(",", ":")
+                ).encode()
+                docker(
+                    "exec",
+                    "-i",
+                    proxy,
+                    "sh",
+                    "-c",
+                    ATOMIC_TESTING_ROUTE_WRITER,
+                    "_",
+                    TRAEFIK_DYNAMIC_DIRECTORY,
+                    route_file.name,
+                    "absent",
+                    hashlib.sha256(initial).hexdigest(),
+                    content=initial,
+                )
                 docker("network", "connect", network, proxy)
                 ports = json.loads(
                     docker("inspect", "--format", "{{json .NetworkSettings.Ports}}", proxy)

@@ -29,7 +29,7 @@ def docker(*arguments: str) -> str:
 )
 class TraefikCutoverRehearsalTests(unittest.TestCase):
     def test_atomic_applied_switch_with_continuous_external_reads_and_retained_old(self) -> None:
-        with TemporaryDirectory(dir=Path("state")) as directory:
+        with TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             prefix = "lp-cutover-" + uuid4().hex[:12]
             network = prefix + "-network"

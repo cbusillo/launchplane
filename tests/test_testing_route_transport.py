@@ -58,7 +58,7 @@ class TestingRouteTransportTests(unittest.TestCase):
             },
             "old": {
                 "Id": "old",
-                "Name": "/testing-old-web",
+                "Name": "/testing-old-web-1",
                 "State": {"Status": "running"},
                 "Config": {
                     "Labels": {
@@ -71,7 +71,12 @@ class TestingRouteTransportTests(unittest.TestCase):
                     ],
                 },
                 "NetworkSettings": {
-                    "Networks": {"dokploy-network": {"IPAddress": "172.20.0.3", "Aliases": None}}
+                    "Networks": {
+                        "dokploy-network": {
+                            "IPAddress": "172.20.0.3",
+                            "Aliases": ["testing-old-web-1"],
+                        }
+                    }
                 },
             },
         }
@@ -87,6 +92,9 @@ class TestingRouteTransportTests(unittest.TestCase):
         self.effect_count = 0
         self.apply_immediately = True
         self.deny = False
+        self.denial_message = (
+            b"permission denied while trying to connect to the Docker daemon socket"
+        )
         self.before_publish: Any = None
         self.original_run = subprocess.run
         self.enterContext(patch.object(transport, "_read_remote", side_effect=self.remote))
@@ -123,7 +131,7 @@ class TestingRouteTransportTests(unittest.TestCase):
         if command[1:3] == ["ps", "-aq"]:
             result = "\n".join(self.containers).encode()
         elif command[1] == "inspect":
-            result = json.dumps([self.containers[command[2]]]).encode()
+            result = json.dumps([self.containers[name] for name in command[2:]]).encode()
         elif command[1:4] == ["exec", "proxy", "cat"]:
             result = self.static.encode()
         elif command[1:3] == ["exec", "proxy"] and command[3:5] == ["sh", "-c"]:
@@ -136,7 +144,7 @@ class TestingRouteTransportTests(unittest.TestCase):
             self.effect_count += 1
             if self.deny:
                 return subprocess.CompletedProcess(
-                    command, 1, stdout=b"", stderr=b"permission denied"
+                    command, 1, stdout=b"", stderr=self.denial_message
                 )
             actual = command[4:]
             actual[-4] = str(self.root)
@@ -200,6 +208,18 @@ class TestingRouteTransportTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.publish(self.plan.old_backend, self.plan.old_backend)
         self.assertEqual(self.effect_count, 0)
+
+    def test_container_name_remains_a_qualified_dns_endpoint_without_extra_aliases(self) -> None:
+        self.containers["old"]["NetworkSettings"]["Networks"]["dokploy-network"]["Aliases"] = None
+        self.assertIn(self.plan.old_backend, self.client.read()["old_endpoints"])
+        self.assertEqual(self.effect_count, 0)
+
+    def test_proxy_filesystem_permission_error_is_unavailable_without_a_fallback(self) -> None:
+        self.deny = True
+        self.denial_message = b"mktemp: permission denied"
+        with self.assertRaises(NativeSourceUnavailable):
+            self.publish(self.plan.old_backend, self.plan.old_backend)
+        self.assertEqual(self.effect_count, 1)
 
     def test_native_atomic_migration_switch_and_switchback_keep_other_files_and_old_copy(
         self,

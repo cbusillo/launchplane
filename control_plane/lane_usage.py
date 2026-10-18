@@ -192,8 +192,9 @@ def evaluate_lane_usage(
 
     runtime_stopped is supplied only by a current fixed Odoo host probe, never
     by a stored usage observation or a caller's declaration of non-use.
-    Callers that historically protect only positive use (retirement, isolation
-    and preview refresh) retain that contract through require_unused=False.
+    Callers that protect only positive use retain that contract through
+    require_unused=False. Repair callers can use that mode for UNKNOWN while
+    retaining verified-down qualification for positive reports.
     Data custody, resource separation, execution and release gates are separate.
     """
     if (
@@ -205,8 +206,9 @@ def evaluate_lane_usage(
     if usage == "unused":
         return LaneUsageDecision(False, "unused")
     if not require_unused:
-        # Retirement and non-destructive isolation keep their original known-use
-        # protection. Downtime qualifies repair, not those separate operations.
+        # This mode protects positive use without requiring negative evidence.
+        # Call repair with require_unused=True to evaluate a positive report
+        # against the recorded downtime evidence.
         return LaneUsageDecision(usage == "in_use", "usage_protected")
     if instance != "prod" and target is not None and target_id is not None:
         try:
