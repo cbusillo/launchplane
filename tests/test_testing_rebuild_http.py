@@ -149,13 +149,13 @@ class TestingRebuildHttpTests(unittest.IsolatedAsyncioTestCase):
                         self.payload if method == "POST" else None,
                         path=self.url if method == "POST" else self.url + "/inputs",
                     )
-                self.assertEqual(response.status_code, status, response.text)
-                self.assertTrue(response.json()["trace_id"])
-                self.assertEqual(
-                    response.json()["error"]["code"],
-                    "authorization_denied" if status == 403 else "testing_rebuild_not_ready",
-                )
-                self.assertNotIn("private-", response.text)
+                    self.assertEqual(response.status_code, status, response.text)
+                    self.assertTrue(response.json()["trace_id"])
+                    self.assertEqual(
+                        response.json()["error"]["code"],
+                        "authorization_denied" if status == 403 else "testing_rebuild_not_ready",
+                    )
+                    self.assertNotIn("private-", response.text)
         self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), before)
         self.assertEqual(self.fixture.effects, [])
 

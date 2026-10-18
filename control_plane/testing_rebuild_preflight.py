@@ -1,6 +1,5 @@
 """Read the native rebuild's inputs without reserving a copy or dispatching effects."""
 
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 from uuid import uuid4
@@ -33,6 +32,7 @@ from control_plane.testing_rebuild_service import (
     check_testing_rebuild_protection,
     TestingRebuildRefused,
 )
+from control_plane.workflows.ship import utc_now_timestamp
 
 
 class TestingRebuildPreflight(BaseModel):
@@ -71,7 +71,7 @@ def inspect_testing_rebuild(
         context=lane.context,
         verified_manifest=verified_manifest,
     )
-    now = datetime.now(UTC).isoformat()
+    now = utc_now_timestamp()
     # A local read identity, never persisted or passed to a provider executor.
     operation = OdooStableTargetReplacementOperationRecord(
         operation_id="preflight-" + uuid4().hex,
