@@ -330,7 +330,7 @@ def candidate_runtime_inputs(
     else:
         values.pop("ODOO_ADDONS_PATH", None)
     values.update(resources.volumes)
-    values.update(candidate_runtime_fences(allocation))
+    values.update(candidate_runtime_fences(allocation, runtime_port=profile.runtime_port))
     values.update(
         {
             "ODOO_INSTALL_MODULES": modules,
@@ -357,6 +357,7 @@ def candidate_runtime_inputs(
             mount_workflow_ssh=False,
             isolated_testing=True,
             private_backend_alias=allocation.namespace,
+            runtime_port=profile.runtime_port,
         ),
         runtime_environment=values,
         workflow_environment=workflow.inline_environment,
@@ -396,7 +397,9 @@ def candidate_authority_sha256(
     )
 
 
-def candidate_runtime_fences(allocation: TestingCandidateAllocation) -> dict[str, str]:
+def candidate_runtime_fences(
+    allocation: TestingCandidateAllocation, *, runtime_port: int
+) -> dict[str, str]:
     """Local runtime coordinates shared by preparation, adoption and maintenance."""
     return {
         "ODOO_PROJECT_NAME": allocation.namespace,
@@ -405,6 +408,6 @@ def candidate_runtime_fences(allocation: TestingCandidateAllocation) -> dict[str
         "PLATFORM_INSTANCE": "testing",
         "ODOO_DB_HOST": "database",
         "ODOO_DB_PORT": "5432",
-        "ODOO_HTTP_PORT": "8069",
+        "ODOO_HTTP_PORT": str(runtime_port),
         "ODOO_MAX_CRON_THREADS": "0",
     }

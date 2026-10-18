@@ -148,6 +148,7 @@ class CandidateContainerProbeTests(unittest.TestCase):
         self.identity = {"deployment_record_id": "candidate-build"}
         self.spec = {
             "base_url": "https://testing.example.invalid",
+            "http_port": 8072,
             "runtime_identity": self.identity,
             "web_config": str(self.config),
         }
@@ -197,7 +198,10 @@ class CandidateContainerProbeTests(unittest.TestCase):
         output = self.run_probe()
         self.assertEqual(output.strip(), "candidate_credentials_verified=true")
         self.assertTrue(
-            all(request.full_url.startswith("http://127.0.0.1:8069/") for request in self.requests)
+            all(
+                request.full_url.startswith(f"http://127.0.0.1:{self.spec['http_port']}/")
+                for request in self.requests
+            )
         )
         self.assertTrue(
             all(
