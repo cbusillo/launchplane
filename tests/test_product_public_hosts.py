@@ -16,6 +16,7 @@ from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord, PublicHostEffect
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
 from control_plane.dokploy import api
 from control_plane.dokploy import source
 from control_plane.http_app import create_launchplane_fastapi_app
@@ -182,6 +183,25 @@ class ProductPublicHostsTests(unittest.IsolatedAsyncioTestCase):
 
     def recorded(self) -> DokployTargetRecord:
         return self.store.read_dokploy_target_record(context_name=CONTEXT, instance_name="prod")
+
+    async def test_foreign_private_endpoint_reserves_hostname_before_provider_effect(self) -> None:
+        dry = await self.config()
+        self.assertEqual(dry.status_code, 202, dry.text)
+        self.store.write_private_health_endpoint_record(
+            PrivateHealthEndpointRecord(
+                endpoint_key="private-testing",
+                product="another-product",
+                context="another-lane",
+                instance="testing",
+                url=f"https://{HOSTS[0]}/health",
+                updated_at=self.target.updated_at,
+            )
+        )
+        response = await self.config(mode="apply", key="private-host-conflict")
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()["error"]["code"], "public_hosts_target_changed")
+        self.assertEqual(self.provider.writes, [])
+        self.assertEqual(self.recorded(), self.target)
 
     @contextmanager
     def failing_config_commit(self, key: str) -> Iterator[None]:

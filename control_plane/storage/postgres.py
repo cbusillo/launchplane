@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from urllib.parse import urlsplit
+
 from control_plane.contracts.merge_train_stall import MergeTrainStallRecord
 from control_plane.contracts.odoo_upgrade_rehearsal import OdooUpgradeRehearsalRecord
 from control_plane.contracts.testing_rebuild import TestingRebuildRecord
@@ -6087,9 +6089,23 @@ class PostgresRecordStore(HumanSessionStore):
         """Checkpoint owned effects before the atomic config/success-receipt commit."""
 
         def guard(session: Any) -> None:
-            requested_hosts = set(bundle.dokploy_targets[0].public_hosts) | {
-                effect.host for effect in pending_effects
-            }
+            requested_hosts = (
+                set(bundle.dokploy_targets[0].public_hosts)
+                | set(bundle.dokploy_targets[0].domains)
+                | {effect.host for effect in pending_effects}
+            )
+            for row in session.scalars(select(LaunchplanePrivateHealthEndpointRow)).all():
+                endpoint = PrivateHealthEndpointRecord.model_validate(row.payload)
+                if (
+                    endpoint.status == "active"
+                    and (endpoint.context, endpoint.instance)
+                    != (expected_target.context, expected_target.instance)
+                    and (urlsplit(endpoint.url).hostname or "").rstrip(".").lower()
+                    in requested_hosts
+                ):
+                    raise DokployTargetRecordChanged(
+                        "A host is already owned by another lane's private endpoint."
+                    )
             for row in session.scalars(select(LaunchplaneDokployTargetRow)).all():
                 if (row.context, row.instance) != (
                     expected_target.context,

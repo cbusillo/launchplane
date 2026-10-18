@@ -852,7 +852,7 @@ INGRESS_DRIVER = DriverDescriptor(
         _action(
             "route_apply",
             "Apply ingress route",
-            "Plan or apply a public ingress route through the configured ingress adapter; dry-run requests require ingress_route.plan.",
+            "Plan or apply a public ingress route through the configured ingress adapter; dry-run requests require ingress_route.plan. Exact-instance provider no-op audits may use ingress_route.audit under the existing ownership and mutation guards.",
             safety="mutation",
             scope="context",
             route_path=INGRESS_ROUTE_APPLY_ROUTE,

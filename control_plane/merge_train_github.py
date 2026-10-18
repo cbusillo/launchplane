@@ -24,7 +24,11 @@ from control_plane.config_authority_comparison import (
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
-from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidate
+from control_plane.contracts.merge_train_batch import (
+    MergeTrainBatchCandidate,
+    MergeTrainBatchCandidateRecord,
+)
+from control_plane.contracts.merge_train_pr_feedback_record import MergeTrainPrFeedbackRecord
 from control_plane.contracts.merge_train_batch import (
     MergeTrainHeadCheckReuse,
     MergeTrainReusedCheck,
@@ -2426,6 +2430,44 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             method="POST",
             path=f"/repos/{repository_path}/issues/{pull_request_number}/labels",
             body={"labels": [normalized_label]},
+        )
+
+    def candidate_block_label_events(
+        self, *, repository: str, number: int, label: str
+    ) -> list[dict[str, object]]:
+        from control_plane.merge_train_github_block_recovery import block_label_events
+
+        return block_label_events(self, repository=repository, number=number, label=label)
+
+    def candidate_block_application(
+        self, *, candidate: MergeTrainBatchCandidateRecord, policy: MergeTrainRepositoryPolicy
+    ) -> dict[str, object]:
+        from control_plane.merge_train_github_block_recovery import candidate_block_application
+
+        return candidate_block_application(self, candidate=candidate, policy=policy)
+
+    def recover_candidate_block(
+        self,
+        *,
+        candidate: MergeTrainBatchCandidateRecord,
+        feedback: "MergeTrainPrFeedbackRecord | None",
+        policy: MergeTrainRepositoryPolicy,
+        expected_head_sha: str,
+        legacy_writer_app_id: int | None,
+        mutate: bool,
+        before_remove: Callable[[], None],
+    ) -> bool:
+        from control_plane.merge_train_github_block_recovery import recover_candidate_block
+
+        return recover_candidate_block(
+            client=self,
+            candidate=candidate,
+            feedback=feedback,
+            policy=policy,
+            expected_head_sha=expected_head_sha,
+            legacy_writer_app_id=legacy_writer_app_id,
+            mutate=mutate,
+            before_remove=before_remove,
         )
 
     def update_pull_request_branch(
@@ -5561,6 +5603,7 @@ def _github_request_route_template(path: str) -> str:
     route = path.split("?", 1)[0].split("#", 1)[0]
     templates = (
         "/graphql",
+        "/apps/{app_slug}",
         "/repos/{owner}/{repo}/pulls",
         "/repos/{owner}/{repo}/pulls/{number}",
         "/repos/{owner}/{repo}/pulls/{number}/merge",

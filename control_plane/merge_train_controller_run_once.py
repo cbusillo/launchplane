@@ -4,13 +4,15 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 import logging
-from typing import TYPE_CHECKING, Protocol, cast
+from time import sleep
+from typing import TYPE_CHECKING, Literal, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidate,
     MergeTrainBatchCandidateRecord,
+    MergeTrainCandidateBlockIntent,
     MergeTrainBatchEntry,
     MergeTrainBatchHeldOutEntry,
     MergeTrainBatchLandingEntry,
@@ -820,6 +822,86 @@ def _resume_merge_train_controller_state(
             "active_record_id": lease.record.active_record_id,
         }
     if lease.record.reconciliation_status != "adopted":
+        return None
+    if (
+        lease.record.active_phase == "block_pull_request"
+        and lease.record.ordinary_job_binding is None
+    ):
+        intent_record = next(
+            (
+                record
+                for record in candidate_store.list_merge_train_batch_candidate_records(
+                    repository=request.repository,
+                    base_branch=request.base_branch,
+                    status="superseded",
+                )
+                if record.record_id == lease.record.active_record_id
+                and record.block_intent is not None
+            ),
+            None,
+        )
+        if intent_record is not None:
+            confirmed = _confirm_candidate_block(
+                record=intent_record,
+                candidate_store=candidate_store,
+                github_client=github_client,
+                repository_policy=repository_policy,
+                lease=lease,
+            )
+            if confirmed == "pending":
+                return _pending_candidate_block_result(
+                    intent_record, lease.record.step_payload.get("block_failure_details")
+                )
+            if confirmed is not None:
+                return {
+                    "repository": request.repository,
+                    "base_branch": request.base_branch,
+                    "mode": "block",
+                    "controller_action": "block",
+                    "reason_code": "candidate_failure_isolated",
+                    "merge_train_batch_candidate_record_id": confirmed.record_id,
+                    "candidate": confirmed.candidate.model_dump(mode="json"),
+                    "details": lease.record.step_payload.get("block_failure_details", {}),
+                    "block_result": {
+                        "status": "blocked",
+                        "repository": request.repository,
+                        "base_branch": request.base_branch,
+                        "pull_request_number": confirmed.candidate.entries[0].pull_request_number,
+                        "blocked_label": repository_policy.blocked_label,
+                        "train_should_continue": True,
+                        "detail": "Observed the saved controller label effect without applying it again.",
+                    },
+                }
+            lease.checkpoint(
+                active_phase="select_next_action",
+                active_record_id="",
+                active_pull_request_number=None,
+                step_payload={},
+            )
+            return None
+    if (
+        lease.record.active_phase == "recover_candidate_block"
+        and lease.record.ordinary_job_binding is None
+    ):
+        saved = lease.record.step_payload.get("candidate_block_recovery")
+        number = lease.record.active_pull_request_number
+        if isinstance(saved, dict) and number is not None:
+            pr = github_client.read_pull_request_snapshot(
+                repository=request.repository, pull_request_number=number
+            )
+            if repository_policy.blocked_label.casefold() not in {
+                label.casefold() for label in pr.labels
+            }:
+                details = saved.get("details")
+                return {
+                    **saved,
+                    "details": {
+                        **(details if isinstance(details, dict) else {}),
+                        "removal_observation": "absent_after_uncertain_attempt",
+                    },
+                }
+        # A still-present label must requalify through the ordinary proof and
+        # fresh-head path; an uncertain removal is never blindly replayed.
         return None
     if lease.record.active_action != "land_batch":
         return None
@@ -4490,6 +4572,36 @@ def _advance_from_live_snapshot(
             repository=request.repository,
             base_branch=request.base_branch,
         )
+    if lease.record.ordinary_job_binding is None:
+        from control_plane.merge_train_block_recovery import recover_candidate_block
+
+        repository_policy = policy.find_repository_policy(
+            repository=request.repository, base_branch=request.base_branch
+        )
+
+        def checkpoint_block_recovery(recovery: dict[str, object]) -> None:
+            details = cast(dict[str, object], recovery["details"])
+            lease.checkpoint(
+                active_action=MERGE_TRAIN_CONTROLLER_ACTIVE_ACTION,
+                active_phase="recover_candidate_block",
+                active_record_id=str(recovery["merge_train_batch_candidate_record_id"]),
+                active_pull_request_number=cast(int, details["pull_request_number"]),
+                step_payload={"candidate_block_recovery": recovery},
+            )
+
+        recovery = recover_candidate_block(
+            snapshot=snapshot,
+            policy=repository_policy,
+            store=candidate_store,
+            client=github_client,
+            mutate=request.mutate,
+            before_remove=checkpoint_block_recovery,
+        )
+        if recovery is not None:
+            recovery["dry_run_result"] = build_merge_train_dry_run_result(
+                policy=policy, snapshot=snapshot, batch_landing=True, new_candidate=True
+            ).model_dump(mode="json")
+            return recovery
     held_out = _surviving_held_out_entries(
         policy=policy,
         snapshot=snapshot,
@@ -5779,6 +5891,9 @@ def _recover_failed_merge_train_candidate(
         base_branch=base_branch,
         mutate=mutate,
         lease=lease,
+        repository_policy=policy.find_repository_policy(
+            repository=repository, base_branch=base_branch
+        ),
     )
 
 
@@ -5950,6 +6065,89 @@ def _plan_failed_candidate_replacement(
     return result
 
 
+def _pending_candidate_block_result(
+    record: MergeTrainBatchCandidateRecord, failure_details: object
+) -> dict[str, object]:
+    result: dict[str, object] = {
+        "repository": record.candidate.repository,
+        "base_branch": record.candidate.base_branch,
+        "mode": "block",
+        "controller_action": "block",
+        "reason_code": "candidate_block_confirmation_pending",
+        "merge_train_batch_candidate_record_id": record.record_id,
+        "candidate": record.candidate.model_dump(mode="json"),
+    }
+    if record.block_intent is None or not record.block_intent.label_write_succeeded:
+        result.update(
+            controller_reconciliation_status="required",
+            reconciliation_detail="retryable:candidate_block_confirmation_pending",
+        )
+    else:
+        result["details"] = failure_details if isinstance(failure_details, dict) else {}
+        result["block_result"] = {
+            "status": "blocked",
+            "repository": record.candidate.repository,
+            "base_branch": record.candidate.base_branch,
+            "pull_request_number": record.candidate.entries[0].pull_request_number,
+            "blocked_label": record.block_intent.label,
+            "train_should_continue": True,
+            "detail": "The successful candidate block write is awaiting provider event proof.",
+        }
+    return result
+
+
+def _confirm_candidate_block(
+    *,
+    record: MergeTrainBatchCandidateRecord,
+    candidate_store: MergeTrainBatchCandidateRecordStore,
+    github_client: GitHubMergeTrainClient,
+    repository_policy: MergeTrainRepositoryPolicy,
+    lease: MergeTrainControllerLeaseContext,
+) -> MergeTrainBatchCandidateRecord | Literal["pending"] | None:
+    if record.block_intent is None:
+        return None
+    observed = github_client.candidate_block_application(candidate=record, policy=repository_policy)
+    if observed.get("status") in {"absent", "pending"}:
+        # Bound consistency observations per pass. Persistent uncertainty is a
+        # visible, saved native hold rather than an exception or a replayed POST.
+        sleep(0.25)
+        observed = github_client.candidate_block_application(
+            candidate=record, policy=repository_policy
+        )
+    if observed.get("status") == "other_hold":
+        return None
+    if observed.get("status") == "absent":
+        return "pending" if record.block_intent.label_write_succeeded else None
+    event_id = observed.get("event_id")
+    if observed.get("status") != "applied" or type(event_id) is not int:
+        return "pending"
+    if record.block_intent.applied_label_event_id is not None:
+        return record if event_id == record.block_intent.applied_label_event_id else None
+    confirmed = build_merge_train_batch_candidate_record(
+        candidate=record.candidate,
+        source="service:controller:candidate-block-applied",
+        updated_at=lease.record.updated_at,
+        block_intent=record.block_intent.model_copy(
+            update={
+                "applied_label_event_id": event_id,
+                "applied_label_actor_id": observed.get("actor_id"),
+            }
+        ),
+    ).model_copy(update={"status": "superseded"})
+    candidate_store.write_merge_train_batch_candidate_record(confirmed)
+    lease.checkpoint(
+        active_action=MERGE_TRAIN_CONTROLLER_ACTIVE_ACTION,
+        active_phase="block_pull_request",
+        active_record_id=confirmed.record_id,
+        active_pull_request_number=record.candidate.entries[0].pull_request_number,
+        step_payload={
+            **lease.record.step_payload,
+            "blocked_label": repository_policy.blocked_label,
+        },
+    )
+    return confirmed
+
+
 def _block_failed_candidate_culprit(
     *,
     candidate_store: MergeTrainBatchCandidateRecordStore,
@@ -5961,6 +6159,7 @@ def _block_failed_candidate_culprit(
     base_branch: str,
     mutate: bool,
     lease: MergeTrainControllerLeaseContext,
+    repository_policy: MergeTrainRepositoryPolicy,
 ) -> dict[str, object] | None:
     """Block the one pull request whose candidate failed, so the rest can land."""
     failed = active_candidate_record.candidate
@@ -5975,10 +6174,7 @@ def _block_failed_candidate_culprit(
     )
     if culprit is None:
         return None
-    detail = (
-        f"Pull request #{culprit.number} failed the merge-train candidate checks "
-        "when tested without the other queued pull requests."
-    )
+    detail = f"Pull request #{culprit.number} failed the merge-train candidate checks when tested without the other queued pull requests."
     block_dry_run = dry_run_result.model_copy(
         update={
             "selected_pr": culprit,
@@ -5998,29 +6194,111 @@ def _block_failed_candidate_culprit(
         "blocking_reason": {"code": "merge_train_candidate_failure_isolated", "message": detail},
         "details": details,
     }
-    if mutate:
+    if not mutate:
+        return result
+    lease.checkpoint(
+        active_action=MERGE_TRAIN_CONTROLLER_ACTIVE_ACTION,
+        active_phase="block_pull_request",
+        active_record_id=active_candidate_record.record_id,
+        active_pull_request_number=culprit.number,
+        step_payload={"blocked_label": block_dry_run.blocked_label},
+    )
+    _supersede_active_merge_train_batch_candidate_records(
+        record_store=candidate_store,
+        repository=repository,
+        base_branch=base_branch,
+        batch_id=failed.batch_id,
+        replacement_record_id=None,
+    )
+    intent: MergeTrainBatchCandidateRecord | None = None
+    if block_dry_run.blocked_label.casefold() in {label.casefold() for label in culprit.labels}:
+        # apply_merge_train_block_intent would return an existing-label no-op.
+        # That is never a successful write receipt for this candidate.
+        result.pop("merge_train_batch_candidate_record_id", None)
+        result["reason_code"] = "candidate_block_existing_hold"
+        return result
+    history_reader = getattr(github_client, "candidate_block_label_events", None)
+    if callable(history_reader):
+        history = history_reader(
+            repository=repository, number=culprit.number, label=block_dry_run.blocked_label
+        )
+        if history and history[-1].get("event") == "labeled":
+            result.pop("merge_train_batch_candidate_record_id", None)
+            result["reason_code"] = "candidate_block_existing_hold"
+            return result
+        prior = history[-1].get("id") if history else 0
+        if type(prior) is not int:
+            raise MergeTrainControllerRequestError("Block label history is incomplete")
+        intent = build_merge_train_batch_candidate_record(
+            candidate=failed,
+            source="service:controller:candidate-block-intent",
+            updated_at=lease.record.updated_at,
+            block_intent=MergeTrainCandidateBlockIntent(
+                label=block_dry_run.blocked_label,
+                prior_label_event_id=prior,
+                source_failed_record_id=active_candidate_record.record_id,
+                writer_app_id=(
+                    repository_policy.github_token.github_app.app_id
+                    if repository_policy.github_token.github_app is not None
+                    else None
+                ),
+            ),
+        ).model_copy(update={"status": "superseded"})
+        candidate_store.write_merge_train_batch_candidate_record(intent)
+        # Only this checkpoint may reconcile the pending decision. Ordinary
+        # discovery never adopts an abandoned or superseded pending intent.
         lease.checkpoint(
             active_action=MERGE_TRAIN_CONTROLLER_ACTIVE_ACTION,
             active_phase="block_pull_request",
-            active_record_id=active_candidate_record.record_id,
+            active_record_id=intent.record_id,
             active_pull_request_number=culprit.number,
-            step_payload={"blocked_label": block_dry_run.blocked_label},
+            step_payload={
+                "blocked_label": block_dry_run.blocked_label,
+                "block_failure_details": details,
+            },
         )
-        # Retire the failed lineage first: a pass interrupted before the label
-        # replans the whole queue instead of keeping the other members held.
-        _supersede_active_merge_train_batch_candidate_records(
-            record_store=candidate_store,
-            repository=repository,
-            base_branch=base_branch,
-            batch_id=failed.batch_id,
-            replacement_record_id=None,
+    block_result = apply_merge_train_block_intent(
+        dry_run_result=block_dry_run, label_client=github_client
+    )
+    if intent is not None:
+        # A successful provider response is durable causal evidence. Save it
+        # before observing eventually consistent event/detail reads. Abandoned
+        # pre-write intents and uncertain replies never acquire this fact.
+        assert intent.block_intent is not None
+        intent = build_merge_train_batch_candidate_record(
+            candidate=intent.candidate,
+            source="service:controller:candidate-block-write-succeeded",
+            updated_at=lease.record.updated_at,
+            block_intent=intent.block_intent.model_copy(update={"label_write_succeeded": True}),
+        ).model_copy(update={"status": "superseded"})
+        candidate_store.write_merge_train_batch_candidate_record(intent)
+        lease.checkpoint(
+            active_action=MERGE_TRAIN_CONTROLLER_ACTIVE_ACTION,
+            active_phase="block_pull_request",
+            active_record_id=intent.record_id,
+            active_pull_request_number=culprit.number,
+            step_payload={
+                "blocked_label": block_dry_run.blocked_label,
+                "block_failure_details": details,
+            },
         )
-        block_result = apply_merge_train_block_intent(
-            dry_run_result=block_dry_run, label_client=github_client
+        confirmed = _confirm_candidate_block(
+            record=intent,
+            candidate_store=candidate_store,
+            github_client=github_client,
+            repository_policy=repository_policy,
+            lease=lease,
         )
-        result["block_result"] = block_result.model_copy(
-            update={"train_should_continue": True}
-        ).model_dump(mode="json")
+        if confirmed == "pending":
+            return _pending_candidate_block_result(intent, details)
+        if confirmed is None:
+            result.pop("merge_train_batch_candidate_record_id", None)
+            result["reason_code"] = "candidate_block_changed"
+            return result
+        result["merge_train_batch_candidate_record_id"] = confirmed.record_id
+    result["block_result"] = block_result.model_copy(
+        update={"train_should_continue": True}
+    ).model_dump(mode="json")
     return result
 
 

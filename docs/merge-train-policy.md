@@ -600,8 +600,76 @@ its own blocked PR. Dry-run reports the intent without applying it.
 For service batches, a PR carrying `blocked_label` is excluded from subsequent
 queue selection,
 including label-free dependency updates, so the next controller pass can select
-other eligible work. Remove the block label after resolving the failure to admit
-that PR again. Applied-block PR feedback explains the failure and how to rejoin.
+other eligible work. Applied-block PR feedback explains the failure and how to rejoin.
+
+For a service-recorded isolated candidate failure, push the fix on a different
+head, wait for green current-head checks, and post the weighed review with
+`gh-pr.py comment --reviewed-head FULL_SHA`. Between candidates, the controller
+can clear its old block and report `recover_candidate_block`. Then run the
+ordinary checked `gh-pr.py ready`; recovery does not enqueue, admit or merge.
+Do not remove the failed-candidate label by hand to route the PR. Other queue
+blocks and admin holds retain their existing release path and never acquire
+automatic recovery from an unrelated candidate failure.
+
+The controller persists its source-head-bound block decision before applying
+the label, including the previous label event ID. It then confirms the applied
+label event ID. A successful POST is also saved as a positive write receipt
+before observing event/detail reads. If both reads lag, that receipt retains
+the causal proof without holding the repository's lease; ordinary queue work
+continues, and later recovery still requires exactly one current label event.
+A lost label reply reconciles only through its exact saved native lease;
+ordinary discovery never adopts an abandoned or uncertain pending intent.
+Recovery requires exactly one subsequent label event by
+the recorded writer App. Its identity comes from the existing token-source App
+ID, independently of the enqueue allowlist; reserved Bot-login metadata resolves
+that ID even when GitHub omits `performed_via_github_app` from label events.
+The confirmed numeric writer ID is saved with the event, so later App/key
+rotation needs no read of the old App's metadata.
+The [Get an app API](https://docs.github.com/en/rest/apps/apps#get-an-app) requires
+no additional token permission. A removal or reapplication is a
+new hold, including within the same timestamp. Feedback delivery is not proof
+of the effect and need not succeed first. Legacy controller outcome receipts,
+including workflow and deferred deliveries, can supply the old failed record;
+the exact closed, unmerged generated batch PR supplies GitHub-side chronology.
+No comparison depends on agreement between the service clock and GitHub's clock.
+A generic or unattributable hold remains held rather than acquiring invented
+provenance. Recovery binds repository, base, policy key and the original blocked
+label. Changes to enqueue, token-source or admission settings do not strand the
+old label; current checks and review authority are read again, and the subsequent
+ready/admission path enforces the full current policy.
+
+The same blocked head never qualifies, including after a green rerun. Recovery
+also refuses pending, failing or unreadable current-head evidence, conflicting
+or unknown mergeability, stale/missing/unweighed review, a renewed review request,
+drafts, a different base, forks and unresolved required review conversations.
+Review request/receipt parsing follows the catalog's producer contract, including
+creation ordering and edited receipts. Receipts and renewed requests accept
+the allowed PR author and writers authorized by the existing Ready-handoff
+policy; recovery grants no new role or identity. Client preview acceptance is requested
+from PR notes by the preview reconciler, independently of a ready handoff; a
+Client-review PR waits for that current-head check before recovery. An old
+waiting handoff is not a new model-review request.
+
+Confirmation makes at most two consistency observations per pass. A saved
+successful write produces managed waiting feedback while the event is pending
+or the label still looks absent; later passes do not repeat POST, and unrelated
+queue work proceeds. An uncertain write retains its exact native checkpoint.
+For that state, inspect the saved controller result and provider label/event
+evidence, repair the underlying provider problem, and use the existing
+`POST /v1/work-graph/merge-train/controller/run-once` reconciliation entrypoint
+with the same repository/base selector and existing authorization. Its mutating
+pass re-observes the saved effect without reissuing the label write. Time alone
+never proves whether an uncertain write happened, and this recovery path adds
+no force-clear or remove-label shortcut. A confirmed absence retires only an
+uncertain attempt; an unrelated hold is never adopted. Resumed block feedback
+retains the original failed-check details from its saved checkpoint.
+
+The controller rechecks the head and label history before leased removal.
+Unavailable proof preserves the hold while unrelated queue work proceeds;
+rate limits and authorization failures retain their normal handling. A lost
+removal reply is observed under the saved native lease checkpoint and emits
+waiting feedback without another DELETE. Dry-run recovery includes the ordinary
+queue preview as well as its proposed recovery step.
 
 Within-major dependency updates admitted through the required-label exception use
 current-head check and mergeability evidence for holds, rather than acquiring a
@@ -622,9 +690,13 @@ rerunning its checks. Landing admission checks only the plan's members. A new
 head or a moved base releases the hold; a new head still waits until the active
 candidate finishes under the admission rule below. The hold posts no PR feedback.
 Every existing block label remains a hold,
-including labels applied by earlier controller versions: no actor or historical
-record is used to guess that a generic hold may be cleared. Those PRs retain the
-supported remove-label path. The single-transition worker and retained bound-job
+including labels applied by earlier controller versions without the failed-candidate
+and label-event proof above. Legacy automatic recovery covers exact closed,
+unmerged protected batch PRs; pre-change squash/rebase, reused-head and individual
+landing blocks may lack that chronology. Those unproven legacy and generic holds
+retain the existing authorized maintainer remove-label path. Automatic
+failed-candidate recovery never uses that administrative path. A generic hold is never guessed
+to be a recoverable candidate block. The single-transition worker and retained bound-job
 controller compatibility path are unchanged.
 
 Landing admission allows transient unknown mergeability only for exact PR/head

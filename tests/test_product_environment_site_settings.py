@@ -82,25 +82,30 @@ class EnvironmentSettingsFormSiteSettingsTests(unittest.IsolatedAsyncioTestCase)
         )
 
     async def _submit(
-        self, payload: dict[str, object], *, idempotency_key: str = ""
+        self, payload: dict[str, object], *, idempotency_key: str = "", environment: str = "testing"
     ) -> _AsgiResponse:
         return await _post_product_environment_config_apply(
             self.app,
             {"reason": "Record the site's own settings.", **payload},
-            environment="testing",
+            environment=environment,
             authorization=_TOKEN,
             idempotency_key=idempotency_key,
         )
 
     async def _submit_generic(
-        self, *, mode: str, settings: dict[str, str], idempotency_key: str = ""
+        self,
+        *,
+        mode: str,
+        settings: dict[str, str],
+        idempotency_key: str = "",
+        instance: str = "testing",
     ) -> _AsgiResponse:
         return await _post_product_config_apply(
             self.app,
             {
                 "product": "example-site",
                 "context": "example-site",
-                "instance": "testing",
+                "instance": instance,
                 "mode": mode,
                 "reason": "Check shared validation.",
                 "runtime_env": {"env": settings},
@@ -108,6 +113,114 @@ class EnvironmentSettingsFormSiteSettingsTests(unittest.IsolatedAsyncioTestCase)
             authorization=_TOKEN,
             idempotency_key=idempotency_key,
         )
+
+    async def test_live_product_testing_settings_and_retirements_stay_on_testing(self) -> None:
+        profile = _profile(production_use="live")
+        self.store.write_product_profile_record(profile)
+        production = _runtime_record().model_copy(
+            update={"instance": "prod", "env": {"SITE_MODE": "production"}}
+        )
+        self.store.write_runtime_environment_record(production)
+        for route in ("generic", "environment"):
+            with self.subTest(route=route):
+                self.store.write_runtime_environment_record(_runtime_record())
+                change: dict[str, object] = {
+                    "reason": "Isolate testing outbound settings.",
+                    "confirmation": product_environment_config_confirmation(
+                        product=profile.product, environment="testing"
+                    ),
+                }
+                if route == "generic":
+                    change.update(
+                        schema_version=2,
+                        product=profile.product,
+                        context="example-site",
+                        instance="testing",
+                        runtime_env={
+                            "env": {"SITE_MODE": "log"},
+                            "retired_provider_keys": [
+                                *_runtime_record().retired_provider_keys,
+                                "LEGACY_MAIL_TOKEN",
+                            ],
+                        },
+                    )
+                else:
+                    change.update(
+                        runtime_settings={"SITE_MODE": "log"},
+                        retired_provider_keys=["LEGACY_MAIL_TOKEN"],
+                    )
+
+                async def submit(mode: str, key: str = "") -> _AsgiResponse:
+                    payload = {**change, "mode": mode}
+                    if route == "generic":
+                        return await _post_product_config_apply(
+                            self.app, payload, authorization=_TOKEN, idempotency_key=key
+                        )
+                    return await self._submit(payload, idempotency_key=key)
+
+                with patch.object(
+                    product_config_service,
+                    "read_lane_provider_env",
+                    side_effect=AssertionError("Settings must not contact the provider"),
+                ):
+                    unreviewed = await submit("apply", f"unreviewed-{route}")
+                    self.assertEqual(unreviewed.status_code, 409, unreviewed.text)
+                    self.assertEqual(
+                        unreviewed.json()["error"]["code"], "matching_dry_run_required"
+                    )
+                    review = await submit("dry-run")
+                    self.assertEqual(review.status_code, 202, review.text)
+                    self.assertEqual(
+                        self.store.list_runtime_environment_records(
+                            scope="instance", context_name="example-site", instance_name="testing"
+                        )[0],
+                        _runtime_record(),
+                    )
+                    applied = await submit("apply", f"testing-settings-{route}")
+                    self.assertEqual(applied.status_code, 202, applied.text)
+                testing = self.store.list_runtime_environment_records(
+                    scope="instance", context_name="example-site", instance_name="testing"
+                )[0]
+                self.assertEqual(testing.env, {**_runtime_record().env, "SITE_MODE": "log"})
+                self.assertEqual(
+                    set(testing.retired_provider_keys),
+                    {*_runtime_record().retired_provider_keys, "LEGACY_MAIL_TOKEN"},
+                )
+                self.assertEqual(
+                    self.store.list_runtime_environment_records(
+                        scope="instance", context_name="example-site", instance_name="prod"
+                    )[0],
+                    production,
+                )
+                self.assertEqual(self.store.read_product_profile_record(profile.product), profile)
+                self.assertEqual(self.store.list_secret_records(), ())
+                self.assertEqual(self.store.list_secret_bindings(), ())
+
+    @scoped_agent_test
+    async def test_scoped_agent_testing_settings_keep_existing_write_authority(self) -> None:
+        await self.test_live_product_testing_settings_and_retirements_stay_on_testing()
+
+    async def test_testing_settings_still_require_product_config_write_authority(self) -> None:
+        self.store.write_product_profile_record(_profile(production_use="live"))
+        self.app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            record_store_factory=lambda: self.store,
+            bearer_identity_config=BearerIdentityConfig(
+                local_operator_token="local-operator-token",
+                local_operator_subject="local-owner-agent",
+                local_operator_token_label="local-owner-write",
+            ),
+        )
+        settings = {"SITE_MODE": "log"}
+        review = await self._submit_generic(mode="dry-run", settings=settings)
+        self.assertEqual(review.status_code, 202, review.text)
+        denied = await self._submit_generic(
+            mode="apply", settings=settings, idempotency_key="ungranted-testing-settings"
+        )
+        self.assertEqual(denied.status_code, 403, denied.text)
+        self.assertEqual(denied.json()["error"]["code"], "authorization_denied")
+        self.assertEqual(self.store.list_runtime_environment_records(), (_runtime_record(),))
 
     async def test_both_routes_refuse_credential_values_without_persistence(self) -> None:
         for key, value in (
@@ -230,7 +343,7 @@ class EnvironmentSettingsFormSiteSettingsTests(unittest.IsolatedAsyncioTestCase)
             env={"SITE_MODE": "private-provider-value", "SERVICE_PASSWORD": "private-password"},
             template_defaults={},
         )
-        for instance in ("testing", "prod"):
+        for instance in ("prod",):
             with (
                 self.subTest(instance=instance),
                 patch.object(
@@ -278,10 +391,87 @@ class EnvironmentSettingsFormSiteSettingsTests(unittest.IsolatedAsyncioTestCase)
         self.assertEqual(self.store.read_product_profile_record("example-site"), profile)
         self.assertEqual(self.store.list_secret_records(), ())
 
+    async def test_live_product_testing_adopts_only_plain_provider_settings(self) -> None:
+        profile = _profile(production_use="live")
+        self.store.write_product_profile_record(profile)
+        production = _runtime_record().model_copy(
+            update={"instance": "prod", "env": {"SITE_MODE": "production"}}
+        )
+        self.store.write_runtime_environment_record(production)
+        provider = LaneProviderEnv(
+            env={"SITE_MODE": "private-provider-value", "SERVICE_PASSWORD": "private-password"},
+            template_defaults={},
+        )
+
+        async def submit(keys: list[str], mode: str, key: str = "") -> _AsgiResponse:
+            return await _post_product_config_apply(
+                self.app,
+                {
+                    "schema_version": 2,
+                    "product": profile.product,
+                    "context": "example-site",
+                    "instance": "testing",
+                    "mode": mode,
+                    "reason": "Record only plain settings from testing's provider environment.",
+                    "runtime_env": {"adopt_provider_keys": keys},
+                },
+                authorization=_TOKEN,
+                idempotency_key=key,
+            )
+
+        before = self.store.list_runtime_environment_records()
+        with patch.object(
+            product_config_service, "read_lane_provider_env", return_value=provider
+        ) as read_provider:
+            keys = list(provider.env)
+            review = await submit(keys, "dry-run")
+            self.assertEqual(review.status_code, 202, review.text)
+            self.assertEqual(
+                {
+                    item["key"]: item["disposition"]
+                    for item in review.json()["result"]["provider_key_adoption"]
+                },
+                {"SITE_MODE": "adopted", "SERVICE_PASSWORD": "refused_credential"},
+            )
+            refused = await submit(keys, "apply", "testing-credential-adoption")
+            self.assertEqual(refused.status_code, 400, refused.text)
+            self.assertEqual(refused.json()["error"]["code"], "provider_key_adoption_refused")
+            self.assertEqual(self.store.list_runtime_environment_records(), before)
+            review_plain = await submit(["SITE_MODE"], "dry-run")
+            self.assertEqual(review_plain.status_code, 202, review_plain.text)
+            applied = await submit(["SITE_MODE"], "apply", "testing-plain-adoption")
+            self.assertEqual(applied.status_code, 202, applied.text)
+            for response in (review, refused, review_plain, applied):
+                for value in provider.env.values():
+                    self.assertNotIn(value, response.text)
+            self.assertTrue(read_provider.call_args_list)
+            for call in read_provider.call_args_list:
+                self.assertEqual(call.kwargs["product"], profile.product)
+                self.assertEqual(call.kwargs["context_name"], "example-site")
+                self.assertEqual(call.kwargs["instance_name"], "testing")
+        records = {
+            record.instance: record for record in self.store.list_runtime_environment_records()
+        }
+        self.assertEqual(records["prod"], production)
+        self.assertEqual(
+            records["testing"].env,
+            {**_runtime_record().env, "SITE_MODE": provider.env["SITE_MODE"]},
+        )
+        self.assertEqual(
+            records["testing"].retired_provider_keys, _runtime_record().retired_provider_keys
+        )
+        self.assertEqual(self.store.read_product_profile_record(profile.product), profile)
+        self.assertEqual(self.store.list_secret_records(), ())
+        self.assertEqual(self.store.list_secret_bindings(), ())
+
+    @scoped_agent_test
+    async def test_scoped_agent_testing_adoption_keeps_credential_refusals(self) -> None:
+        await self.test_live_product_testing_adopts_only_plain_provider_settings()
+
     async def test_director_live_setting_plan_does_not_authorize_apply(self) -> None:
         profile = _profile(production_use="live")
         self.store.write_product_profile_record(profile)
-        for instance in ("testing", "prod", ""):
+        for instance in ("prod", ""):
             with self.subTest(instance=instance):
                 payload: dict[str, object] = {
                     "product": "example-site",
@@ -375,6 +565,7 @@ class EnvironmentSettingsFormSiteSettingsTests(unittest.IsolatedAsyncioTestCase)
                 mode=mode,
                 settings={"SITE_MODE": "public"},
                 idempotency_key=f"live-undeclared-{mode}",
+                instance="prod",
             )
             self.assertEqual(response.status_code, 403, response.text)
             self.assertEqual(response.json()["error"]["code"], "live_product_requires_operator")
@@ -400,9 +591,8 @@ class EnvironmentSettingsFormSiteSettingsTests(unittest.IsolatedAsyncioTestCase)
                         "schema_version": 2,
                         "product": "example-site",
                         "context": "example-site",
-                        "instance": "testing",
+                        "instance": "prod",
                         "mode": mode,
-                        "confirmation": "APPLY example-site/testing",
                         "reason": "Adopt a provider setting.",
                         alias: {"env": {}, "adopt_provider_keys": ["SITE_MODE"]},
                     },
@@ -428,10 +618,9 @@ class EnvironmentSettingsFormSiteSettingsTests(unittest.IsolatedAsyncioTestCase)
                             "schema_version": 2,
                             "product": "example-site",
                             "context": "example-site",
-                            "instance": "testing",
+                            "instance": "prod",
                             "mode": mode,
                             "reason": "Check canonical settings.",
-                            "confirmation": "APPLY example-site/testing",
                             alias: runtime_input,
                         },
                         authorization=_TOKEN,
@@ -709,7 +898,8 @@ class EnvironmentSettingsFormSiteSettingsTests(unittest.IsolatedAsyncioTestCase)
     ) -> None:
         self.store.write_product_profile_record(_profile(production_use="live"))
         undeclared = await self._submit(
-            {"mode": "dry-run", "runtime_settings": {"SITE_BASE_URL": "https://site.invalid"}}
+            {"mode": "dry-run", "runtime_settings": {"SITE_BASE_URL": "https://site.invalid"}},
+            environment="prod",
         )
         self.assertEqual(undeclared.status_code, 403, undeclared.text)
         self.assertEqual(undeclared.json()["error"]["code"], "live_product_requires_operator")

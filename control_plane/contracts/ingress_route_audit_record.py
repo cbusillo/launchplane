@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 IngressRouteAuditMode = Literal["dry-run", "apply"]
 IngressRouteAuditStatus = Literal["pending", "planned", "applied", "unchanged"]
 IngressRouteTlsOwner = Literal["launchplane", "provider", "external", "none", "unknown"]
+TESTING_PRIVATE_INGRESS_AUDIT_PREFIX = "testing-private-ingress-"
 
 
 class IngressRouteAuditOperation(BaseModel):
@@ -48,6 +49,7 @@ class IngressRouteAuditRecord(BaseModel):
     provider_route_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
     testing_generation_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
     testing_authority_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
+    testing_application_id: str = ""
     expected_host_id: int | None = Field(default=None, ge=1)
     provider_host_id: int | None = Field(default=None, ge=1)
     operations: tuple[IngressRouteAuditOperation, ...]
@@ -68,6 +70,7 @@ class IngressRouteAuditRecord(BaseModel):
             self.recorded_at, "ingress route audit requires recorded_at"
         )
         self.edge_endpoint_key = self.edge_endpoint_key.strip()
+        self.testing_application_id = self.testing_application_id.strip()
         self.provider_certificate_ref = self.provider_certificate_ref.strip()
         self.idempotency_key = self.idempotency_key.strip()
         if self.tls_owner in {"none", "unknown"} and self.provider_certificate_ref:
