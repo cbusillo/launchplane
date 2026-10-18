@@ -12,7 +12,10 @@ class NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs):
         return None
 opener = build_opener(NoRedirect())
-base = 'http://127.0.0.1:8069'
+port = spec['http_port']
+if type(port) is not int or not 1 <= port <= 65535:
+    raise RuntimeError('Candidate HTTP port is invalid')
+base = 'http://127.0.0.1:' + str(port)
 headers = {'Host': urlsplit(spec['base_url']).netloc}
 def request(path, data=None):
     values = dict(headers)

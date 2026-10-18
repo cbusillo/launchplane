@@ -140,6 +140,20 @@ class TestingPublicationTests(unittest.TestCase):
             observation=self.observation if observation is None else observation,
         )
 
+    def test_canonical_local_database_matches_the_prepared_copy(self) -> None:
+        self.prepare()
+        self.publish()
+        runtime = self.current().runtime
+        assert runtime is not None
+        self.assertEqual(
+            runtime.env.get("ODOO_DB_HOST"),
+            self.fixture.compiled.runtime_environment["ODOO_DB_HOST"],
+        )
+        self.assertEqual(
+            runtime.env.get("ODOO_MAX_CRON_THREADS"),
+            self.fixture.compiled.runtime_environment["ODOO_MAX_CRON_THREADS"],
+        )
+
     def test_preparation_preserves_old_authority_then_adoption_is_atomic(self) -> None:
         self.prepare()
         self.assertEqual(self.current(), self.before)

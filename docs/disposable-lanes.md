@@ -771,7 +771,10 @@ original provider reservation, current lease holder and expiry, exclusive produc
 context, candidate custody, delivered context/instance runtime inputs and generated
 credential metadata are checked within the authority transaction. An input change
 since private preparation refuses adoption. Password values are never added to
-the successor runtime record and no secret or version is rotated.
+the successor runtime record and no secret or version is rotated. Local database,
+HTTP and disabled-cron coordinates are the same projection used to prepare the
+copy; the HTTP port comes from its managed profile. Canonical adoption cannot
+leave an older database endpoint for a subsequent deploy to select.
 
 After fresh applied routing and verified public health/identity at the unchanged
 origin, one transaction adopts target representations, resource selection,

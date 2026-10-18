@@ -116,6 +116,39 @@ class CandidateApplicationTests(unittest.TestCase):
             source=source,
         )
 
+    def test_private_candidate_uses_the_managed_application_port(self) -> None:
+        self.profile = self.profile.model_copy(update={"runtime_port": 8072})
+        self.store.write_product_profile_record(self.profile)
+        self.fixture.before = self.fixture.authority()
+        inputs = self.inputs(self.allocate())
+        self.assertEqual(
+            inputs.runtime_environment["ODOO_HTTP_PORT"], str(self.profile.runtime_port)
+        )
+        self.fixture.assert_serving_unchanged()
+
+    def test_managed_port_reaches_private_probe_and_recorded_endpoint(self) -> None:
+        real_readiness = application.candidate_private_readiness
+        self.profile = self.profile.model_copy(update={"runtime_port": 8072})
+        self.store.write_product_profile_record(self.profile)
+        self.fixture.before = self.fixture.authority()
+        self.execution()
+
+        def remote(**kwargs: Any) -> None:
+            self.assertEqual(kwargs["payload"]["http_port"], self.profile.runtime_port)
+            kwargs["receive"]({"type": "complete", "private_readiness_verified": True})
+
+        with (
+            patch.object(application, "_read_remote", side_effect=remote),
+            patch.object(application, "candidate_private_readiness", side_effect=real_readiness),
+        ):
+            result = self.prepare_application()
+        assert result.application is not None and result.application.prepared is not None
+        self.assertEqual(
+            result.application.prepared.private_endpoint,
+            f"http://{result.namespace}:{self.profile.runtime_port}",
+        )
+        self.fixture.assert_serving_unchanged()
+
     def test_private_build_preserves_the_serving_address_and_generated_passwords(self) -> None:
         allocation = self.allocate()
         inputs = self.inputs(allocation)

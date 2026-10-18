@@ -21,6 +21,7 @@ from control_plane.contracts.secret_record import SecretBinding
 from control_plane.contracts.secret_record import SecretRecord
 from control_plane.contracts.secret_record import SecretVersion
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.runtime_platform_credentials import PlatformCredentialRefusedError
 
 
 def _sqlite_database_url(database_path: Path) -> str:
@@ -526,6 +527,14 @@ class LaunchplaneSecretsTests(unittest.TestCase):
                         target_environment_override={},
                         secret_binding_keys=frozenset(),
                     )
+                    with self.assertRaises(PlatformCredentialRefusedError):
+                        runtime_environments.resolve_site_runtime_environment(
+                            control_plane_root=control_plane_root,
+                            context_name="site",
+                            instance_name="testing",
+                            target_environment_override={"GITHUB_TOKEN": "fixture"},
+                            secret_binding_keys=frozenset(),
+                        )
                 self.assertFalse(private.secret_keys)
                 self.assertNotIn("SITE_SHARED_TOKEN", private.values)
                 self.assertEqual(private.values["SITE_SETTING"], "site")
