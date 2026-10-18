@@ -578,6 +578,35 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertEqual(self.current().target_id.target_id, self.fixture.candidate.compose_id)
         self.assertTrue(self.retained["stopped"])
 
+    def test_verified_down_checkpoint_allows_a_historical_login(self) -> None:
+        from tests.support.down_lanes import record_lane_health
+
+        record_lane_health(
+            self.store, self.operation.product, self.operation.context, datetime.now(UTC)
+        )
+        self.intent = self.intent.model_copy(
+            update={"profile": self.store.read_product_profile_record(self.operation.product)}
+        )
+        self.capture.return_value = self.intent
+        with patch.object(
+            service,
+            "read_odoo_testing_usage",
+            return_value=OdooTestingUsage("in_use", True, True, "complete"),
+        ):
+            adapter = service.NativeTestingRebuildAdapter(
+                root=self.root,
+                store=self.store,
+                operation=self.operation,
+                intent=self.intent,
+                authorize=self.authorize,
+            )
+            executor = service.NativeTestingRebuildExecution(
+                adapter, Mock(spec=["assert_current"]), Mock()
+            )
+            executor.host, executor.token = "fixture-host", "fixture-token"
+            executor.guard()
+        self.assertEqual(self.effects, [])
+
     def test_hold_or_positive_use_refuses_before_any_candidate_or_route_effect(self) -> None:
         from control_plane.contracts.dokploy_target_record import DokployTargetStaffTestingHold
 

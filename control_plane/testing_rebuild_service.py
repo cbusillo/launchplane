@@ -412,7 +412,9 @@ class NativeTestingRebuildExecution:
             target_id=self.intent.before.target_id,
             instance="testing",
             usage=usage.usage,
-            require_unused=False,
+            # Unknown use alone cannot stop disposable work. A historical
+            # positive report still uses the verified-down repair override.
+            require_unused=usage.usage != "unknown",
         )
         retained_copy_operation(
             host=self.host,
