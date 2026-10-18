@@ -171,6 +171,24 @@ class TestingCandidateApplication(FrozenRecord):
         default="", pattern=r"^(?:[a-f0-9]{64})?$", exclude_if=lambda value: not value
     )
 
+    @property
+    def configuration_only(self) -> bool:
+        """Recorded effects have not reached application execution or restore."""
+        return self.phase == "configuring" and not (
+            self.deployment_id
+            or self.prepared
+            or self.restore_schedule_id
+            or self.restore_previous_deployments
+            or self.workflow_evidence
+            or self.restore_workflow_started is not None
+        )
+
+    @property
+    def unapplied_configuration_evidence(self) -> str:
+        return "configuration-unapplied:" + canonical_json_sha256(
+            {"plan": self.plan.digest, "configuration": self.configuration_sha256}
+        )
+
     @model_validator(mode="after")
     def validate_progress(self) -> Self:
         if self.restore_workflow_started is not None and self.phase not in {

@@ -11031,7 +11031,22 @@ class PostgresRecordStore(HumanSessionStore):
                     update={"application": app.model_copy(update={"phase": "configured"})}
                 )
             )
-            if not (storage_observation or configuration_observation):
+            configuration_abandonment = (
+                app is not None
+                and app.configuration_only
+                and replacement
+                == expected.model_copy(
+                    update={
+                        "application": app.model_copy(
+                            update={
+                                "phase": "abandoned",
+                                "abandonment_evidence": app.unapplied_configuration_evidence,
+                            }
+                        )
+                    }
+                )
+            )
+            if not (storage_observation or configuration_observation or configuration_abandonment):
                 raise ValueError(
                     "Candidate observation cannot change intent or dispatch an effect."
                 )

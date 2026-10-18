@@ -954,9 +954,23 @@ mode. A still-running or unknown schedule stays pending; the inspector's termina
 empty/incomplete result cannot dispatch preparation again. Configuration records
 bind the exact intended private configuration before the update. Recovery reads
 that binding without resolving changed inputs or sending another update. A
-missing older binding or mismatched readback remains pending. These observations
-can update only the original candidate's storage receipt or configuring-to-configured
-phase, under its custody CAS, physical reservation and unchanged serving target;
+nonempty mismatched readback remains pending; an older missing binding cannot
+qualify a configured copy.
+
+If the same owned compose is still empty, on its original server/environment and
+namespace, with no environment, source, domain or deployment history, readback can
+instead retain it as abandoned. No application build/restore receipt may exist.
+The evidence binds the original plan and any recorded configuration fingerprint;
+an older absent fingerprint stays absent. The operation can finish failed without
+holding the lane forever. A late original update can only configure that retained
+private copy with deployment disabled, and its abandoned record/lease cannot
+advance to a build. Original request evidence, physical custody and volumes stay
+retained; no update is retried, excluded or declared cancelled, and the next
+intent uses its own namespace.
+
+These observations can update only the original candidate's storage receipt,
+configuring-to-configured phase, or exact configuration-only abandonment, under
+its custody CAS, physical reservation and unchanged serving target;
 they cannot allocate, change intent, deploy, publish or retire a copy. Newly
 recorded protected data, production sharing or aliases pause recovery with an
 explicit cause instead of being reclassified as a new admission refusal.

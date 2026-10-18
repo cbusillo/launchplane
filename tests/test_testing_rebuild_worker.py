@@ -24,7 +24,10 @@ from control_plane.contracts.testing_rebuild import (
     TestingCopy,
     TestingRebuildRecord,
 )
-from control_plane.contracts.testing_candidate import testing_candidate_namespace
+from control_plane.contracts.testing_candidate import (
+    TestingCandidateAllocation,
+    testing_candidate_namespace,
+)
 from control_plane.contracts.testing_candidate_application import TestingCandidatePrepared
 from control_plane.dokploy.testing_route import route_document, compile_testing_route
 from control_plane.dokploy.testing_route_transport import DokployTestingRouteTransport
@@ -970,6 +973,244 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertEqual(result.error_code, "testing_rebuild_admission_changed")
         self.assertEqual(self.effects, [])
         self.assertEqual(self.current().target_id, self.fixture.before.target_id)
+
+    def empty_original_configuration(self, *, legacy: bool = False) -> TestingCandidateAllocation:
+        from control_plane.storage.postgres import LaunchplaneTestingCandidateRow
+
+        app = self.app.model_copy(
+            update={
+                "phase": "configuring",
+                "configuration_sha256": "" if legacy else self.app.configuration_sha256,
+                "deployment_id": "",
+                "prepared": None,
+                "restore_schedule_id": "",
+                "restore_previous_deployments": (),
+                "restore_workflow_started": None,
+                "workflow_evidence": {},
+            }
+        )
+        candidate = self.fixture.candidate.model_copy(update={"application": app})
+        with self.store._session_factory.begin() as session:
+            row = session.get(LaunchplaneTestingCandidateRow, candidate.namespace)
+            assert row is not None
+            row.payload = candidate.model_dump(mode="json", exclude_none=True)
+        provider = self.fixture.fixture.provider_state
+        provider.clear()
+        provider.update(
+            composeId=candidate.compose_id,
+            environmentId=candidate.environment_id,
+            serverId=candidate.server_id,
+            name=candidate.namespace,
+            appName=candidate.namespace,
+            sourceType="raw",
+            composeFile="",
+            env="",
+            autoDeploy=False,
+        )
+        self.fixture.fixture.effects.clear()
+        return candidate
+
+    def test_unapplied_private_configuration_fails_without_holding_the_lane(self) -> None:
+        configured = dict(self.fixture.fixture.provider_state)
+        candidate = self.empty_original_configuration()
+        result = self.execute()
+        self.assertEqual(result.deploy_status, "fail")
+        observed = self.store.read_testing_candidate(candidate.namespace)
+        assert observed is not None and observed.application is not None
+        self.assertEqual(observed.application.phase, "abandoned")
+        self.assertTrue(observed.application.abandonment_evidence)
+        self.assertEqual(observed.application.configuration_sha256, self.app.configuration_sha256)
+        self.assertEqual(observed.application.plan, self.app.plan)
+        self.assertEqual(self.current(), self.fixture.before)
+        self.assertEqual(self.effects, [])
+        self.assertFalse(self.retained["stopped"])
+        # A delayed original update can configure only the retained private copy.
+        self.fixture.fixture.provider_state.update(configured)
+        self.assertEqual(self.execute(), result)
+        self.assertEqual(self.store.read_testing_candidate(candidate.namespace), observed)
+        self.assertEqual(self.fixture.fixture.effects, [])
+        self.assertEqual(self.current(), self.fixture.before)
+        with self.assertRaises(ValueError):
+            candidate_application.prepare_candidate_application(
+                root=self.root,
+                store=self.store,
+                allocation=observed,
+                inputs=self.fixture.fixture.compiled,
+                lease=Mock(spec=["assert_current"]),
+                guard=Mock(),
+            )
+        self.assertEqual(self.fixture.fixture.effects, [])
+
+    def test_admission_loss_can_retain_an_empty_legacy_configuration(self) -> None:
+        candidate = self.empty_original_configuration(legacy=True)
+        profile = self.store.read_product_profile_record(self.operation.product)
+        self.store.write_product_profile_record(
+            profile.model_copy(update={"runtime_port": profile.runtime_port + 1})
+        )
+        result = self.execute()
+        self.assertEqual(result.error_code, "testing_rebuild_admission_changed")
+        observed = self.store.read_testing_candidate(candidate.namespace)
+        assert observed is not None and observed.application is not None
+        self.assertEqual(observed.application.phase, "abandoned")
+        self.assertFalse(observed.application.configuration_sha256)
+        self.assertEqual(observed.application.plan, self.app.plan)
+        self.assertEqual(self.current(), self.fixture.before)
+        self.assertEqual(self.effects, [])
+
+    def test_lost_empty_configuration_observation_reply_reuses_its_abandonment(self) -> None:
+        candidate = self.empty_original_configuration()
+        write = self.store.compare_and_write_testing_candidate
+        lost = False
+
+        def lose_reply(expected: Any, replacement: Any, **kwargs: Any) -> None:
+            nonlocal lost
+            write(expected, replacement, **kwargs)
+            if replacement.application.phase == "abandoned" and not lost:
+                lost = True
+                raise TimeoutError("Fixture lost observation commit reply")
+
+        with (
+            patch.object(self.store, "compare_and_write_testing_candidate", side_effect=lose_reply),
+            self.assertRaises(TimeoutError),
+        ):
+            self.execute()
+        retained = self.store.read_testing_candidate(candidate.namespace)
+        assert retained is not None and retained.application is not None
+        self.assertEqual(retained.application.phase, "abandoned")
+        self.assertEqual(self.execute().deploy_status, "fail")
+        self.assertEqual(self.store.read_testing_candidate(candidate.namespace), retained)
+        self.assertEqual(self.effects, [])
+        self.assertEqual(self.current(), self.fixture.before)
+
+    def test_configuration_observation_cannot_invent_an_abandonment_receipt(self) -> None:
+        candidate = self.empty_original_configuration()
+        app = candidate.application
+        assert app is not None
+        replacement = candidate.model_copy(
+            update={
+                "application": app.model_copy(
+                    update={"phase": "abandoned", "abandonment_evidence": "foreign-observation"}
+                )
+            }
+        )
+        with self.assertRaises(ValueError):
+            self.store.compare_and_write_testing_candidate(
+                candidate, replacement, observation_only=True
+            )
+        self.assertEqual(self.store.read_testing_candidate(candidate.namespace), candidate)
+        self.assertEqual(self.effects, [])
+
+    def test_configuration_abandonment_requires_empty_unexecuted_private_custody(self) -> None:
+        for change in ("env", "source", "placement", "name", "domain", "deployment"):
+            with self.subTest(change=change):
+                candidate = self.empty_original_configuration()
+                payload = self.fixture.fixture.provider_state
+                if change == "env":
+                    payload["env"] = "UNEXPECTED=value"
+                elif change == "source":
+                    payload["repository"] = "foreign-source"
+                elif change == "placement":
+                    payload["serverId"] = "foreign-server"
+                elif change == "name":
+                    payload["appName"] = "foreign-copy"
+                with (
+                    patch.object(
+                        candidate_application,
+                        "fetch_dokploy_compose_domains_for_target_setup",
+                        return_value=("unexpected-domain",) if change == "domain" else (),
+                    ),
+                    patch.object(
+                        api,
+                        "list_deployments_for_target",
+                        side_effect=lambda **kwargs: (
+                            [{"deploymentId": "unexpected", "status": "running"}]
+                            if change == "deployment"
+                            and kwargs["target_id"] == candidate.compose_id
+                            else []
+                        ),
+                    ),
+                    self.assertRaises(service.NativeTestingRebuildPending),
+                ):
+                    self.execute()
+                self.assertEqual(self.store.read_testing_candidate(candidate.namespace), candidate)
+                self.assertEqual(self.current(), self.fixture.before)
+                self.assertEqual(self.effects, [])
+
+    def test_empty_configuration_failure_finishes_the_worker_and_admits_a_fresh_request(
+        self,
+    ) -> None:
+        from control_plane.contracts.durable_operation_authorization import (
+            DurableOperationAuthorization,
+        )
+        from control_plane.workflows import odoo_stable_operation_worker as worker
+        from tests.support.durable_operations import (
+            durable_operation_authorization_payload,
+            durable_operation_policy_record,
+        )
+
+        candidate = self.empty_original_configuration()
+        authorization = durable_operation_authorization_payload(
+            action="odoo_target_replacement_apply.execute",
+            managed_rule_id="native-testing-fixture",
+            product=self.operation.product,
+            context=self.operation.context,
+        )
+        now = datetime.now(UTC)
+        operation = self.operation.model_copy(
+            update={
+                "schema_version": 2,
+                "authorization": DurableOperationAuthorization.model_validate(authorization),
+                "status": "running",
+                "phase": "running",
+                "lease_owner": "worker",
+                "started_at": now.isoformat(),
+                "lease_expires_at": (now + timedelta(minutes=5)).isoformat(),
+            }
+        )
+        self.store.write_odoo_stable_target_replacement_operation_record(operation)
+        with patch.object(
+            worker,
+            "read_active_authz_policy_record",
+            return_value=durable_operation_policy_record(authorization),
+        ):
+            self.assertTrue(
+                worker._execute_target_replacement_with_checkpoint(
+                    record_store=self.store,
+                    control_plane_root_path=self.root,
+                    operation=operation,
+                    lease_owner="worker",
+                    lease_seconds=300,
+                    heartbeat_seconds=60,
+                )
+            )
+        failed = self.store.read_odoo_stable_target_replacement_operation_record(
+            operation.operation_id
+        )
+        self.assertEqual(failed.status, "fail")
+        self.assertTrue(failed.finished_at)
+        fresh = self.operation.model_copy(
+            update={
+                "operation_id": operation.operation_id + "-successor",
+                "idempotency_key": "successor-request",
+                "request_fingerprint": "successor-fingerprint",
+            }
+        )
+        queued, created = (
+            self.store.create_odoo_stable_target_replacement_operation_record_if_no_active_lane(
+                fresh
+            )
+        )
+        self.assertTrue(created)
+        self.assertEqual(queued.operation_id, fresh.operation_id)
+        self.assertNotEqual(
+            testing_candidate_namespace(fresh.product, fresh.context, fresh.operation_id),
+            candidate.namespace,
+        )
+        retained = self.store.read_testing_candidate(candidate.namespace)
+        assert retained is not None and retained.application is not None
+        self.assertEqual(retained.application.phase, "abandoned")
+        self.assertEqual(self.effects, [])
+        self.assertEqual(self.current(), self.fixture.before)
 
     def test_terminal_incomplete_storage_ends_admission_without_another_preparation(self) -> None:
         from control_plane.storage.postgres import LaunchplaneTestingCandidateRow

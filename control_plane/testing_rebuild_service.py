@@ -1065,6 +1065,25 @@ class NativeTestingRebuildExecution:
             self.failed_private_readiness(plan)
         except (ValueError, api.DokployDeploymentFailed, api.DokployScheduleExecutionFailed):
             current = self.store.read_testing_candidate(self.allocation.namespace)
+            if current is not None and current.application is not None:
+                if current.application.phase == "configuring":
+                    current = observe_candidate_configuration(
+                        root=self.root,
+                        store=self.store,
+                        record=current,
+                        lease=self.lease,
+                        guard=self.guard,
+                    )
+                app = current.application
+                if (
+                    app is not None
+                    and app.phase == "abandoned"
+                    and app.abandonment_evidence == app.unapplied_configuration_evidence
+                ):
+                    self.allocation = current
+                    raise TestingRebuildPreparationFailure(
+                        copy_id=plan.new.copy_id, evidence_id=app.abandonment_evidence
+                    ) from None
             if (
                 current is not None
                 and current.application is not None

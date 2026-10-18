@@ -172,10 +172,10 @@ def observe_candidate_configuration(
     lease: ProviderOperationLease,
     guard: Callable[[], None],
 ) -> TestingCandidateAllocation:
-    """Observe the exact original update; never compile new inputs or send an update."""
+    """Observe the original private outcome; never select inputs or send an update."""
     app = record.application
-    if app is None or app.phase != "configuring" or not app.configuration_sha256:
-        raise CandidateObservationUnavailable("The original configuration binding is unavailable.")
+    if app is None or not app.configuration_only:
+        raise CandidateObservationUnavailable("The original configuration custody is unavailable.")
     lease.assert_current()
     guard()
     require_candidate_target_custody(store, record)
@@ -185,25 +185,47 @@ def observe_candidate_configuration(
     payload = api.fetch_dokploy_target_payload(
         host=host, token=token, target_type="compose", target_id=record.compose_id
     )
-    if (
-        candidate_configuration_sha256(payload) != app.configuration_sha256
-        or fetch_dokploy_compose_domains_for_target_setup(
-            host=host, token=token, compose_id=record.compose_id
-        )
-        or api.list_deployments_for_target(
-            host=host,
-            token=token,
-            target_type="compose",
-            target_id=record.compose_id,
-            require_complete=True,
-        )
+    if fetch_dokploy_compose_domains_for_target_setup(
+        host=host, token=token, compose_id=record.compose_id
+    ) or api.list_deployments_for_target(
+        host=host,
+        token=token,
+        target_type="compose",
+        target_id=record.compose_id,
+        require_complete=True,
     ):
         raise CandidateObservationUnavailable("The original private configuration remains unknown.")
+    if (
+        app.configuration_sha256
+        and candidate_configuration_sha256(payload) == app.configuration_sha256
+    ):
+        observed_app = app.model_copy(update={"phase": "configured"})
+    else:
+        try:
+            require_empty_compose_source(payload, record.compose_id)
+            if (
+                (payload.get("serverId"), payload.get("environmentId"))
+                != (record.server_id, record.environment_id)
+                or payload.get("name") != record.namespace
+                or payload.get("appName") != record.namespace
+                or payload.get("env") not in (None, "")
+            ):
+                raise ValueError("The original empty configuration changed.")
+        except ValueError:
+            raise CandidateObservationUnavailable(
+                "The original private configuration remains unknown."
+            ) from None
+        # A late original update can affect only this retained private copy.
+        # Its lease/CAS cannot advance an abandoned copy to deployment.
+        observed_app = app.model_copy(
+            update={
+                "phase": "abandoned",
+                "abandonment_evidence": app.unapplied_configuration_evidence,
+            }
+        )
     lease.assert_current()
     guard()
-    updated = record.model_copy(
-        update={"application": app.model_copy(update={"phase": "configured"})}
-    )
+    updated = record.model_copy(update={"application": observed_app})
     store.compare_and_write_testing_candidate(record, updated, observation_only=True)
     return updated
 

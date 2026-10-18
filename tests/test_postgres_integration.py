@@ -13864,6 +13864,25 @@ class RealPostgresTestingRebuildResumeTests(unittest.TestCase):
 
 
 class RealPostgresNativeTestingWorkerTests(unittest.TestCase):
+    def test_unapplied_configuration_is_retained_without_holding_the_lane(self) -> None:
+        self.run_worker_case("test_unapplied_private_configuration_fails_without_holding_the_lane")
+
+    def test_empty_legacy_configuration_can_end_after_admission_loss(self) -> None:
+        self.run_worker_case("test_admission_loss_can_retain_an_empty_legacy_configuration")
+
+    def test_lost_configuration_observation_reply_reuses_original_evidence(self) -> None:
+        self.run_worker_case(
+            "test_lost_empty_configuration_observation_reply_reuses_its_abandonment"
+        )
+
+    def test_unapplied_configuration_finishes_worker_and_admits_new_intent(self) -> None:
+        self.run_worker_case(
+            "test_empty_configuration_failure_finishes_the_worker_and_admits_a_fresh_request"
+        )
+
+    def test_configuration_observation_rejects_unbound_abandonment_evidence(self) -> None:
+        self.run_worker_case("test_configuration_observation_cannot_invent_an_abandonment_receipt")
+
     def test_hold_before_application_plan_keeps_original_authority(self) -> None:
         self.run_worker_case(
             "test_real_hold_before_application_plan_preserves_original_input_authority"
