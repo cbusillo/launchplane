@@ -25,6 +25,8 @@ from tests.test_odoo_cutover_website_settings import WebsiteProvider
 def require_local_docker_endpoint() -> None:
     context = os.environ.get("DOCKER_CONTEXT")
     endpoint = os.environ.get("DOCKER_HOST", "")
+    if context and endpoint:
+        raise ValueError("unset DOCKER_HOST before selecting a local DOCKER_CONTEXT")
     if context or not endpoint:
         argv = ["docker", "context", "inspect"]
         if context:
@@ -63,13 +65,12 @@ class StartupRehearsalEndpointTests(unittest.TestCase):
             require_local_docker_endpoint()
         command.assert_not_called()
 
-    def test_selected_remote_context_overrides_local_host_and_refuses(self) -> None:
+    def test_remote_context_refuses(self) -> None:
         with (
             patch.dict(
                 os.environ,
                 {
                     "DOCKER_CONTEXT": "remote-fixture",
-                    "DOCKER_HOST": "unix:///local.sock",
                 },
                 clear=True,
             ),
@@ -87,13 +88,34 @@ class StartupRehearsalEndpointTests(unittest.TestCase):
             require_local_docker_endpoint()
         self.assertIn("remote-fixture", command.call_args.args[0])
 
-    def test_explicit_local_context_overrides_remote_host(self) -> None:
+    def test_competing_endpoint_selectors_refuse_before_any_docker_command(self) -> None:
+        for context, endpoint in (
+            ("local-fixture", "ssh://remote.invalid"),
+            ("remote-fixture", "unix:///local.sock"),
+        ):
+            with (
+                self.subTest(context=context),
+                patch.dict(
+                    os.environ,
+                    {"DOCKER_CONTEXT": context, "DOCKER_HOST": endpoint},
+                    clear=True,
+                ),
+                patch.object(
+                    subprocess,
+                    "run",
+                    return_value=subprocess.CompletedProcess([], 0, stdout="unix:///local.sock\n"),
+                ) as command,
+                self.assertRaises(ValueError),
+            ):
+                require_local_docker_endpoint()
+            command.assert_not_called()
+
+    def test_local_context_without_host_is_supported(self) -> None:
         with (
             patch.dict(
                 os.environ,
                 {
                     "DOCKER_CONTEXT": "local-fixture",
-                    "DOCKER_HOST": "ssh://remote.invalid",
                 },
                 clear=True,
             ),

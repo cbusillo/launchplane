@@ -256,8 +256,9 @@ effective forward/rollback startup payload readback.
 The gate refuses an unset image instead of reporting skipped tests as proof.
 The rehearsal requires a local Unix-socket Docker endpoint. If the current
 context or `DOCKER_HOST` selects a remote engine, select an existing local
-context with `DOCKER_CONTEXT` before running it. Context selection follows
-Docker's precedence: an explicit `DOCKER_CONTEXT` overrides `DOCKER_HOST`.
+context with `DOCKER_CONTEXT` before running it, after unsetting `DOCKER_HOST`.
+The rehearsal refuses competing `DOCKER_CONTEXT` and `DOCKER_HOST` settings
+before any Docker command; use only one endpoint selector.
 
 That rehearsal substitutes the Dokploy environment-record API and the guard
 and database observers. Its containers run no Odoo registry or jobs. It does
