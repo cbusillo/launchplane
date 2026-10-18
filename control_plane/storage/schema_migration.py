@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import os
 from pathlib import Path
 import sys
@@ -16,11 +17,15 @@ from control_plane.storage.schema_adoption import schema_stamp_revision_for_engi
 from control_plane.storage.schema_invariants import (
     AUTHZ_COMPATIBILITY_FLOOR_REVISION,
     EXPECTED_ALEMBIC_HEAD_REVISION,
+    PRE_RETIREMENT_ALEMBIC_REVISION,
 )
 
-SCHEMA_MIGRATION_TARGET_REVISION = EXPECTED_ALEMBIC_HEAD_REVISION
+# #2437 prepares a destructive migration; activation needs separate shared-data
+# and release authority. Keep hosted startup on the installed schema meanwhile.
+SCHEMA_MIGRATION_TARGET_REVISION = PRE_RETIREMENT_ALEMBIC_REVISION
 SCHEMA_MIGRATION_SUPPORTED_REVISIONS = (
     AUTHZ_COMPATIBILITY_FLOOR_REVISION,
+    PRE_RETIREMENT_ALEMBIC_REVISION,
     EXPECTED_ALEMBIC_HEAD_REVISION,
 )
 _SCHEMA_MIGRATION_LOCK_KEY = "launchplane:schema-migration"
@@ -125,13 +130,21 @@ def alembic_config(database_url: str) -> Config:
     return config
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Migrate the configured Launchplane database.")
+    parser.add_argument(
+        "--target-revision",
+        choices=SCHEMA_MIGRATION_SUPPORTED_REVISIONS,
+        default=SCHEMA_MIGRATION_TARGET_REVISION,
+        help="Explicit approved host-side migration target; startup uses the release default.",
+    )
+    args = parser.parse_args(argv)
     database_url = os.environ.get("LAUNCHPLANE_DATABASE_URL", "").strip()
     if not database_url:
         print("LAUNCHPLANE_DATABASE_URL is required for schema migration.", file=sys.stderr)
         return 1
     try:
-        revision = migrate_schema(database_url=database_url)
+        revision = migrate_schema(database_url=database_url, target_revision=args.target_revision)
     except Exception as error:
         print(str(error), file=sys.stderr)
         return 1

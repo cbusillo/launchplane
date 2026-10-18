@@ -16,7 +16,10 @@ from control_plane.storage.schema_adoption import (
     SchemaInspectorProtocol,
     verify_existing_schema_for_stamp,
 )
-from control_plane.storage.schema_invariants import EXPECTED_ALEMBIC_HEAD_REVISION
+from control_plane.storage.schema_invariants import (
+    EXPECTED_ALEMBIC_HEAD_REVISION,
+    PRE_RETIREMENT_ALEMBIC_REVISION,
+)
 from control_plane.storage.schema_migration import alembic_config
 
 
@@ -174,10 +177,15 @@ class SchemaAdoptionTests(unittest.TestCase):
                 expected_schema=LEGACY_BASELINE_SCHEMA,
             )
 
-    def test_rejects_every_table_the_migration_head_creates_after_adoption(self) -> None:
+    def test_rejects_tables_at_both_sides_of_retirement_before_adoption(self) -> None:
+        for revision in (PRE_RETIREMENT_ALEMBIC_REVISION, EXPECTED_ALEMBIC_HEAD_REVISION):
+            with self.subTest(revision=revision):
+                self._assert_rejects_later_tables(revision)
+
+    def _assert_rejects_later_tables(self, revision: str) -> None:
         with TemporaryDirectory() as directory:
             database_url = f"sqlite+pysqlite:///{Path(directory) / 'head.sqlite3'}"
-            command.upgrade(alembic_config(database_url), EXPECTED_ALEMBIC_HEAD_REVISION)
+            command.upgrade(alembic_config(database_url), revision)
             engine = create_engine(database_url)
             try:
                 head = cast(SchemaInspectorProtocol, inspect(engine))
