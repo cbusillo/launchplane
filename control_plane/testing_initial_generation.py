@@ -118,10 +118,6 @@ def require_initial_usage(
     require_testing_generation_usage(root, store, product, request.context, target, target_id)
 
 
-class TestingGenerationUsageUnverified(ValueError):
-    """The original use cannot be established from current read-only evidence."""
-
-
 def require_testing_generation_usage(
     root: Path,
     store: PostgresRecordStore,
@@ -154,8 +150,6 @@ def require_testing_generation_usage(
         runtime_stopped=usage.reason_code == "serving_container_stopped",
     )
     if decision.protected:
-        if not known_use and usage.usage == "unknown":
-            raise TestingGenerationUsageUnverified("Original testing use is unverified.")
         raise ValueError("Original testing use is protected.")
     # Data custody is preserved by construction: only the separately named empty
     # target is ever written. No positive fact is asserted about the old copy.

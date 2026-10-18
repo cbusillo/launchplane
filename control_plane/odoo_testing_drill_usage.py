@@ -111,20 +111,18 @@ def read_drill_recent_signins(
         receive=frames.append,
     )
     assert_selection_current(store, selection)
-    return parse_drill_usage_result(frames, usage_required=usage_required)
+    return parse_drill_usage_result(frames)
 
 
-def parse_drill_usage_result(
-    frames: list[dict[str, object]], *, usage_required: bool
-) -> bool | None:
-    """Consume the fixed receiver protocol, including scoped resource-only proof."""
+def parse_drill_usage_result(frames: list[dict[str, object]]) -> bool | None:
+    """Keep unavailable occupancy distinct from the fixed receiver's resource proof."""
     if (
         len(frames) == 1
         and frames[0].get("type") == "complete"
         and frames[0].get("new_copy_serving") is True
     ):
         raise DrillCopyAlreadyServing("The new testing copy has already been opened.")
-    if not usage_required and frames == [{"type": "complete", "resources_qualified": True}]:
+    if frames == [{"type": "complete", "resources_qualified": True}]:
         return None
     if (
         len(frames) != 1

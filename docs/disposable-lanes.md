@@ -85,10 +85,15 @@ candidate custody before this component is activated as a rebuild control.
 
 `control_plane/lane_usage.py` owns the usage decision for disposable repair.
 A current staff-testing hold always protects the lane. Without a hold,
-automated UNKNOWN or positive usage (including recent login/session reports)
-cannot block repair of a verified-down non-production lane. The usage observation stays UNKNOWN; this
-is repair eligibility, not an assertion that nobody ever used the copy.
-Serving or unverified lanes retain their existing usage protections.
+UNKNOWN occupancy alone does not require downtime or a declaration of non-use
+for a disposable non-production lane. It remains UNKNOWN, never `unused`.
+Positive usage, including recent login/session reports, protects a serving or
+unverified lane. Q380's existing verified-down rule can qualify those automated
+positive reports for repair. This is repair eligibility, not an assertion that
+nobody ever used the copy. Initial generation, native rebuild and shared
+disposable admission all use this rule; an invalid lifetime non-use witness
+is never treated more strictly than UNKNOWN or turned into a requirement for
+negative evidence.
 Production admission and release gates are unchanged.
 
 Verified down means every effective application HTTP check has failed in each
@@ -106,7 +111,7 @@ unmonitored states remain unverified. No probe or live action is initiated by
 this decision. The guard logs the durable monitor record IDs and interval;
 the drill also preserves those references in its private admission receipt.
 
-For initial Odoo generation preparation and its resource/bootstrap rechecks,
+For positive-use qualification during initial Odoo generation preparation and its resource/bootstrap rechecks,
 HTTP 404 also qualifies when the same call's fixed host probe independently
 verifies the exact testing web container is stopped. Complete container
 inventories before and after must agree on identity, running state, start time,
@@ -128,7 +133,8 @@ replacement target setup, held-operation supersession and rehearsal admission.
 The Odoo daily drill uses the same usage decision before queueing and worker
 activation. Its down-lane read still runs the original container, storage,
 network, credential and copy-witness inspections, including protection of an
-already-opened replacement copy; it skips login-history collection.
+already-opened replacement copy. It attempts login-history collection; an
+unavailable history stays UNKNOWN after the independent resource checks pass.
 UNKNOWN is preserved in that scoped receipt, which remains usable only by
 the same continuously leased attempt. Its captured usage revision covers the
 unchanged historical observation if monitoring expires or recovers during the
@@ -142,8 +148,9 @@ checks without requiring a negative usage read.
 Connection-isolation and environment-staging guards also use the shared usage
 decision. Acknowledged activation/interlock lifting keeps its original explicit
 hold and known-use checks; it has no UNKNOWN usage requirement. Preview operations
-use the common guard, but previews without stable-lane monitor authority remain
-unverified and retain their existing admission paths.
+use the common guard. Without stable-lane monitor authority, UNKNOWN preview
+usage may proceed with fresh reproducible-data and isolated-resource evidence;
+positive use still protects the preview.
 Existing preview refresh, never-live retirement and non-destructive isolation
 paths continue to protect known use without demanding a universal negative
 occupancy observation. This change adds no UNKNOWN restriction to those paths.
@@ -178,7 +185,7 @@ usage (`unused`/`in_use`/`unknown`), data custody
 reference and a timezone-aware observation/expiry window of at most fifteen
 minutes. A changed binding, expired observation, positive
 staff-testing hold or any required unknown custody/isolation fact refuses the new
-permission. UNKNOWN usage alone has the verified-down repair exception above.
+permission. UNKNOWN usage alone does not require downtime.
 A target ID also bound to another lane refuses it independently of the observation.
 The existing Odoo preview-refresh exception below uses direct resource inspection
 and protected-use reports instead of positive occupancy/custody observations.
@@ -209,6 +216,11 @@ and session reads can produce `unused`. The separate
 [never-served rule](#never-served-testing-generations) can also qualify non-use
 from complete durable generation records; staff holds protect both paths.
 Other drivers and previews retain their existing collection behavior.
+Resource collection inspects eligible resettable Odoo testing copies on both
+healthy and down lanes when no staff-testing hold is active. A successful
+inspection can supply reproducible-data and isolated-resource facts independently
+of UNKNOWN usage. An unavailable inspection clears inherited resource facts;
+it cannot qualify them from the earlier observation.
 
 Collection returns the first failed checkpoint as an allowlisted code, never
 exception text, command lines, session identifiers, account names or topology.
@@ -1600,9 +1612,22 @@ does not expire in the middle of that continuously leased restore. A reclaimed
 attempt requires fresh admission. It reads login history from the original served database and its committed
 copy witness, including when web is stopped or the new copy is incomplete;
 copied production login rows in the new database cannot stand in for testing use.
-An unavailable original login database normally skips rather than assuming
-non-use. The verified-down repair rule above can instead qualify usage while
-preserving UNKNOWN; the independent resource/copy inspection must still pass.
+An unavailable original login database or failed history query leaves occupancy
+UNKNOWN after the independent resource/copy inspection succeeds. It never
+becomes non-use. The service writes the scoped activation receipt under its
+activation lock, and continuation checks its worker attempt and current generation
+binding. The existing verified-down rule still qualifies historical
+positive use; new positive use and a current hold retain their checks. A provider
+authorization denial remains a denial and escapes admission without another read
+or identity. The scheduler records `authorization_denied` against the original
+admission revision, with no queued operation, so an unchanged poll cannot repeat
+that denied read. A failed physical/copy inspection supplies no resource proof.
+The fixed host program reports actual Docker-daemon authority refusals as denied
+in its inspection modes; this does not describe storage maintenance's per-copy
+deferral handling. A command failing inside the container, including a local file
+permission or database-password failure, remains a non-denial: a failed operation,
+or UNKNOWN occupancy for the login-history read after resource checks pass. It
+does not claim that the provider denied its identity.
 This also applies when Launchplane's own stop or stalled operation caused the
 downtime: excluding that cause would recreate a repair deadlock. The original
 database is retained and the already-opened new-copy gate below still protects

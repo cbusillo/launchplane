@@ -1238,7 +1238,7 @@ class DisposableRuntimeAuthorityTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await self.sync(instance="prod"), 403)
             driver.assert_not_called()
 
-    async def test_protected_or_unknown_testing_never_reaches_the_driver(self) -> None:
+    async def test_protected_use_or_unknown_custody_never_reaches_the_driver(self) -> None:
         with patch(
             "control_plane.http_app.control_plane_live_target_runtime.apply_live_target_runtime_environment"
         ) as driver:
@@ -1247,7 +1247,7 @@ class DisposableRuntimeAuthorityTests(unittest.IsolatedAsyncioTestCase):
                 {"usage": "in_use"},
                 {"data": "only_copy"},
                 {"production_resources": "shared"},
-                {"usage": "unknown"},
+                {"data": "unknown"},
                 {"binding_sha256": "0" * 64},
             ):
                 with self.subTest(changes=changes):
@@ -1266,6 +1266,20 @@ class DisposableRuntimeAuthorityTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(await self.sync(), 409)
             driver.assert_not_called()
+
+    async def test_unknown_occupancy_with_current_independent_facts_reaches_the_driver(
+        self,
+    ) -> None:
+        record_safety(self.store, "example-site", self.context, "testing", usage="unknown")
+        with patch(
+            "control_plane.http_app.control_plane_live_target_runtime.apply_live_target_runtime_environment",
+            return_value={},
+        ) as driver:
+            self.assertEqual(await self.sync(), 202)
+        driver.assert_called_once()
+        safety = self.store.read_disposable_lane_safety("example-site", self.context, "testing")
+        assert safety is not None
+        self.assertEqual(safety.usage, "unknown")
 
     async def test_production_target_alias_is_refused_even_with_an_isolation_claim(self) -> None:
         target_id = self.store.read_dokploy_target_id_record(
