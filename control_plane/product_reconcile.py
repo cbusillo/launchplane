@@ -627,6 +627,7 @@ def reconcile_testing_target(
             f"{manifest.artifact_id}"
         ),
         idempotency_scope=idempotency_scope,
+        generation_prepared_at=generation.prepared_at if generation is not None else "",
     )
     if attempt.last_failed is not None:
         # The operation's own status read needs the grant that starts a deploy;
@@ -1132,6 +1133,7 @@ def _next_testing_attempt(
     testing_runs_desired: Callable[[], bool],
     base_key: str,
     idempotency_scope: str,
+    generation_prepared_at: str = "",
 ) -> _TestingAttempt:
     """Follow this artifact's earlier attempts to the active one or the next key.
 
@@ -1139,6 +1141,13 @@ def _next_testing_attempt(
     repeated reconcile finds the same attempt instead of queueing another.
     """
     operation_store = odoo_target_replacement_apply_operation_store(record_store)
+    generation_started = (
+        parse_launchplane_mutation_timestamp(
+            generation_prepared_at, field_name="testing generation preparation"
+        )
+        if generation_prepared_at
+        else None
+    )
     key = base_key
     failed_attempts = 0
     last_failed: OdooStableTargetReplacementOperationRecord | None = None
@@ -1168,8 +1177,17 @@ def _next_testing_attempt(
                     idempotency_key=key, deployed_operation_id=existing.operation_id
                 )
         elif existing.status != "superseded" and not is_staff_testing_hold_cancellation(existing):
-            failed_attempts += 1
-            last_failed = existing
+            # A qualified independent generation preserves the retained target's
+            # failures, but they cannot spend this recipient's retry budget.
+            # Follow the original chain, including every unresolved attempt.
+            if generation_started is None or (
+                parse_launchplane_mutation_timestamp(
+                    existing.created_at, field_name="testing operation creation"
+                )
+                >= generation_started
+            ):
+                failed_attempts += 1
+                last_failed = existing
         # A passed attempt that testing no longer runs was rolled back: deploy again.
         key = f"{base_key}:after-{existing.operation_id}"
     raise ProductReconcileError(
