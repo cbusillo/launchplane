@@ -131,9 +131,19 @@ class CIRunnerPoolTests(unittest.TestCase):
             "ci_gate", "Require successful CI path"
         )
         assert step is not None
-        for job, result_key in (
-            ("test", "TEST_RESULT"),
-            ("postgres_integration", "POSTGRES_INTEGRATION_RESULT"),
+        for job, result_key, head_repository in (
+            ("test", "TEST_RESULT", "example/control"),
+            ("postgres_integration", "POSTGRES_INTEGRATION_RESULT", "example/control"),
+            (
+                "frontend_browser_smoke_evidence",
+                "FRONTEND_BROWSER_SMOKE_EVIDENCE_RESULT",
+                "example/control",
+            ),
+            (
+                "frontend_browser_smoke_evidence",
+                "FRONTEND_BROWSER_SMOKE_EVIDENCE_RESULT",
+                "outside/fork",
+            ),
         ):
             for status in ["failure", "skipped", "cancelled", "success"]:
                 with self.subTest(job=job, status=status):
@@ -147,13 +157,18 @@ class CIRunnerPoolTests(unittest.TestCase):
                             "REPOSITORY_PINS_RESULT": "success",
                             "VERIFIED_TREE": "false",
                             "BASE_REPOSITORY": "example/control",
-                            "HEAD_REPOSITORY": "example/control",
+                            "HEAD_REPOSITORY": head_repository,
                             "STATIC_CHECKS_RESULT": "success",
                             "CONTAINER_SCAN_RESULT": "success",
                             "FRONTEND_VALIDATE_RESULT": "success",
                             "FRONTEND_BROWSER_SMOKE_RESULT": "success",
+                            "FRONTEND_BROWSER_SMOKE_EVIDENCE_RESULT": "success",
                             "TEST_RESULT": "success",
                             "POSTGRES_INTEGRATION_RESULT": "success",
+                            "STATIC_CHECKS_FORK_RESULT": "success",
+                            "CONTAINER_SCAN_FORK_RESULT": "success",
+                            "FRONTEND_VALIDATE_FORK_RESULT": "success",
+                            "TEST_FORK_RESULT": "success",
                             result_key: status,
                         },
                         capture_output=True,

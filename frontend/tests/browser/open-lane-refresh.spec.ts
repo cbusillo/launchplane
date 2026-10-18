@@ -221,8 +221,14 @@ for (const view of ["actions", "runtime-settings", "managed-secrets"]) {
     expect(readinessReads).toBe(observedReadinessReads);
     if (view === "actions") {
       await expect(page.getByLabel("Inspect exact action")).toHaveValue(selectedAction);
+      fixtures.detail.display_name = "Manually refreshed lane evidence";
       await page.getByRole("button", { name: "Refresh current evidence" }).click();
       await waitForState(() => readinessReads).toBeGreaterThan(observedReadinessReads);
+      // A request counter observes dispatch, not the response or the next
+      // refresh timer. Let the manually refreshed detail and readiness render
+      // before advancing the clock to the next automatic read.
+      await expect(page.locator(".environment-back-link")).toHaveText(fixtures.detail.display_name);
+      await expect(page.getByRole("button", { name: "Refresh readiness" })).toBeEnabled();
       await expect(page.getByLabel("Inspect exact action")).toHaveValue(selectedAction);
       const afterManualReadinessReads = readinessReads;
       fixtures.detail.target.expected_runtime_identity.artifact_id = "fixture-next-expected-artifact";
