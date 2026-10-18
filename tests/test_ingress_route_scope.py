@@ -110,6 +110,33 @@ class IngressRouteInstanceScopeTests(unittest.TestCase):
             requested_domains=("app-testing.example.test",),
         )
 
+    def test_private_endpoint_on_another_port_does_not_break_public_scope(self) -> None:
+        profile = _profile()
+        endpoint = PrivateHealthEndpointRecord(
+            endpoint_key="testing-alternate-port",
+            product=profile.product,
+            context="example",
+            instance="testing",
+            url="https://private-testing.example.test:8443/health",
+            updated_at=profile.updated_at,
+        )
+        validate_ingress_route_instance_scope(
+            profile=profile,
+            context="example",
+            instance="testing",
+            requested_domains=("app-testing.example.test",),
+            private_endpoints=(endpoint,),
+        )
+        with self.assertRaises(IngressRouteInstanceScopeError):
+            validate_ingress_route_instance_scope(
+                profile=profile,
+                context="example",
+                instance="testing",
+                requested_domains=("private-testing.example.test",),
+                private_endpoints=(endpoint,),
+                access_list_id=1,
+            )
+
     def test_rejects_missing_lane(self) -> None:
         with self.assertRaisesRegex(
             IngressRouteInstanceScopeError,

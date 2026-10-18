@@ -1,6 +1,7 @@
 """An application testing lane's own hostname at an existing protected edge."""
 
 from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast
@@ -33,6 +34,7 @@ from control_plane.provider_operations import (
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
 from control_plane.testing_public_ingress import _certificate_current, _covers, _host_payload
+from control_plane.testing_event_deploy_recovery import testing_event_execution_lock_name
 from control_plane.workflows.generic_web_deploy_provider import (
     dokploy_generic_web_provider_target_key,
 )
@@ -67,11 +69,7 @@ class TestingPrivateIngressAdapter:
     client: NpmplusClient
 
     def target_key(self) -> str:
-        return dokploy_generic_web_provider_target_key(
-            self.store.read_provider_target_record(
-                context_name=self.request.context, instance_name="testing"
-            )
-        )
+        return f"testing-private-ingress:{self.product}:{self.request.context}"
 
     def reconciliation_key(self) -> str:
         return canonical_json_sha256(
@@ -116,6 +114,14 @@ class TestingPrivateIngressAdapter:
             private_endpoints=self.store.list_private_health_endpoint_records(),
             access_list_id=self.request.access_list_id,
         )
+        if self.request.operation == "disable":
+            # Disabling the exact receipt-owned route must remain possible after
+            # its application or edge placement has been replaced or removed.
+            return {
+                "profile": profile.model_dump(mode="json"),
+                "endpoint": endpoint.model_dump(mode="json"),
+                "hostname": hostname,
+            }
         target = self.store.read_dokploy_target_record(
             context_name=self.request.context, instance_name="testing"
         )
@@ -186,7 +192,11 @@ class TestingPrivateIngressAdapter:
             "profile": profile.model_dump(mode="json"),
             "endpoint": endpoint.model_dump(mode="json"),
             "edge": edge.model_dump(mode="json"),
-            "target": target.model_dump(mode="json", exclude={"env"}),
+            # Include the claim this operation commits, so a lost final response
+            # has the same authority digest before and after that local commit.
+            "target": target.model_copy(update={"domains": (hostname,)}).model_dump(
+                mode="json", exclude={"env"}
+            ),
             "target_id": target_id.model_dump(mode="json"),
             "provider": provider.model_dump(mode="json", exclude={"provider_evidence"}),
             "hostname": hostname,
@@ -257,9 +267,7 @@ class TestingPrivateIngressAdapter:
         recovery_key: str = "",
     ) -> tuple[dict[str, object], NpmplusProxyHostPayload, NpmplusProxyHost | None]:
         authority = self._authority()
-        desired = self._desired(authority)
-        desired.to_api_payload()
-        hostname = desired.domain_names[0]
+        hostname = str(authority["hostname"])
         hosts = []
         for candidate in self.client.list_proxy_hosts():
             for name in candidate.domain_names:
@@ -273,6 +281,15 @@ class TestingPrivateIngressAdapter:
         if len(hosts) > 1:
             raise ValueError("The testing edge hostname is ambiguous.")
         existing = self.client.get_proxy_host(hosts[0].id, public_only=True) if hosts else None
+        if self.request.operation == "disable":
+            if existing is None or existing.domain_names != (hostname,):
+                raise ValueError("There is no owned private testing route to disable.")
+            desired = NpmplusProxyHostPayload.model_validate(_host_payload(existing)).model_copy(
+                update={"enabled": False}
+            )
+        else:
+            desired = self._desired(authority)
+        desired.to_api_payload()
         if existing is not None and not self._owned(existing, desired, authority, recovery_key):
             raise ValueError("The existing edge route has no matching private testing receipt.")
         for name in self.client.list_other_host_domains():
@@ -282,12 +299,21 @@ class TestingPrivateIngressAdapter:
                 or (name.startswith("*.") and hostname.endswith(name[1:]))
             ):
                 raise ValueError("Another edge host type owns the testing hostname.")
-        if self.request.operation == "disable" and existing is None:
-            raise ValueError("There is no owned private testing route to disable.")
         if existing is not None and _host_payload(existing) != _host_payload(
             desired.model_copy(update={"enabled": existing.enabled})
         ):
             raise ValueError("Private route configuration changed; do not overwrite it.")
+        if self.request.operation == "disable":
+            return (
+                {
+                    "authority": authority,
+                    "desired": desired.model_dump(mode="json"),
+                    "existing": _host_payload(existing) if existing else None,
+                    "domain_present": True,
+                },
+                desired,
+                existing,
+            )
         host, token = source.read_dokploy_config(control_plane_root=self.root)
         domains = api.fetch_dokploy_application_domains(
             host=host, token=token, application_id=str(authority["application_id"]), strict=True
@@ -408,23 +434,76 @@ class TestingPrivateIngressAdapter:
     def apply(
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
+        # An uncertain edge operation retains its own reservation, without
+        # holding ordinary deployments forever. Only active application-domain
+        # mutation shares the testing event executor lock with deployments.
+        execution_lock: AbstractContextManager[Callable[[], None] | None] = nullcontext(
+            lambda: None
+        )
+        if self.request.operation == "create":
+            provider = self.store.read_provider_target_record(
+                context_name=self.request.context, instance_name="testing"
+            )
+            execution_lock = self.store.testing_replacement_execution_lock(
+                testing_event_execution_lock_name(dokploy_generic_web_provider_target_key(provider))
+            )
+        with execution_lock as check:
+            if check is None:
+                raise ProviderMutationRejectedError(ValueError("The testing executor is busy."))
+
+            def check_execution() -> None:
+                check()
+                if self.request.operation == "create":
+                    current = self.store.read_provider_target_record(
+                        context_name=self.request.context, instance_name="testing"
+                    )
+                    if dokploy_generic_web_provider_target_key(current) != (
+                        dokploy_generic_web_provider_target_key(provider)
+                    ):
+                        raise ValueError("The locked testing application changed.")
+
+            return self._apply(provider_operation_key, lease, check_execution)
+
+    def _write_application_claim(
+        self, effect: Callable[[Callable[[str, str, int], None]], None]
+    ) -> None:
+        target = self.store.read_dokploy_target_record(
+            context_name=self.request.context, instance_name="testing"
+        )
+        target_id = self.store.read_dokploy_target_id_record(
+            context_name=self.request.context, instance_name="testing"
+        )
+        provider = self.store.read_provider_target_record(
+            context_name=self.request.context, instance_name="testing"
+        )
+        profile = self.store.read_product_profile_record(self.product)
+        endpoint = self.store.read_private_health_endpoint_record(self.request.endpoint_key)
+        hostname = urlsplit(endpoint.url).hostname
+        if not hostname:
+            raise ValueError("Private testing hostname is unavailable.")
+        self.store.write_product_public_hosts_bundle(
+            ProductAuthorityBundle(
+                dokploy_targets=(target.model_copy(update={"domains": (hostname,)}),),
+                expected_product_profiles=(profile,),
+                required_context_owner=(self.product, self.request.context),
+            ),
+            expected_target=target,
+            expected_target_id=target_id,
+            expected_provider_target=provider,
+            apply_provider=effect,
+        )
+
+    def _apply(
+        self,
+        provider_operation_key: str,
+        lease: ProviderOperationLease,
+        check_execution: Callable[[], None],
+    ) -> ProviderMutationOutcome:
         started = False
         try:
             snapshot, desired, existing = self._snapshot()
             if canonical_json_sha256(snapshot) != self.request.reviewed_plan_sha256:
                 raise ValueError("The reviewed private hostname plan changed.")
-            target = self.store.read_dokploy_target_record(
-                context_name=self.request.context, instance_name="testing"
-            )
-            target_id = self.store.read_dokploy_target_id_record(
-                context_name=self.request.context, instance_name="testing"
-            )
-            provider = self.store.read_provider_target_record(
-                context_name=self.request.context, instance_name="testing"
-            )
-            profile = self.store.read_product_profile_record(self.product)
-            host, token = source.read_dokploy_config(control_plane_root=self.root)
-
             actual_hosts: list[NpmplusProxyHost] = []
             self._audit(
                 None,
@@ -435,10 +514,12 @@ class TestingPrivateIngressAdapter:
 
             def effect(checkpoint: Callable[[str, str, int], None]) -> None:
                 nonlocal started
+                check_execution()
                 lease.assert_current()
                 if self._snapshot()[0] != snapshot:
                     raise ValueError("Private hostname authority changed before apply.")
                 if not snapshot["domain_present"]:
+                    host, token = source.read_dokploy_config(control_plane_root=self.root)
                     lease.checkpoint_effect("create_private_testing_application_domain")
                     started = True
                     api.dokploy_request(
@@ -465,17 +546,10 @@ class TestingPrivateIngressAdapter:
                     raise ValueError("The provider did not retain the exact protected route.")
                 actual_hosts.append(actual)
 
-            self.store.write_product_public_hosts_bundle(
-                ProductAuthorityBundle(
-                    dokploy_targets=(target,),
-                    expected_product_profiles=(profile,),
-                    required_context_owner=(self.product, self.request.context),
-                ),
-                expected_target=target,
-                expected_target_id=target_id,
-                expected_provider_target=provider,
-                apply_provider=effect,
-            )
+            if self.request.operation == "disable":
+                effect(lambda *_: None)
+            else:
+                self._write_application_claim(effect)
             self._audit(
                 actual_hosts[0],
                 provider_operation_key,
@@ -525,6 +599,13 @@ class TestingPrivateIngressAdapter:
                     or (_host_payload(existing) != _host_payload(desired))
                 ):
                     return ProviderObservation("unknown")
+                if self.request.operation == "create":
+
+                    def verify_claim(_: Callable[[str, str, int], None]) -> None:
+                        if self._snapshot(provider_operation_key)[0] != snapshot:
+                            raise ValueError("Private hostname changed before claim adoption.")
+
+                    self._write_application_claim(verify_claim)
                 self._audit(
                     existing,
                     provider_operation_key,

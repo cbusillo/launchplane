@@ -277,7 +277,10 @@ class NpmplusClient:
         if not isinstance(payload, dict):
             raise click.ClickException("NPMplus proxy-host read returned an invalid payload.")
         if public_only and (
-            payload.get("npmplus_nginx_online") is not True
+            (
+                payload.get("enabled") is not False
+                and payload.get("npmplus_nginx_online") is not True
+            )
             or any(
                 payload.get(field) != expected
                 for field, expected in {

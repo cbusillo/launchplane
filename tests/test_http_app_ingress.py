@@ -24,6 +24,7 @@ from control_plane.service_human_auth import (
     InMemoryHumanSessionStore,
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.npmplus_ingress import (
     NpmplusIngressApplyResult,
     NpmplusIngressOperation,
@@ -1400,6 +1401,80 @@ class FastApiIngressRouteApplyTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(client.calls, ["list"])
         self.assertEqual(records, ())
+
+    async def test_private_instance_generic_apply_rejects_authority_changes(self) -> None:
+        for changes in (
+            {"access_list_id": 2},
+            {"certificate_id": 48},
+            {"upstream_host": "100.73.170.114"},
+        ):
+            with self.subTest(changes=changes), TemporaryDirectory() as temporary:
+                client = _FakeNpmplusIngressClient((_npmplus_proxy_host(access_list_id=1),))
+                store = PostgresRecordStore(
+                    database_url=f"sqlite+pysqlite:///{Path(temporary) / 'state.db'}"
+                )
+                store.ensure_schema()
+                self.addCleanup(store.close)
+                profile = _instance_ingress_product_profile()
+                store.write_product_profile_record(
+                    profile.model_copy(
+                        update={
+                            "lanes": (
+                                profile.lanes[0].model_copy(update={"base_url": ""}),
+                                profile.lanes[1],
+                            )
+                        }
+                    )
+                )
+                store.write_private_health_endpoint_record(
+                    _private_health_endpoint_record().model_copy(
+                        update={
+                            "product": "launchplane",
+                            "context": "reon-prod",
+                            "instance": "testing",
+                            "url": "https://ingress-canary.example.test/health",
+                        }
+                    )
+                )
+                edge = _edge_endpoint_record()
+                store.write_edge_endpoint_record(
+                    edge.model_copy(
+                        update={"upstream_host": changes.get("upstream_host", edge.upstream_host)}
+                    )
+                )
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_instance_ingress_route_policy(action="ingress_route.apply"),
+                    record_store_factory=lambda: store,
+                    npmplus_ingress_client_factory=lambda: client,
+                )
+                payload = _instance_ingress_exact_host_payload(mode="apply")
+                ingress = cast(dict[str, object], payload["ingress"])
+                route = cast(dict[str, object], ingress["route"])
+                route.update(access_list_id=changes.get("access_list_id", 1))
+                if "certificate_id" in changes:
+                    route["certificate_id"] = changes["certificate_id"]
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/drivers/ingress/route-apply",
+                    headers={
+                        "Authorization": "Bearer valid-token",
+                        "Idempotency-Key": "private-ingress-change",
+                    },
+                    payload=payload,
+                )
+                self.assertEqual(response.status_code, 409, response.text)
+                self.assertEqual(
+                    response.json()["error"]["code"], "instance_scoped_ingress_change_forbidden"
+                )
+                self.assertEqual(client.calls, ["list"])
+                self.assertEqual(
+                    store.list_ingress_route_audit_records(
+                        product="launchplane", context_name="reon-prod"
+                    ),
+                    (),
+                )
 
     async def test_ingress_route_dry_run_returns_plan_without_mutation(self) -> None:
         client = _FakeNpmplusIngressClient()

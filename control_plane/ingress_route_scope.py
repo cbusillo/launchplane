@@ -46,6 +46,8 @@ def validate_ingress_route_instance_scope(
         for endpoint in private_endpoints
         if endpoint.status == "active"
         and urlsplit(endpoint.url).scheme == "https"
+        and urlsplit(endpoint.url).port in {None, 443}
+        and urlsplit(endpoint.url).hostname
         and endpoint.product == profile.product
         and endpoint.context == normalized_context
         and endpoint.instance == normalized_instance == "testing"

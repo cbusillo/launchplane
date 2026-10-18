@@ -303,6 +303,23 @@ class NpmplusClientTests(unittest.TestCase):
             )
         )
 
+    def test_disabled_public_read_keeps_hidden_configuration_checks(self) -> None:
+        opener = _Opener()
+        client = NpmplusClient(credentials=_credentials(), opener=opener)
+        opener.host_details.update(enabled=False, npmplus_nginx_online=False)
+        self.assertFalse(client.get_proxy_host(78, public_only=True).enabled)
+        for field, value in (
+            ("npmplus_mtls_certificate_id", 12),
+            ("npmplus_location_config", "return 403;"),
+            ("npmplus_auth_request_upstream", "http://other-auth"),
+        ):
+            with self.subTest(field=field):
+                original = opener.host_details[field]
+                opener.host_details[field] = value
+                with self.assertRaises(click.ClickException):
+                    client.get_proxy_host(78, public_only=True)
+                opener.host_details[field] = original
+
     def test_removed_protocol_settings_refuse_before_transport(self) -> None:
         opener = _Opener()
         client = NpmplusClient(credentials=_credentials(), opener=opener)

@@ -27,7 +27,11 @@ exclusive lane and application ownership, actual server placement against the
 edge record, and the existing wildcard certificate's coverage and expiry. It
 creates the application's HTTP hostname and its own edge route; it does not
 rewrite existing application domains or an unrelated edge route. A successful
-receipt owns later disablement. The edge retains its certificate, key, renewal
+receipt owns later disablement. The active private endpoint is the hostname's
+recorded claim; the public-host write guard also checks that claim before any
+provider effect for another lane. Successful creation or original-key adoption
+also records it in the application's `domains`, under the existing name fences,
+without making it a public website. The edge retains its certificate, key, renewal
 and access list. The application owns its HTTP paths and bearer checks; the edge
 preserves authorization and WebSocket headers. Provider readback retains the
 access list, certificate and complete route configuration. No DNS operation is performed.
@@ -39,13 +43,20 @@ application testing lanes. Q453 accepted this topology instead of the
 Compose-only upstream binding and its host firewall requirement. It does not
 change the restrictions on the Compose path below or any production record.
 
-Planning changes no provider state. Apply uses the application's existing durable
+Planning changes no provider state. Apply uses a dedicated lane-private-ingress
 provider-operation fence, saves its pending receipt before effects, then records
-independent provider readback. A lost final response can be adopted from the same
-key only when both effects and the pending receipt match. Partial or unavailable
-evidence remains `reconcile_required`; never repeat it with another key. Disable
-uses a fresh reviewed plan on the same lane's owned route and leaves the
-application hostname and bot state in place. Neither operation deploys a workload
+independent provider readback. Active application-hostname creation also holds
+the testing event executor lock, excluding a concurrent event deployment. A lost
+final response can be adopted from the same key only when both effects and the
+pending receipt match. Partial or unavailable evidence remains
+`reconcile_required` on the private route, without holding the application's
+deployment reservation; never repeat the private operation with another key.
+Disable uses a fresh reviewed plan and the same lane's exact receipt-owned route,
+retaining its original endpoint and edge keys. It only toggles that route even
+after the old application or edge record disappears, and leaves the application
+hostname and bot state in place. Disabled routes need no loaded-nginx flag, but
+retain the same hidden-config checks; enabled routes must be loaded.
+Neither operation deploys a workload
 or proves TLS, WSS, remote tailnet access or healthy runtime identity.
 
 The HTTP surface is projected into the agent/admin contract. Installed caller
