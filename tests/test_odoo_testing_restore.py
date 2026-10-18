@@ -599,7 +599,9 @@ class FreshTestingHostProgramTests(unittest.TestCase):
                             arguments,
                             1,
                             stdout=b"",
-                            stderr=b"permission denied" if denied else b"missing login table",
+                            stderr=b"permission denied while trying to connect to the Docker daemon socket"
+                            if denied
+                            else b"missing login table",
                         )
                     return command(arguments, **kwargs)
 
@@ -616,6 +618,27 @@ class FreshTestingHostProgramTests(unittest.TestCase):
                 else:
                     self.assertEqual(status, 0, output)
                     self.assertEqual(frames, [{"type": "complete", "resources_qualified": True}])
+
+    def test_container_file_permission_error_is_failed_not_provider_denied(self) -> None:
+        self.spec.update(inspection_only=True, verification_only=True)
+        with patch.object(
+            self,
+            "command",
+            return_value=subprocess.CompletedProcess(
+                ["docker", "inspect"],
+                1,
+                stdout=b"",
+                stderr=b"Python: [Errno 13] Permission denied: '/data/filestore'",
+            ),
+        ):
+            status, output = self.run_program()
+        self.assertNotEqual(status, 0)
+        frames = [
+            json.loads(line.removeprefix("fixture:"))
+            for line in output.splitlines()
+            if line.startswith("fixture:")
+        ]
+        self.assertEqual(frames, [{"type": "failed"}])
 
     def test_down_lane_resource_qualification_does_not_need_login_database(self) -> None:
         from control_plane.odoo_testing_drill_usage import parse_drill_usage_result

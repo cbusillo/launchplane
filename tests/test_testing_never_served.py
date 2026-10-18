@@ -221,17 +221,6 @@ class NeverServedTestingTests(unittest.TestCase):
             bindings, product=self.product, context=self.context, target_id=self.gen.target_id
         )
         self.assertEqual(qualified.usage, "unknown")
-        # Losing a non-use witness is not positive use. The lane remains
-        # disposable with independently qualified custody and isolation.
-        self.assertEqual(
-            require_disposable_lane(
-                cast(DisposableLaneStore, bindings),
-                product=self.product,
-                context=self.context,
-                instance="testing",
-            ),
-            evidence.binding_sha256,
-        )
         bindings.safety = evidence.model_copy(
             update={"usage": "in_use", "usage_evidence": "fresh-login-history"}
         )

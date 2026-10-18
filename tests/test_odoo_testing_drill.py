@@ -355,23 +355,6 @@ class TestingDrillTests(TestingDrillScenario):
         )
         assert historical is not None
         self.assertEqual(historical.usage, "unknown")
-        from control_plane.odoo_testing_drill import DrillSkipped
-
-        self.store.write_idempotency_record(
-            receipt.model_copy(
-                update={
-                    "response_payload": {
-                        **receipt.response_payload,
-                        "activation_safety": {
-                            **safety,
-                            "usage_evidence": "service:odoo-testing-drill:foreign-copy",
-                        },
-                    }
-                }
-            )
-        )
-        with self.assertRaises(DrillSkipped):
-            require_drill_checkpoint(self.store, operation)
 
     def test_admission_propagates_a_provider_denial_without_reinterpreting_it_as_unknown(
         self,

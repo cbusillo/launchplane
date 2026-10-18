@@ -707,7 +707,10 @@ def command(arguments, *, stdin=None, stdout=None):
     result = subprocess.run(arguments, input=stdin, stdout=stdout or subprocess.PIPE,
         stderr=subprocess.PIPE, check=False)
     if result.returncode:
-        if any(word in result.stderr.lower() for word in (b'permission denied',b'password authentication failed',b'unauthorized')):
+        if arguments[0]=='docker' and any(word in result.stderr.lower() for word in (
+                b'permission denied while trying to connect to the docker daemon socket',
+                b'authorization denied by plugin', b'error response from daemon: unauthorized',
+                b'error response from daemon: access denied')):
             raise PermissionError('The testing runtime refused this identity')
         raise RuntimeError("Fresh testing copy command did not pass")
     return result.stdout or b""

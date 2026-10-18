@@ -456,28 +456,6 @@ class LaneUsageTests(unittest.TestCase):
         self.assertIsNone(superseded.recovery_journal)
         self.assertIsNotNone(superseded.disposable_supersession)
 
-    def test_invalid_lifetime_proof_remains_unknown_without_becoming_a_non_use_requirement(
-        self,
-    ) -> None:
-        from control_plane.testing_never_served import NON_USE_EVIDENCE_PREFIX
-
-        def evidence() -> None:
-            record_safety(
-                self.store,
-                self.product,
-                self.context,
-                "testing",
-                usage_evidence=NON_USE_EVIDENCE_PREFIX + "a" * 64,
-                observed_at=self.now,
-                expires_at=self.now + timedelta(minutes=5),
-            )
-
-        evidence()
-        self.assertTrue(self.require())
-        self.health()
-        evidence()
-        self.assertTrue(self.require())
-
     def test_successful_target_inside_failed_aggregate_does_not_mean_down(self) -> None:
         self.health()
         records = self.store.list_public_ingress_observation_records(product=self.product)

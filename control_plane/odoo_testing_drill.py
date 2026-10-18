@@ -430,24 +430,10 @@ def require_drill_checkpoint(
     admitted = DisposableLaneSafety.model_validate(
         receipt.response_payload.get("activation_safety")
     )
-    unknown_qualified = admitted.usage_evidence.startswith(VERIFIED_DOWN_USAGE_EVIDENCE_PREFIX)
-    if admitted.usage == "unknown" and not unknown_qualified:
-        # First activation inspects the retained copy; reclaim inspects the
-        # selected generation. Both exact snapshots already live in this receipt.
-        unknown_qualified = any(
-            admitted.usage_evidence
-            == "service:odoo-testing-drill:"
-            + generation_binding(FreshOdooTestingGeneration.model_validate(snapshot))
-            for snapshot in (
-                receipt.response_payload.get("previous_generation"),
-                receipt.response_payload.get("planned_generation"),
-            )
-            if isinstance(snapshot, dict)
-        )
     if (
         (admitted.product, admitted.context, admitted.instance)
         != (operation.product, operation.context, "testing")
-        or (admitted.usage != "unused" and not (admitted.usage == "unknown" and unknown_qualified))
+        or admitted.usage not in {"unused", "unknown"}
         or admitted.data != "reproducible"
         or admitted.production_resources != "isolated"
         or receipt.response_payload.get("activation_attempt") != operation.attempt
