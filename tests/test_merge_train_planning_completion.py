@@ -18,6 +18,7 @@ from control_plane.merge_train_pr_feedback import (
     build_merge_train_pr_feedback_record,
     deliver_merge_train_pr_feedback_record,
     PLANNING_RECEIPT_PREFIX,
+    _PLANNING_NOTE_START,
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.contracts.merge_train_pr_feedback_record import MergeTrainPrFeedbackRecord
@@ -694,7 +695,7 @@ class PlanningCompletionTests(TestCase):
         self.assertFalse(_receipt(held)["ok"])
         self.assertEqual(held.comment_id, 3)
         self.assertIn(
-            "Planning reconciliation is incomplete", self.comment_mock.call_args.kwargs["body"]
+            _PLANNING_NOTE_START, self.comment_mock.call_args.kwargs["body"]
         )
         self.assertFalse(self.provider.writes)
 
@@ -856,7 +857,7 @@ class PlanningCompletionTests(TestCase):
         self.assertEqual(retry.delivery_status, "failed")
         self.assertFalse(retry.retryable)
         self.assertEqual(retry.comment_id, 3)
-        self.assertEqual(retry.comment_markdown.count("Planning reconciliation is incomplete"), 1)
+        self.assertEqual(retry.comment_markdown.count(_PLANNING_NOTE_START), 1)
 
     def test_malformed_reconciliation_is_recorded_without_publishing(self) -> None:
         with patch(
