@@ -4,6 +4,7 @@ from contextlib import nullcontext
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from http.client import HTTPException
 import json
 import re
 from typing import TYPE_CHECKING, Any
@@ -488,7 +489,7 @@ class ApplicationStateVolumeAdapter:
             if all(data.get(key) for key in ("application", "environment", "app_name")):
                 live = self._live(data["application"], data["environment"], data["app_name"])
                 evidence = "matches" if self._mount_matches(live) else "differs"
-        except (click.ClickException, OSError):
+        except (click.ClickException, OSError, HTTPException):
             evidence = "unavailable"
         except (ValueError, KeyError):
             evidence = "differs"

@@ -352,18 +352,20 @@ class ApplicationStateVolumeTests(_DirectorTestingSetupFixture):
 
     async def test_readback_outage_and_missing_target_are_bounded_observations(self) -> None:
         import click
+        from http.client import IncompleteRead
 
         await self.plan()
         result = await self.post()
         self.assertEqual(result.status_code, 202, result.text)
         calls = self.provider.call_count
-        for message in (
-            "HTTP 404: private provider details",
-            "connection failed: private provider details",
+        for failure in (
+            click.ClickException("HTTP 404: private provider details"),
+            click.ClickException("connection failed: private provider details"),
+            IncompleteRead(b"private provider details", 100),
         ):
             with patch(
                 "control_plane.dokploy_target_setup_http.fetch_dokploy_target_payload_for_setup",
-                side_effect=click.ClickException(message),
+                side_effect=failure,
             ):
                 readback = await self.post(mode="readback")
             self.assertEqual(readback.status_code, 202, readback.text)
