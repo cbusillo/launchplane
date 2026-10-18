@@ -711,8 +711,13 @@ images, runtime and copy identity, integration settings and the web-start gate,
 and verifies the testing-local credentials without signing in. The private HTTP
 health request bypasses proxy environment settings and refuses redirects. A
 read-only connection using the running web configuration checks the generated
-database password and the active local administrator's stored password hash;
-the running master password is also checked. Readiness never creates a session
+database password and the active local administrator's stored password hash.
+The login follows startup's trimmed value or `admin` default. Local database
+authentication failure is a failed candidate check, not a provider denial.
+The plaintext master value and database settings are checked for consistency
+with the running container environment. These local comparisons do not attest
+that a stored provider environment update was deployed; provider configuration,
+installed runtime identity and image are checked separately. Readiness never creates a session
 or login-history row, which would otherwise protect the new copy from its next
 rebuild. Passwords, hashes and raw program output stay private to the provider
 transport. This checks credential installation, not an interactive browser
@@ -765,6 +770,11 @@ its watched writable directory mount and private applied API. It reads only the
 lane-qualified dynamic filename. Publication rechecks the static configuration,
 provider state, current file digest and retained physical web identity, then uses
 the existing proxy container to write a temporary file and atomically rename it.
+Immediately before that writer, a forward publication also requires exactly one
+running web process owning the candidate alias on managed ingress, its expected
+project and its admitted runtime identity. A shared, missing, stopped or rebound
+alias refuses without touching the route. Inverse identity comparison excludes
+only the observation's deployment timestamp, as the runtime identity contract does.
 No application receives a provider credential or host mount. No global Traefik
 configuration, shared file, process or other product route is updated. The caller
 must hold and renew the original authorized lane/provider operation throughout,
@@ -774,6 +784,12 @@ the existing transport; there is no second writer or identity fallback.
 An absent reply does not prove the proxy writer stopped. The caller retains the
 original durable dispatch fence and continues observing it; an old file alone
 cannot exclude a still-running writer or authorize an inverse decision.
+A fixed publish program that exits before invoking the atomic writer returns an
+explicit `route_write_not_started` receipt. The caller can close that original
+child effect as excluded after verifying the old route. Once the writer may have
+started, a timeout or generic failed frame remains unknown; killing its Docker
+client does not prove that the daemon's exec has stopped. Permission denials
+remain denials and never become permission to retry.
 A written
 but partly/unapplied group stays pending without another dispatch. Public health
 and exact runtime identity remain the controller's separate proof before serving

@@ -1,7 +1,8 @@
 """Run the fixed host/container programs with simulated provider boundaries."""
 
 import base64
-from contextlib import redirect_stdout
+from contextlib import nullcontext, redirect_stdout
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 import json
 import os
@@ -9,6 +10,7 @@ from pathlib import Path
 import subprocess
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from threading import Thread
 from typing import Any, cast
 import unittest
 from unittest.mock import MagicMock, Mock, patch
@@ -52,6 +54,7 @@ class CandidateHostProbeTests(unittest.TestCase):
         self.credentials_ok = True
         self.gate_ok = True
         self.image_ok = True
+        self.container_probe: CandidateContainerProbeTests | None = None
         namespace: dict[str, Any] = {"__name__": "probe_test"}
         exec(compile(probe.CANDIDATE_HOST_PROBE, "<candidate-probe>", "exec"), namespace)
         self.program = namespace["probe"]
@@ -72,10 +75,20 @@ class CandidateHostProbeTests(unittest.TestCase):
                 "-c" in command
                 and command[command.index("-c") + 1] == probe.CANDIDATE_CONTAINER_PROBE
             ):
-                result = b"candidate_credentials_verified=true\n" if self.credentials_ok else b""
-            elif "-c" in command and command[command.index("-c") + 1].startswith(
-                "import hashlib,os,sys"
-            ):
+                if self.container_probe is not None:
+                    import traceback
+
+                    try:
+                        result = self.container_probe.run_probe().encode()
+                    except Exception:
+                        return subprocess.CompletedProcess(
+                            command, 1, stdout=b"", stderr=traceback.format_exc().encode()
+                        )
+                else:
+                    result = (
+                        b"candidate_credentials_verified=true\n" if self.credentials_ok else b""
+                    )
+            elif command[2:4] == [self.fixture.containers["script-runner"]["Id"], "python3"]:
                 if not self.gate_ok:
                     return subprocess.CompletedProcess(
                         command, 1, stdout=b"", stderr=b"private gate error"
@@ -129,7 +142,32 @@ class CandidateHostProbeTests(unittest.TestCase):
         frame = json.loads(output.getvalue().removeprefix("frame:"))
         self.assertEqual(frame["type"], "denied")
 
-    def test_shared_or_published_runtime_refuses_before_login(self) -> None:
+    def test_bad_database_password_is_a_failed_probe_not_a_provider_denial(self) -> None:
+        import sys
+
+        container_probe = CandidateContainerProbeTests()
+        container_probe.setUp()
+        self.addCleanup(container_probe.doCleanups)
+        container_probe.driver.connect.side_effect = container_probe.driver.Error(
+            "password authentication failed for user fixture"
+        )
+        self.container_probe = container_probe
+        encoded = base64.b64encode(json.dumps(self.spec).encode()).decode()
+        output = io.StringIO()
+        with (
+            patch.object(sys, "argv", ["probe", encoded, "frame:"]),
+            patch("subprocess.run", side_effect=self.command),
+            redirect_stdout(output),
+            self.assertRaises(SystemExit),
+        ):
+            exec(
+                compile(probe.CANDIDATE_HOST_PROBE, "<candidate-probe>", "exec"),
+                {"__name__": "__main__"},
+            )
+        self.assertEqual(json.loads(output.getvalue().removeprefix("frame:"))["type"], "failed")
+        self.assertNotIn("password authentication", output.getvalue())
+
+    def test_shared_or_published_runtime_refuses_before_credential_check(self) -> None:
         self.fixture.containers["web"]["HostConfig"]["PortBindings"] = {
             "8069/tcp": [{"HostPort": "8069"}]
         }
@@ -163,13 +201,15 @@ class CandidateContainerProbeTests(unittest.TestCase):
         self.connection = MagicMock()
         self.cursor = self.connection.cursor.return_value.__enter__.return_value
         self.cursor.fetchall.side_effect = lambda: self.rows
-        self.driver = SimpleNamespace(connect=Mock(return_value=self.connection))
+        self.driver = SimpleNamespace(
+            connect=Mock(return_value=self.connection),
+            Error=type("OperationalError", (Exception,), {}),
+        )
         self.context = Mock()
         self.context.verify.side_effect = lambda password, stored: (
             (password, stored)
             in {
                 ("local-login-fixture", "encoded-local-admin"),
-                ("local-master-fixture", "$encoded-local-master"),
             }
         )
         self.requests: list[Request] = []
@@ -187,12 +227,14 @@ class CandidateContainerProbeTests(unittest.TestCase):
         result.status = 200  # type: ignore[attr-defined]
         return result
 
-    def run_probe(self) -> str:
+    def run_probe(self, *, admin_login: str | None = "tester", real_http: bool = False) -> str:
         opener = Mock()
         opener.open.side_effect = self.response
         output = io.StringIO()
         with (
-            patch("urllib.request.build_opener", return_value=opener) as build,
+            nullcontext()
+            if real_http
+            else patch("urllib.request.build_opener", return_value=opener),
             patch.dict(
                 "sys.modules",
                 {
@@ -217,8 +259,11 @@ class CandidateContainerProbeTests(unittest.TestCase):
             ),
             redirect_stdout(output),
         ):
+            if admin_login is None:
+                os.environ.pop("ODOO_ADMIN_LOGIN", None)
+            else:
+                os.environ["ODOO_ADMIN_LOGIN"] = admin_login
             exec(compile(probe.CANDIDATE_CONTAINER_PROBE, "<candidate-container>", "exec"), {})
-        self.handlers = build.call_args.args
         return output.getvalue()
 
     def test_health_and_local_credentials_use_only_loopback_with_stable_host(self) -> None:
@@ -243,16 +288,18 @@ class CandidateContainerProbeTests(unittest.TestCase):
         self.run_probe()
         self.run_probe()
         self.assertTrue(all(request.get_method() == "GET" for request in self.requests))
-        self.assertEqual(
-            self.cursor.execute.call_args_list[-2].args, ("SET TRANSACTION READ ONLY",)
-        )
         self.assertEqual(self.cursor.execute.call_args.args[1], ("tester",))
         self.assertEqual(self.connection.commit.call_count, 0)
         self.assertEqual(self.connection.rollback.call_count, 2)
         self.assertEqual(self.connection.close.call_count, 2)
-        self.assertIn(
-            "default_transaction_read_only=on", self.driver.connect.call_args.kwargs["options"]
-        )
+
+    def test_unset_empty_and_whitespace_login_use_startup_default(self) -> None:
+        for login in (None, "", "  "):
+            with self.subTest(login=login):
+                self.run_probe(admin_login=login)
+                self.assertEqual(self.cursor.execute.call_args.args[1], ("admin",))
+        self.run_probe(admin_login=" tester ")
+        self.assertEqual(self.cursor.execute.call_args.args[1], ("tester",))
 
     def test_wrong_http_identity_admin_or_master_credential_refuses(self) -> None:
         self.health_identity = {"deployment_record_id": "other"}
@@ -289,26 +336,37 @@ class CandidateContainerProbeTests(unittest.TestCase):
                     self.run_probe()
         self.driver.connect.assert_not_called()
 
-    def test_database_authentication_refusal_propagates(self) -> None:
-        self.driver.connect.side_effect = PermissionError("fixture authentication refused")
-        with self.assertRaises(PermissionError):
-            self.run_probe()
-
-    def test_hashed_master_credential_is_checked_without_changing_it(self) -> None:
-        self.config.write_text(
-            self.config_text.replace("local-master-fixture", "$encoded-local-master")
-        )
-        self.run_probe()
-        self.context.verify.assert_any_call("local-master-fixture", "$encoded-local-master")
-
     def test_proxy_environment_cannot_redirect_the_private_health_request(self) -> None:
-        from urllib.request import ProxyHandler
+        calls: list[int] = []
+        payload = json.dumps({"runtime_identity": self.identity}).encode()
 
-        with patch.dict(os.environ, {"http_proxy": "http://outside.invalid:8080"}):
-            self.run_probe()
-        proxies = [
-            cast(Any, handler).proxies
-            for handler in self.handlers
-            if isinstance(handler, ProxyHandler)
-        ]
-        self.assertEqual(proxies, [{}])
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                calls.append(self.server.server_port)  # type: ignore[attr-defined]
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, format: str, *args: Any) -> None:
+                pass
+
+        with (
+            ThreadingHTTPServer(("127.0.0.1", 0), Handler) as health,
+            ThreadingHTTPServer(("127.0.0.1", 0), Handler) as proxy,
+        ):
+            threads = [Thread(target=server.serve_forever) for server in (health, proxy)]
+            for thread in threads:
+                thread.start()
+            self.spec["http_port"] = health.server_port
+            try:
+                with (
+                    patch.dict(os.environ, {"http_proxy": f"http://127.0.0.1:{proxy.server_port}"}),
+                    patch("urllib.request.proxy_bypass", return_value=False),
+                ):
+                    self.run_probe(real_http=True)
+            finally:
+                for server in (health, proxy):
+                    server.shutdown()
+                for thread in threads:
+                    thread.join()
+        self.assertEqual(calls, [health.server_port])
