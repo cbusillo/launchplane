@@ -72,7 +72,7 @@ class TestingRouteFenceController:
         else:
             intent = proposed
             state = self.transport.read_execution_fence(custody)
-            if state["status"] != "missing":
+            if state["status"] not in {"missing", "partial"}:
                 if (
                     state["status"] not in {"ready", "rebound"}
                     or self.known_initializer(
@@ -83,6 +83,11 @@ class TestingRouteFenceController:
                     raise NativeSourceUnavailable(
                         "An unrecorded permanent route lock is not adopted."
                     )
+            # No resource receipt exists for this directory in this boot. An
+            # empty lock cannot have authorized an initializer or ordinary
+            # writer here. Bind its actual FD before minting any nonce. A
+            # same-boot historical resource follows the prior-receipt path
+            # above and still refuses a lost/replaced lock.
         parent = self
 
         class Lock:
@@ -329,11 +334,36 @@ class TestingRouteEffects:
 
         return self.controller.transport.settle_attempt(attempt, dispatch_guard=dispatch)
 
+    def writer_was_busy(self, attempt_number: int) -> bool:
+        attempt = self.original_writer(attempt_number)
+        if attempt is None:
+            return False
+        receipt = self.controller.store.read_idempotency_record(
+            scope=REBUILD_SCOPE,
+            route_path=ROUTE_WRITER_RECEIPT,
+            idempotency_key=attempt.key,
+        )
+        return (
+            receipt is not None
+            and receipt.state == "completed"
+            and receipt.response_payload.get("writer_outcome") == "busy"
+        )
+
     def observe(self, effect_phase: str, attempt_number: int) -> ProviderObservation:
         if effect_phase == ROUTE_WRITING:
             attempt = self.original_writer(attempt_number)
             if attempt is None:
                 return ProviderObservation("unknown")
+            if self.writer_was_busy(attempt_number):
+                self.recovery_guard()
+                # A returned busy result never entered the writer's critical
+                # section. No old call remains to seal: retry under a fresh
+                # lease/attempt after rechecking current admission and custody.
+                return (
+                    ProviderObservation("present", 200)
+                    if self.present()
+                    else ProviderObservation("absent", retry_safe=True)
+                )
             receipt = self.controller.store.read_idempotency_record(
                 scope=REBUILD_SCOPE,
                 route_path=ROUTE_WRITER_RECEIPT,

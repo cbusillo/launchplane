@@ -1191,8 +1191,12 @@ its identity; rename and sync children inherit the descriptor. It removes only
 abandoned staging files while holding that lock. Completed rebuilds do not add
 per-key directories or files. The previous per-execution writer is removed.
 
-Lock allocation has its own creation-only durable child. Each actual generation
-initializer invocation gets a unique durable nonce and never resends that nonce.
+Lock allocation has its own creation-only durable child.
+An empty lock with no resource receipt for this directory in the current boot
+can be bound before the first nonce, including after a reboot interrupted
+initialization. A historical resource still requires its original actual lock.
+Each actual generation initializer invocation gets a unique durable nonce and
+never resends that nonce.
 A positive witness can be adopted read-only; a lost pre-nonce call can be fenced
 by another unique invocation under the same original lock. Ordinary writers and
 settlements cannot create a missing lock or generation. They compare the exact
@@ -1217,6 +1221,10 @@ writer cannot affect the current route; it does not claim the old writer never
 ran. A confirmed non-applied forward attempt keeps the old copy serving. An
 excluded or retired inverse may obtain a fresh physical attempt through the
 existing durable retry transaction, preserving the rebuild and request key.
+A completed busy reply proves that its call never entered the writer's critical
+section. It retries with a fresh attempt after current admission checks, instead
+of sealing that contention as a failed forward cutover. An in-flight busy lock
+without that completed reply remains unknown.
 Timeouts and denials never establish exclusion. Legacy dispatches remain
 observation-only; recovery never guesses their original custody.
 

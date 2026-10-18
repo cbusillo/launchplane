@@ -1620,7 +1620,11 @@ class NativeTestingRebuildExecution:
                 and prior.provider_effect_started_at
                 and not inverse_route
                 and not (
-                    route_effect is not None and prior.provider_effect_phase == ROUTE_PREPARING
+                    route_effect is not None
+                    and (
+                        prior.provider_effect_phase == ROUTE_PREPARING
+                        or route_effect.writer_was_busy(prior.attempt)
+                    )
                 )
             ),
         )

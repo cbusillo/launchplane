@@ -292,6 +292,38 @@ class TestingRouteFenceControllerTests(unittest.TestCase):
         self.assertEqual(self.store.read_original_mutation_intent(pending[0]), original)
         self.assertFalse(self.fixture.route_file.exists())
 
+    def test_partial_lock_recovers_after_reboot_before_a_nonce_was_created(self) -> None:
+        custody = self.custody()
+        self.controller.lock(custody)
+        self.fixture.writer_timeout = True
+        with self.assertRaises(NativeSourceUnavailable):
+            self.controller.ensure(custody)
+        self.fixture.writer_timeout = False
+        self.fixture.process_boot.write_text("87654321-4321-4321-4321-cba987654321")
+        self.fixture.device_offset.write_text("100")
+        current = self.custody()
+        fence = self.controller.ensure(current)
+        self.assertEqual(fence.state, "initialized")
+        self.assertEqual(fence.lock_identity, self.fixture.client.observe_execution_lock(current))
+        self.assertFalse(self.fixture.route_file.exists())
+
+    def test_partial_root_can_return_after_reboot_before_initializer_dispatch(self) -> None:
+        self.fixture.root = self.fixture.root / "dynamic"
+        self.fixture.root.mkdir()
+        self.fixture.route_file = self.fixture.root / self.fixture.route_file.name
+        custody = self.custody()
+        self.controller.lock(custody)
+        retired = self.fixture.root.with_name("retired-partial")
+        self.fixture.root.rename(retired)
+        self.fixture.root.mkdir()
+        self.fixture.process_boot.write_text("87654321-4321-4321-4321-cba987654321")
+        self.fixture.root.rmdir()
+        retired.rename(self.fixture.root)
+        current = self.custody()
+        fence = self.controller.ensure(current)
+        self.assertEqual(fence.state, "initialized")
+        self.assertFalse(self.fixture.route_file.exists())
+
     def test_lost_permanent_lock_is_never_recreated_from_a_completed_receipt(self) -> None:
         custody = self.custody()
         self.controller.ensure(custody)

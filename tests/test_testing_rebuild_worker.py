@@ -186,6 +186,10 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.enterContext(
             patch.object(post_deploy, "compose_data_workflow_is_quiescent", return_value=True)
         )
+        self.real_route_transport = {
+            name: getattr(DokployTestingRouteTransport, name)
+            for name in ("read", "publish", "settle_attempt")
+        }
         self.enterContext(
             patch.object(DokployTestingRouteTransport, "read", side_effect=self.route_read)
         )
@@ -203,6 +207,8 @@ class NativeTestingWorkerTests(unittest.TestCase):
         )
         from control_plane.dokploy.testing_route_execution import TestingRouteFence
         from control_plane.testing_route_effects import TestingRouteFenceController
+
+        self.real_route_fence_ensure = TestingRouteFenceController.ensure
 
         self.route_fence_ensure = self.enterContext(
             patch.object(
@@ -2508,6 +2514,93 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertEqual(self.effects, [])
         self.assertEqual(self.execute().deploy_status, "pass")
         self.assertEqual(self.effects, ["switch-new", "stop-old"])
+
+    def real_route_fixture(self) -> Any:
+        from tests import test_testing_route_transport as shell_tests
+        from control_plane.testing_route_effects import TestingRouteFenceController
+
+        shell = shell_tests.TestingRouteTransportTests()
+        shell.setUp(initialize_fence=False)
+        self.addCleanup(shell.doCleanups)
+        shell.plan = self.fixture.route
+        shell.raw = deepcopy(self.raw)
+        shell.identity, shell.new_identity = self.original_identity, self.app.plan.runtime_identity
+        shell.route_file = shell.root / (shell.plan.route_id + ".yml")
+        for key, backend, project, identity in (
+            ("old", shell.plan.old_backend, self.intent.project, shell.identity),
+            (
+                "new",
+                shell.plan.new_backend,
+                str(urlsplit(shell.plan.new_backend).hostname),
+                shell.new_identity,
+            ),
+        ):
+            name = str(urlsplit(backend).hostname)
+            container = shell.containers[key]
+            container["Name"] = "/" + name
+            container["Config"]["Labels"]["com.docker.compose.project"] = project
+            container["Config"]["Env"] = [
+                "PLATFORM_INSTANCE=testing",
+                "LAUNCHPLANE_RUNTIME_IDENTITY_JSON=" + identity.model_dump_json(),
+            ]
+            container["NetworkSettings"]["Networks"]["dokploy-network"]["Aliases"] = [name]
+        self.enterContext(patch.multiple(DokployTestingRouteTransport, **self.real_route_transport))
+        self.enterContext(
+            patch.object(TestingRouteFenceController, "ensure", self.real_route_fence_ensure)
+        )
+
+        def health(base_url: str, path: str) -> HealthcheckEvidence:
+            self.owned = (
+                json.loads(shell.route_file.read_text()) if shell.route_file.exists() else None
+            )
+            return self.health(base_url, path)
+
+        self.enterContext(patch.object(service, "read_public_testing_health", side_effect=health))
+        return shell
+
+    def test_worker_real_route_lost_reply_adopts_the_original_physical_writer(self) -> None:
+        shell = self.real_route_fixture()
+        shell.before_publish = lambda: setattr(shell, "lose_writer_reply", True)
+        with self.assertRaises(service.NativeTestingRebuildPending):
+            self.execute()
+        self.assertFalse(self.retained["stopped"])
+        self.assertEqual(self.current(), self.fixture.before)
+        original = shell.route_file.read_bytes()
+        sends = shell.remote_modes.count("publish_v2")
+        shell.before_publish = None
+        shell.lose_writer_reply = False
+        self.assertEqual(self.execute().deploy_status, "pass")
+        self.assertEqual(shell.remote_modes.count("publish_v2"), sends)
+        self.assertEqual(shell.route_file.read_bytes(), original)
+        self.assertTrue(self.retained["stopped"])
+
+    def test_worker_real_route_retries_reader_contention_without_failing_the_candidate(
+        self,
+    ) -> None:
+        import fcntl
+        import os
+
+        shell = self.real_route_fixture()
+        held: list[int] = []
+
+        def reader() -> None:
+            descriptor = os.open(shell.root / ("." + shell.route_file.name + ".lock"), os.O_RDONLY)
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            held.append(descriptor)
+
+        shell.before_publish = reader
+        try:
+            with self.assertRaises(service.NativeTestingRebuildPending):
+                self.execute()
+        finally:
+            for descriptor in held:
+                os.close(descriptor)
+        self.assertTrue(held)
+        self.assertFalse(self.retained["stopped"])
+        self.assertFalse(shell.route_file.exists())
+        shell.before_publish = None
+        self.assertEqual(self.execute().deploy_status, "pass")
+        self.assertTrue(self.retained["stopped"])
 
     def test_sealed_non_applied_writer_finishes_without_candidate_readiness(self) -> None:
         from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
