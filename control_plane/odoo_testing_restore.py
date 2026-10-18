@@ -1,6 +1,7 @@
 """Host-side source capture and pre-registry sanitization for a fresh testing copy."""
 
 import base64
+import inspect
 import json
 from control_plane._odoo_testing_storage_program import STORAGE_MAINTENANCE_LIBRARY
 from control_plane._odoo_copy_runtime_guard import COPY_RUNTIME_INSPECTION_LIBRARY
@@ -16,6 +17,7 @@ from control_plane.contracts.product_profile_record import (
     product_config_requirement_applies_to_lane,
 )
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
+from control_plane.docker_errors import docker_daemon_authorization_denied
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -711,10 +713,7 @@ def command(arguments, *, stdin=None, stdout=None):
     result = subprocess.run(arguments, input=stdin, stdout=stdout or subprocess.PIPE,
         stderr=subprocess.PIPE, check=False)
     if result.returncode:
-        if arguments[0]=='docker' and any(word in result.stderr.lower() for word in (
-                b'permission denied while trying to connect to the docker ',
-                b'authorization denied by plugin', b'error response from daemon: unauthorized',
-                b'error response from daemon: access denied')):
+        if arguments[0]=='docker' and docker_daemon_authorization_denied(result.stderr):
             raise TestingProviderDenied('The testing runtime refused this identity')
         raise RuntimeError("Fresh testing copy command did not pass")
     return result.stdout or b""
@@ -1456,5 +1455,8 @@ def fresh_testing_authority_sha256(
 
 
 FRESH_TESTING_RESTORE_HOST_PROGRAM = (
-    COPY_RUNTIME_INSPECTION_LIBRARY + FRESH_TESTING_RESTORE_HOST_PROGRAM
+    COPY_RUNTIME_INSPECTION_LIBRARY
+    + "\n"
+    + inspect.getsource(docker_daemon_authorization_denied)
+    + FRESH_TESTING_RESTORE_HOST_PROGRAM
 )

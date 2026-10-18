@@ -22,6 +22,7 @@ from control_plane.dokploy.testing_route_execution import (
     TestingRouteExecutionIntent,
     TestingRouteExecutionOutcome,
 )
+from control_plane.docker_errors import docker_daemon_authorization_denied
 from control_plane.dokploy.native_copy_stream import _read_remote, NativeSourceUnavailable
 from control_plane.dokploy.route_rules import host_rule_may_match
 from control_plane.dokploy.testing_route import (
@@ -48,6 +49,8 @@ def testing_route_host_program() -> str:
         + inspect.getsource(host_rule_may_match)
         + "\n"
         + inspect.getsource(redirects_to_https)
+        + "\n"
+        + inspect.getsource(docker_daemon_authorization_denied)
         + "\nDIRECTORY="
         + repr(TRAEFIK_DYNAMIC_DIRECTORY)
         + "\nSTATIC="
@@ -61,7 +64,7 @@ def testing_route_host_program() -> str:
 def docker(*arguments, stdin=None):
     result = subprocess.run(['docker', *arguments], input=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60, check=False)
     if result.returncode:
-        if any(token in result.stderr.lower() for token in (b'permission denied while trying to connect to the docker daemon socket',b'authorization denied by plugin',b'error response from daemon: unauthorized',b'error response from daemon: access denied')):
+        if docker_daemon_authorization_denied(result.stderr):
             raise PermissionError('The managed testing route operation was refused')
         raise RuntimeError('The managed testing route operation did not complete')
     return result.stdout
