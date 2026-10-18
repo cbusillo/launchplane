@@ -134,12 +134,19 @@ class DeliveryEvidenceIndex:
         self.initialization_lock: Callable[[], AbstractContextManager[None]] = nullcontext
 
     @contextmanager
-    def lane_lock(self, context: str, product: str) -> Iterator[bool]:
+    def lane_lock(self, context: str, product: str, *, wait: bool = False) -> Iterator[bool]:
         name = "production-delivery:" + context + ":" + product
         if self.engine.dialect.name == "postgresql":
             from sqlalchemy import text
 
             with self.engine.begin() as connection:
+                if wait:
+                    connection.execute(
+                        text("SELECT pg_advisory_xact_lock(hashtextextended(:name, 0))"),
+                        {"name": name},
+                    )
+                    yield True
+                    return
                 acquired = connection.scalar(
                     text("SELECT pg_try_advisory_xact_lock(hashtextextended(:name, 0))"),
                     {"name": name},
@@ -151,7 +158,7 @@ class DeliveryEvidenceIndex:
         )
         with path.open("a+") as lock:
             try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(lock, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
             except BlockingIOError:
                 yield False
                 return

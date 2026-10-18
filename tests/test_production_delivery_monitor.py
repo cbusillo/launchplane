@@ -303,6 +303,126 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
         self.assertEqual(len(attempts), len(incidents))
         self.assertTrue(all(attempt.delivery_status == "skipped" for attempt in attempts))
 
+    def test_scheduled_recheck_resolves_historical_refusals_and_preserves_history(self) -> None:
+        for source in ("b", "c", "d", "e"):
+            self.reject("image@" + source * 40, reason="promotion_required")
+        originals = self.store.list_public_ingress_incident_records(status="open")
+        deployments = self.store.list_deployment_records()
+        self.now += timedelta(seconds=2)
+        self.healthy_production()
+        scheduler = HealthMonitorScheduler(
+            self.store, clock=lambda: self.now.timestamp(), run_delivery_monitor=self.monitor
+        )
+        self.assertTrue(scheduler.run_delivery_once())
+        self.assertEqual(self.store.list_public_ingress_incident_records(status="open"), ())
+        for original in originals:
+            resolved = self.store.read_public_ingress_incident_record(original.incident_id)
+            self.assertEqual(resolved.resolution_reason, PRODUCTION_REQUEST_REFUSED)
+            self.assertEqual(resolved.opened_observation_id, original.opened_observation_id)
+            self.assertIn(original.summary, resolved.summary)
+            self.assertTrue(
+                self.store.list_public_ingress_observation_records(incident_id=original.incident_id)
+            )
+        self.store.close()
+        self.store = PostgresRecordStore(database_url=self.store.database_url)
+        self.addCleanup(self.store.close)
+        self.monitor()
+        self.assertEqual(self.store.list_public_ingress_incident_records(status="open"), ())
+        self.assertEqual(self.store.list_deployment_records(), deployments)
+
+    def test_scheduled_recheck_waits_for_health_identity_and_no_newer_refusal(self) -> None:
+        self.reject(reason="promotion_required")
+        incident = self.store.list_public_ingress_incident_records(status="open")[0]
+        self.now += timedelta(seconds=2)
+        self.monitor()
+        self.assertEqual(
+            self.store.read_public_ingress_incident_record(incident.incident_id).status, "open"
+        )
+        for case in ("failed", "stale", "identity_mismatch", "newer_refusal"):
+            with self.subTest(case=case):
+                record = self.healthy_production()
+                if case == "failed":
+                    record = record.model_copy(
+                        update={
+                            "status": "fail",
+                            "failure_code": "http_error",
+                            "targets": tuple(
+                                target.model_copy(
+                                    update={"status": "fail", "failure_code": "http_error"}
+                                )
+                                for target in record.targets
+                            ),
+                        }
+                    )
+                elif case == "stale":
+                    self.now += timedelta(days=1)
+                elif case == "identity_mismatch":
+                    record = record.model_copy(update={"expected_runtime_identity": None})
+                else:
+                    _observe(
+                        self.store,
+                        self.profile,
+                        self.lane,
+                        check_name=REFUSED_REQUEST_CHECK_PREFIX + "retrying",
+                        failed=False,
+                        refused=True,
+                        summary="New refusal after the passing health check.",
+                        observed_at=self.timestamp(),
+                    )
+                self.store.write_public_ingress_observation_record(record)
+                self.monitor()
+                self.assertEqual(
+                    self.store.read_public_ingress_incident_record(incident.incident_id).status,
+                    "open",
+                )
+                self.now += timedelta(seconds=2)
+        self.healthy_production()
+        self.monitor()
+        self.assertEqual(
+            self.store.read_public_ingress_incident_record(incident.incident_id).resolution_reason,
+            PRODUCTION_REQUEST_REFUSED,
+        )
+
+    def test_scheduled_recheck_keeps_mixed_history_and_real_delivery_failures_open(self) -> None:
+        self.reject(reason="deployment_failed")
+        self.now += timedelta(seconds=1)
+        self.reject(reason="promotion_required")
+        self.reject("image@" + "c" * 40, reason="deployment_failed")
+        originals = self.store.list_public_ingress_incident_records(status="open")
+        self.now += timedelta(seconds=2)
+        self.healthy_production()
+        self.monitor()
+        self.assertEqual(
+            {
+                incident.incident_id
+                for incident in self.store.list_public_ingress_incident_records(status="open")
+            },
+            {incident.incident_id for incident in originals},
+        )
+
+    def test_scheduled_recheck_preserves_a_concurrent_incident_change(self) -> None:
+        self.reject(reason="promotion_required")
+        incident = self.store.list_public_ingress_incident_records(status="open")[0]
+        self.now += timedelta(seconds=2)
+        self.healthy_production()
+        original = self.store.write_public_ingress_transition_with_outbox
+
+        def race(**kwargs: Any) -> object:
+            if kwargs["observation"].purpose == "reconciliation":
+                with patch.object(
+                    self.store, "write_public_ingress_transition_with_outbox", original
+                ):
+                    self.reject(reason="deployment_failed")
+            return original(**kwargs)
+
+        with patch.object(
+            self.store, "write_public_ingress_transition_with_outbox", side_effect=race
+        ):
+            self.monitor()
+        self.assertEqual(
+            self.store.read_public_ingress_incident_record(incident.incident_id).status, "open"
+        )
+
     def test_reconciled_refusal_keeps_an_interrupted_notification_outcome_unknown(self) -> None:
         self.reject(reason="promotion_required")
         incident = self.store.list_public_ingress_incident_records(status="open")[0]

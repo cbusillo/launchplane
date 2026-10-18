@@ -361,6 +361,28 @@ class DeliveryEvidenceIndexTests(unittest.TestCase):
                         first.result(timeout=10)
                 self.assertEqual(len(self.incidents()), 1)
 
+    def test_waiting_lane_writer_acquires_after_monitor_releases(self) -> None:
+        for backend in ("filesystem", "sqlite"):
+            with self.subTest(backend=backend):
+                self.setup_store(backend)
+                attempted = Event()
+
+                def writer() -> bool:
+                    with self.store.delivery_evidence_index() as other:
+                        attempted.set()
+                        with other.lane_lock(
+                            self.lane.context, self.profile.product, wait=True
+                        ) as acquired:
+                            return acquired
+
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    with self.store.delivery_evidence_index() as index:
+                        with index.lane_lock(self.lane.context, self.profile.product) as acquired:
+                            self.assertTrue(acquired)
+                            pending = executor.submit(writer)
+                            self.assertTrue(attempted.wait(10))
+                    self.assertTrue(pending.result(timeout=10))
+
     def test_interrupted_file_publication_cannot_create_a_failure_or_fake_recovery(self) -> None:
         self.setup_store("filesystem")
         self.deploy("current")

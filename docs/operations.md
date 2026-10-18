@@ -2010,36 +2010,41 @@ Explicit lifecycle retirement resolves automatic delivery monitoring; prelaunch
 products have no automatic production deadline. This is notification evidence,
 never acceptance or a release gate.
 
-Historical promotion-guard incidents can be disposed of once their caller is
-retired and production remains healthy. Use the deployed service's existing
-`POST /v1/products/public-ingress-monitor/run-once` with its existing
-`public_ingress_monitor.run_once` authority and an `Idempotency-Key`. Add
-`refused_production_requests`, a list of objects containing `incident_id`,
-`caller_retired: true`, `caller_retired_at` (a timezone-aware timestamp), and
-`caller_retirement_evidence` (the merged change or other explicit evidence that
-the admin checked). Caller retirement is an admin attestation, never an
-inference from health or elapsed time. Verify all old callers/in-flight jobs have
-stopped before attesting it. No new grant, release, or hand-edited record is needed.
+Historical promotion-guard incidents are rechecked automatically by the scheduled
+production delivery monitor. An open refusal-only occurrence resolves when all
+effective production checks are fresh and passing strictly after the most recent
+refusal, and the current runtime matches the expected release identity. A refusal
+at or after a passing check keeps the incident open until a later healthy check.
+Repeated monitor observations that merely retain an unresolved incident are not
+new requests. No manual reconciliation call or caller-retirement attestation is
+needed for scheduled recovery.
 
-That run first performs normal monitoring. Reconciliation then requires every
-effective production check to be fresh and passing after caller retirement,
-with current runtime identity verified. It rejects continuing refusal observations,
-non-refusal or mixed/uncertain incident history, changed lane authority, and
-concurrent incident changes. It shares the delivery monitor's lane lock. Each
-qualified occurrence resolves independently through the normal atomic incident,
-event and reminder transition, with “Production request refused, nothing changed”
-and the retirement evidence in its summary. Its original observations and trace
-remain linked; `resolution_reason=request_refused` records the refusal disposition,
-not a successful deployment. The safe incident API summary says “refused, nothing changed”. The response's
-`refused_production_requests_resolved` lists the disposed occurrences. A blocked
-entry returns 409 `refused_request_reconciliation_blocked`; earlier entries may
-already have resolved. Read back before retrying; entries already resolved as
-`request_refused` are harmless. Incidents resolved by another outcome keep that
-outcome and refuse reclassification. Reconciliation sends no recovery notification. The normal outbox worker
-skips its queued failure notices before resolving a destination; interrupted
-provider sends retain an unknown outcome. Read the incident list/detail APIs to
-verify the resulting disposition. Deploying the source alone does not clear the
-historical incidents.
+Real delivery failures, mixed or uncertain histories, missing/stale/failed checks,
+unverified identity and concurrent incident changes stay open. Scheduled rechecks
+and explicit reconciliation share the delivery monitor's lane lock; incoming
+promotion-guard refusal evidence waits for that lock rather than racing a closure
+or being dropped. Changed product authority also blocks persistence.
+
+Qualified occurrences use the normal atomic incident, event and reminder
+transition. The original observations and traces stay linked, with
+`resolution_reason=request_refused` and the safe summary “Production request
+refused, nothing changed.” This records a correct refusal, not a successful
+deployment. Reconciliation sends no recovery notification; the normal outbox
+worker skips queued failure notices for resolved refusals before resolving a
+destination, while interrupted sends retain an unknown outcome. Source deployment
+makes this behavior available; ordinary scheduled checks must still prove recovery.
+
+The existing admin API remains available for explicit caller-retirement evidence:
+`POST /v1/products/public-ingress-monitor/run-once`, authorized by
+`public_ingress_monitor.run_once`, with an `Idempotency-Key` and optional
+`refused_production_requests`. Each entry has `incident_id`, `caller_retired: true`,
+`caller_retired_at` (timezone-aware), and `caller_retirement_evidence`. This separate
+path verifies fresh passing health after attested retirement, current runtime
+identity, full refusal-only history and no subsequent refusal. It reports
+`refused_production_requests_resolved`, or 409
+`refused_request_reconciliation_blocked` for a blocked entry; earlier entries may
+already have resolved. Read back before retrying. Replays already marked
+`request_refused` are harmless; another resolved outcome cannot be reclassified.
 
 Exact replays of an unresolved candidate retain its original reason and trace and
 reuse the incident/outbox. A different failure stage updates that incident, and

@@ -142,7 +142,6 @@ def _reconcile_refused_production_request(
     latest_refusal_at: datetime | None,
 ) -> str:
     incident = store.read_public_ingress_incident_record(request.incident_id)
-    observed_at = now.isoformat()
     if not is_guard_refusal_incident(incident):
         raise ValueError("Only a promotion guard refusal can be reconciled as refused.")
     if incident.status == "resolved":
@@ -157,6 +156,30 @@ def _reconcile_refused_production_request(
     lane = next((lane for lane in profile.lanes if lane.instance == "prod"), None)
     if lane is None or not profile.is_active or lane.context != incident.context:
         raise ValueError("The production lane has changed; inspect its current evidence.")
+    if latest_refusal_at is not None and latest_refusal_at >= request.caller_retired_at:
+        raise ValueError("A production caller is still making refused requests.")
+    return _resolve_guard_refusal(
+        store,
+        incident=incident,
+        profile=profile,
+        lane=lane,
+        now=now,
+        health_after=request.caller_retired_at,
+        summary="Production request refused, nothing changed. Caller retired at "
+        f"{request.caller_retired_at.isoformat()}; evidence: {request.caller_retirement_evidence}. ",
+    )
+
+
+def _resolve_guard_refusal(
+    store: Store,
+    *,
+    incident: PublicIngressIncidentRecord,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+    now: datetime,
+    health_after: datetime,
+    summary: str,
+) -> str:
     history = store.list_public_ingress_observation_records(incident_id=incident.incident_id)
     if not history or any(
         observation.status != "fail"
@@ -168,8 +191,6 @@ def _reconcile_refused_production_request(
         for observation in history
     ):
         raise ValueError("Incident history includes a failure or uncertain outcome beyond refusal.")
-    if latest_refusal_at is not None and latest_refusal_at >= request.caller_retired_at:
-        raise ValueError("A production caller is still making refused requests.")
     checks = tuple(
         check
         for check in lane.health_monitoring.checks
@@ -193,11 +214,13 @@ def _reconcile_refused_production_request(
         if (
             not observations
             or observations[0].status != "pass"
-            or _time(observations[0].observed_at) < request.caller_retired_at
+            or _time(observations[0].observed_at) <= health_after
             or monitor_observation_provenance(observations[0], now=now).freshness_status
             != "verified"
         ):
-            raise ValueError("Production health must pass freshly after caller retirement.")
+            raise ValueError(
+                "Production health must pass freshly after the last refusal or retirement."
+            )
     verification = read_lane_runtime_verification(
         record_store=store,
         profile=profile,
@@ -220,13 +243,64 @@ def _reconcile_refused_production_request(
         check_name=incident.check_name,
         failed=False,
         retired=True,
-        observed_at=observed_at,
-        summary="Production request refused, nothing changed. Caller retired at "
-        f"{request.caller_retired_at.isoformat()}; evidence: {request.caller_retirement_evidence}. "
-        "Production health and runtime identity remain verified.",
+        observed_at=now.isoformat(),
+        summary=summary + "Production health and runtime identity remain verified.",
         expected_incident_sha256=public_ingress_incident_record_sha256(incident),
     )
     return incident.incident_id
+
+
+def _recheck_guard_refusals(
+    store: Store, profile: LaunchplaneProductProfileRecord, lane: ProductLaneProfile, now: str
+) -> None:
+    with (
+        store.delivery_evidence_index() as index,
+        index.lane_lock(lane.context, profile.product) as acquired,
+    ):
+        if not acquired:
+            return
+        incidents = tuple(
+            incident
+            for incident in store.list_public_ingress_incident_records(
+                product=profile.product,
+                context_name=lane.context,
+                instance_name="prod",
+                status="open",
+            )
+            if is_guard_refusal_incident(incident)
+        )
+        if not incidents:
+            return
+        observations = store.list_public_ingress_observation_records(
+            product=profile.product,
+            context_name=lane.context,
+            instance_name="prod",
+            check_kind="provider",
+        )
+        latest_refusal = max(
+            [
+                *(_time(incident.opened_at) for incident in incidents),
+                *(
+                    _time(record.observed_at)
+                    for record in observations
+                    if record.check_name.startswith(REFUSED_REQUEST_CHECK_PREFIX)
+                ),
+            ]
+        )
+        for incident in incidents:
+            try:
+                _resolve_guard_refusal(
+                    store,
+                    incident=incident,
+                    profile=profile,
+                    lane=lane,
+                    now=_time(now),
+                    health_after=latest_refusal,
+                    summary="Production request refused, nothing changed. Scheduled recheck: ",
+                )
+            except ValueError:
+                # Unhealthy, stale, changed or uncertain evidence stays open for the next pass.
+                continue
 
 
 def _candidate_key(candidate: str) -> str:
@@ -487,17 +561,23 @@ def _record_rejected_payload(
 
         candidate = normalize_generic_web_artifact_id(profile=profile, artifact_id=candidate)
     if reason == ProductionChangeRequiresPromotion.code:
-        _observe(
-            store,
-            profile,
-            lane,
-            check_name=REFUSED_REQUEST_CHECK_PREFIX + _candidate_key(candidate + trace_id),
-            failed=False,
-            refused=True,
-            summary=f"Production request refused, nothing changed; promotion_required; trace: {trace_id}.",
-            observed_at=utc_now_timestamp(),
-            reason=reason,
-        )
+        # Serialize new refusal evidence with scheduled/manual disposition. A busy
+        # monitor must never cause a rejected request's evidence to be dropped.
+        with (
+            store.delivery_evidence_index() as index,
+            index.lane_lock(lane.context, profile.product, wait=True),
+        ):
+            _observe(
+                store,
+                profile,
+                lane,
+                check_name=REFUSED_REQUEST_CHECK_PREFIX + _candidate_key(candidate + trace_id),
+                failed=False,
+                refused=True,
+                summary=f"Production request refused, nothing changed; promotion_required; trace: {trace_id}.",
+                observed_at=utc_now_timestamp(),
+                reason=reason,
+            )
         return
     record_production_delivery_failure(
         store,
@@ -580,6 +660,10 @@ def monitor_production_delivery_once(
                 _monitor_availability(
                     store, profile, lane, now, component="source", available=False
                 )
+            try:
+                _recheck_guard_refusals(store, profile, lane, now)
+            except Exception:
+                _LOGGER.exception("Could not recheck production refusals for %s", profile.product)
 
 
 def _monitor_lane(
