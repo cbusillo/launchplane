@@ -24,7 +24,10 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.secret_record import SecretRecord, SecretBinding
 from control_plane.storage import postgres as db
-from control_plane.testing_candidate_runtime import testing_profile_binding
+from control_plane.testing_candidate_runtime import (
+    testing_profile_binding,
+    testing_serving_target_authority,
+)
 from control_plane.storage.product_authority_bundle import (
     ProductAuthorityBundle,
     ProviderTargetWrite,
@@ -47,9 +50,7 @@ def serving_snapshot_matches(
     values = []
     for snapshot in (actual, expected):
         payload = snapshot.model_dump(mode="json")
-        payload["target"].pop("updated_at", None)
-        payload["target"].pop("source_label", None)
-        payload["target"]["policies"].pop("staff_testing_hold", None)
+        payload["target"] = testing_serving_target_authority(snapshot.target)
         values.append(payload)
     return _same(*values)
 

@@ -13864,6 +13864,37 @@ class RealPostgresTestingRebuildResumeTests(unittest.TestCase):
 
 
 class RealPostgresNativeTestingWorkerTests(unittest.TestCase):
+    def test_hold_before_application_plan_keeps_original_authority(self) -> None:
+        self.run_worker_case(
+            "test_real_hold_before_application_plan_preserves_original_input_authority"
+        )
+
+    def test_hold_lift_resumes_the_existing_candidate(self) -> None:
+        self.run_worker_case("test_real_hold_set_and_clear_before_input_resume_preserves_candidate")
+
+    def test_lost_admission_observes_storage_without_preparing(self) -> None:
+        self.run_worker_case(
+            "test_admission_drift_observes_original_storage_without_preparing_again"
+        )
+
+    def test_lost_admission_observes_exact_original_configuration(self) -> None:
+        self.run_worker_case(
+            "test_admission_drift_observes_exact_original_configuration_without_new_inputs"
+        )
+
+    def test_incomplete_original_storage_ends_without_another_prepare(self) -> None:
+        self.run_worker_case(
+            "test_terminal_incomplete_storage_ends_admission_without_another_preparation"
+        )
+
+    def test_missing_candidate_cannot_poison_admission_checkpoint(self) -> None:
+        self.run_worker_case("test_missing_candidate_cannot_save_a_terminal_admission_checkpoint")
+
+    def test_next_rebuild_uses_the_new_desired_port(self) -> None:
+        self.run_worker_case(
+            "test_next_rebuild_moves_to_desired_port_without_reverting_the_profile"
+        )
+
     def test_private_candidate_history_cannot_be_cancelled_after_marker_reset(self) -> None:
         self.run_worker_case(
             "test_private_candidate_without_a_current_outer_marker_cannot_be_cancelled"

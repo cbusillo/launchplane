@@ -10992,11 +10992,49 @@ class PostgresRecordStore(HumanSessionStore):
             return TestingCandidateAllocation.model_validate(rows[0].payload) if rows else None
 
     def compare_and_write_testing_candidate(
-        self, expected: TestingCandidateAllocation | None, replacement: TestingCandidateAllocation
+        self,
+        expected: TestingCandidateAllocation | None,
+        replacement: TestingCandidateAllocation,
+        *,
+        observation_only: bool = False,
     ) -> None:
         replacement = TestingCandidateAllocation.model_validate(replacement.model_dump())
         if expected is not None:
             replacement.require_successor(expected)
+        if observation_only:
+            from control_plane.odoo_testing_resources import OdooTestingResources
+
+            if expected is None or not expected.compose_id:
+                raise ValueError("Candidate observation requires its original physical custody.")
+            resources = OdooTestingResources(
+                product=expected.product,
+                context=expected.context,
+                operation_id=expected.operation_id,
+                target_id=expected.compose_id,
+                namespace=expected.namespace,
+            )
+            app = expected.application
+            storage_observation = (
+                expected.effect == "storage"
+                and app is None
+                and replacement
+                == expected.model_copy(
+                    update={"resources_binding_sha256": resources.binding_sha256}
+                )
+            )
+            configuration_observation = (
+                app is not None
+                and app.phase == "configuring"
+                and bool(app.configuration_sha256)
+                and replacement
+                == expected.model_copy(
+                    update={"application": app.model_copy(update={"phase": "configured"})}
+                )
+            )
+            if not (storage_observation or configuration_observation):
+                raise ValueError(
+                    "Candidate observation cannot change intent or dispatch an effect."
+                )
         with self._session_factory() as session:
             self._begin_serialized_write(session)
             self._lock_product_authority_bundle_write(session)
@@ -11018,7 +11056,7 @@ class PostgresRecordStore(HumanSessionStore):
                 for item in session.scalars(select(LaunchplaneProductProfileRow))
             )
             profile = next((item for item in profiles if item.product == replacement.product), None)
-            if (
+            if not observation_only and (
                 profile is None
                 or profile.driver_id != "odoo"
                 or profile.lifecycle_state != "active"
@@ -11042,6 +11080,15 @@ class PostgresRecordStore(HumanSessionStore):
             ):
                 raise ValueError("The serving testing target changed during candidate preparation.")
             if replacement.compose_id:
+                custody = session.get(
+                    LaunchplaneProviderTargetRow, (replacement.namespace, "testing-candidate")
+                )
+                if observation_only and (
+                    custody is None
+                    or (custody.provider_id, custody.target_category, custody.target_id)
+                    != ("dokploy", "compose", replacement.compose_id)
+                ):
+                    raise ValueError("The observed candidate physical reservation changed.")
                 if (
                     session.scalar(
                         select(LaunchplaneDokployTargetIdRow)

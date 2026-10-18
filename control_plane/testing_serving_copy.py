@@ -15,7 +15,12 @@ from control_plane.testing_publication_storage import read_publication, read_sna
 
 
 def published_testing_copy(
-    store: PostgresRecordStore, *, product: str, context: str, recovery_operation_id: str = ""
+    store: PostgresRecordStore,
+    *,
+    product: str,
+    context: str,
+    recovery_operation_id: str = "",
+    for_rebuild_admission: bool = False,
 ) -> TestingPublicationRecord | None:
     try:
         target = store.read_dokploy_target_record(context_name=context, instance_name="testing")
@@ -67,7 +72,7 @@ def published_testing_copy(
         # The original executor finishes physical retirement under its admitted
         # port. A later profile edit cannot change the already-running copy.
         # Ordinary maintenance still requires the current profile to agree.
-        or not recovery_operation_id
+        or not (recovery_operation_id or for_rebuild_admission)
         and profile.runtime_port != plan.profile.runtime_port
         or lane.base_url.rstrip("/") != app.plan.base_url
         or snapshot.target_id.target_id != candidate.compose_id

@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from control_plane.contracts.testing_candidate import TestingCandidateAllocation
+from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.testing_candidate_application import (
     TestingCandidateApplication,
     TestingCandidatePrepared,
@@ -141,6 +142,72 @@ def require_candidate_configuration(
         raise ValueError("Candidate configuration has not retained its exact admitted inputs.")
 
 
+def candidate_configuration_sha256(payload: api.JsonObject) -> str:
+    """Bind the intended private configuration without storing its secret values."""
+    return canonical_json_sha256(
+        {
+            **{
+                key: payload.get(key)
+                for key in (
+                    "composeId",
+                    "environmentId",
+                    "serverId",
+                    "name",
+                    "sourceType",
+                    "composePath",
+                    "autoDeploy",
+                )
+            },
+            "composeFile": compose.compose_file_sha256(str(payload.get("composeFile") or "")),
+            "env": api.parse_dokploy_env_text(str(payload.get("env") or "")),
+        }
+    )
+
+
+def observe_candidate_configuration(
+    *,
+    root: Path,
+    store: PostgresRecordStore,
+    record: TestingCandidateAllocation,
+    lease: ProviderOperationLease,
+    guard: Callable[[], None],
+) -> TestingCandidateAllocation:
+    """Observe the exact original update; never compile new inputs or send an update."""
+    app = record.application
+    if app is None or app.phase != "configuring" or not app.configuration_sha256:
+        raise CandidateObservationUnavailable("The original configuration binding is unavailable.")
+    lease.assert_current()
+    guard()
+    require_candidate_target_custody(store, record)
+    host, token = source.read_dokploy_config(
+        control_plane_root=root, database_url=store.database_url
+    )
+    payload = api.fetch_dokploy_target_payload(
+        host=host, token=token, target_type="compose", target_id=record.compose_id
+    )
+    if (
+        candidate_configuration_sha256(payload) != app.configuration_sha256
+        or fetch_dokploy_compose_domains_for_target_setup(
+            host=host, token=token, compose_id=record.compose_id
+        )
+        or api.list_deployments_for_target(
+            host=host,
+            token=token,
+            target_type="compose",
+            target_id=record.compose_id,
+            require_complete=True,
+        )
+    ):
+        raise CandidateObservationUnavailable("The original private configuration remains unknown.")
+    lease.assert_current()
+    guard()
+    updated = record.model_copy(
+        update={"application": app.model_copy(update={"phase": "configured"})}
+    )
+    store.compare_and_write_testing_candidate(record, updated, observation_only=True)
+    return updated
+
+
 def prepare_candidate_application(
     *,
     root: Path,
@@ -232,7 +299,22 @@ def prepare_candidate_application(
                 env_text=environment, current_env_text="", target="testing candidate"
             )
             compose.validate_odoo_raw_compose_file(compose_file=inputs.compose_file)
-            save(phase="configuring")
+            update_payload: api.JsonObject = {
+                "composeId": record.compose_id,
+                "name": record.namespace,
+                "environmentId": record.environment_id,
+                "sourceType": "raw",
+                "composePath": "docker-compose.yml",
+                "composeFile": inputs.compose_file,
+                "autoDeploy": False,
+                "env": environment,
+            }
+            save(
+                phase="configuring",
+                configuration_sha256=candidate_configuration_sha256(
+                    {**update_payload, "serverId": record.server_id}
+                ),
+            )
             lease.checkpoint_effect("candidate_configuration")
             checkpoint()
             api.dokploy_request(
@@ -240,16 +322,7 @@ def prepare_candidate_application(
                 token=token,
                 path="/api/compose.update",
                 method="POST",
-                payload={
-                    "composeId": record.compose_id,
-                    "name": record.namespace,
-                    "environmentId": record.environment_id,
-                    "sourceType": "raw",
-                    "composePath": "docker-compose.yml",
-                    "composeFile": inputs.compose_file,
-                    "autoDeploy": False,
-                    "env": environment,
-                },
+                payload=update_payload,
             )
             current = payload()
         # A lost update reply is recovered only when all intended values match.

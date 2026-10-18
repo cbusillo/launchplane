@@ -8,6 +8,10 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-o
       return { identity: module.fixtureIdentity, products: module.productsForFixture("products"), environment: module.environmentForFixture("products", "atlas-commerce", "testing")! };
     });
     const environment = fixtures.environment;
+    const readAttempt = () => page.evaluate(async product => {
+      const { readTestingRebuildAttempt } = await import("/ui/src/testing-rebuild-operation.ts");
+      return readTestingRebuildAttempt(product);
+    }, environment.product);
     environment.driver_id = "odoo";
     environment.driver_extensions.odoo = {
       allowed_rebuild_sources: ["empty", "production_restore", "upstream_restore"], data_authority: "disposable",
@@ -112,7 +116,7 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-o
         await waitForState(() => lookups).toBe(1);
         expect(writes.length).toBe(2);
         if (outcome === "lookup-not-observed") {
-          await waitForState(() => page.evaluate(() => JSON.parse(sessionStorage.getItem("launchplane:testing-rebuild:atlas-commerce") ?? "null")?.readOnlyRecovery)).toBe(true);
+          await waitForState(async () => (await readAttempt())?.readOnlyRecovery).toBe(true);
           await expect(panel.getByRole("button", { name: "Rebuild testing", exact: true })).toHaveCount(0);
           await panel.getByRole("button", { name: "Find the original rebuild" }).click();
           await waitForState(() => lookups).toBe(2);
@@ -121,12 +125,12 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-o
       }
     }
     if (["stale-build", "session-unavailable", "session-unauthenticated"].includes(outcome)) {
-      await waitForState(() => page.evaluate(() => sessionStorage.getItem("launchplane:testing-rebuild:atlas-commerce"))).toBe(null);
+      await waitForState(readAttempt).toBe(null);
       await expect(panel.getByRole("button", { name: "Rebuild testing", exact: true })).toBeEnabled();
       expect(writes.length).toBe(outcome === "stale-build" ? 1 : 0);
       expect(polled).toBe(false);
     } else if (outcome === "denied") {
-      await waitForState(() => page.evaluate(() => JSON.parse(sessionStorage.getItem("launchplane:testing-rebuild:atlas-commerce") ?? "null")?.denied)).toBe(true);
+      await waitForState(async () => (await readAttempt())?.denied).toBe(true);
       await page.reload();
       await expect(panel.getByRole("button", { name: "Recover this request" })).toHaveCount(0);
       expect(writes.length).toBe(1);
@@ -136,7 +140,7 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-o
       await expect(panel.getByRole("button", { name: "Rebuild testing", exact: true })).toBeEnabled();
       expect(writes.length).toBe(1);
     } else {
-      await waitForState(() => page.evaluate(() => JSON.parse(sessionStorage.getItem("launchplane:testing-rebuild:atlas-commerce") ?? "null")?.operationId)).toBe("native-original");
+      await waitForState(async () => (await readAttempt())?.operationId).toBe("native-original");
       await page.clock.runFor(2500);
       if (heldOutcome) {
         await expect(panel.getByRole("button", { name: "Resume this rebuild", exact: true })).toBeEnabled();
@@ -146,7 +150,7 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-o
         await panel.screenshot({ path: testInfo.outputPath("testing-rebuild-held.png") });
         await panel.getByRole("button", { name: "Resume this rebuild", exact: true }).click();
         if (outcome !== "held-resume") {
-          await waitForState(() => page.evaluate(() => JSON.parse(sessionStorage.getItem("launchplane:testing-rebuild:atlas-commerce") ?? "null")?.resumeNeedsRead)).toBe(true);
+          await waitForState(async () => (await readAttempt())?.resumeNeedsRead).toBe(true);
           await expect(panel.getByRole("button", { name: "Resume this rebuild", exact: true })).toBeDisabled();
           expect(resumes.length).toBe(1);
           await panel.screenshot({ path: testInfo.outputPath("testing-rebuild-resume-needs-read.png") });
@@ -164,7 +168,7 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-o
         expect(writes.length).toBe(1);
         await page.reload();
       }
-      await waitForState(() => page.evaluate(() => sessionStorage.getItem("launchplane:testing-rebuild:atlas-commerce"))).toBe(null);
+      await waitForState(readAttempt).toBe(null);
       await expect(panel.getByRole("button", { name: "Rebuild testing", exact: true })).toBeEnabled();
       if (heldOutcome) expect(resumes.length).toBe(outcome === "held-resume-denied" ? 2 : 1);
       expect(polled).toBe(true);

@@ -526,6 +526,52 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertIsNone(self.current().target.policies.staff_testing_hold)
         self.assertEqual(self.effects, ["switch-new", "stop-old"])
 
+    def test_real_hold_set_and_clear_before_input_resume_preserves_candidate(self) -> None:
+        original = self.store.read_testing_candidate(self.fixture.candidate.namespace)
+        assert original is not None
+        self.apply_staff_hold(True, "Staff testing while the candidate is prepared")
+        with self.assertRaises(service.NativeTestingRebuildPending):
+            self.execute()
+        self.assertEqual(self.effects, [])
+        self.assertEqual(self.store.read_testing_candidate(original.namespace), original)
+        self.apply_staff_hold(False, "Staff testing finished")
+        self.assertEqual(self.execute().deploy_status, "pass")
+        self.assertEqual(self.effects, ["switch-new", "stop-old"])
+
+    def test_real_hold_before_application_plan_preserves_original_input_authority(self) -> None:
+        from control_plane.storage.postgres import LaunchplaneTestingCandidateRow
+
+        candidate = self.fixture.candidate.model_copy(update={"application": None})
+        with self.store._session_factory.begin() as session:
+            row = session.get(LaunchplaneTestingCandidateRow, candidate.namespace)
+            assert row is not None
+            row.payload = candidate.model_dump(mode="json", exclude_none=True)
+        self.apply_staff_hold(True, "Staff testing during independent allocation")
+        self.apply_staff_hold(False, "Staff testing finished before application planning")
+
+        def prepared(**kwargs: Any) -> Any:
+            # Exercise the real input compiler and publication validator around
+            # an already-proven private application fixture.
+            inputs = kwargs["inputs"]
+            proof = self.prepared.model_copy(
+                update={
+                    "plan_sha256": inputs.plan.digest,
+                    "source_witness": "empty:" + inputs.plan.digest,
+                }
+            )
+            self.app = self.app.model_copy(update={"plan": inputs.plan, "prepared": proof})
+            self.prepared = proof
+            updated = candidate.model_copy(update={"application": self.app})
+            self.store.compare_and_write_testing_candidate(candidate, updated)
+            return updated
+
+        with (
+            patch.object(service, "prepare_candidate_storage", return_value=candidate),
+            patch.object(service, "prepare_candidate_application", side_effect=prepared),
+        ):
+            self.assertEqual(self.execute().deploy_status, "pass")
+        self.assertEqual(self.effects, ["switch-new", "stop-old"])
+
     def test_hold_after_cutover_does_not_block_inverse_or_erase_the_hold(self) -> None:
         self.fail_public = True
         hold: Any = None
@@ -672,6 +718,76 @@ class NativeTestingWorkerTests(unittest.TestCase):
             with self.subTest(flag=flag), self.assertRaises(ValueError):
                 TestingRebuildRecord.model_validate({**failed.model_dump(), flag: True})
 
+    def test_missing_candidate_cannot_save_a_terminal_admission_checkpoint(self) -> None:
+        from control_plane.testing_rebuild_storage import RecordTestingRebuildStore
+
+        self.hold_after_private_candidate_effects()
+        profile = self.store.read_product_profile_record(self.operation.product)
+        self.store.write_product_profile_record(
+            profile.model_copy(update={"runtime_port": profile.runtime_port + 1})
+        )
+        with (
+            patch.object(self.store, "read_testing_candidate", return_value=None),
+            self.assertRaises(service.NativeTestingRebuildPending),
+        ):
+            self.execute()
+        self.assertEqual(
+            RecordTestingRebuildStore(self.store).load(self.admission_checkpoint.plan),
+            self.admission_checkpoint,
+        )
+        self.assertEqual(self.effects, [])
+
+    def test_recovery_reports_protected_resources_without_reclassifying_admission(self) -> None:
+        from tests.support.disposable_lanes import record_safety
+
+        executor = service.NativeTestingRebuildExecution(
+            service.NativeTestingRebuildAdapter(
+                self.root, self.store, self.operation, self.intent, self.authorize
+            ),
+            Mock(spec=["assert_current"]),
+            Mock(),
+        )
+        executor.host, executor.token = "fixture-host", "fixture-token"
+        for changes in (
+            {"data": "only_copy"},
+            {"production_resources": "shared"},
+            {"production_resources": "separation_ready"},
+        ):
+            with self.subTest(changes=changes):
+                record_safety(
+                    self.store,
+                    self.operation.product,
+                    self.operation.context,
+                    "testing",
+                    **changes,
+                )
+                with self.assertRaises(service.NativeTestingRebuildPending):
+                    executor.guard(recovery=True)
+                self.assertEqual(self.effects, [])
+                self.assertEqual(self.current().target_id, self.fixture.before.target_id)
+
+    def test_recovery_names_unverified_candidate_custody_without_releasing_it(self) -> None:
+        candidate = self.fixture.candidate
+        provider = self.store.read_provider_target_record(
+            context_name=candidate.namespace, instance_name="testing-candidate"
+        )
+        self.store.write_provider_target_record(
+            provider.model_copy(update={"target_id": "foreign"})
+        )
+        executor = service.NativeTestingRebuildExecution(
+            service.NativeTestingRebuildAdapter(
+                self.root, self.store, self.operation, self.intent, self.authorize
+            ),
+            Mock(spec=["assert_current"]),
+            Mock(),
+        )
+        executor.host, executor.token = "fixture-host", "fixture-token"
+        with self.assertRaises(service.NativeTestingRebuildPending):
+            executor.guard(recovery=True)
+        self.assertEqual(self.store.read_testing_candidate(candidate.namespace), candidate)
+        self.assertEqual(self.effects, [])
+        self.assertEqual(self.current().target_id, self.fixture.before.target_id)
+
     def test_unavailable_production_probe_is_not_permanent_admission_drift(self) -> None:
         from control_plane import testing_candidate_runtime as compiler
         from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
@@ -750,6 +866,162 @@ class NativeTestingWorkerTests(unittest.TestCase):
         observe.assert_called_once()
         self.assertEqual(self.effects, [])
         self.assertEqual(self.current().target_id, self.fixture.before.target_id)
+
+    def test_admission_drift_observes_original_storage_without_preparing_again(self) -> None:
+        from control_plane.storage.postgres import LaunchplaneTestingCandidateRow
+        from control_plane import testing_candidate_allocation as allocation_service
+
+        candidate = self.fixture.candidate.model_copy(
+            update={"application": None, "resources_binding_sha256": ""}
+        )
+        with self.store._session_factory.begin() as session:
+            row = session.get(LaunchplaneTestingCandidateRow, candidate.namespace)
+            assert row is not None
+            row.payload = candidate.model_dump(mode="json", exclude_none=True)
+        profile = self.store.read_product_profile_record(self.operation.product)
+        self.store.write_product_profile_record(
+            profile.model_copy(
+                update={
+                    "lanes": tuple(
+                        lane for lane in profile.lanes if lane.context != self.operation.context
+                    )
+                }
+            )
+        )
+        with (
+            patch.object(
+                allocation_service,
+                "run_resource_schedule",
+                side_effect=candidate_application.CandidateObservationUnavailable("Fixture busy"),
+            ) as readback,
+            self.assertRaises(service.NativeTestingRebuildPending),
+        ):
+            self.execute()
+        self.assertEqual(self.store.read_testing_candidate(candidate.namespace), candidate)
+        with patch.object(allocation_service, "run_resource_schedule", return_value={}) as done:
+            result = self.execute()
+        self.assertEqual(readback.call_args.kwargs["mode"], "readback")
+        self.assertEqual(done.call_args.kwargs["mode"], "readback")
+        observed = self.store.read_testing_candidate(candidate.namespace)
+        assert observed is not None
+        self.assertEqual(
+            observed.resources_binding_sha256, candidate_resources(candidate).binding_sha256
+        )
+        self.assertEqual(result.error_code, "testing_rebuild_admission_changed")
+        self.assertEqual(self.effects, [])
+        self.assertEqual(self.current().target_id, self.fixture.before.target_id)
+
+    def test_admission_drift_observes_exact_original_configuration_without_new_inputs(self) -> None:
+        from control_plane.storage.postgres import LaunchplaneTestingCandidateRow
+
+        assert self.app.configuration_sha256
+        app = self.app.model_copy(
+            update={
+                "phase": "configuring",
+                "deployment_id": "",
+                "prepared": None,
+                "restore_schedule_id": "",
+                "restore_previous_deployments": (),
+                "restore_workflow_started": None,
+                "workflow_evidence": {},
+            }
+        )
+        candidate = self.fixture.candidate.model_copy(update={"application": app})
+        with self.store._session_factory.begin() as session:
+            row = session.get(LaunchplaneTestingCandidateRow, candidate.namespace)
+            assert row is not None
+            row.payload = candidate.model_dump(mode="json", exclude_none=True)
+        profile = self.store.read_product_profile_record(self.operation.product)
+        self.store.write_product_profile_record(
+            profile.model_copy(update={"runtime_port": profile.runtime_port + 1})
+        )
+        provider = self.fixture.fixture.provider_state
+        original = dict(provider)
+        provider["env"] = "UNEXPECTED=value"
+        with self.assertRaises(service.NativeTestingRebuildPending):
+            self.execute()
+        self.assertEqual(self.store.read_testing_candidate(candidate.namespace), candidate)
+        provider.clear()
+        provider.update(original)
+        with patch.object(
+            service,
+            "candidate_runtime_inputs",
+            side_effect=AssertionError("Do not select new inputs"),
+        ):
+            result = self.execute()
+        observed = self.store.read_testing_candidate(candidate.namespace)
+        assert observed is not None and observed.application is not None
+        self.assertEqual(observed.application.phase, "configured")
+        self.assertEqual(observed.application.configuration_sha256, app.configuration_sha256)
+        self.assertEqual(observed.application.plan, app.plan)
+        with self.assertRaises(ValueError):
+            self.store.compare_and_write_testing_candidate(
+                observed,
+                observed.model_copy(
+                    update={
+                        "application": observed.application.model_copy(
+                            update={"phase": "deploying"}
+                        )
+                    }
+                ),
+                observation_only=True,
+            )
+        self.assertEqual(self.store.read_testing_candidate(candidate.namespace), observed)
+        self.assertEqual(result.error_code, "testing_rebuild_admission_changed")
+        self.assertEqual(self.effects, [])
+        self.assertEqual(self.current().target_id, self.fixture.before.target_id)
+
+    def test_terminal_incomplete_storage_ends_admission_without_another_preparation(self) -> None:
+        from control_plane.storage.postgres import LaunchplaneTestingCandidateRow
+        from control_plane import testing_candidate_allocation as allocation_service
+        from control_plane.testing_replacement_resources import IncompleteTestingResources
+
+        candidate = self.fixture.candidate.model_copy(
+            update={"application": None, "resources_binding_sha256": ""}
+        )
+        with self.store._session_factory.begin() as session:
+            row = session.get(LaunchplaneTestingCandidateRow, candidate.namespace)
+            assert row is not None
+            row.payload = candidate.model_dump(mode="json", exclude_none=True)
+        profile = self.store.read_product_profile_record(self.operation.product)
+        self.store.write_product_profile_record(
+            profile.model_copy(update={"runtime_port": profile.runtime_port + 1})
+        )
+        with patch.object(
+            allocation_service,
+            "run_resource_schedule",
+            side_effect=IncompleteTestingResources("Fixture terminal empty storage"),
+        ) as readback:
+            result = self.execute()
+        self.assertEqual(readback.call_args.kwargs["mode"], "readback")
+        self.assertEqual(result.error_code, "testing_rebuild_admission_changed")
+        self.assertEqual(self.store.read_testing_candidate(candidate.namespace), candidate)
+        self.assertEqual(self.effects, [])
+        self.assertEqual(self.current().target_id, self.fixture.before.target_id)
+
+    def test_legacy_configuration_without_a_binding_cannot_be_invented_by_readback(self) -> None:
+        app = self.app.model_copy(
+            update={
+                "configuration_sha256": "",
+                "phase": "configuring",
+                "prepared": None,
+                "restore_workflow_started": None,
+            }
+        )
+        candidate = self.fixture.candidate.model_copy(update={"application": app})
+        with (
+            patch.object(api, "fetch_dokploy_target_payload") as read,
+            self.assertRaises(candidate_application.CandidateObservationUnavailable),
+        ):
+            candidate_application.observe_candidate_configuration(
+                root=self.root,
+                store=self.store,
+                record=candidate,
+                lease=Mock(spec=["assert_current"]),
+                guard=Mock(),
+            )
+        read.assert_not_called()
+        self.assertEqual(self.effects, [])
 
     def test_admission_drift_cannot_outlive_an_original_candidate_job(self) -> None:
         for phase in ("configuring", "deploying", "restoring"):
@@ -984,12 +1256,25 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertFalse(self.retained["stopped"])
 
     def test_second_rebuild_uses_published_copy_and_preserves_later_deployment_route(self) -> None:
+        self.complete_second_rebuild()
+
+    def test_next_rebuild_moves_to_desired_port_without_reverting_the_profile(self) -> None:
+        self.complete_second_rebuild(change_port=True)
+
+    def complete_second_rebuild(self, *, change_port: bool = False) -> None:
         import yaml
 
         self.assertEqual(self.execute().deploy_status, "pass")
         first = self.fixture.candidate
         previous = published_testing_copy(self.store, product=first.product, context=first.context)
         assert previous is not None
+        if change_port:
+            profile = self.store.read_product_profile_record(first.product)
+            self.store.write_product_profile_record(
+                profile.model_copy(update={"runtime_port": profile.runtime_port + 1})
+            )
+            with self.assertRaises(ValueError):
+                published_testing_copy(self.store, product=first.product, context=first.context)
         before = self.current()
         secrets = self.store.list_secret_records()
         operation_id = "second-native-rebuild"
@@ -1067,7 +1352,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
             context=first.context,
             host=previous.plan.route.host,
             old_backend=previous.plan.route.new_backend,
-            new_backend=f"http://{namespace}:{previous.plan.profile.runtime_port}",
+            new_backend=f"http://{namespace}:{inputs.runtime_environment['ODOO_HTTP_PORT']}",
             raw=self.raw,
             public_entrypoints=previous.plan.route.public_entrypoints,
             owned_document=self.owned,

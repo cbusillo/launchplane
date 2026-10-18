@@ -167,6 +167,9 @@ class TestingCandidateApplication(FrozenRecord):
     restore_workflow_started: bool | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
+    configuration_sha256: str = Field(
+        default="", pattern=r"^(?:[a-f0-9]{64})?$", exclude_if=lambda value: not value
+    )
 
     @model_validator(mode="after")
     def validate_progress(self) -> Self:
@@ -193,6 +196,8 @@ class TestingCandidateApplication(FrozenRecord):
     def require_successor(self, previous: Self) -> None:
         if (
             self.plan != previous.plan
+            or previous.configuration_sha256
+            and self.configuration_sha256 != previous.configuration_sha256
             or previous.restore_workflow_started is not None
             and (
                 self.restore_workflow_started is None

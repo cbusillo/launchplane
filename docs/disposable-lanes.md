@@ -941,7 +941,25 @@ failure. Temporary source or metadata observations do not become permanent input
 drift. After publication, original-copy retirement uses recovery safety and the
 admitted physical port, while a current staff hold still pauses its dispatch.
 The published-copy recovery check is bound to that original operation; ordinary
-maintenance continues to require the current profile port.
+maintenance continues to require the current profile port. A fresh rebuild
+qualifies the predecessor against its recorded physical port and prepares its
+successor at the desired current port, without reverting the profile or changing
+the public address.
+
+Staff holds and the hold writer's timestamp/source label are excluded from the
+shared serving-target input projection. A hold pauses preparation and cutover;
+lifting it resumes the same candidate rather than changing its input authority.
+After admission changes, original private storage is inspected only in readback
+mode. A still-running or unknown schedule stays pending; the inspector's terminal
+empty/incomplete result cannot dispatch preparation again. Configuration records
+bind the exact intended private configuration before the update. Recovery reads
+that binding without resolving changed inputs or sending another update. A
+missing older binding or mismatched readback remains pending. These observations
+can update only the original candidate's storage receipt or configuring-to-configured
+phase, under its custody CAS, physical reservation and unchanged serving target;
+they cannot allocate, change intent, deploy, publish or retire a copy. Newly
+recorded protected data, production sharing or aliases pause recovery with an
+explicit cause instead of being reclassified as a new admission refusal.
 
 An explicit resume of the same held operation is described below (#4016).
 Managed-proxy execution receipts for interrupted writers are described below
@@ -1081,6 +1099,9 @@ explicitly resumes a held native rebuild. It requires the original request's
 fresh authority for the existing target-replacement action from the original
 caller. A signed-in human is bound by immutable GitHub ID; a supported terminal
 or local caller must retain its original identity type, subject and token label.
+The configured bearer value can rotate while those identity fields remain
+unchanged. Changing the label changes the caller; resume does not transfer a
+held request to that new identity or to an administrator.
 A workflow or service identity cannot substitute. Cookie callers also need the
 normal Origin/CSRF evidence. This action creates no authorization grant.
 

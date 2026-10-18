@@ -430,7 +430,7 @@ def candidate_authority_sha256(
     return canonical_json_sha256(
         {
             "profile": profile.model_dump(mode="json"),
-            "target": target.model_dump(mode="json"),
+            "target": testing_serving_target_authority(target),
             "runtime": [
                 item.model_dump(mode="json")
                 for item in sorted(
@@ -445,6 +445,13 @@ def candidate_authority_sha256(
             ),
         }
     )
+
+
+def testing_serving_target_authority(target: DokployTargetRecord) -> dict[str, object]:
+    """A staff pause and its writer provenance do not change a serving copy."""
+    payload = target.model_dump(mode="json", exclude={"updated_at", "source_label"})
+    payload["policies"].pop("staff_testing_hold", None)
+    return payload
 
 
 def candidate_runtime_fences(

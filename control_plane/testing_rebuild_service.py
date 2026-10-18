@@ -4,6 +4,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 import json
+import logging
 from pathlib import Path
 from typing import Any, NoReturn
 from urllib.parse import urlsplit
@@ -82,10 +83,12 @@ from control_plane.provider_operations import (
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_candidate_allocation import (
     observe_candidate_creation,
+    observe_candidate_storage,
     prepare_candidate_storage,
     require_candidate_target_custody,
 )
 from control_plane.testing_candidate_application import (
+    observe_candidate_configuration,
     prepare_candidate_application,
     candidate_private_readiness,
     abandon_candidate_application,
@@ -113,6 +116,7 @@ from control_plane.testing_publication_storage import (
     serving_snapshot_matches,
 )
 from control_plane.testing_rebuild_storage import RecordTestingRebuildStore
+from control_plane.testing_replacement_resources import IncompleteTestingResources
 from control_plane.testing_serving_copy import published_testing_copy
 from control_plane.workflows.generic_web_deploy_provider import generic_web_provider_target_key
 from control_plane.workflows.testing_rebuild import (
@@ -242,7 +246,9 @@ def capture_rebuild_intent(
         old_runtime_identity=identity,
     )
     frame = transport.read()
-    previous = published_testing_copy(store, product=operation.product, context=operation.context)
+    previous = published_testing_copy(
+        store, product=operation.product, context=operation.context, for_rebuild_admission=True
+    )
     template = previous.plan.route.template if previous else None
     endpoints = frame["old_endpoints"]
     if not endpoints:
@@ -477,8 +483,6 @@ class NativeTestingRebuildExecution:
     def finish_admission_refusal(
         self, error: NativeTestingRebuildAdmissionChanged
     ) -> OdooStableTargetReplacementApplyResult:
-        import logging
-
         self.check_lock()
         self.lease.assert_current()
         self.adapter.authorize("testing_rebuild_checkpoint")
@@ -527,14 +531,30 @@ class NativeTestingRebuildExecution:
                         "Observe the original candidate creation before ending admission."
                     ) from error
             if candidate.effect == "storage" and not candidate.resources_binding_sha256:
-                raise NativeTestingRebuildPending(
-                    "The original candidate storage operation remains unresolved."
-                ) from error
+                try:
+                    candidate = observe_candidate_storage(
+                        root=self.root,
+                        store=self.store,
+                        allocation=candidate,
+                        lease=self.lease,
+                        guard=lambda: self.guard(recovery=True),
+                    )
+                except IncompleteTestingResources:
+                    # The existing inspector refuses active schedules and
+                    # distinguishes terminal, empty/incomplete resources from
+                    # unknown or unsafe backing data. Retain the failed copy;
+                    # admission refusal must not dispatch preparation again.
+                    self.guard(recovery=True)
             app = candidate.application
             if app is not None and app.phase == "configuring":
-                raise NativeTestingRebuildPending(
-                    "The original candidate configuration writer remains unresolved."
-                ) from error
+                candidate = observe_candidate_configuration(
+                    root=self.root,
+                    store=self.store,
+                    record=candidate,
+                    lease=self.lease,
+                    guard=lambda: self.guard(recovery=True),
+                )
+                app = candidate.application
             if app is not None and app.phase in {"deploying", "restoring"}:
                 candidate_terminal_custody_evidence(
                     root=self.root, store=self.store, record=candidate
@@ -565,6 +585,8 @@ class NativeTestingRebuildExecution:
         ):
             raise NativeTestingRebuildPending(str(error)) from error
         if checkpoint is not None:
+            if candidate is None:
+                raise NativeTestingRebuildPending("The original candidate custody is unavailable.")
             observation = self.current_route(checkpoint.plan)
             if observation.slot_id != checkpoint.plan.old.copy_id:
                 raise NativeTestingRebuildPending(str(error)) from error
@@ -583,8 +605,6 @@ class NativeTestingRebuildExecution:
             self.check_lock()
             self.lease.assert_current()
             self.adapter.checkpoints.save(failed)
-            if candidate is None:
-                raise NativeTestingRebuildPending("The original candidate custody is unavailable.")
             result = rebuild_result(failed, candidate)
         else:
             result = OdooStableTargetReplacementApplyResult(
@@ -650,12 +670,25 @@ class NativeTestingRebuildExecution:
                     recovery_operation_id=self.operation.operation_id if recovery else "",
                 )
             else:
-                require_candidate_target_custody(self.store, candidate)
+                try:
+                    require_candidate_target_custody(self.store, candidate)
+                except (ValueError, FileNotFoundError) as error:
+                    if recovery:
+                        raise NativeTestingRebuildPending(
+                            "Recovery is paused: the original candidate custody cannot be verified. "
+                            "Resolve its physical reservation or conflicting lane alias first."
+                        ) from error
+                    raise
         if any(
             item.target_id in {self.intent.old.target_id, current_target}
             and (item.context, item.instance) != (self.operation.context, "testing")
             for item in self.store.list_dokploy_target_id_records()
         ):
+            if recovery:
+                raise NativeTestingRebuildPending(
+                    "Recovery is paused: a rebuild copy aliases another serving lane. "
+                    "Resolve the conflicting ownership before continuing this operation."
+                )
             raise NativeTestingRebuildAdmissionChanged(
                 "A rebuild copy aliases another serving lane."
             )
@@ -667,6 +700,11 @@ class NativeTestingRebuildExecution:
             safety.data == "only_copy"
             or safety.production_resources in {"shared", "separation_ready"}
         ):
+            if recovery:
+                raise NativeTestingRebuildPending(
+                    "Recovery is paused by protected-copy or production-resource evidence. "
+                    "Refresh and resolve that safety evidence before continuing this operation."
+                )
             raise NativeTestingRebuildAdmissionChanged(
                 "The lane has a recorded protected copy or shared production resource."
             )
@@ -983,6 +1021,7 @@ class NativeTestingRebuildExecution:
             assert allocation is not None and allocation.application is not None
             app_plan = allocation.application.plan
             if existing_publication.state == "planned" and not self.cutover_started():
+                self.guard()
                 self.inputs = self.current_candidate_inputs(allocation)
         self.allocation = allocation
         self.plan = self.build_plan(allocation, app_plan)
