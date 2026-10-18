@@ -8,6 +8,77 @@ the only needed copy of data, production resources and live credentials remain
 protected. A label, missing staff hold, distinct volume name or distinct secret
 version is not proof of those facts.
 
+## Stable-address rebuild lifecycle
+
+`workflows/testing_rebuild.py` provides the service-side lifecycle for a testing
+lane with one stable HTTPS address and a separate candidate copy. It is a source
+component: the existing resource/bootstrap endpoints below do not yet call it.
+It exposes no new HTTP operation, UI control or permission. Its tests qualify the
+controller and checkpoint storage, not a real provider, restored data or a live
+lane.
+
+The immutable plan binds the existing route/address, old and new target/resource
+identities, the candidate build and a managed source reference. Empty rebuilds,
+production-copy restores and configured upstream restores use the same lifecycle.
+The service adapter resolves those references from admitted records; these are
+not caller-supplied provider coordinates. Production destinations and shared
+copy identities are rejected. Different resource names are only a contract
+check; the adapter must independently inspect actual backing resources.
+
+Preparation leaves the serving copy and lane metadata authoritative. A bound
+receipt must verify independent resources, local credentials and removal of live
+connections before candidate startup. Fresh private health and exact runtime
+identity precede switching the existing route. Applied/public health and identity
+at the original address precede metadata adoption and old-copy retirement.
+Retirement drains/stops the old runtime and preserves its storage and custody;
+physical deletion is outside this operation. Public probe URLs must use the
+stable lane origin. Missing, stale, unverified or skipped evidence preserves the
+intent for observation; only a fresh verified failure or identity mismatch
+starts automatic rollback.
+
+Failed preparation or private readiness leaves the old copy serving. Failed
+public verification, including immediately before metadata adoption or before
+the old stop begins, persists an inverse route intent. The controller verifies
+the original copy at the same address and restores its original metadata before
+reporting failure. Publication is a DB-only atomic compare/write/readback under
+the original operation and authority-writer lock. An unavailable publication
+outcome cannot be replaced with an assertion that the old metadata still wins.
+The checkpoint retains whether forward publication started and passes that fact
+to inverse publication, including after a lost commit reply.
+
+`testing_rebuild_storage.py` stores checkpoints in the existing DB-backed record
+payloads, scoped by product, context and operation key. The envelope is completed checkpoint evidence, while the payload keeps
+the actual rebuild stage. It is not an execution lease or a replacement for a
+durable provider fence. The adapter must hold the existing lane/worker lease and
+recheck authorization, holds/use, custody and production isolation before effects.
+The native rebuild protects a current staff hold or positive use. UNKNOWN usage
+alone does not require downtime or a declaration of non-use; it does not supply
+any missing custody, resource-isolation or credential evidence.
+Provider calls reconcile their original dispatch keys before any replay. A
+foreign route, changed plan or inaccessible authority refuses continuation.
+Permission and transport exceptions propagate without a fallback or automatic
+retry.
+
+After an interrupted route switch, read actual applied authority and public
+identity; never issue a second switch merely because its acknowledgement was
+lost. Resumption calls the adapter in reconciliation mode, which can redispatch
+only with the original provider fence's explicit proof that the effect was
+never dispatched and is safe to run. After an interrupted stop, preserve the retirement intent: the old copy
+may already be stopped, so it cannot be advertised as a healthy rollback target.
+The supported exception requires an original stop proven terminal and never
+dispatched, plus fresh private readiness for the old copy. The checkpoint keeps
+that recovery proof before moving back; pending, dispatched and unknown stops
+cannot use this path. A refusal propagates before any inverse action.
+An interrupted preparation retains its candidate, copy receipt and original key.
+Use a compatible controller/adapter for continuation and preserve unresolved
+provider effects, rather than deleting checkpoints or replaying a legacy
+bootstrap against that copy. Terminal checkpoint reads return their historical
+receipt even after a later rebuild moves the lane. They do not reacquire a
+mutation lease or claim current live health; the service caller still authorizes
+the read. Worker/HTTP integration in [#3968](https://github.com/cbusillo/launchplane/issues/3968)
+must supply cancellation/abandonment for failed preparation with retained
+candidate custody before this component is activated as a rebuild control.
+
 ## Repair usage rule
 
 `control_plane/lane_usage.py` owns the usage decision for disposable repair.
@@ -563,6 +634,249 @@ is unchanged; downgrade retains allocation metadata and re-upgrade adopts it.
 An older image cannot continue the new resource route. After activation, retain
 the qualifying image and forward-fix rather than erasing custody or restoring
 an old database to clear the fence.
+
+## Testing candidate storage before adoption
+
+The rebuild candidate allocator keeps custody in
+`launchplane_testing_candidates`, keyed by its service-generated namespace and
+bound to the original operation, intent and serving target. This record is
+separate from the lane's current generation. Allocation creates a private
+project/environment/compose and independent local volumes without changing
+the lane profile, target records, runtime values, inventory or public address.
+The target is reserved in the existing physical provider registry in the same
+transaction as its candidate custody; another lane cannot adopt it.
+Compatibility target-ID records are also fenced, both at capture and before
+subsequent provider effects; an older lane reference cannot become permission
+to qualify or change its target as a candidate.
+
+The caller must hold the authorized lane operation and recheck its authority,
+holds, use, custody and isolation at every checkpoint. Provider effect intent
+and each returned identity are recorded before proceeding. Lost creation
+responses require original-key observation of the complete uniquely named
+placement. Confirmed parents can continue; absent uncertain creates remain
+unknown. Storage retries inspect the original empty, labelled resources and
+refuse changed or in-use storage. Nothing is deleted to make a retry work.
+
+This source component reuses the isolated placement creator used by upgrade
+rehearsals and the existing testing backing-store readback program. It removes
+the need to adopt a candidate as the serving target merely to qualify its
+storage. It does not activate a rebuild endpoint, restore data, move traffic,
+publish a generation or retire the serving copy. Those stages remain part of
+the stable-address rebuild work in [#3963](https://github.com/cbusillo/launchplane/issues/3963)
+and [#3968](https://github.com/cbusillo/launchplane/issues/3968).
+
+The schema migration adds custody without modifying existing lane records.
+Use the normal service schema-migration procedure on delivery. Rolling back
+code retains the candidate table and physical reservations, including uncertain
+effects; recover with the original operation rather than clearing custody or
+reusing its target. Local SQLite tests exercise record semantics; the matching
+PostgreSQL integration cases qualify the actual database path in CI.
+
+## Private candidate build and copy preparation
+
+Candidate application preparation binds an admitted artifact and source to the
+allocation before provider configuration. It reads the existing three generated
+testing-local credentials. Secret selection happens before version lookup and
+decryption, so other managed runtime secrets are never materialized for this
+copy. It does not rotate passwords or write the serving runtime, profile,
+overrides, inventory, target or current-generation records.
+
+The rendered candidate has independent storage, a pinned image, no public
+hostname/router or host ports, and a namespace-qualified private ingress alias.
+Its database and runner remain on the internal data network. The existing
+SQL-before-registry restore runner handles production copies and upstream
+copies; the existing bootstrap handles an empty database. Projected overrides
+remove integration connections and retain the lane's public address. A candidate
+uses its own manual host schedule, so preparation cannot replace the serving
+lane's data-workflow schedule.
+
+Before each provider effect the caller rechecks its exclusive operation lease,
+authority, holds, usage and physical custody. Configuration and deployment
+intent are persisted first. A continuation only accepts the exact configuration
+or the uniquely titled original deployment. An absent or ambiguous effect stays
+unknown. Restore dispatch records the original schedule and prior job IDs;
+continuation observes that one terminal job instead of triggering another.
+Private readiness then checks actual storage/network isolation, pinned installed
+images, runtime and copy identity, integration settings and the web-start gate,
+and authenticates with the testing-local credentials. Passwords and raw program
+output stay private to the provider transport.
+
+A failed terminal restore may be marked abandoned while keeping its candidate
+and custody records. This action does not stop or remove either copy. Running,
+absent and ambiguous provider jobs cannot be abandoned or redispatched. The
+service worker must preserve their original-key recovery path. A prepared copy
+is still private: stable-route switching, atomic serving publication, old-copy
+retirement and the service/UI action are separate stages under #3963. This
+source component does not activate them or establish live CM proof.
+
+Maintenance uses the original candidate operation and its stored receipts.
+Rollback retains candidate application intent, storage and physical reservations;
+it does not clear fences or adopt a candidate as the serving lane. No schema
+migration is added beyond the candidate custody table.
+## Stable testing traffic between disposable copies
+
+The native testing route adapter gives the lane one stable dynamic route identity.
+It binds the existing HTTPS hostname to an observed private predecessor backend
+and the prepared candidate backend. A first migration from Docker-owned routing
+publishes a lane-owned file at strictly higher numeric priority, initially still
+serving the predecessor. The adapter verifies every applicable router and its
+actual backend; it does not treat a duplicate or tied router as proven authority.
+HTTP and HTTPS entrypoints remain distinct when the predecessor uses both.
+Subsequent rebuilds require the recorded owned template and reuse the same route.
+
+The managed testing connection policy is rendered from the same source as Odoo
+Compose routes. It lives in the owned file and survives retirement of its former
+Docker producer. Unknown/broad host rules, unsupported middleware, changed
+predecessor configuration and unexpected services refuse admission. The host-rule
+check evaluates boolean ownership conservatively; a foreign Host clause joined
+with OR cannot hide another matching path, and Go regex syntax is not evaluated
+using Python regex semantics.
+
+The fixed managed-server program discovers the running Dokploy Traefik process,
+its watched writable directory mount and private applied API. It reads only the
+lane-qualified dynamic filename. Publication rechecks the static configuration,
+provider state, current file digest and retained physical web identity, then uses
+the existing proxy container to write a temporary file and atomically rename it.
+No application receives a provider credential or host mount. No global Traefik
+configuration, shared file, process or other product route is updated. The caller
+must hold and renew the original authorized lane/provider operation throughout,
+including immediately before dispatch. A real provider denial propagates through
+the existing transport; there is no second writer or identity fallback.
+
+An absent reply is reconciled from the owned file and the applied API. A written
+but partly/unapplied group stays pending without another dispatch. Public health
+and exact runtime identity remain the controller's separate proof before serving
+publication or old-copy retirement. The old physical copy must still be qualified
+before switch-back; an already stopped predecessor does not prevent observing the
+current candidate, but cannot authorize an inverse switch.
+
+The supported host capability requires Dokploy's directory-mounted dynamic file
+provider, its private applied API and the existing managed terminal/Docker
+transport. Missing capability remains unqualified; no host configuration or access
+grant is invented to make it pass. Source delivery alone does not activate this
+adapter, establish canonical publication or prove CM. Those stages remain #3963.
+Maintenance and rollback use the same recorded route identity, original effect
+and admitted backends; retain the owned template/receipts and old-copy custody.
+Do not remove a route or a data volume to clear uncertainty.
+
+The isolated Traefik rehearsal executes the actual Linux atomic writer and checks
+continuous public old/new/switch-back responses while retaining the old copy. It
+cleans up its own containers/networks. Initial Docker migration, stale provider
+state, partial application, foreign routing and denial paths also have fixture
+behavior tests. These are distinct from managed-host and live CM qualification.
+
+## Atomic serving publication for a rebuilt testing copy
+
+The native publication stage stores the exact predecessor and prepared successor
+metadata before any traffic switch, using existing DB evidence storage. This is
+an internal worker capability, not a caller-supplied target or permission. The
+original provider reservation, current lease holder and expiry, exclusive product
+context, candidate custody, delivered context/instance runtime inputs and generated
+credential metadata are checked within the authority transaction. An input change
+since private preparation refuses adoption. Password values are never added to
+the successor runtime record and no secret or version is rotated. Local database,
+HTTP and disabled-cron coordinates are the same projection used to prepare the
+copy; the HTTP port comes from its managed profile. Canonical adoption cannot
+leave an older database endpoint for a subsequent deploy to select.
+
+After fresh applied routing and verified public health/identity at the unchanged
+origin, one transaction adopts target representations, resource selection,
+neutralized overrides, route provenance, inventory and the deployment receipt.
+A restored copy publishes its real generation witness. An empty rebuild has no
+invented restore generation. Existing ingress/TLS ownership and the profile's
+address remain unchanged. Both physical copies stay reserved; legacy predecessor
+custody is captured before replacing the canonical target. Storage is retained.
+
+The publication receipt commits with those records. A lost reply is resolved from
+that original receipt. An inverse waits for an in-flight original transaction,
+then restores the exact preimage only when the current records still match that
+operation's committed successor. Unknown database outcomes stay pending. An
+uncommitted original transaction proves that no adoption occurred. Completed
+publication provenance remains readable by an authorized service caller so a
+later rebuild can qualify its existing owned route template.
+
+Rebuild checkpoints now also compare-and-write under a database lock; a stale
+writer cannot erase a terminal receipt, effect intent or recovery evidence.
+Legacy predecessor runtime identity fields are retained as actually observed;
+new candidates require an explicit product and immutable image digest. This
+compatibility does not supply lane ownership or authorize a mutation.
+
+This stage replaces sequential canonical record adoption for the native rebuild.
+It does not activate a service/UI action, stop an old copy or prove CM testing.
+The parent integration still wires the controller/provider lifecycle, preserves
+the private backend alias during later ordinary deploys, and qualifies live CM.
+No production mutation or new authorization grant is part of this stage.
+
+## Native testing worker integration
+
+The existing durable target-replacement action accepts testing-only
+`replace-and-cutover` requests with an explicit `empty`, `production_restore`
+or `upstream_restore` source and an immutable artifact/source pair. The native
+worker joins candidate allocation, private application/copy preparation,
+stable-address routing, atomic publication and retained-copy retirement. It
+uses the same action authorization and queue; it adds no grant or alternate
+provider identity. The shared service record store is required.
+
+An original intent retains the serving metadata, observed runtime, actual
+private backend, server and container/data custody before candidate writes.
+Every boundary rechecks the current authorization, exclusive execution and
+provider leases, staff hold, actual login/session use, protected-copy reports,
+physical target aliases and resource/credential isolation. Storage qualification
+runs before application execution. A resumed populated candidate uses its
+original custody and private proof instead of requiring empty storage again.
+Candidate reservations are rechecked before cutover, and unresolved predecessor
+deployments refuse further effects. Whole-project retirement requires only the
+owned Odoo services in that project, not an unrelated application sharing its
+project label.
+
+The restore intent distinguishes a new workflow with no dispatched effect from
+an older or unknown dispatch. A crash before the first effect can continue the
+original workflow; unknown intents are observed without repeating it. A known
+terminal failed build or restore can be abandoned while retaining candidate
+custody and the old serving selection. Historical terminal receipts replay
+without fresh runtime resolution or provider credential reads.
+
+Route writes and retirement have separate original-effect fences within the
+lane operation. A lost reply is observed before continuation; an old or absent
+outcome does not permit a blind duplicate. A crashed queue worker resumes
+observation with the same operation and keys. Explicit provider permission
+failures remain authorization failures and are not retried as pending work.
+Only after fresh public health and identity at the unchanged address and atomic
+canonical publication does retirement disable the predecessor's automatic
+deploys and call the existing [Compose stop API](https://docs.dokploy.com/docs/api/compose).
+Readback requires every service in the old testing project to be stopped. Its
+provider object, containers, volumes and custody remain; no volume is deleted.
+The host helper only reads custody and health. It shares the existing backing-path
+inspection with copy/rehearsal code, including refusing bind aliases of testing
+volumes used by another project. A restarted process with the same runtime and
+data is still the same retained copy.
+
+The old copy does not need its passwords rotated or compared with production.
+The new private copy independently proves its testing-only generated credentials
+and connection isolation before receiving traffic. Existing current local secret
+versions are preserved, including across successive rebuilds.
+
+Ordinary deploys of a published native copy preserve its private backend alias,
+local database coordinates and recorded restore witness. Credential selection
+excludes production/shared bindings before reading values. Existing local
+credential versions are retained; installing changed local versions requires a
+fresh private copy through the same rebuild action.
+
+This is staged integration under [#3987](https://github.com/cbusillo/launchplane/issues/3987),
+not live qualification. Signed-in and supported agent controls, recovery from a
+fully stopped initial legacy predecessor, a live host second-rebuild/next-deploy
+rehearsal and CM testing proof remain under #3963. The legacy local apply command
+is not a live-service fallback. No CM or production mutation is proved by these
+source tests.
+The worker regression executes a second application's configure/deploy/initialize
+stages and same-address adoption, then the ordinary replacement and post-deploy
+workflows for a newer artifact. It verifies retained route, storage, generated
+credential versions, private alias and both contract-owned image references.
+Provider IO and build ordering are mocked, storage is prequalified, and this
+does not constitute a live host rehearsal.
+Continuing native-route refresh is tracked in [#3995](https://github.com/cbusillo/launchplane/issues/3995).
+Scheduled native restores, retained-copy maintenance and capacity integration
+are tracked in [#3996](https://github.com/cbusillo/launchplane/issues/3996).
 
 ## Service collection
 

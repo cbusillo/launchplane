@@ -13698,3 +13698,151 @@ class RealPostgresOdooUpgradeRehearsalTests(unittest.TestCase):
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
         fixture.test_lifecycle_preserves_both_recovery_states_and_all_original_lanes()
+
+
+@unittest.skipUnless(os.environ.get(POSTGRES_TEST_URL_ENV), "PostgreSQL integration URL required")
+class RealPostgresTestingCandidateTests(unittest.TestCase):
+    def test_candidate_capture_also_fences_legacy_lane_aliases(self) -> None:
+        from tests.test_testing_candidate_allocation import TestingCandidateTests
+
+        fixture = TestingCandidateTests()
+        fixture.database_url = self.enterContext(_head_postgres_database())
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.test_legacy_lane_alias_refuses_capture_before_any_candidate_storage()
+
+    def test_candidate_custody_preserves_serving_authority_and_fences_aliases(self) -> None:
+        from tests.test_testing_candidate_allocation import TestingCandidateTests
+
+        fixture = TestingCandidateTests()
+        fixture.database_url = self.enterContext(_head_postgres_database())
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.test_independent_storage_never_publishes_candidate_as_serving()
+
+    def test_original_creation_can_be_observed_and_continued_without_repeating(self) -> None:
+        from tests.test_testing_candidate_allocation import TestingCandidateTests
+
+        fixture = TestingCandidateTests()
+        fixture.database_url = self.enterContext(_head_postgres_database())
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.test_lost_creation_reply_preserves_old_copy_and_never_repeats_effect()
+
+
+class RealPostgresTestingPublicationTests(unittest.TestCase):
+    def test_serving_publication_rollback_and_physical_custody(self) -> None:
+        from tests import test_testing_publication as publication_tests
+
+        with _head_postgres_database() as url:
+            fixture = publication_tests.TestingPublicationTests()
+            fixture.database_url = url
+            fixture.setUp()
+            try:
+                fixture.test_lost_committed_reply_reconciles_and_inverse_restores_exact_preimage()
+            finally:
+                fixture.doCleanups()
+
+    def test_uncommitted_publication_rolls_back_all_serving_records(self) -> None:
+        from tests import test_testing_publication as publication_tests
+
+        with _head_postgres_database() as url:
+            fixture = publication_tests.TestingPublicationTests()
+            fixture.database_url = url
+            fixture.setUp()
+            try:
+                fixture.test_failed_transaction_restores_every_record_and_retry_is_safe()
+            finally:
+                fixture.doCleanups()
+
+    def test_inverse_waits_for_original_forward_commit_before_selecting_preimage(self) -> None:
+        from tests import test_testing_publication as publication_tests
+
+        with _head_postgres_database() as url:
+            fixture = publication_tests.TestingPublicationTests()
+            fixture.database_url = url
+            fixture.setUp()
+            entered, release = threading.Event(), threading.Event()
+
+            def pause(name: str) -> None:
+                if name == "testing_publication" and not entered.is_set():
+                    entered.set()
+                    if not release.wait(10):
+                        raise TimeoutError("fixture did not release original transaction")
+
+            try:
+                fixture.prepare()
+                with (
+                    patch.object(
+                        fixture.store, "_after_product_authority_bundle_step", side_effect=pause
+                    ),
+                    ThreadPoolExecutor(max_workers=2) as pool,
+                ):
+                    forward = pool.submit(fixture.publish)
+                    try:
+                        self.assertTrue(entered.wait(5))
+                        inverse = pool.submit(fixture.publish, inverse=True)
+                        deadline = time.monotonic() + 5
+                        waited = False
+                        while time.monotonic() < deadline:
+                            with fixture.store._session_factory() as session:
+                                waited = bool(
+                                    session.scalar(
+                                        text(
+                                            "SELECT EXISTS(SELECT 1 FROM pg_stat_activity "
+                                            "WHERE datname=current_database() AND wait_event_type='Lock')"
+                                        )
+                                    )
+                                )
+                            if waited:
+                                break
+                            release.wait(0.01)
+                        self.assertTrue(waited, "inverse must wait on the original transaction")
+                        self.assertFalse(inverse.done())
+                    finally:
+                        release.set()
+                    self.assertEqual(forward.result(timeout=10).state, "applied")
+                    self.assertEqual(inverse.result(timeout=10).state, "reversed")
+                    self.assertEqual(fixture.current(), fixture.before)
+            finally:
+                release.set()
+                fixture.doCleanups()
+
+
+class RealPostgresNativeTestingWorkerTests(unittest.TestCase):
+    def run_worker_case(self, name: str) -> None:
+        from tests import test_testing_rebuild_worker as worker_tests
+
+        with _head_postgres_database() as url:
+            fixture = worker_tests.NativeTestingWorkerTests()
+            fixture.database_url = url
+            fixture.setUp()
+            try:
+                getattr(fixture, name)()
+            finally:
+                fixture.doCleanups()
+
+    def test_same_address_publication_and_retirement(self) -> None:
+        self.run_worker_case(
+            "test_one_action_preserves_address_credentials_and_retires_only_after_publication"
+        )
+
+    def test_second_rebuild_preserves_the_address_and_private_deployment_alias(self) -> None:
+        self.run_worker_case(
+            "test_second_rebuild_uses_published_copy_and_preserves_later_deployment_route"
+        )
+
+    def test_expired_queue_worker_resumes_original_observation(self) -> None:
+        self.run_worker_case(
+            "test_expired_native_worker_keeps_its_original_key_and_resumes_observation"
+        )
+
+    def test_lost_stop_exclusion_cannot_restart_retirement(self) -> None:
+        self.run_worker_case(
+            "test_lost_exclusion_reply_cannot_restart_stop_when_new_health_recovers"
+        )
+
+    def test_unknown_stop_is_observed_without_duplicate_dispatch(self) -> None:
+        self.run_worker_case(
+            "test_unknown_dispatched_stop_is_not_excluded_or_repeated_when_health_recovers"
+        )

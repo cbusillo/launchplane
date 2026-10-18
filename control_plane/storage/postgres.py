@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from control_plane.contracts.merge_train_stall import MergeTrainStallRecord
 from control_plane.contracts.odoo_upgrade_rehearsal import OdooUpgradeRehearsalRecord
+from control_plane.contracts.testing_rebuild import TestingRebuildRecord
+from control_plane.contracts.testing_candidate import TestingCandidateAllocation
 
 from pathlib import Path
 
@@ -3440,6 +3442,12 @@ class LaunchplaneDisposableReplacementPreparationRow(Base):
 class LaunchplaneDisposableTestingResourceAllocationRow(Base):
     __tablename__ = "launchplane_disposable_testing_resource_allocations"
     operation_id: Mapped[str] = mapped_column(String, primary_key=True)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneTestingCandidateRow(Base):
+    __tablename__ = "launchplane_testing_candidates"
+    namespace: Mapped[str] = mapped_column(String, primary_key=True)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -7670,6 +7678,61 @@ class PostgresRecordStore(HumanSessionStore):
             )
         self._write_row(self._idempotency_row(record))
 
+    def compare_and_write_testing_rebuild_checkpoint(
+        self,
+        expected: TestingRebuildRecord | None,
+        replacement: LaunchplaneIdempotencyRecord,
+    ) -> None:
+        from control_plane.contracts.testing_rebuild import TestingRebuildRecord
+        from control_plane.testing_rebuild_storage import (
+            REBUILD_CHECKPOINT_ROUTE,
+            REBUILD_CHECKPOINT_SCOPE,
+            require_rebuild_successor,
+        )
+
+        if (
+            replacement.state != "completed"
+            or replacement.scope != REBUILD_CHECKPOINT_SCOPE
+            or replacement.route_path != REBUILD_CHECKPOINT_ROUTE
+        ):
+            raise ValueError("Only testing rebuild evidence may use this checkpoint CAS.")
+        record = TestingRebuildRecord.model_validate(replacement.response_payload)
+        key = canonical_json_sha256(
+            {
+                "product": record.plan.product,
+                "context": record.plan.context,
+                "operation": record.plan.operation_id,
+            }
+        )
+        if (
+            replacement.request_fingerprint != record.plan.digest
+            or replacement.idempotency_key != key
+        ):
+            raise ValueError("Rebuild checkpoint fingerprint or scope differs from its plan.")
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_landing_authority(session, "testing-rebuild:" + replacement.idempotency_key)
+            row = session.scalar(
+                self._idempotency_statement(
+                    scope=replacement.scope,
+                    route_path=replacement.route_path,
+                    idempotency_key=replacement.idempotency_key,
+                    for_update=True,
+                )
+            )
+            current = (
+                TestingRebuildRecord.model_validate(
+                    LaunchplaneIdempotencyRecord.model_validate(row.payload).response_payload
+                )
+                if row is not None
+                else None
+            )
+            if current != expected:
+                raise ValueError("Rebuild checkpoint changed before commit.")
+            require_rebuild_successor(current, record)
+            session.merge(self._idempotency_row(replacement))
+            session.commit()
+
     def write_idempotency_record_once(self, record: LaunchplaneIdempotencyRecord) -> bool:
         """Commit an evidence-only reservation once; never reclaim it after a crash."""
         if record.state != "completed":
@@ -10640,6 +10703,114 @@ class PostgresRecordStore(HumanSessionStore):
                 ),
             )
 
+    def read_testing_candidate(self, namespace: str) -> TestingCandidateAllocation | None:
+        with self._session_factory() as session:
+            row = session.get(LaunchplaneTestingCandidateRow, namespace)
+            return TestingCandidateAllocation.model_validate(row.payload) if row else None
+
+    def find_testing_candidate_by_target(self, target_id: str) -> TestingCandidateAllocation | None:
+        with self._session_factory() as session:
+            rows = tuple(
+                session.scalars(
+                    select(LaunchplaneTestingCandidateRow)
+                    .where(
+                        LaunchplaneTestingCandidateRow.payload["compose_id"].as_string()
+                        == target_id
+                    )
+                    .limit(2)
+                )
+            )
+            if len(rows) > 1:
+                raise ValueError("The physical testing candidate has ambiguous custody.")
+            return TestingCandidateAllocation.model_validate(rows[0].payload) if rows else None
+
+    def compare_and_write_testing_candidate(
+        self, expected: TestingCandidateAllocation | None, replacement: TestingCandidateAllocation
+    ) -> None:
+        replacement = TestingCandidateAllocation.model_validate(replacement.model_dump())
+        if expected is not None:
+            replacement.require_successor(expected)
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            self._lock_landing_authority(session, "testing-candidate:" + replacement.namespace)
+            row = session.get(
+                LaunchplaneTestingCandidateRow, replacement.namespace, with_for_update=True
+            )
+            if (row.payload if row else None) != (
+                self._payload_dict(expected) if expected else None
+            ):
+                raise ValueError("Candidate custody changed; preserve the original operation.")
+            from control_plane.contracts.product_profile_record import (
+                is_exclusive_product_context,
+                product_context_owner_map,
+            )
+
+            profiles = tuple(
+                LaunchplaneProductProfileRecord.model_validate(item.payload)
+                for item in session.scalars(select(LaunchplaneProductProfileRow))
+            )
+            profile = next((item for item in profiles if item.product == replacement.product), None)
+            if (
+                profile is None
+                or profile.driver_id != "odoo"
+                or profile.lifecycle_state != "active"
+                or not any(
+                    lane.context == replacement.context and lane.instance == "testing"
+                    for lane in profile.lanes
+                )
+                or not is_exclusive_product_context(
+                    context=replacement.context,
+                    product=replacement.product,
+                    owners=product_context_owner_map(profiles),
+                )
+            ):
+                raise ValueError("Candidate allocation requires the owned Odoo testing lane.")
+            serving = session.get(LaunchplaneProviderTargetRow, (replacement.context, "testing"))
+            if (
+                serving is None
+                or serving.provider_id != "dokploy"
+                or serving.target_category != "compose"
+                or serving.target_id != replacement.serving_target_id
+            ):
+                raise ValueError("The serving testing target changed during candidate preparation.")
+            if replacement.compose_id:
+                if (
+                    session.scalar(
+                        select(LaunchplaneDokployTargetIdRow)
+                        .where(LaunchplaneDokployTargetIdRow.target_id == replacement.compose_id)
+                        .limit(1)
+                    )
+                    is not None
+                ):
+                    raise ValueError("Candidate identity is already named by a legacy lane target.")
+            if replacement.compose_id and (expected is None or not expected.compose_id):
+                # Physical alias fencing reserves custody without changing the
+                # canonical target, generation, runtime environment or inventory.
+                self._write_provider_target_with_expectation(
+                    session=session,
+                    write=ProviderTargetWrite(
+                        record=ProviderTargetRecord(
+                            context=replacement.namespace,
+                            instance="testing-candidate",
+                            provider_id="dokploy",
+                            target_category="compose",
+                            target_id=replacement.compose_id,
+                            display_name=replacement.namespace,
+                            provider_target_type="compose",
+                            source_label="service:testing-candidate",
+                            updated_at=replacement.created_at.isoformat(),
+                        ),
+                        expected_absent=True,
+                    ),
+                )
+            session.merge(
+                LaunchplaneTestingCandidateRow(
+                    namespace=replacement.namespace, payload=self._payload_dict(replacement)
+                )
+            )
+            session.commit()
+
     def read_odoo_upgrade_rehearsal(self, rehearsal_id: str) -> OdooUpgradeRehearsalRecord | None:
         with self._session_factory() as session:
             row = session.get(LaunchplaneOdooUpgradeRehearsalRow, rehearsal_id)
@@ -13136,7 +13307,24 @@ class PostgresRecordStore(HumanSessionStore):
                     payload=row.payload,
                 )
                 affected_operation_ids.append(record.operation_id)
-                if record.phase in safe_phases and record.attempt < max_attempts:
+                if record.is_native_testing_rebuild:
+                    # Its component intents and original provider fences remain
+                    # authoritative after process death. Requeue observation,
+                    # without releasing a fence or repeating an unknown effect.
+                    recovered_record = record.model_copy(
+                        update={
+                            "status": "pending",
+                            "phase": "created",
+                            "updated_at": now,
+                            "lease_owner": "",
+                            "lease_expires_at": "",
+                            "heartbeat_at": "",
+                            "finished_at": "",
+                            "error_code": "testing_rebuild_observation_pending",
+                            "error_message": "Continue observing the original native testing rebuild.",
+                        }
+                    )
+                elif record.phase in safe_phases and record.attempt < max_attempts:
                     recovered_record = record.model_copy(
                         update={
                             "status": "pending",

@@ -1103,6 +1103,19 @@ def read_current_testing_generation(
 ) -> FreshOdooTestingGeneration | None:
     if instance != "testing":
         return None
+    from control_plane.storage.postgres import PostgresRecordStore
+
+    if isinstance(store, PostgresRecordStore):
+        from control_plane.testing_serving_copy import published_testing_copy
+
+        publication = published_testing_copy(store, product=product, context=context)
+        if publication is not None:
+            target = store.read_dokploy_target_record(context_name=context, instance_name=instance)
+            if target.policies.staff_testing_hold is not None and not task_account_cleanup:
+                raise ValueError("The adopted testing copy has a staff testing hold.")
+            # Native publication's queue/copy/route receipt replaces the old
+            # bootstrap and resource-adoption receipts. Empty copies carry none.
+            return store.read_fresh_odoo_testing_generation(product, context)
     read = getattr(store, "read_fresh_odoo_testing_generation", None)
     if not callable(read):
         return None
