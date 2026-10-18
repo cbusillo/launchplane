@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Literal
 from collections.abc import Callable
@@ -51,6 +52,11 @@ def require_empty_testing_target_creation(
         is_exclusive_product_lane_context,
         product_context_owners,
     )
+
+    if not request.state_volume_path:
+        from control_plane.application_state_volume import require_no_held_state_volume
+
+        require_no_held_state_volume(record_store, request.context)
 
     if (
         request.operation not in {"create-compose", "create-application"}
@@ -172,7 +178,7 @@ class DokployTargetSetupEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = Field(default=1, ge=1)
-    mode: Literal["dry-run", "apply"] = "dry-run"
+    mode: Literal["dry-run", "apply", "readback"] = "dry-run"
     operation: Literal[
         "adopt",
         "create-application",
@@ -205,6 +211,11 @@ class DokployTargetSetupEnvelope(BaseModel):
     domains: tuple[str, ...] = ()
     runtime_port: int | None = Field(default=None, ge=1, le=65535)
     deploy_timeout_seconds: int | None = Field(default=None, ge=1)
+    retain_state_volume_allocation: bool = False
+    expected_state_volume_custody_sha256: str = ""
+    state_volume_path: str = ""
+    state_volume_plan_id: str = ""
+    expected_plan_sha256: str = ""
     expected_current_provider_target: DeployedTargetReference | None = None
     expected_current_provider_target_fingerprint: str = Field(default="", max_length=256)
     replaces_operation_id: str = ""
@@ -235,6 +246,18 @@ class DokployTargetSetupEnvelope(BaseModel):
         self.source_type = self.source_type.strip() or "raw"
         self.compose_path = self.compose_path.strip() or "docker-compose.yml"
         self.custom_git_branch = self.custom_git_branch.strip()
+        if (
+            self.state_volume_path
+            or self.state_volume_plan_id
+            or self.expected_plan_sha256
+            or self.retain_state_volume_allocation
+            or self.expected_state_volume_custody_sha256
+        ):
+            from control_plane.application_state_volume import validate_volume_request
+
+            validate_volume_request(self)
+        elif self.mode == "readback":
+            raise ValueError("Setup readback requires an original state-volume plan.")
         if self.replaces_operation_id and (
             self.operation != "create-compose"
             or self.instance != "testing"
@@ -535,7 +558,58 @@ def execute_dokploy_target_setup(
     disposable_before_create: Callable[[str], None] | None = None,
     disposable_placement: tuple[str, str] | None = None,
     director_source_completion: bool = False,
+    application_mutate: Callable[
+        [str, str, str, dict[str, dokploy_api.JsonValue]], dict[str, dokploy_api.JsonValue]
+    ]
+    | None = None,
+    lane_lock_held: bool = False,
 ) -> dict[str, object]:
+    from control_plane.application_state_volume import LANE_LOCK_PREFIX
+
+    lock = (
+        record_store.testing_replacement_execution_lock(LANE_LOCK_PREFIX + request.context)
+        if request.mode == "apply" and request.instance == "testing" and not lane_lock_held
+        else nullcontext(lambda: None)
+    )
+    with lock as check:
+        if check is None:
+            raise ValueError("Testing lane setup is busy; keep the original operation.")
+        check()
+        return _execute_dokploy_target_setup(
+            control_plane_root_path=control_plane_root_path,
+            record_store=record_store,
+            request=request,
+            required_context_owner=required_context_owner,
+            disposable_checkpoint=disposable_checkpoint,
+            disposable_before_create=disposable_before_create,
+            disposable_placement=disposable_placement,
+            director_source_completion=director_source_completion,
+            application_mutate=application_mutate,
+        )
+
+
+def _execute_dokploy_target_setup(
+    *,
+    control_plane_root_path: Path,
+    record_store: PostgresRecordStore,
+    request: DokployTargetSetupEnvelope,
+    required_context_owner: tuple[str, str] | None = None,
+    disposable_checkpoint: Callable[[], None] | None = None,
+    disposable_before_create: Callable[[str], None] | None = None,
+    disposable_placement: tuple[str, str] | None = None,
+    director_source_completion: bool = False,
+    application_mutate: Callable[
+        [str, str, str, dict[str, dokploy_api.JsonValue]], dict[str, dokploy_api.JsonValue]
+    ]
+    | None = None,
+) -> dict[str, object]:
+    if request.state_volume_path and application_mutate is None:
+        raise ValueError("State-volume creation requires its reviewed durable service operation.")
+    if request.mode == "apply" and request.instance == "testing" and not request.state_volume_path:
+        from control_plane.application_state_volume import require_no_held_state_volume
+
+        require_no_held_state_volume(record_store, request.context)
+
     def mutate_setup(
         host: str, token: str, path: str, payload: dict[str, dokploy_api.JsonValue]
     ) -> dict[str, dokploy_api.JsonValue]:
@@ -690,9 +764,8 @@ def execute_dokploy_target_setup(
             source_label=CREATE_APPLICATION_SOURCE_LABEL,
             policies=_replaced_target_policies(record_store, request),
             apply=apply_changes,
-            mutate_provider=mutate_setup
-            if disposable_checkpoint
-            else mutate_dokploy_payload_for_target_setup,
+            mutate_provider=application_mutate
+            or (mutate_setup if disposable_checkpoint else mutate_dokploy_payload_for_target_setup),
             fetch_target_payload=fetch_setup
             if disposable_checkpoint
             else fetch_dokploy_target_payload_for_setup,

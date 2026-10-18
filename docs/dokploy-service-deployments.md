@@ -148,6 +148,123 @@ setup should use the deployed service route or admin workflow instead. It
 still leaves runtime env, managed secrets, volumes, ports, and health behavior
 as explicit setup rather than inferred provider state.
 
+### Testing application state volume
+
+`POST /v1/dokploy-targets/setup`, `operation: create-application`, optionally
+accepts `state_volume_path`, the product's reviewed absolute container state
+directory. This option creates only a new testing application in a new project
+and environment on the supplied server. Existing target replacement keeps the
+usual exact `expected_current_provider_target`, never-deployed evidence,
+isolation-staging hold and deployment lock. It accepts no volume name, host
+path, mount id, existing application id or caller-selected `app_name`.
+
+Start with `mode: dry-run`. The service saves only planning evidence in the DB
+and returns `state_volume_plan_id`, `plan_sha256`, the exact target intent and
+`state_volume: {name, mount_path}`. The service generates the new volume and
+application names, and returns `allocation` with the effective generated project,
+environment, target and application names. Caller names remain reviewed labels;
+only the generated names identify recoverable provider placement. No provider
+resource is created by a dry run. Keep the
+private request and response together. For `mode: apply`, add the returned
+`state_volume_plan_id`, `expected_plan_sha256: <plan_sha256>`, the normal setup
+confirmation and reason, and an `Idempotency-Key`. The same caller must use the
+saved plan. Changed input, lane authority, ownership or provider binding refuses
+before effects. A fresh dry run is needed after an intentional change.
+
+The durable provider runner fences the lane and records each creation phase.
+The new application must have empty mounts and match its generated identity and
+reviewed placement. Its single named volume is attached and independently read
+back before the application becomes the tracked target. The ordinary image and
+runtime-input update path preserves this mount across testing deployments.
+Creation does not deploy an artifact, copy state, or prove runtime retention.
+
+Use `mode: readback` with the unchanged private request, original plan/digest and
+original `Idempotency-Key` for observational recovery evidence. Readback reports
+`operation_state`, durable `provider_effect_phase`, `configuration_matches`,
+`configuration_evidence` (`matches`, `differs` or `unavailable`) and `custody_sha256`.
+Provider failures and missing targets return value-free `unavailable` evidence.
+Readback never creates a resource or adopts a record.
+
+Repeating **apply with the original key** can recover a lost project, environment
+or application response from exactly one original generated marker in complete
+provider inventory. It resumes only the next undispatched step under a renewed
+lease and the lane lock. A lost mount response resumes only when independent
+readback proves the exact mount exists. Positive mount proof survives recovery;
+if that mount is later removed or changed, the original key refuses rather than
+attaching it again. Retain custody and review a fresh plan to continue.
+Separate lease-fenced progress is bound to the original operation key and
+survives runner retries and process restarts. A completed plan refuses use under
+a new key before effects or a held reservation can remain. Final target adoption
+checks and locks the same live reservation and rechecks reviewed lane authority
+inside its record transaction, so retained, expired or stale workers cannot
+publish a lane target. Duplicate markers, incomplete inventory,
+changed identities and an absent uncertain mount preserve the unresolved operation.
+An empty inventory does not prove a dispatched provider create cannot finish later.
+A different key or plan cannot bypass the held lane reservation. All testing mutations through the service setup route, including adoption and
+source completion, share the lane lock and refuse unresolved storage custody.
+Direct-DB break-glass and separate recovery paths are outside this route; their
+authority changes make an in-flight creation plan stale, but do not prevent
+retaining its exact custody under current context ownership.
+
+For an uncertain allocation that cannot resume, keep its resources and explicitly
+retain its custody through the service. Obtain current original-key readback.
+Send the unchanged reviewed setup request with `mode: apply`,
+`retain_state_volume_allocation: true`,
+`expected_state_volume_custody_sha256: <custody_sha256>`, the original key/plan,
+and the normal exact confirmation and reason. The service requires the original
+execution lease to have expired, current active exclusive context ownership
+and exact reviewed custody. Retention performs no provider effect and does not
+require the original profile bytes or provider binding to remain unchanged.
+A display-name or policy update therefore cannot strand the old allocation.
+It atomically fences the old worker and records
+`allocation_state: retained_uncertain` and `applied: false`. Ordinary apply
+replay under the original key returns that same retained receipt, not a created
+target; callers must check `applied` and `allocation_state`. If the original
+allocation is already the tracked target, retention refuses; use original-key
+recovery to complete its receipt. When a verified-mount checkpoint and the exact
+generated target are already committed, original-key recovery completes that
+receipt from database evidence without requiring current provider availability.
+It reports `allocation_state: adopted`, `applied: true` and
+`configuration_evidence: unavailable`; this receipt does not prove the current
+mount configuration. Use readback to inspect that separately.
+This performs no provider mutation, deployment or deletion. Its original intent,
+known ids and pending phase remain retained even if a late create materializes.
+The retained allocation can never resume, including under another key. To keep
+working, request a fresh dry-run and apply its independent names with a new key.
+Do not delete or recreate partial resources as a retry. Retention is available
+under existing setup authority; it grants no access to a mounted resource.
+
+The mount path must contain mutable state only. The image author must keep
+application code outside that directory. Syntactic path validation cannot inspect
+an image or prove that a directory contains no code. The reviewed path is echoed
+in the saved plan; creation does not qualify the image's storage layout.
+
+Recovery uses the original caller scope, including its token label. Rotating
+that label does not transfer access to the original plan or release its lane
+reservation. Preserve the original receipts if the caller becomes unavailable; changing
+the caller scope requires a separate authority decision, and this operation
+provides no cross-scope transfer. Applications with mounts also fail
+the existing agent retirement guard; use a supported admin retirement/data
+custody path, rather than an unmounted-target deletion command, when retiring
+this testing lane. Creating storage does not authorize its later deletion.
+
+Retention refusals expose stable error codes for caller decisions:
+
+| Code | Next action |
+| --- | --- |
+| `application_state_volume_execution_active` | Wait for the original lease to expire. |
+| `application_state_volume_lane_busy` | Retry the original operation after the executor releases the lane. |
+| `application_state_volume_custody_changed` | Obtain new original-key readback and review its custody digest. |
+| `application_state_volume_already_adopted` | Apply the original key to complete the adoption receipt. |
+| `application_state_volume_owner_changed` | Resolve current ownership through the existing authority process. |
+| `application_state_volume_unqualified` | Correct the request or its reviewed plan before retrying. |
+
+An HTTP 202 alone does not prove creation: callers must inspect both `applied`
+and `allocation_state`, including retained replay responses.
+
+This option is service-only. The local/bootstrap CLI has no storage apply path.
+Actual state retention and isolation still require testing-lane qualification.
+
 Product repos may document these expected facts, but they must not store live
 Launchplane product profiles, target ids, provider credentials, or lifecycle
 records as repo-local authority.
