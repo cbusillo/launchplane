@@ -222,6 +222,9 @@ def main(spec):
         if outcome not in {'applied','excluded','busy','unknown','retired'}:
             raise RuntimeError('The original route execution outcome is unavailable')
         return {'type':'complete','writer_outcome':outcome,'execution_custody':custody,**binding}
+    network_mode=proxy.get('HostConfig',{}).get('NetworkMode','')
+    if not isinstance(proxy_networks,dict) or not isinstance(proxy_networks.get('dokploy-network'),dict) or not isinstance(network_mode,str) or network_mode=='host' or network_mode.startswith('container:'):
+        raise RuntimeError('Managed proxy requires managed ingress in its own network namespace')
     static=docker('exec',proxy['Id'],'cat',STATIC).decode()
     response=docker('exec',proxy['Id'],'sh','-c',API_READER,'_',str(MAX_API_BYTES+1))
     if len(response)>MAX_API_BYTES:

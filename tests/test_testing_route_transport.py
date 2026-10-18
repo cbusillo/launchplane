@@ -451,12 +451,25 @@ class TestingRouteTransportTests(unittest.TestCase):
 
     def test_route_observation_does_not_require_host_access_to_the_docker_address(self) -> None:
         self.api_calls = 0
-        self.containers["proxy"]["NetworkSettings"]["Networks"] = {}
+        self.containers["proxy"]["NetworkSettings"]["Networks"]["dokploy-network"] = {}
         frame = self.client.read()
         self.assertEqual(frame["raw"]["routers"], self.raw["routers"])
         self.assertEqual(self.api_calls, 1)
         self.assertEqual(self.effect_count, 0)
         self.assertFalse(self.route_file.exists())
+
+    def test_route_read_requires_managed_ingress_in_the_proxys_own_network_namespace(self) -> None:
+        networks = deepcopy(self.containers["proxy"]["NetworkSettings"]["Networks"])
+        for membership, mode in (({}, ""), (networks, "host"), (networks, "container:foreign")):
+            with self.subTest(mode=mode, membership=membership):
+                self.containers["proxy"]["NetworkSettings"]["Networks"] = membership
+                self.containers["proxy"]["HostConfig"] = {"NetworkMode": mode}
+                calls = self.api_calls
+                with self.assertRaises(NativeSourceUnavailable):
+                    self.client.read()
+                self.assertEqual(self.api_calls, calls)
+                self.assertEqual(self.effect_count, 0)
+                self.assertFalse(self.route_file.exists())
 
     def test_applied_api_response_must_be_complete_bounded_and_successful(self) -> None:
         valid = json.dumps(self.raw).encode()

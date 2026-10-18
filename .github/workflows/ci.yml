@@ -14,6 +14,7 @@ env:
   DOCKER_COMPOSE_VERSION: v5.3.1
   LAUNCHPLANE_CI_POSTGRES_IMAGE: &postgres_test_image postgres:17@sha256:0af65001d05296a2ead57ac4a6412433d8913d1bb5d0c88435a7d1e1ee5cb04b
   BROWSER_SMOKE_IMAGE: mcr.microsoft.com/playwright:v1.63.0-noble@sha256:eff16c30e6f3f4af0a03fa4b706120d5e9b0891c344a27d64559aff5900a4a27
+  LAUNCHPLANE_CI_TRAEFIK_IMAGE: traefik:v3.3@sha256:2cd5cc75530c8d07ae0587c743d23eb30cae2436d07017a5ff78498b1a43d09f
 
 permissions:
   contents: read
@@ -897,6 +898,14 @@ jobs:
           --plan-file "${UNITTEST_TIMING_SNAPSHOT_DIR}/plan.json"
           --timings-output "${UNITTEST_TIMINGS_RESULTS_DIR}/shard-${{ matrix.shard_index }}.json"
 
+      - name: Qualify the container-local proxy API reader
+        if: matrix.shard_index == 0
+        env:
+          LAUNCHPLANE_TEST_TRAEFIK_IMAGE: ${{ env.LAUNCHPLANE_CI_TRAEFIK_IMAGE }}
+        run: |
+          docker pull "$LAUNCHPLANE_TEST_TRAEFIK_IMAGE"
+          uv run --extra dev python -m unittest tests.test_testing_route_rehearsal.TestingRouteRehearsalTests.test_api_reader_works_with_no_bridge_or_published_port -v
+
       - name: Upload unittest timings
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -1010,6 +1019,13 @@ jobs:
 
       - name: Run unit tests
         run: uv run --extra dev python -m unittest
+
+      - name: Qualify the container-local proxy API reader
+        env:
+          LAUNCHPLANE_TEST_TRAEFIK_IMAGE: ${{ env.LAUNCHPLANE_CI_TRAEFIK_IMAGE }}
+        run: |
+          docker pull "$LAUNCHPLANE_TEST_TRAEFIK_IMAGE"
+          uv run --extra dev python -m unittest tests.test_testing_route_rehearsal.TestingRouteRehearsalTests.test_api_reader_works_with_no_bridge_or_published_port -v
 
   postgres_integration:
     needs: [runner_pool, verified_tree]
