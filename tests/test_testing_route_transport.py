@@ -462,6 +462,7 @@ class TestingRouteTransportTests(unittest.TestCase):
         valid = json.dumps(self.raw).encode()
         for response, exit_code, unavailable in (
             (valid + b" " * (transport.MAX_TRAEFIK_API_BYTES - len(valid)), 0, False),
+            (valid + b" " * (transport.MAX_TRAEFIK_API_BYTES + 1 - len(valid)), 0, True),
             (valid + b" " * transport.MAX_TRAEFIK_API_BYTES, 0, True),
             (valid[:-1], 0, True),
             (valid, 1, True),
