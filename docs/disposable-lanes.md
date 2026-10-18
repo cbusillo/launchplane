@@ -12,10 +12,14 @@ version is not proof of those facts.
 
 `control_plane/lane_usage.py` owns the usage decision for disposable repair.
 A current staff-testing hold always protects the lane. Without a hold,
-automated UNKNOWN or positive usage (including recent login/session reports)
-cannot block repair of a verified-down non-production lane. The usage observation stays UNKNOWN; this
-is repair eligibility, not an assertion that nobody ever used the copy.
-Serving or unverified lanes retain their existing usage protections.
+UNKNOWN occupancy alone does not require downtime or a declaration of non-use
+for a disposable non-production lane. It remains UNKNOWN, never `unused`.
+Positive usage, including recent login/session reports, protects a serving or
+unverified lane. Q380's existing verified-down rule can qualify those automated
+positive reports for repair. This is repair eligibility, not an assertion that
+nobody ever used the copy. Initial generation, native rebuild and shared
+disposable admission all use this rule; an invalid lifetime non-use witness
+also becomes UNKNOWN rather than a new requirement for negative evidence.
 Production admission and release gates are unchanged.
 
 Verified down means every effective application HTTP check has failed in each
@@ -33,7 +37,7 @@ unmonitored states remain unverified. No probe or live action is initiated by
 this decision. The guard logs the durable monitor record IDs and interval;
 the drill also preserves those references in its private admission receipt.
 
-For initial Odoo generation preparation and its resource/bootstrap rechecks,
+For positive-use qualification during initial Odoo generation preparation and its resource/bootstrap rechecks,
 HTTP 404 also qualifies when the same call's fixed host probe independently
 verifies the exact testing web container is stopped. Complete container
 inventories before and after must agree on identity, running state, start time,
@@ -1345,9 +1349,16 @@ does not expire in the middle of that continuously leased restore. A reclaimed
 attempt requires fresh admission. It reads login history from the original served database and its committed
 copy witness, including when web is stopped or the new copy is incomplete;
 copied production login rows in the new database cannot stand in for testing use.
-An unavailable original login database normally skips rather than assuming
-non-use. The verified-down repair rule above can instead qualify usage while
-preserving UNKNOWN; the independent resource/copy inspection must still pass.
+An unavailable original login database or failed history query leaves occupancy
+UNKNOWN after the independent resource/copy inspection succeeds. It never
+becomes non-use. The scoped activation receipt retains that UNKNOWN and binds
+its resource proof to the exact previous or selected generation, including at
+continuation. The existing verified-down rule still qualifies historical
+positive use; new positive use and a current hold retain their checks. A provider
+authorization denial remains a denial and escapes admission without another read
+or identity. The scheduler records `authorization_denied` against the original
+admission revision, with no queued operation, so an unchanged poll cannot repeat
+that denied read. A failed physical/copy inspection supplies no resource proof.
 This also applies when Launchplane's own stop or stalled operation caused the
 downtime: excluding that cause would recreate a repair deadlock. The original
 database is retained and the already-opened new-copy gate below still protects

@@ -335,6 +335,70 @@ class TestingDrillTests(TestingDrillScenario):
     def test_down_lane_queues_without_login_history_and_keeps_resource_qualification(self) -> None:
         self.assert_down_lane_drill_admitted("unknown")
 
+    def test_unknown_usage_queues_without_downtime_and_stays_unknown_at_activation(self) -> None:
+        record_safety(self.store, self.profile.product, self.context, "testing", usage="unknown")
+        self.signins.return_value = None
+        self.scheduler.run_once()
+        self.assertEqual(self.evidence().status, "queued")
+        self.activate()
+        operation = self.operation()
+        receipt = self.store.read_idempotency_record(
+            scope=DRILL_SCOPE, route_path=DRILL_ROUTE, idempotency_key=operation.idempotency_key
+        )
+        assert receipt is not None
+        safety = receipt.response_payload["activation_safety"]
+        assert isinstance(safety, dict)
+        self.assertEqual(safety["usage"], "unknown")
+        require_drill_checkpoint(self.store, operation)
+        historical = self.store.read_disposable_lane_safety(
+            self.profile.product, self.context, "testing"
+        )
+        assert historical is not None
+        self.assertEqual(historical.usage, "unknown")
+        from control_plane.odoo_testing_drill import DrillSkipped
+
+        self.store.write_idempotency_record(
+            receipt.model_copy(
+                update={
+                    "response_payload": {
+                        **receipt.response_payload,
+                        "activation_safety": {
+                            **safety,
+                            "usage_evidence": "service:odoo-testing-drill:foreign-copy",
+                        },
+                    }
+                }
+            )
+        )
+        with self.assertRaises(DrillSkipped):
+            require_drill_checkpoint(self.store, operation)
+
+    def test_admission_propagates_a_provider_denial_without_reinterpreting_it_as_unknown(
+        self,
+    ) -> None:
+        from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
+        from control_plane.odoo_testing_drill import collect_drill_admission
+
+        self.signins.side_effect = NativeSourceAuthorizationDenied("fixture authorization refusal")
+        with self.assertRaises(NativeSourceAuthorizationDenied):
+            collect_drill_admission(self.store, self.gen, self.now)
+        self.signins.assert_called_once()
+
+    def test_scheduler_records_denial_without_retrying_unchanged_admission(self) -> None:
+        from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
+
+        self.signins.side_effect = NativeSourceAuthorizationDenied("fixture authorization refusal")
+        self.scheduler.run_once()
+        self.scheduler.run_once()
+        self.assertEqual(self.evidence().status, "fail")
+        self.assertEqual(self.evidence().step, "authorization_denied")
+        self.assertEqual(self.evidence().operation_id, "")
+        self.signins.assert_called_once()
+        self.assertEqual(
+            self.store.read_fresh_odoo_testing_generation(self.profile.product, self.context),
+            self.gen,
+        )
+
     def test_down_lane_overrides_historical_use_for_drill_repair(self) -> None:
         self.assert_down_lane_drill_admitted("in_use")
 

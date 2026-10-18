@@ -96,7 +96,7 @@ def disposable_collection_coverage() -> dict[str, str]:
     }
 
 
-def collect_down_testing_resource_facts(
+def collect_testing_resource_facts(
     store: object, *, product: str, context: str, now: datetime
 ) -> dict[str, str] | None:
     """Reinspect a service-created resettable copy without requiring login history."""

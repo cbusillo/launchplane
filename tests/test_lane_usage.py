@@ -61,7 +61,7 @@ class LaneUsageTests(unittest.TestCase):
             )
 
     def decision(
-        self, usage: str = "unknown", instance: str = "testing", *, runtime_stopped: bool = False
+        self, usage: str = "in_use", instance: str = "testing", *, runtime_stopped: bool = False
     ) -> LaneUsageDecision:
         return evaluate_lane_usage(
             self.store,
@@ -120,7 +120,26 @@ class LaneUsageTests(unittest.TestCase):
                 update={"policies": target.policies.model_copy(update={"staff_testing_hold": hold})}
             )
         )
-        self.assertTrue(self.decision().protected)
+        for usage in ("unknown", "in_use"):
+            self.assertTrue(self.decision(usage).protected)
+
+    def test_unknown_occupancy_does_not_require_downtime_or_a_non_use_declaration(self) -> None:
+        for status in (None, 200, 403):
+            with self.subTest(status=status):
+                if status is not None:
+                    self.health(status=status)
+                self.assertFalse(self.decision("unknown").protected)
+                self.assertTrue(self.decision("in_use").protected)
+        record_safety(
+            self.store,
+            self.product,
+            self.context,
+            "testing",
+            usage="unknown",
+            observed_at=self.now,
+            expires_at=self.now + timedelta(minutes=5),
+        )
+        self.assertTrue(self.require())
 
     def test_down_lane_keeps_known_use_protected_for_retirement_and_isolation(self) -> None:
         from control_plane.connection_isolation_qualification import (
@@ -231,11 +250,13 @@ class LaneUsageTests(unittest.TestCase):
                 self.assertTrue(decision.protected)
                 self.assertNotEqual(decision.reason, unverified.reason)
 
-    def test_serving_unknown_and_production_remain_protected(self) -> None:
+    def test_serving_positive_use_and_production_remain_protected(self) -> None:
         self.health(status=200)
         self.assertTrue(self.decision().protected)
+        self.assertFalse(self.decision("unknown").protected)
         self.health(instance="prod")
         self.assertTrue(self.decision(instance="prod").protected)
+        self.assertTrue(self.decision("unknown", instance="prod").protected)
         self.assertFalse(self.decision("unused", instance="prod").protected)
 
     def test_access_errors_do_not_prove_a_lane_unavailable_to_its_users(self) -> None:
@@ -435,7 +456,9 @@ class LaneUsageTests(unittest.TestCase):
         self.assertIsNone(superseded.recovery_journal)
         self.assertIsNotNone(superseded.disposable_supersession)
 
-    def test_invalid_lifetime_proof_is_unknown_usage_with_the_same_down_repair_rule(self) -> None:
+    def test_invalid_lifetime_proof_remains_unknown_without_becoming_a_non_use_requirement(
+        self,
+    ) -> None:
         from control_plane.testing_never_served import NON_USE_EVIDENCE_PREFIX
 
         def evidence() -> None:
@@ -450,8 +473,7 @@ class LaneUsageTests(unittest.TestCase):
             )
 
         evidence()
-        with self.assertRaises(DisposableLaneSafetyUnknown):
-            self.require()
+        self.assertTrue(self.require())
         self.health()
         evidence()
         self.assertTrue(self.require())

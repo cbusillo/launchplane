@@ -32,6 +32,7 @@ from control_plane.disposable_lanes import (
     disposable_lane_binding_sha256,
     disposable_lane_configuration,
 )
+from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 from control_plane.launchplane_reconcile_authorization import (
     build_launchplane_reconcile_authorization,
 )
@@ -236,22 +237,12 @@ def collect_drill_admission(
         target_id = store.read_dokploy_target_id_record(
             context_name=generation.context, instance_name="testing"
         )
-        downtime = evaluate_lane_usage(
-            store,
-            profile=profile,
-            target=target,
-            target_id=target_id,
-            instance="testing",
-            usage="unknown",
-            now=moment,
-        )
         used = read_drill_recent_signins(
             store,
             generation,
             now,
             history_generation=history_generation,
             history_database=history_database,
-            **({"usage_required": False} if downtime.reason == "verified_down" else {}),
         )
         decision = evaluate_lane_usage(
             store,
@@ -264,6 +255,8 @@ def collect_drill_admission(
         )
     except DrillCopyAlreadyServing as error:
         raise DrillSkipped("new_testing_copy_already_serving") from error
+    except NativeSourceAuthorizationDenied:
+        raise
     except Exception as error:
         raise DrillSkipped("successful_login_check_unreadable") from error
     if decision.protected:
@@ -291,7 +284,7 @@ def collect_drill_admission(
         observed_by="service:odoo-testing-drill",
         observer_kind="director_agent",
         binding_sha256=binding,
-        usage="unknown" if decision.reason == "verified_down" else "unused",
+        usage="unknown" if used is None or decision.reason == "verified_down" else "unused",
         data="reproducible",
         production_resources="isolated",
         usage_evidence=(
@@ -437,16 +430,24 @@ def require_drill_checkpoint(
     admitted = DisposableLaneSafety.model_validate(
         receipt.response_payload.get("activation_safety")
     )
+    unknown_qualified = admitted.usage_evidence.startswith(VERIFIED_DOWN_USAGE_EVIDENCE_PREFIX)
+    if admitted.usage == "unknown" and not unknown_qualified:
+        # First activation inspects the retained copy; reclaim inspects the
+        # selected generation. Both exact snapshots already live in this receipt.
+        unknown_qualified = any(
+            admitted.usage_evidence
+            == "service:odoo-testing-drill:"
+            + generation_binding(FreshOdooTestingGeneration.model_validate(snapshot))
+            for snapshot in (
+                receipt.response_payload.get("previous_generation"),
+                receipt.response_payload.get("planned_generation"),
+            )
+            if isinstance(snapshot, dict)
+        )
     if (
         (admitted.product, admitted.context, admitted.instance)
         != (operation.product, operation.context, "testing")
-        or (
-            admitted.usage != "unused"
-            and not (
-                admitted.usage == "unknown"
-                and admitted.usage_evidence.startswith(VERIFIED_DOWN_USAGE_EVIDENCE_PREFIX)
-            )
-        )
+        or (admitted.usage != "unused" and not (admitted.usage == "unknown" and unknown_qualified))
         or admitted.data != "reproducible"
         or admitted.production_resources != "isolated"
         or receipt.response_payload.get("activation_attempt") != operation.attempt
