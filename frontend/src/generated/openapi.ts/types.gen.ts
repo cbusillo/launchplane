@@ -7666,6 +7666,33 @@ export type SubmitTestingRebuildResponses = {
 
 export type SubmitTestingRebuildResponse = SubmitTestingRebuildResponses[keyof SubmitTestingRebuildResponses];
 
+export type LookupTestingRebuildData = {
+    body: TestingRebuildSubmit;
+    headers: {
+        'Idempotency-Key': string;
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path: {
+        product: string;
+    };
+    query?: never;
+    url: '/v1/products/{product}/testing-rebuild/lookup';
+};
+
+export type LookupTestingRebuildErrors = {
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type LookupTestingRebuildError = LookupTestingRebuildErrors[keyof LookupTestingRebuildErrors];
+
+export type LookupTestingRebuildResponses = {
+    200: TestingRebuildResponse;
+};
+
+export type LookupTestingRebuildResponse = LookupTestingRebuildResponses[keyof LookupTestingRebuildResponses];
+
 export type WriteReleaseReviewDecisionData = {
     body: ReleaseReviewDecisionEnvelope;
     headers?: {

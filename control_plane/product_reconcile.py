@@ -35,7 +35,7 @@ from pathlib import Path
 from threading import Event, Thread
 from typing import Literal, Protocol, cast
 from urllib.error import HTTPError
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlsplit
 from uuid import uuid4
 
 import click
@@ -2827,11 +2827,20 @@ def _testing_build_read[Result](read: Callable[[str], Result], path: str) -> Res
     try:
         return read(path)
     except BuildProvenanceError as error:
-        if isinstance(error.__cause__, HTTPError) and error.__cause__.code in {401, 403}:
+        failure = error.__cause__
+        if isinstance(failure, HTTPError) and failure.code in {401, 403}:
             # The shared selector may skip an invalid build. An identity refusal
             # is not an invalid build and must stop before another candidate read.
-            raise NativeSourceAuthorizationDenied(
-                "The existing build reader refused access."
+            rate_limited = failure.code == 403 and (
+                failure.headers.get("Retry-After") is not None
+                or failure.headers.get("X-RateLimit-Remaining") == "0"
+            )
+            if urlsplit(failure.geturl()).hostname == "api.github.com" and not rate_limited:
+                raise NativeSourceAuthorizationDenied(
+                    "The existing build reader refused access."
+                ) from error
+            raise ProductReconcileError(
+                "The current build read is unavailable.", code="testing_build_unavailable"
             ) from error
         raise
 
@@ -2854,17 +2863,18 @@ def latest_verified_testing_build(
     if profile.driver_id != "odoo" or lane.instance != "testing":
         raise ValueError("Native rebuild build selection requires an Odoo testing lane.")
     identity = product_repository_identity(record_store, profile)
-    verified, _, blocked = _desired_release(
+    plan, verified = _plan_testing_target(
+        record_store=cast(ProductReconcileStore, record_store),
         transport=_TestingRebuildBuildReads(
             resolve_build_provenance_transport(record_store, profile)
         ),
         profile=profile,
         repository_id=identity.repository_id,
-        lane=lane,
     )
     if not isinstance(verified, VerifiedBuildArtifact):
         raise ProductReconcileError(
-            "No current verified testing build.", code=blocked or "no_verified_build"
+            "No current verified testing build.",
+            code=str(plan.get("reason") or "no_verified_build"),
         )
     return verified
 

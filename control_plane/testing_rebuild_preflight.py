@@ -25,7 +25,7 @@ from control_plane.odoo_target_replacement_plan_http import (
 from control_plane.odoo_testing_native_source import native_testing_source_authority
 from control_plane.testing_candidate_runtime import candidate_credential_authority
 from control_plane.runtime_environments import resolve_site_runtime_environment
-from control_plane.dokploy import post_deploy
+from control_plane.dokploy import post_deploy, api
 from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_rebuild_service import (
@@ -84,8 +84,15 @@ def inspect_testing_rebuild(
         created_at=now,
         updated_at=now,
     )
-    intent = capture_rebuild_intent(root, store, operation)
-    check_testing_rebuild_protection(root, store, operation, intent)
+    try:
+        intent = capture_rebuild_intent(root, store, operation)
+        check_testing_rebuild_protection(root, store, operation, intent)
+    except api.DokployRequestFailed as error:
+        if error.status_code in {401, 403}:
+            raise NativeSourceAuthorizationDenied(
+                "The provider refused the native preflight read."
+            ) from error
+        raise
     try:
         candidate_credential_authority(store, lane.context)
     except NativeSourceAuthorizationDenied:

@@ -35,7 +35,10 @@ from control_plane.odoo_product_driver_http import (
     resolve_odoo_product_route,
 )
 from control_plane.odoo_stable_lane import OdooStableLaneOperationConflictError
-from control_plane.release_review import require_unchanged_production_artifact
+from control_plane.release_review import (
+    require_unchanged_production_artifact,
+    ProductionChangeRequiresPromotion,
+)
 
 
 ODOO_TARGET_REPLACEMENT_APPLY_ROUTE = "/v1/drivers/odoo/target-replacement-apply"
@@ -67,6 +70,10 @@ class OdooTargetReplacementApplyLaneBusyError(ValueError):
 
 class OdooTargetReplacementApplyCurrentArtifactChangedError(ValueError):
     pass
+
+
+class OdooTargetReplacementApplyAdmissionRefusedError(ValueError):
+    """Validation refused before entering the operation's create transaction."""
 
 
 class OdooTargetReplacementApplyOperationStore(Protocol):
@@ -146,7 +153,10 @@ def enqueue_odoo_target_replacement_apply_operation(
     created_at: str,
     authorization: DurableOperationAuthorization,
 ) -> tuple[dict[str, object], dict[str, object]]:
-    operation_store = odoo_target_replacement_apply_operation_store(record_store)
+    try:
+        operation_store = odoo_target_replacement_apply_operation_store(record_store)
+    except click.ClickException as error:
+        raise OdooTargetReplacementApplyAdmissionRefusedError from error
     existing_operation = find_odoo_target_replacement_apply_operation_by_idempotency_key(
         operation_store=operation_store,
         idempotency_key=idempotency_key,
@@ -162,27 +172,34 @@ def enqueue_odoo_target_replacement_apply_operation(
     if request.replacement.strategy == "replace-and-cutover" and not request.replacement.reason:
         raise ValueError("A testing rebuild requires a concrete reason.")
 
-    require_unchanged_production_artifact(
-        record_store=record_store,
-        product=request.replacement.product,
-        instance=request.replacement.instance,
-        artifact_id=request.replacement.artifact_id,
-    )
-    _validate_target_replacement_apply_artifact_authority(
-        operation_store=operation_store,
-        replacement_request=request.replacement,
-        context=context,
-    )
-
-    operation = build_odoo_target_replacement_apply_operation_record(
-        replacement_request=request.replacement,
-        context=context,
-        idempotency_key=idempotency_key,
-        idempotency_scope=idempotency_scope,
-        request_fingerprint=request_fingerprint,
-        created_at=created_at,
-        authorization=authorization,
-    )
+    try:
+        require_unchanged_production_artifact(
+            record_store=record_store,
+            product=request.replacement.product,
+            instance=request.replacement.instance,
+            artifact_id=request.replacement.artifact_id,
+        )
+        _validate_target_replacement_apply_artifact_authority(
+            operation_store=operation_store,
+            replacement_request=request.replacement,
+            context=context,
+        )
+        operation = build_odoo_target_replacement_apply_operation_record(
+            replacement_request=request.replacement,
+            context=context,
+            idempotency_key=idempotency_key,
+            idempotency_scope=idempotency_scope,
+            request_fingerprint=request_fingerprint,
+            created_at=created_at,
+            authorization=authorization,
+        )
+    except (
+        OdooTargetReplacementApplyCurrentArtifactChangedError,
+        ProductionChangeRequiresPromotion,
+    ):
+        raise
+    except (ValueError, click.ClickException) as error:
+        raise OdooTargetReplacementApplyAdmissionRefusedError from error
     try:
         operation, created_operation = (
             operation_store.create_odoo_stable_target_replacement_operation_record_if_no_active_lane(

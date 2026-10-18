@@ -94046,6 +94046,98 @@
         "summary": "Inspect"
       }
     },
+    "/v1/products/{product}/testing-rebuild/lookup": {
+      "post": {
+        "description": "Read the original request after a denied recovery; never admit or retry it.",
+        "operationId": "lookup_testing_rebuild",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 256,
+              "minLength": 1,
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TestingRebuildSubmit"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TestingRebuildResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Lookup Original"
+      }
+    },
     "/v1/products/{product}/testing-rebuild/operations/{operation_id}": {
       "get": {
         "operationId": "read_testing_rebuild",
@@ -100815,6 +100907,7 @@
     "/v1/products/{product}/environments/{environment}/promotion/dry-run": "dry_run_product_promotion",
     "/v1/products/{product}/environments/{environment}/promotion/workflow-dispatch": "dispatch_product_promotion_workflow",
     "/v1/products/{product}/testing-rebuild": "submit_testing_rebuild",
+    "/v1/products/{product}/testing-rebuild/lookup": "lookup_testing_rebuild",
     "/v1/release-review/decisions": "write_release_review_decision",
     "/v1/release-review/urgent-openings": "open_urgent_release_review",
     "/v1/service/delivery/apply-receipt": "read_service_delivery_apply_receipt",

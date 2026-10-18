@@ -3,7 +3,9 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path as FilePath
-from typing import Annotated, Literal
+from typing import Annotated, Literal, NoReturn
+
+import click
 
 from fastapi import Depends, Header, Path, Query
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -26,6 +28,7 @@ from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDepend
 from control_plane.odoo_target_replacement_apply_http import (
     ODOO_TARGET_REPLACEMENT_APPLY_ROUTE,
     OdooTargetReplacementApplyEnvelope,
+    OdooTargetReplacementApplyAdmissionRefusedError,
     OdooTargetReplacementApplyIdempotencyKeyReusedError,
     OdooTargetReplacementApplyCurrentArtifactChangedError,
     OdooTargetReplacementApplyLaneBusyError,
@@ -152,6 +155,25 @@ def register_testing_rebuild_routes(
             ),
         )
 
+    def refuse(error: Exception, trace_id: str) -> NoReturn:
+        if isinstance(error, NativeSourceAuthorizationDenied):
+            status, code, message = (
+                403,
+                "authorization_denied",
+                "The existing provider identity refused the testing preflight read.",
+            )
+        elif isinstance(error, TestingRebuildRefused):
+            status, code, message = 409, error.code, str(error)
+        else:
+            status, code, message = (
+                409,
+                "testing_rebuild_not_ready",
+                "Testing rebuild was not admitted. Refresh the lane evidence before another request.",
+            )
+        raise common.http_error(
+            status_code=status, trace_id=trace_id, code=code, message=message
+        ) from error
+
     def inspect(
         product: Annotated[str, Path(min_length=1)],
         identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],
@@ -181,24 +203,15 @@ def register_testing_rebuild_routes(
                 request=request,
                 verified_manifest=verified.manifest,
             )
-        except TestingRebuildRefused as error:
-            raise common.http_error(
-                status_code=409, trace_id=trace_id, code=error.code, message=str(error)
-            ) from error
-        except NativeSourceAuthorizationDenied as error:
-            raise common.http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message="The existing provider identity refused the testing preflight read.",
-            ) from error
-        except (ValueError, LookupError, ProductReconcileError, BuildProvenanceError) as error:
-            raise common.http_error(
-                status_code=409,
-                trace_id=trace_id,
-                code="testing_rebuild_not_ready",
-                message="Testing rebuild inputs are unavailable or protected. Check the lane evidence.",
-            ) from error
+        except (
+            NativeSourceAuthorizationDenied,
+            ValueError,
+            LookupError,
+            ProductReconcileError,
+            BuildProvenanceError,
+            click.ClickException,
+        ) as error:
+            refuse(error, trace_id)
 
     def submit(
         product: Annotated[str, Path(min_length=1)],
@@ -266,24 +279,15 @@ def register_testing_rebuild_routes(
                 verified_manifest=verified.manifest,
             )
             record_verified_build_artifact(record_store=store, verified=verified)
-        except TestingRebuildRefused as error:
-            raise common.http_error(
-                status_code=409, trace_id=trace_id, code=error.code, message=str(error)
-            ) from error
-        except NativeSourceAuthorizationDenied as error:
-            raise common.http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message="The existing provider identity refused the testing preflight read.",
-            ) from error
-        except (ValueError, LookupError, ProductReconcileError, BuildProvenanceError) as error:
-            raise common.http_error(
-                status_code=409,
-                trace_id=trace_id,
-                code="testing_rebuild_not_ready",
-                message="Testing rebuild was not admitted. Refresh the lane evidence before another request.",
-            ) from error
+        except (
+            NativeSourceAuthorizationDenied,
+            ValueError,
+            LookupError,
+            ProductReconcileError,
+            BuildProvenanceError,
+            click.ClickException,
+        ) as error:
+            refuse(error, trace_id)
 
         try:
             records, _ = enqueue_odoo_target_replacement_apply_operation(
@@ -314,6 +318,8 @@ def register_testing_rebuild_routes(
                 code="testing_rebuild_not_ready",
                 message="Testing changed or another operation holds the lane. Inspect again.",
             ) from error
+        except OdooTargetReplacementApplyAdmissionRefusedError as error:
+            refuse(error, trace_id)
         operation_id = str(records["odoo_stable_target_replacement_operation_id"])
         return response(
             store.read_odoo_stable_target_replacement_operation_record(operation_id), trace_id
@@ -340,6 +346,51 @@ def register_testing_rebuild_routes(
             ) from error
         return response(operation, trace_id)
 
+    def lookup_original(
+        product: Annotated[str, Path(min_length=1)],
+        payload: TestingRebuildSubmit,
+        identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],
+        record_store: Annotated[object, Depends(common.get_record_store)],
+        idempotency_key: Annotated[
+            str, Header(alias="Idempotency-Key", min_length=1, max_length=256)
+        ],
+    ) -> TestingRebuildResponse:
+        """Read the original request after a denied recovery; never admit or retry it."""
+        trace_id = common.next_trace_id()
+        store = require_admin(identity, record_store, trace_id)
+        if not idempotency_key.strip():
+            raise common.http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="idempotency_key_required",
+                message="Lookup requires the original request key.",
+            )
+        original = find_odoo_target_replacement_apply_operation_by_idempotency_key(
+            operation_store=store,
+            idempotency_key=idempotency_key.strip(),
+            idempotency_scope=idempotency_scope(identity),
+        )
+        if original is None:
+            raise common.http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="testing_rebuild_not_observed",
+                message="The original request has no observed operation yet. Keep its key and continue read-only lookup.",
+            )
+        if (
+            original.product != product
+            or not original.is_native_testing_rebuild
+            or original.request_fingerprint
+            != request_fingerprint({"product": product, **payload.model_dump(mode="json")})
+        ):
+            raise common.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="idempotency_key_reused",
+                message="This request key identifies another intent.",
+            )
+        return response(original, trace_id)
+
     app.add_api_route(
         TESTING_REBUILD_ROUTE + "/inputs",
         inspect,
@@ -352,6 +403,13 @@ def register_testing_rebuild_routes(
         submit,
         methods=["POST"],
         operation_id="submit_testing_rebuild",
+        response_model=TestingRebuildResponse,
+    )
+    app.add_api_route(
+        TESTING_REBUILD_ROUTE + "/lookup",
+        lookup_original,
+        methods=["POST"],
+        operation_id="lookup_testing_rebuild",
         response_model=TestingRebuildResponse,
     )
     app.add_api_route(

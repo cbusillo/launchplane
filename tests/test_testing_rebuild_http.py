@@ -14,6 +14,10 @@ from control_plane.contracts.artifact_identity import ArtifactSourceBuild
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.http_routes import testing_rebuild as routes
 from control_plane import testing_rebuild_preflight as preflight
+from control_plane import odoo_target_replacement_apply_http as admission
+from control_plane.contracts.odoo_stable_target_replacement_operation import (
+    OdooStableTargetReplacementOperationRecord,
+)
 from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
 from tests import test_testing_rebuild_worker as worker_tests
 from tests import test_odoo_prod_promotion_operation as administrator_tests
@@ -109,6 +113,94 @@ class TestingRebuildHttpTests(unittest.IsolatedAsyncioTestCase):
             self.store.read_artifact_manifest(self.manifest.artifact_id)
         self.assertEqual(self.fixture.effects, [])
 
+    async def test_provider_denial_and_unavailable_preflight_cannot_queue(self) -> None:
+        import click
+        from control_plane.dokploy import api
+
+        before = self.store.list_odoo_stable_target_replacement_operation_records()
+        for failure, status in (
+            (
+                api.DokployRequestFailed(
+                    method="GET",
+                    path="/api/compose.one",
+                    detail="private-provider-message",
+                    status_code=403,
+                ),
+                403,
+            ),
+            (
+                api.DokployRequestFailed(
+                    method="GET",
+                    path="/api/compose.one",
+                    detail="private-provider-message",
+                    status_code=503,
+                ),
+                409,
+            ),
+            (click.ClickException("private-bootstrap-message"), 409),
+        ):
+            for method in ("GET", "POST"):
+                with (
+                    self.subTest(failure=type(failure).__name__, method=method),
+                    patch.object(preflight, "capture_rebuild_intent", side_effect=failure),
+                ):
+                    response = await self.call(
+                        method,
+                        self.payload if method == "POST" else None,
+                        path=self.url if method == "POST" else self.url + "/inputs",
+                    )
+                self.assertEqual(response.status_code, status, response.text)
+                self.assertTrue(response.json()["trace_id"])
+                self.assertEqual(
+                    response.json()["error"]["code"],
+                    "authorization_denied" if status == 403 else "testing_rebuild_not_ready",
+                )
+                self.assertNotIn("private-", response.text)
+        self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), before)
+        self.assertEqual(self.fixture.effects, [])
+
+    async def test_pre_admission_enqueue_validation_has_a_fixed_refusal(self) -> None:
+        before = self.store.list_odoo_stable_target_replacement_operation_records()
+        with patch.object(
+            admission,
+            "_validate_target_replacement_apply_artifact_authority",
+            side_effect=ValueError("private-revalidated-artifact"),
+        ):
+            response = await self.call("POST", self.payload)
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()["error"]["code"], "testing_rebuild_not_ready")
+        self.assertTrue(response.json()["trace_id"])
+        self.assertNotIn("private-", response.text)
+        self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), before)
+
+    async def test_lost_create_reply_keeps_the_admitted_operation_uncertain(self) -> None:
+        create = self.store.create_odoo_stable_target_replacement_operation_record_if_no_active_lane
+
+        def committed(
+            record: OdooStableTargetReplacementOperationRecord,
+        ) -> tuple[OdooStableTargetReplacementOperationRecord, bool]:
+            create(record)
+            raise ValueError("fixture lost database reply after commit")
+
+        with (
+            patch.object(
+                self.store,
+                "create_odoo_stable_target_replacement_operation_record_if_no_active_lane",
+                side_effect=committed,
+            ),
+            self.assertRaises(ValueError),
+        ):
+            await self.call("POST", self.payload)
+        saved = next(
+            operation
+            for operation in self.store.list_odoo_stable_target_replacement_operation_records()
+            if operation.idempotency_key == "button-one"
+        )
+        self.assertTrue(saved.is_native_testing_rebuild)
+        observed = await self.call("POST", self.payload, path=self.url + "/lookup")
+        self.assertEqual(observed.status_code, 200, observed.text)
+        self.assertEqual(observed.json()["operation"]["operation_id"], saved.operation_id)
+
     async def test_one_submit_replay_and_poll_keep_original_build_and_reason(self) -> None:
         accepted = await self.call("POST", self.payload)
         self.assertEqual(accepted.status_code, 200, accepted.json())
@@ -128,6 +220,26 @@ class TestingRebuildHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(polled.status_code, 200, polled.json())
         self.assertEqual(polled.json()["operation"], operation)
         self.assertNotIn("request", polled.json()["operation"])
+        self.assertEqual(self.fixture.effects, [])
+
+    async def test_original_key_lookup_only_reads_and_never_admits_missing_or_changed_intent(
+        self,
+    ) -> None:
+        before = self.store.list_odoo_stable_target_replacement_operation_records()
+        absent = await self.call("POST", self.payload, path=self.url + "/lookup", csrf=False)
+        self.assertEqual(absent.status_code, 404, absent.text)
+        self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), before)
+        accepted = await self.call("POST", self.payload)
+        self.assertEqual(accepted.status_code, 200, accepted.text)
+        self.latest.side_effect = AssertionError("Lookup cannot reselect, prepare or enqueue")
+        looked_up = await self.call("POST", self.payload, path=self.url + "/lookup", csrf=False)
+        self.assertEqual(looked_up.status_code, 200, looked_up.text)
+        self.assertEqual(looked_up.json()["operation"], accepted.json()["operation"])
+        changed = await self.call(
+            "POST", {**self.payload, "reason": "Changed intent"}, path=self.url + "/lookup"
+        )
+        self.assertEqual(changed.status_code, 409, changed.text)
+        self.assertNotIn(accepted.json()["operation"]["operation_id"], changed.text)
         self.assertEqual(self.fixture.effects, [])
 
     async def test_missing_csrf_and_non_testing_input_cannot_queue(self) -> None:
@@ -155,6 +267,7 @@ class TestingRebuildHttpTests(unittest.IsolatedAsyncioTestCase):
         for method, path, payload in (
             ("GET", self.url + "/inputs", None),
             ("POST", self.url, self.payload),
+            ("POST", self.url + "/lookup", self.payload),
         ):
             result = await self.call(method, payload, path=path)
             self.assertEqual(result.status_code, 403, result.json())
@@ -282,7 +395,7 @@ class TestingRebuildHttpTests(unittest.IsolatedAsyncioTestCase):
             calls.append(path)
             raise BuildProvenanceError(
                 "Fixture read refused", code="github_read_failed"
-            ) from HTTPError("https://provider.invalid/read", 403, "Forbidden", Message(), None)
+            ) from HTTPError("https://api.github.com/read", 403, "Forbidden", Message(), None)
 
         reader = product_reconcile._TestingRebuildBuildReads(Mock(get_json=denied))
         with self.assertRaises(NativeSourceAuthorizationDenied):
@@ -293,6 +406,40 @@ class TestingRebuildHttpTests(unittest.IsolatedAsyncioTestCase):
             except BuildProvenanceError:
                 reader.get_json("older")
         self.assertEqual(calls, ["current"])
+
+    def test_rate_limit_or_expired_storage_url_stops_selection_without_identity_denial(
+        self,
+    ) -> None:
+        from control_plane import product_reconcile
+        from control_plane.build_provenance import BuildProvenanceError
+        from unittest.mock import Mock
+
+        for url, headers in (
+            ("https://api.github.com/repos/example/actions", {"X-RateLimit-Remaining": "0"}),
+            ("https://api.github.com/repos/example/actions", {"Retry-After": "60"}),
+            ("https://artifacts.example.invalid/archive", {}),
+        ):
+            calls: list[str] = []
+            values = Message()
+            for key, value in headers.items():
+                values[key] = value
+
+            def unavailable(path: str) -> object:
+                calls.append(path)
+                raise BuildProvenanceError(
+                    "fixture temporary read failure", code="github_read_failed"
+                ) from HTTPError(url, 403, "Forbidden", values, None)
+
+            reader = product_reconcile._TestingRebuildBuildReads(Mock(get_json=unavailable))
+            with (
+                self.subTest(url=url, headers=headers),
+                self.assertRaises(product_reconcile.ProductReconcileError),
+            ):
+                try:
+                    reader.get_json("current")
+                except BuildProvenanceError:
+                    reader.get_json("older")
+            self.assertEqual(calls, ["current"])
 
     async def test_new_machine_admission_requires_reason_but_original_receipt_still_replays(
         self,

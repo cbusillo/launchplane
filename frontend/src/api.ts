@@ -5,7 +5,7 @@ import type {
   LogoutPayload,
   ProductListPayload,
 } from "./types";
-import type { InspectTestingRebuildData, InspectTestingRebuildResponse, ReadTestingRebuildResponse, SubmitTestingRebuildData, SubmitTestingRebuildResponse } from "./generated/openapi.ts";
+import type { InspectTestingRebuildData, InspectTestingRebuildResponse, ReadTestingRebuildResponse, SubmitTestingRebuildData, SubmitTestingRebuildResponse, LookupTestingRebuildData, LookupTestingRebuildResponse } from "./generated/openapi.ts";
 import type {
   ApplyProductionBackupAuthorityData,
   ApplyProductionBackupAuthorityResponse,
@@ -846,6 +846,15 @@ export function submitTestingRebuild(
 
 export function readTestingRebuild(product: string, operationId: string, signal?: AbortSignal): Promise<ReadTestingRebuildResponse> {
   return requestJson(`/v1/products/${encodeURIComponent(product)}/testing-rebuild/operations/${encodeURIComponent(operationId)}`, "GET", undefined, signal);
+}
+
+export function lookupTestingRebuild(product: string, payload: LookupTestingRebuildData["body"], options: BrowserOperationOptions): Promise<LookupTestingRebuildResponse> {
+  const request: LookupTestingRebuildData = {
+    url: BROWSER_WRITE_ROUTES.testingRebuildLookup, path: { product }, body: payload,
+    headers: { "Idempotency-Key": options.idempotencyKey },
+  };
+  return requestJson(request.url.replace("{product}", encodeURIComponent(product)), "POST", request.body,
+    options.signal, options.idempotencyKey);
 }
 
 export function readOdooProdPromotionOperation(

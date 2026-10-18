@@ -8,6 +8,8 @@ export interface TestingRebuildAttempt {
   payload: SubmitTestingRebuildData["body"];
   operationId?: string;
   denied?: boolean;
+  dispatchStarted?: boolean;
+  readOnlyRecovery?: boolean;
 }
 
 export function saveTestingRebuildAttempt(product: string, attempt: TestingRebuildAttempt | null, storage: BrowserOperationStorage = sessionStorage) {
@@ -27,7 +29,15 @@ export function readTestingRebuildAttempt(product: string, storage: BrowserOpera
       && ["empty", "production_restore", "upstream_restore"].includes(attempt.payload.data_source_mode)
       && typeof attempt.payload.reason === "string" && attempt.payload.reason.trim() && attempt.payload.reason.length <= 1000
       && (attempt.operationId === undefined || typeof attempt.operationId === "string" && !!attempt.operationId.trim())
-      && (attempt.denied === undefined || typeof attempt.denied === "boolean")) return attempt;
+      && (attempt.denied === undefined || typeof attempt.denied === "boolean")
+      && (attempt.dispatchStarted === undefined || typeof attempt.dispatchStarted === "boolean")
+      && (attempt.readOnlyRecovery === undefined || typeof attempt.readOnlyRecovery === "boolean")) {
+      // Older saved denials did not distinguish a write refusal from a failed
+      // recovery/read. Preserve their key and allow only lookup, never a write.
+      return attempt.dispatchStarted === undefined
+        ? { ...attempt, dispatchStarted: true, denied: false, readOnlyRecovery: !!attempt.denied }
+        : attempt;
+    }
   } catch { /* Unreadable browser state is not an operation handle. */ }
   return null;
 }
@@ -35,6 +45,7 @@ export function readTestingRebuildAttempt(product: string, storage: BrowserOpera
 interface TestingRebuildDependencies {
   submit: (product: string, payload: SubmitTestingRebuildData["body"], options: BrowserOperationOptions) => Promise<TestingRebuildResponse>;
   read: (product: string, operationId: string, signal?: AbortSignal) => Promise<TestingRebuildResponse>;
+  lookup: (product: string, payload: SubmitTestingRebuildData["body"], options: BrowserOperationOptions) => Promise<TestingRebuildResponse>;
   wait: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
   persist: (attempt: TestingRebuildAttempt | null) => void;
   progress: (response: TestingRebuildResponse) => void;
@@ -42,16 +53,22 @@ interface TestingRebuildDependencies {
 
 export async function runTestingRebuild(attempt: TestingRebuildAttempt, dependencies: TestingRebuildDependencies, signal?: AbortSignal): Promise<TestingRebuildResponse> {
   if (attempt.denied) throw new Error("This request was denied. It will not be submitted again.");
+  const previouslyDispatched = !!attempt.dispatchStarted;
+  attempt = { ...attempt, dispatchStarted: true };
   dependencies.persist(attempt);
   let response: TestingRebuildResponse;
   try {
     response = attempt.operationId
       ? await dependencies.read(attempt.product, attempt.operationId, signal)
-      : await dependencies.submit(attempt.product, attempt.payload, { idempotencyKey: attempt.key, signal });
+      : attempt.readOnlyRecovery
+        ? await dependencies.lookup(attempt.product, attempt.payload, { idempotencyKey: attempt.key, signal })
+        : await dependencies.submit(attempt.product, attempt.payload, { idempotencyKey: attempt.key, signal });
   } catch (error) {
     if (error instanceof LaunchplaneApiError && [401, 403].includes(error.statusCode)) {
-      dependencies.persist({ ...attempt, denied: true });
-    } else if (!attempt.operationId && error instanceof LaunchplaneApiError && error.statusCode === 409
+      dependencies.persist(attempt.operationId || previouslyDispatched
+        ? { ...attempt, readOnlyRecovery: true }
+        : { ...attempt, denied: true });
+    } else if (!attempt.operationId && !previouslyDispatched && error instanceof LaunchplaneApiError && error.statusCode === 409
       && ["testing_rebuild_not_ready", "testing_staff_hold", "testing_in_use", "testing_needed_copy",
         "testing_production_resources_shared", "testing_credentials_unverified", "testing_restore_source_unconfigured"].includes(error.code)) {
       // These are explicit admission refusals before an operation is queued.

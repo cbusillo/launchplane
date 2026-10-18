@@ -905,8 +905,9 @@ source tests.
 The testing Actions page replaces the unavailable generic replacement cards with
 a typed administrator control for fresh empty,
 sanitized production and configured upstream copies. It shows the unchanged
-address and selects the latest verified product build through the existing
-testing build selector. The audit reason is prefilled and may be edited; a ready
+address and selected short commit. Selection uses the ordinary testing planner's
+current-release inputs and forward-build guard; an unavailable current manifest
+cannot silently move testing to its ancestor. The audit reason is prefilled and may be edited; a ready
 lane can be rebuilt with the primary button without entering build IDs or text.
 `GET /v1/products/{product}/testing-rebuild/inputs`
 reads that selection, actual retained-copy/route admission, current use/hold and
@@ -930,7 +931,20 @@ The browser persists the original payload/key and accepted operation ID. A
 reload watches a known operation with GET; a lost enqueue reply requires an
 explicit recovery of that same request. A denied request is retained and never
 automatically resubmitted. Typed operation views expose status and phase without
-provider payloads, authorization records or requester text. The source feature
+provider payloads, authorization records or requester text. The browser
+distinguishes a confirmed first-submit denial from an unavailable watch or denied
+recovery of an earlier uncertain dispatch. The latter retain the original request
+and operation. After a denied recovery, `POST /testing-rebuild/lookup` on the same
+product prefix only reads the original key and exact intent; it cannot enqueue,
+reselect a build or call a provider. Absence is not proof that an earlier request
+cannot still arrive, so lookup retains the uncertain request. Known operation IDs
+resume with GET after sign-in. A confirmed first-submit denial can be discarded
+locally to refresh inspection, without another submit. Provider 401/403 preflight
+refusals carry a denial trace. Other known pre-admission failures use a fixed
+not-ready response; an uncertain create/commit reply remains uncertain. GitHub
+rate limits and expired artifact-storage URLs stop build selection as unavailable,
+without trying an older candidate or misreporting an identity denial.
+The source feature
 requires normal train delivery and service activation; its tests and mocked
 browser journey do not establish CM health or rebuild timing.
 The worker regression executes a second application's configure/deploy/initialize
