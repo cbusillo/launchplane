@@ -23,6 +23,8 @@ from tests import test_testing_runtime_separation as testing_separation
 from tests import test_testing_separation_resources as independent_storage
 from tests import test_testing_activation as testing_activation
 from tests import test_testing_hold_rehearsal as testing_hold_rehearsal
+from tests import test_testing_rebuild as testing_rebuild_tests
+from control_plane.contracts.testing_rebuild import TestingRebuildRecord
 from tests import test_merge_train_historical_completion_storage as historical_storage_tests
 from unittest.mock import Mock, patch
 from uuid import uuid4
@@ -13761,6 +13763,91 @@ class RealPostgresTestingCandidateTests(unittest.TestCase):
 
 
 class RealPostgresTestingPublicationTests(unittest.TestCase):
+    @contextmanager
+    def checkpoint_fixture(self) -> Iterator[testing_rebuild_tests.TestingRebuildTests]:
+        with _head_postgres_database() as url:
+            fixture = testing_rebuild_tests.TestingRebuildTests()
+            fixture.database_url = url
+            fixture.setUp()
+            try:
+                yield fixture
+            finally:
+                fixture.records._engine.dispose()
+                fixture.doCleanups()
+
+    def test_checkpoint_compare_and_write_refuses_a_stale_writer(self) -> None:
+        with self.checkpoint_fixture() as fixture:
+            fixture.test_checkpoint_compare_and_write_refuses_a_stale_writer()
+
+    def test_checkpoint_first_insert_serializes_before_an_absent_row_exists(self) -> None:
+        with self.checkpoint_fixture() as fixture:
+            record = TestingRebuildRecord(
+                plan=fixture.plan, began_at=fixture.provider.now, updated_at=fixture.provider.now
+            )
+            entered, release = threading.Event(), threading.Event()
+            original = fixture.records._idempotency_row
+
+            def pause(evidence: LaunchplaneIdempotencyRecord) -> Any:
+                if not entered.is_set():
+                    entered.set()
+                    if not release.wait(10):
+                        raise TimeoutError("fixture did not release first checkpoint insert")
+                return original(evidence)
+
+            with (
+                patch.object(fixture.records, "_idempotency_row", side_effect=pause),
+                ThreadPoolExecutor(max_workers=2) as pool,
+            ):
+                first = pool.submit(
+                    fixture.store.save, record.model_copy(update={"publication_started": True})
+                )
+                try:
+                    self.assertTrue(entered.wait(5))
+                    stale = pool.submit(fixture.store.save, record)
+                    deadline = time.monotonic() + 5
+                    waited = False
+                    while time.monotonic() < deadline and not stale.done():
+                        with fixture.records._session_factory() as session:
+                            waited = bool(
+                                session.scalar(
+                                    text(
+                                        "SELECT EXISTS(SELECT 1 FROM pg_stat_activity "
+                                        "WHERE datname=current_database() AND wait_event_type='Lock')"
+                                    )
+                                )
+                            )
+                        if waited:
+                            break
+                        release.wait(0.01)
+                    self.assertTrue(waited)
+                    self.assertFalse(stale.done())
+                finally:
+                    release.set()
+                first.result(timeout=10)
+                with self.assertRaises(ValueError):
+                    stale.result(timeout=10)
+            self.assertTrue(fixture.store.load(fixture.plan).publication_started)
+
+    def test_uncommitted_inverse_preserves_changed_inputs_and_serving_authority(self) -> None:
+        from tests import test_testing_publication as publication_tests
+
+        cases = (
+            publication_tests.TestingPublicationTests.test_changed_generated_credential_metadata_refuses_without_adoption,
+            publication_tests.TestingPublicationTests.test_runtime_insert_refuses_before_any_adoption,
+            publication_tests.TestingPublicationTests.test_uncommitted_inverse_preserves_a_later_serving_snapshot,
+            publication_tests.TestingPublicationTests.test_foreign_predecessor_alias_refuses_inverse_without_changing_serving,
+        )
+        for case in cases:
+            with self.subTest(case=case.__name__), _head_postgres_database() as url:
+                fixture = publication_tests.TestingPublicationTests()
+                fixture.database_url = url
+                fixture.setUp()
+                try:
+                    case(fixture)
+                finally:
+                    fixture.store._engine.dispose()
+                    fixture.doCleanups()
+
     def test_serving_publication_rollback_and_physical_custody(self) -> None:
         from tests import test_testing_publication as publication_tests
 

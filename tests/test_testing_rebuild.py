@@ -219,10 +219,14 @@ class TestingProvider:
 
 
 class TestingRebuildTests(unittest.TestCase):
+    database_url = ""
+
     def setUp(self) -> None:
         self.temporary = TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.database_url = f"sqlite+pysqlite:///{Path(self.temporary.name) / 'state.sqlite'}"
+        self.database_url = self.database_url or (
+            f"sqlite+pysqlite:///{Path(self.temporary.name) / 'state.sqlite'}"
+        )
         self.records = PostgresRecordStore(database_url=self.database_url)
         self.records.ensure_schema()
         self.store = RecordTestingRebuildStore(self.records)
@@ -246,20 +250,19 @@ class TestingRebuildTests(unittest.TestCase):
             {**self.plan.model_dump(), "old": old.model_dump()}
         )
         self.assertEqual(plan.old.runtime_identity, old.runtime_identity)
-        for foreign in ("another-product",):
-            with self.assertRaises(ValueError):
-                TestingRebuildPlan.model_validate(
-                    {
-                        **plan.model_dump(),
-                        "old": {
-                            **old.model_dump(),
-                            "runtime_identity": {
-                                **old.runtime_identity.model_dump(),
-                                "product": foreign,
-                            },
+        with self.assertRaises(ValueError):
+            TestingRebuildPlan.model_validate(
+                {
+                    **plan.model_dump(),
+                    "old": {
+                        **old.model_dump(),
+                        "runtime_identity": {
+                            **old.runtime_identity.model_dump(),
+                            "product": "another-product",
                         },
-                    }
-                )
+                    },
+                }
+            )
         with self.assertRaises(ValueError):
             TestingRebuildPlan.model_validate(
                 {
