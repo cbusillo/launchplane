@@ -1,6 +1,8 @@
 """Execute fixed host and atomic writer programs against isolated route files."""
 
 from copy import deepcopy
+import base64
+from contextlib import redirect_stdout
 import io
 import json
 import os
@@ -39,6 +41,13 @@ class TestingRouteTransportTests(unittest.TestCase):
             deployment_record_id="old-deployment",
             artifact_id="old-build",
             source_git_ref="old-source",
+        )
+        self.new_identity = self.identity.model_copy(
+            update={
+                "deployment_record_id": "new-deployment",
+                "artifact_id": "new-build",
+                "source_git_ref": "new-source",
+            }
         )
         self.static = (
             "providers:\n  file:\n    directory: "
@@ -80,6 +89,30 @@ class TestingRouteTransportTests(unittest.TestCase):
                 },
             },
         }
+        namespace = self.plan.new_backend.removeprefix("http://").split(":")[0]
+        self.containers["new"] = {
+            "Id": "new",
+            "Name": "/" + namespace + "-web-1",
+            "State": {"Status": "running"},
+            "Config": {
+                "Labels": {
+                    "com.docker.compose.project": namespace,
+                    "com.docker.compose.service": "web",
+                },
+                "Env": [
+                    "PLATFORM_INSTANCE=testing",
+                    "LAUNCHPLANE_RUNTIME_IDENTITY_JSON=" + self.new_identity.model_dump_json(),
+                ],
+            },
+            "NetworkSettings": {
+                "Networks": {
+                    "dokploy-network": {
+                        "IPAddress": "172.20.0.4",
+                        "Aliases": [namespace],
+                    }
+                }
+            },
+        }
         self.bin = self.root / "bin"
         self.bin.mkdir()
         self.script(
@@ -96,6 +129,7 @@ class TestingRouteTransportTests(unittest.TestCase):
             b"permission denied while trying to connect to the Docker daemon socket"
         )
         self.before_publish: Any = None
+        self.writer_timeout = False
         self.original_run = subprocess.run
         self.enterContext(patch.object(transport, "_read_remote", side_effect=self.remote))
         self.client = transport.DokployTestingRouteTransport(
@@ -142,6 +176,8 @@ class TestingRouteTransportTests(unittest.TestCase):
             )
         elif command[1:4] == ["exec", "-i", "proxy"]:
             self.effect_count += 1
+            if self.writer_timeout:
+                raise subprocess.TimeoutExpired(command, 1)
             if self.deny:
                 return subprocess.CompletedProcess(
                     command, 1, stdout=b"", stderr=self.denial_message
@@ -165,8 +201,6 @@ class TestingRouteTransportTests(unittest.TestCase):
         return subprocess.CompletedProcess(command, 0, stdout=result, stderr=b"")
 
     def remote(self, **kwargs: Any) -> None:
-        namespace: dict[str, Any] = {"__name__": "fixed_program_test"}
-        exec(compile(kwargs["program"], "<testing-route-host>", "exec"), namespace)
         opener = Mock()
         opener.open.side_effect = lambda *_args, **_kwargs: io.BytesIO(
             json.dumps(self.raw).encode()
@@ -175,19 +209,37 @@ class TestingRouteTransportTests(unittest.TestCase):
         def dispatch() -> None:
             if kwargs["payload"]["mode"] == "publish" and self.before_publish is not None:
                 self.before_publish()
+            output = io.StringIO()
             with (
                 patch("subprocess.run", side_effect=self.command),
                 patch("urllib.request.build_opener", return_value=opener),
+                patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "route-program",
+                        base64.b64encode(json.dumps(kwargs["payload"]).encode()).decode(),
+                        "route-frame:",
+                    ],
+                ),
+                redirect_stdout(output),
             ):
-                # build_opener was imported by the fixed program at compile time.
-                namespace["build_opener"] = lambda *_args, **_kwargs: opener
                 try:
-                    frame = namespace["main"](kwargs["payload"])
-                except PermissionError:
-                    raise NativeSourceAuthorizationDenied("fixture denied") from None
-                except RuntimeError:
-                    raise NativeSourceUnavailable("fixture unavailable") from None
-            kwargs["receive"](frame)
+                    exec(
+                        compile(kwargs["program"], "<testing-route-host>", "exec"),
+                        {"__name__": "__main__"},
+                    )
+                except SystemExit:
+                    pass
+            for line in output.getvalue().splitlines():
+                if not line.startswith("route-frame:"):
+                    continue
+                frame = json.loads(line.removeprefix("route-frame:"))
+                if frame["type"] == "denied":
+                    raise NativeSourceAuthorizationDenied("fixture denied")
+                if frame["type"] == "failed":
+                    raise NativeSourceUnavailable("fixture unavailable")
+                kwargs["receive"](frame)
 
         guard = kwargs.get("dispatch_guard")
         if guard is None:
@@ -197,7 +249,13 @@ class TestingRouteTransportTests(unittest.TestCase):
 
     def publish(self, backend: str, expected: str) -> None:
         self.client.publish(
-            self.plan, backend, expected_backend=expected, dispatch_guard=self.guard
+            self.plan,
+            backend,
+            expected_backend=expected,
+            dispatch_guard=self.guard,
+            desired_runtime_identity=self.identity
+            if backend == self.plan.old_backend
+            else self.new_identity,
         )
 
     def test_container_name_remains_a_qualified_dns_endpoint_without_extra_aliases(self) -> None:
@@ -248,6 +306,47 @@ class TestingRouteTransportTests(unittest.TestCase):
             self.publish(self.plan.old_backend, self.plan.old_backend)
         self.assertFalse(self.route_file.exists())
         self.assertEqual(self.effect_count, 0)
+
+    def test_prewrite_refusal_is_terminal_but_a_started_writer_timeout_stays_unknown(self) -> None:
+        original_raw = deepcopy(self.raw)
+        self.before_publish = lambda: self.raw["routers"]["old-http@docker"].update(priority=999)
+        with self.assertRaises(transport.TestingRouteWriteNotStarted):
+            self.publish(self.plan.old_backend, self.plan.old_backend)
+        self.assertEqual(self.effect_count, 0)
+        self.raw = original_raw
+        self.before_publish = None
+        self.writer_timeout = True
+        with self.assertRaises(NativeSourceUnavailable) as caught:
+            self.publish(self.plan.old_backend, self.plan.old_backend)
+        self.assertNotIsInstance(caught.exception, transport.TestingRouteWriteNotStarted)
+        self.assertEqual(self.effect_count, 1)
+
+    def test_candidate_alias_must_be_unique_running_web_and_the_admitted_runtime(self) -> None:
+        original = deepcopy(self.containers["new"])
+        for problem in ("missing", "shared", "stopped", "identity", "project"):
+            with self.subTest(problem=problem):
+                self.containers["new"] = deepcopy(original)
+                self.containers.pop("foreign", None)
+                if problem == "missing":
+                    self.containers.pop("new")
+                elif problem == "shared":
+                    self.containers["foreign"] = deepcopy(original)
+                    self.containers["foreign"]["Id"] = "foreign"
+                elif problem == "stopped":
+                    self.containers["new"]["State"]["Status"] = "exited"
+                elif problem == "identity":
+                    self.containers["new"]["Config"]["Env"] = [
+                        "PLATFORM_INSTANCE=testing",
+                        "LAUNCHPLANE_RUNTIME_IDENTITY_JSON=" + self.identity.model_dump_json(),
+                    ]
+                else:
+                    self.containers["new"]["Config"]["Labels"]["com.docker.compose.project"] = (
+                        "foreign"
+                    )
+                with self.assertRaises(NativeSourceUnavailable):
+                    self.publish(self.plan.new_backend, self.plan.old_backend)
+                self.assertEqual(self.effect_count, 0)
+                self.assertFalse(self.route_file.exists())
 
     def test_permission_denial_is_propagated_without_an_alternate_writer(self) -> None:
         self.deny = True
@@ -304,6 +403,7 @@ class TestingRouteTransportTests(unittest.TestCase):
                 different.old_backend,
                 expected_backend=different.old_backend,
                 dispatch_guard=self.guard,
+                desired_runtime_identity=self.identity,
             )
         read.assert_not_called()
         self.assertEqual(self.effect_count, 0)
