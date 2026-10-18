@@ -960,19 +960,38 @@ qualify a configured copy.
 If the same owned compose is still empty, on its original server/environment and
 namespace, with no environment, source, domain or deployment history, readback can
 instead retain it as abandoned. No application build/restore receipt may exist.
+The provider's generated optional app-name suffix is accepted while the exact
+compose id, namespace name, server and environment remain bound.
 The evidence binds the original plan and any recorded configuration fingerprint;
 an older absent fingerprint stays absent. The operation can finish failed without
 holding the lane forever. A late original update can only configure that retained
 private copy with deployment disabled, and its abandoned record/lease cannot
-advance to a build. Original request evidence, physical custody and volumes stay
-retained; no update is retried, excluded or declared cancelled, and the next
+advance to a build. Even an empty readback may later receive that original full
+configuration, including credentials. Retention and eventual cleanup must treat
+every such copy as credential-bearing; the unapplied receipt is an observation,
+not proof of cancellation or absence of secrets. Original request evidence,
+physical custody and volumes stay retained; no update is retried, excluded or
+declared cancelled, and the next
 intent uses its own namespace.
+
+If original configuration is positively matched but preparation now fails before
+any deployment, the same observation may retain that configured private copy
+with a configuration-retained receipt binding its original plan and fingerprint.
+This also handles a lost update reply and a testing secret rotation before the
+first build. The original configuration must match, deployment history and
+restore/build receipts must be absent, custody must remain private and current
+guards/leases must pass. A nonempty mismatch stays unknown. No fresh inputs are
+written or deployed. A replay uses the retained receipt and keeps old traffic
+selected.
 
 These observations can update only the original candidate's storage receipt,
 configuring-to-configured phase, or exact configuration-only abandonment, under
 its custody CAS, physical reservation and unchanged serving target;
-they cannot allocate, change intent, deploy, publish or retire a copy. Newly
-recorded protected data, production sharing or aliases pause recovery with an
+they cannot allocate, change intent, deploy, publish or retire a copy.
+The trusted store validates the exact successor shape and intent binding; its
+CAS is not a separate attestation that a provider read occurred. That read is
+the guarded observer's responsibility. Newly recorded protected data, production
+sharing or aliases pause recovery with an
 explicit cause instead of being reclassified as a new admission refusal.
 
 An explicit resume of the same held operation is described below (#4016).

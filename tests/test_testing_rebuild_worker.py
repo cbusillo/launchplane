@@ -1,6 +1,7 @@
 """The durable worker joins preparation, unchanged routing, adoption and retirement."""
 
 from copy import deepcopy
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 import json
 from urllib.parse import urlsplit
@@ -313,6 +314,19 @@ class NativeTestingWorkerTests(unittest.TestCase):
             authorize=self.authorize,
             lease_owner="native-worker-fixture",
         )
+
+    def assert_failed_checkpoint(self, result: Any) -> None:
+        from control_plane.testing_rebuild_storage import RecordTestingRebuildStore
+
+        checkpoint = RecordTestingRebuildStore(self.store).load_operation(
+            product=self.operation.product,
+            context=self.operation.context,
+            operation_id=self.operation.operation_id,
+        )
+        self.assertTrue(checkpoint.error)
+        self.assertEqual(result.error_code, checkpoint.error)
+        self.assertFalse(result.runtime_identity_injected)
+        self.assertEqual(result.target_id, self.intent.old.target_id)
 
     def cancellation(self) -> OdooStableTargetReplacementOperationRecord:
         from control_plane.contracts.durable_operation_authorization import (
@@ -970,7 +984,9 @@ class NativeTestingWorkerTests(unittest.TestCase):
                 observation_only=True,
             )
         self.assertEqual(self.store.read_testing_candidate(candidate.namespace), observed)
-        self.assertEqual(result.error_code, "testing_rebuild_admission_changed")
+        self.assertFalse(result.runtime_identity_injected)
+        self.assertEqual(result.target_id, self.intent.old.target_id)
+        self.assertTrue(result.error_code)
         self.assertEqual(self.effects, [])
         self.assertEqual(self.current().target_id, self.fixture.before.target_id)
 
@@ -1001,7 +1017,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
             environmentId=candidate.environment_id,
             serverId=candidate.server_id,
             name=candidate.namespace,
-            appName=candidate.namespace,
+            appName=candidate.namespace + "-a1b2c3",
             sourceType="raw",
             composeFile="",
             env="",
@@ -1014,7 +1030,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
         configured = dict(self.fixture.fixture.provider_state)
         candidate = self.empty_original_configuration()
         result = self.execute()
-        self.assertEqual(result.deploy_status, "fail")
+        self.assert_failed_checkpoint(result)
         observed = self.store.read_testing_candidate(candidate.namespace)
         assert observed is not None and observed.application is not None
         self.assertEqual(observed.application.phase, "abandoned")
@@ -1048,7 +1064,9 @@ class NativeTestingWorkerTests(unittest.TestCase):
             profile.model_copy(update={"runtime_port": profile.runtime_port + 1})
         )
         result = self.execute()
-        self.assertEqual(result.error_code, "testing_rebuild_admission_changed")
+        self.assertFalse(result.runtime_identity_injected)
+        self.assertEqual(result.target_id, self.intent.old.target_id)
+        self.assertTrue(result.error_code)
         observed = self.store.read_testing_candidate(candidate.namespace)
         assert observed is not None and observed.application is not None
         self.assertEqual(observed.application.phase, "abandoned")
@@ -1056,6 +1074,66 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertEqual(observed.application.plan, self.app.plan)
         self.assertEqual(self.current(), self.fixture.before)
         self.assertEqual(self.effects, [])
+
+    def retain_stale_configuration(self, *, phase: str, changed_plan: bool = False) -> None:
+        from control_plane.contracts.canonical_json import canonical_json_sha256
+        from control_plane.storage.postgres import LaunchplaneTestingCandidateRow
+
+        configured = dict(self.fixture.fixture.provider_state)
+        candidate = self.empty_original_configuration()
+        assert candidate.application is not None
+        candidate = candidate.model_copy(
+            update={"application": candidate.application.model_copy(update={"phase": phase})}
+        )
+        with self.store._session_factory.begin() as session:
+            row = session.get(LaunchplaneTestingCandidateRow, candidate.namespace)
+            assert row is not None
+            row.payload = candidate.model_dump(mode="json", exclude_none=True)
+        self.fixture.fixture.provider_state.clear()
+        self.fixture.fixture.provider_state.update(configured)
+        inputs = self.fixture.fixture.compiled
+        changed = replace(
+            inputs,
+            plan=inputs.plan.model_copy(
+                update={
+                    "credential_bindings_sha256": canonical_json_sha256(
+                        {"rotated": inputs.plan.credential_bindings_sha256}
+                    )
+                }
+            )
+            if changed_plan
+            else inputs.plan,
+            runtime_environment={
+                **inputs.runtime_environment,
+                "ODOO_DB_PASSWORD": "rotated-fixture",
+            },
+        )
+        with patch.object(service, "candidate_runtime_inputs", return_value=changed):
+            result = self.execute()
+            self.assert_failed_checkpoint(result)
+            self.assertEqual(self.execute(), result)
+        observed = self.store.read_testing_candidate(candidate.namespace)
+        assert observed is not None and observed.application is not None
+        assert candidate.application is not None
+        self.assertEqual(observed.application.phase, "abandoned")
+        self.assertEqual(observed.application.plan, candidate.application.plan)
+        self.assertEqual(
+            observed.application.configuration_sha256, candidate.application.configuration_sha256
+        )
+        self.assertTrue(observed.application.abandonment_evidence)
+        self.assertEqual(self.fixture.fixture.provider_state, configured)
+        self.assertEqual(self.current(), self.fixture.before)
+        self.assertEqual(self.effects, [])
+        self.assertEqual(self.fixture.fixture.effects, [])
+
+    def test_secret_rotation_retains_original_configured_copy_without_deployment(self) -> None:
+        self.retain_stale_configuration(phase="configured")
+
+    def test_secret_rotation_retains_applied_configuration_after_lost_update_reply(self) -> None:
+        self.retain_stale_configuration(phase="configuring")
+
+    def test_changed_binding_plan_retains_original_configured_copy(self) -> None:
+        self.retain_stale_configuration(phase="configured", changed_plan=True)
 
     def test_lost_empty_configuration_observation_reply_reuses_its_abandonment(self) -> None:
         candidate = self.empty_original_configuration()
@@ -1077,12 +1155,12 @@ class NativeTestingWorkerTests(unittest.TestCase):
         retained = self.store.read_testing_candidate(candidate.namespace)
         assert retained is not None and retained.application is not None
         self.assertEqual(retained.application.phase, "abandoned")
-        self.assertEqual(self.execute().deploy_status, "fail")
+        self.assert_failed_checkpoint(self.execute())
         self.assertEqual(self.store.read_testing_candidate(candidate.namespace), retained)
         self.assertEqual(self.effects, [])
         self.assertEqual(self.current(), self.fixture.before)
 
-    def test_configuration_observation_cannot_invent_an_abandonment_receipt(self) -> None:
+    def test_configuration_abandonment_receipt_must_bind_original_intent(self) -> None:
         candidate = self.empty_original_configuration()
         app = candidate.application
         assert app is not None
@@ -1101,7 +1179,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertEqual(self.effects, [])
 
     def test_configuration_abandonment_requires_empty_unexecuted_private_custody(self) -> None:
-        for change in ("env", "source", "placement", "name", "domain", "deployment"):
+        for change in ("env", "source", "placement", "name", "appName", "domain", "deployment"):
             with self.subTest(change=change):
                 candidate = self.empty_original_configuration()
                 payload = self.fixture.fixture.provider_state
@@ -1112,6 +1190,8 @@ class NativeTestingWorkerTests(unittest.TestCase):
                 elif change == "placement":
                     payload["serverId"] = "foreign-server"
                 elif change == "name":
+                    payload["name"] = "foreign-copy"
+                elif change == "appName":
                     payload["appName"] = "foreign-copy"
                 with (
                     patch.object(
@@ -1240,7 +1320,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertEqual(self.effects, [])
         self.assertEqual(self.current().target_id, self.fixture.before.target_id)
 
-    def test_legacy_configuration_without_a_binding_cannot_be_invented_by_readback(self) -> None:
+    def test_execution_receipts_prevent_configuration_only_abandonment(self) -> None:
         app = self.app.model_copy(
             update={
                 "configuration_sha256": "",

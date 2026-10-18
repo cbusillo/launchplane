@@ -13864,6 +13864,19 @@ class RealPostgresTestingRebuildResumeTests(unittest.TestCase):
 
 
 class RealPostgresNativeTestingWorkerTests(unittest.TestCase):
+    def test_changed_binding_plan_retains_original_configured_copy(self) -> None:
+        self.run_worker_case("test_changed_binding_plan_retains_original_configured_copy")
+
+    def test_secret_rotation_retains_configured_copy_without_deployment(self) -> None:
+        self.run_worker_case(
+            "test_secret_rotation_retains_original_configured_copy_without_deployment"
+        )
+
+    def test_secret_rotation_retains_applied_configuration_after_lost_reply(self) -> None:
+        self.run_worker_case(
+            "test_secret_rotation_retains_applied_configuration_after_lost_update_reply"
+        )
+
     def test_unapplied_configuration_is_retained_without_holding_the_lane(self) -> None:
         self.run_worker_case("test_unapplied_private_configuration_fails_without_holding_the_lane")
 
@@ -13881,7 +13894,7 @@ class RealPostgresNativeTestingWorkerTests(unittest.TestCase):
         )
 
     def test_configuration_observation_rejects_unbound_abandonment_evidence(self) -> None:
-        self.run_worker_case("test_configuration_observation_cannot_invent_an_abandonment_receipt")
+        self.run_worker_case("test_configuration_abandonment_receipt_must_bind_original_intent")
 
     def test_hold_before_application_plan_keeps_original_authority(self) -> None:
         self.run_worker_case(

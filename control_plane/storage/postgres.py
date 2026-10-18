@@ -11031,19 +11031,25 @@ class PostgresRecordStore(HumanSessionStore):
                     update={"application": app.model_copy(update={"phase": "configured"})}
                 )
             )
+            abandonment_receipts: tuple[str, ...] = ()
+            if app is not None:
+                if app.phase == "configuring":
+                    abandonment_receipts += (app.unapplied_configuration_evidence,)
+                if app.configuration_sha256:
+                    abandonment_receipts += (app.retained_configuration_evidence,)
             configuration_abandonment = (
                 app is not None
                 and app.configuration_only
-                and replacement
-                == expected.model_copy(
-                    update={
-                        "application": app.model_copy(
-                            update={
-                                "phase": "abandoned",
-                                "abandonment_evidence": app.unapplied_configuration_evidence,
-                            }
-                        )
-                    }
+                and any(
+                    replacement
+                    == expected.model_copy(
+                        update={
+                            "application": app.model_copy(
+                                update={"phase": "abandoned", "abandonment_evidence": evidence}
+                            )
+                        }
+                    )
+                    for evidence in abandonment_receipts
                 )
             )
             if not (storage_observation or configuration_observation or configuration_abandonment):

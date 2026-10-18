@@ -174,7 +174,7 @@ class TestingCandidateApplication(FrozenRecord):
     @property
     def configuration_only(self) -> bool:
         """Recorded effects have not reached application execution or restore."""
-        return self.phase == "configuring" and not (
+        return self.phase in {"configuring", "configured"} and not (
             self.deployment_id
             or self.prepared
             or self.restore_schedule_id
@@ -186,6 +186,12 @@ class TestingCandidateApplication(FrozenRecord):
     @property
     def unapplied_configuration_evidence(self) -> str:
         return "configuration-unapplied:" + canonical_json_sha256(
+            {"plan": self.plan.digest, "configuration": self.configuration_sha256}
+        )
+
+    @property
+    def retained_configuration_evidence(self) -> str:
+        return "configuration-retained:" + canonical_json_sha256(
             {"plan": self.plan.digest, "configuration": self.configuration_sha256}
         )
 

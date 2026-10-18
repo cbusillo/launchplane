@@ -4,6 +4,7 @@ import base64
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
+import re
 
 from control_plane.contracts.testing_candidate import TestingCandidateAllocation
 from control_plane.contracts.canonical_json import canonical_json_sha256
@@ -171,6 +172,7 @@ def observe_candidate_configuration(
     record: TestingCandidateAllocation,
     lease: ProviderOperationLease,
     guard: Callable[[], None],
+    retain_configured: bool = False,
 ) -> TestingCandidateAllocation:
     """Observe the original private outcome; never select inputs or send an update."""
     app = record.application
@@ -199,15 +201,27 @@ def observe_candidate_configuration(
         app.configuration_sha256
         and candidate_configuration_sha256(payload) == app.configuration_sha256
     ):
-        observed_app = app.model_copy(update={"phase": "configured"})
+        observed_app = app.model_copy(
+            update={
+                "phase": "abandoned",
+                "abandonment_evidence": app.retained_configuration_evidence,
+            }
+            if retain_configured
+            else {"phase": "configured"}
+        )
     else:
         try:
+            if app.phase != "configuring":
+                raise ValueError("A configured copy no longer matches its original update.")
             require_empty_compose_source(payload, record.compose_id)
             if (
                 (payload.get("serverId"), payload.get("environmentId"))
                 != (record.server_id, record.environment_id)
                 or payload.get("name") != record.namespace
-                or payload.get("appName") != record.namespace
+                or not re.fullmatch(
+                    re.escape(record.namespace) + r"(?:-[a-z0-9]{6})?",
+                    str(payload.get("appName") or ""),
+                )
                 or payload.get("env") not in (None, "")
             ):
                 raise ValueError("The original empty configuration changed.")
@@ -215,7 +229,8 @@ def observe_candidate_configuration(
             raise CandidateObservationUnavailable(
                 "The original private configuration remains unknown."
             ) from None
-        # A late original update can affect only this retained private copy.
+        # A late original update may still install the full credential-bearing
+        # configuration in this retained private copy. This is not cancellation.
         # Its lease/CAS cannot advance an abandoned copy to deployment.
         observed_app = app.model_copy(
             update={

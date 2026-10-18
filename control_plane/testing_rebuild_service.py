@@ -1066,19 +1066,21 @@ class NativeTestingRebuildExecution:
         except (ValueError, api.DokployDeploymentFailed, api.DokployScheduleExecutionFailed):
             current = self.store.read_testing_candidate(self.allocation.namespace)
             if current is not None and current.application is not None:
-                if current.application.phase == "configuring":
+                if current.application.phase in {"configuring", "configured"}:
                     current = observe_candidate_configuration(
                         root=self.root,
                         store=self.store,
                         record=current,
                         lease=self.lease,
                         guard=self.guard,
+                        retain_configured=True,
                     )
                 app = current.application
                 if (
                     app is not None
                     and app.phase == "abandoned"
-                    and app.abandonment_evidence == app.unapplied_configuration_evidence
+                    and app.abandonment_evidence
+                    in {app.unapplied_configuration_evidence, app.retained_configuration_evidence}
                 ):
                     self.allocation = current
                     raise TestingRebuildPreparationFailure(
