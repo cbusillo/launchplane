@@ -16,12 +16,14 @@ from unittest.mock import Mock, patch
 
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.dokploy import testing_route_transport as transport
+from control_plane.dokploy import native_copy_stream
 from control_plane.dokploy.native_copy_stream import (
     NativeSourceAuthorizationDenied,
     NativeSourceUnavailable,
 )
 from control_plane.dokploy.testing_route import TestingRoutePending, route_document
 from tests import test_testing_route as route_tests
+from tests.test_odoo_testing_native_source import Connection
 
 
 class TestingRouteTransportTests(unittest.TestCase):
@@ -266,8 +268,9 @@ class TestingRouteTransportTests(unittest.TestCase):
     def test_proxy_filesystem_permission_error_is_unavailable_without_a_fallback(self) -> None:
         self.deny = True
         self.denial_message = b"mktemp: permission denied"
-        with self.assertRaises(NativeSourceUnavailable):
+        with self.assertRaises(NativeSourceUnavailable) as caught:
             self.publish(self.plan.old_backend, self.plan.old_backend)
+        self.assertNotIsInstance(caught.exception, transport.TestingRouteWriteNotStarted)
         self.assertEqual(self.effect_count, 1)
 
     def test_native_atomic_migration_switch_and_switchback_keep_other_files_and_old_copy(
@@ -347,6 +350,66 @@ class TestingRouteTransportTests(unittest.TestCase):
                     self.publish(self.plan.new_backend, self.plan.old_backend)
                 self.assertEqual(self.effect_count, 0)
                 self.assertFalse(self.route_file.exists())
+
+    def test_alias_ownership_covers_every_proxy_network_and_dns_spelling(self) -> None:
+        original = deepcopy(self.containers)
+        original_raw = deepcopy(self.raw)
+        alias = self.plan.new_backend.removeprefix("http://").split(":")[0]
+        for problem in ("other-network", "case-alias", "dns-name", "detached-name"):
+            with self.subTest(problem=problem):
+                self.containers = deepcopy(original)
+                self.raw = deepcopy(original_raw)
+                self.route_file.unlink(missing_ok=True)
+                self.effect_count = 0
+                if problem == "detached-name":
+                    self.containers["new"]["Name"] = "/" + alias
+                    self.containers["new"]["NetworkSettings"]["Networks"] = {}
+                else:
+                    network = "other-app" if problem == "other-network" else "dokploy-network"
+                    self.containers["proxy"]["NetworkSettings"]["Networks"][network] = {
+                        "IPAddress": "172.21.0.2"
+                    }
+                    endpoint: dict[str, Any] = {"IPAddress": "172.21.0.3"}
+                    endpoint["DNSNames" if problem == "dns-name" else "Aliases"] = [
+                        alias.upper() if problem == "case-alias" else alias
+                    ]
+                    self.containers["foreign"] = {
+                        "Id": "foreign",
+                        "Name": "/foreign",
+                        "NetworkSettings": {"Networks": {network: endpoint}},
+                    }
+                with self.assertRaises(transport.TestingRouteWriteNotStarted):
+                    self.publish(self.plan.new_backend, self.plan.old_backend)
+                self.assertEqual(self.effect_count, 0)
+                self.assertFalse(self.route_file.exists())
+
+    def test_candidate_port_and_runtime_lane_must_match_before_publication(self) -> None:
+        self.containers["new"]["Config"]["Env"].append("ODOO_HTTP_PORT=8070")
+        with self.assertRaises(transport.TestingRouteWriteNotStarted):
+            self.publish(self.plan.new_backend, self.plan.old_backend)
+        self.assertEqual(self.effect_count, 0)
+        with self.assertRaises(ValueError):
+            self.client.publish(
+                self.plan,
+                self.plan.new_backend,
+                expected_backend=self.plan.old_backend,
+                dispatch_guard=self.guard,
+                desired_runtime_identity=self.new_identity.model_copy(update={"context": "other"}),
+            )
+        self.assertEqual(self.effect_count, 0)
+
+    def test_not_started_frame_survives_the_real_stream_reader(self) -> None:
+        connection = Connection({"type": "route_write_not_started"})
+        context = Mock()
+        context.__enter__ = Mock(return_value=connection)
+        context.__exit__ = Mock(return_value=False)
+        with (
+            patch.object(native_copy_stream, "connect", return_value=context),
+            patch.object(transport, "_read_remote", native_copy_stream._read_remote),
+            self.assertRaises(transport.TestingRouteWriteNotStarted),
+        ):
+            self.client._run({"mode": "publish"})
+        self.assertEqual(len(connection.sent), 2)
 
     def test_permission_denial_is_propagated_without_an_alternate_writer(self) -> None:
         self.deny = True

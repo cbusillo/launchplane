@@ -580,8 +580,11 @@ lane-qualified dynamic filename. Publication rechecks the static configuration,
 provider state, current file digest and retained physical web identity, then uses
 the existing proxy container to write a temporary file and atomically rename it.
 Immediately before that writer, a forward publication also requires exactly one
-running web process owning the candidate alias on managed ingress, its expected
-project and its admitted runtime identity. A shared, missing, stopped or rebound
+running web process owning the candidate alias across every proxy network,
+including Docker DNSNames, network aliases and attached container names compared
+without case distinctions. The candidate must share a proxy network, bind the
+requested Odoo port, and match its expected project and admitted lane/runtime
+identity. A shared, missing, stopped or rebound
 alias refuses without touching the route. Inverse identity comparison excludes
 only the observation's deployment timestamp, as the runtime identity contract does.
 No application receives a provider credential or host mount. No global Traefik
@@ -598,7 +601,9 @@ explicit `route_write_not_started` receipt. The caller can close that original
 child effect as excluded after verifying the old route. Once the writer may have
 started, a timeout or generic failed frame remains unknown; killing its Docker
 client does not prove that the daemon's exec has stopped. Permission denials
-remain denials and never become permission to retry.
+remain denials and never become permission to retry. A denial after writer
+invocation leaves its effect unknown: an authorization plugin can refuse the
+response after execution. Only the explicit not-started receipt excludes it.
 A written
 but partly/unapplied group stays pending without another dispatch. Public health
 and exact runtime identity remain the controller's separate proof before serving
