@@ -46,6 +46,35 @@ application testing lanes. Q453 accepted this topology instead of the
 Compose-only upstream binding and its host firewall requirement. It does not
 change the restrictions on the Compose path below or any production record.
 
+### Health probes with public wildcard DNS
+
+An application testing endpoint may retain the existing public wildcard DNS.
+The monitor does not follow those public answers or permit arbitrary public
+private-health requests. For a testing hostname it verifies the active endpoint,
+exclusive application and lane ownership, current provider placement and exact
+application domain, an applied private-route receipt, and fresh NPMplus readback.
+The enabled route must still have its reviewed access list, current wildcard
+certificate and unchanged configuration, with no overlapping edge aliases or
+pending private-route effects. Missing or changed evidence fails the probe.
+
+The health request connects to the configured NPMplus API origin's machine on
+HTTPS port 443. That origin must resolve exclusively to the existing permitted
+private address ranges (RFC1918 or RFC6598), and must reach the same edge's HTTPS
+listener. Socket addresses are validated and pinned before connecting, while
+Host, SNI and ordinary certificate/name verification use the endpoint hostname.
+Endpoint DNS is never used to select this socket, so wildcard DNS changes cannot
+redirect it; a public or mixed answer for the configured edge origin refuses.
+No DNS record or shared trust store changes. A provider API hosted separately
+from its HTTPS listener does not qualify through this transport.
+
+This continuation sends only an unauthenticated `GET /health`, with no request
+body, query, API credentials, cookies or redirects. It requires the monitor's
+runtime-identity check; HTTP 200 alone cannot qualify an absent or different
+runtime. Non-testing endpoints and the generic private HTTP client retain their
+existing network policy. Actual edge access-list denial, remote tailnet and WSS
+qualification remain separate operational proof; route registration is not
+transport proof.
+
 Planning changes no provider state. Apply uses a dedicated lane-private-ingress
 provider-operation fence, saves its pending receipt before effects, then records
 independent provider readback. Active application-hostname creation also holds

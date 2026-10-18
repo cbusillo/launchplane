@@ -408,6 +408,47 @@ def request_public_http(
         redirect_count += 1
 
 
+def request_private_edge_health(
+    url: str,
+    *,
+    edge_api_url: str,
+    timeout_seconds: float,
+    resolver: AddressResolver | None = None,
+    connection_factory: PublicHttpConnectionFactory | None = None,
+) -> PublicHttpResponse:
+    """GET one health path at the configured edge, retaining its TLS name.
+
+    The caller must independently verify current testing route ownership. The
+    API origin identifies the edge machine, never an upstream application.
+    Only private addresses of that machine may receive the health request;
+    endpoint DNS, redirects, API cookies and API credentials are never used.
+    """
+    parsed, hostname, port = _parse_http_url(url)
+    if (
+        parsed.scheme != "https"
+        or port != 443
+        or parsed.path != "/health"
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise PublicHttpDestinationError("invalid_url", "An exact HTTPS health URL is required.")
+    _edge, edge_hostname, _edge_port = _parse_http_url(edge_api_url)
+    resolve = resolver or _system_address_resolver
+
+    def edge_addresses(name: str, requested_port: int) -> tuple[ResolvedAddressInfo, ...]:
+        if (name, requested_port) != (hostname, port):
+            raise PublicHttpDestinationError("invalid_url", "Health authority changed.")
+        return resolve(edge_hostname, port)
+
+    return request_private_http(
+        url,
+        timeout_seconds=timeout_seconds,
+        max_redirects=0,
+        resolver=edge_addresses,
+        connection_factory=connection_factory,
+    )
+
+
 def request_private_http(
     url: str,
     *,
