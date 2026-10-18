@@ -20,6 +20,7 @@ from control_plane.application_state_volume_retention import (
     state_volume_plan_is_retained,
     state_volume_progress_operation_key,
 )
+from control_plane.application_state_volume_errors import StateVolumeRefusal
 from control_plane.contracts.idempotency_record import (
     LaunchplaneIdempotencyRecord,
     format_launchplane_mutation_timestamp,
@@ -179,10 +180,12 @@ class ApplicationStateVolumeRetentionTests(unittest.TestCase):
         )
 
     def test_active_lease_and_stale_review_refuse_without_changing_custody(self) -> None:
-        with self.assertRaises(ValueError):
+        with self.assertRaises(StateVolumeRefusal) as active:
             self.retain()
-        with self.expired(), self.assertRaises(ValueError):
+        self.assertEqual(active.exception.code, "application_state_volume_execution_active")
+        with self.expired(), self.assertRaises(StateVolumeRefusal) as stale:
             self.retain(expected_custody_sha256="wrong-review")
+        self.assertEqual(stale.exception.code, "application_state_volume_custody_changed")
         altered = deepcopy(self.intent)
         altered["binding"] = "changed-binding"
         with self.expired(), self.assertRaises(ValueError):

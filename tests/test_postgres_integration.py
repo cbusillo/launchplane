@@ -1770,7 +1770,10 @@ class RealPostgresNoTargetRetirementTests(unittest.IsolatedAsyncioTestCase):
 
 class RealPostgresSchemaIntegrationTests(unittest.TestCase):
     def test_state_volume_retention_and_guarded_adoption_serialize_in_both_orders(self) -> None:
-        from control_plane.application_state_volume_retention import state_volume_plan_is_retained
+        from control_plane.application_state_volume_retention import (
+            require_state_volume_retention_eligibility,
+            state_volume_plan_is_retained,
+        )
         from control_plane.storage.product_authority_bundle import (
             ProductAuthorityBundle,
             ProviderTargetWrite,
@@ -1792,6 +1795,19 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                 fixture = RetentionFixture()
                 try:
                     fixture.setUp()
+                    fixture.store.write_product_profile_record(
+                        _product_profile().model_copy(
+                            update={
+                                "product": fixture.intent["product"],
+                                "lanes": (
+                                    ProductLaneProfile(
+                                        context=fixture.intent["request"]["context"],
+                                        instance="testing",
+                                    ),
+                                ),
+                            }
+                        )
+                    )
                     known_application_id = "allocation-app"
                     checkpointed = fixture.store.checkpoint_mutation_provider_effect(
                         reservation=fixture.reservation,
@@ -1861,14 +1877,12 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                             hold_winner()
 
                     def require_original_allocation_unbound() -> None:
-                        try:
-                            current = fixture.store.read_provider_target_record(
-                                context_name=target.context, instance_name=target.instance
-                            )
-                        except FileNotFoundError:
-                            return
-                        if current.target_id == known_application_id:
-                            raise ValueError("Original allocation is already the tracked target.")
+                        require_state_volume_retention_eligibility(
+                            fixture.store,
+                            product=fixture.intent["product"],
+                            context=target.context,
+                            application_id=known_application_id,
+                        )
 
                     def retain() -> bool:
                         with fixture.expired():

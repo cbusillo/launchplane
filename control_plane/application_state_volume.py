@@ -13,6 +13,7 @@ import click
 from uuid import uuid4
 
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+from control_plane.application_state_volume_errors import StateVolumeRefusal
 from control_plane.dokploy import api, source
 from control_plane.dokploy_inventory import InventoryUnavailable
 from control_plane.http_routes.mutation_support import request_fingerprint
@@ -312,18 +313,23 @@ class ApplicationStateVolumeAdapter:
             and bool(mount.get("mountId"))
         )
 
-    def _verify_adopted(self, phase: str) -> dict[str, object]:
+    def _verify_adopted(
+        self, phase: str, *, configuration_verified: bool = True
+    ) -> dict[str, object]:
         from control_plane.dokploy_target_setup_http import (
             dokploy_target_setup_result_payload,
         )
 
         data = json.loads(phase)
+        if not configuration_verified and data.get("mount_verified") != "true":
+            raise ValueError("Original allocation has no durable verified-mount checkpoint.")
         application_id, environment_id = data["application"], data["environment"]
-        live = self._live(application_id, environment_id, data["app_name"])
-        if not self._mount_matches(live):
-            raise ValueError(
-                "Original volume effect is incomplete or changed; never repeat creation."
-            )
+        if configuration_verified:
+            live = self._live(application_id, environment_id, data["app_name"])
+            if not self._mount_matches(live):
+                raise ValueError(
+                    "Original volume effect is incomplete or changed; never repeat creation."
+                )
         target = self.store.read_dokploy_target_record(
             context_name=self.request.context, instance_name="testing"
         )
@@ -338,6 +344,8 @@ class ApplicationStateVolumeAdapter:
 
         if (
             target.target_type != "application"
+            or target.project_name != self.intent["project_marker"]
+            or target.target_name != self.intent["target_marker"]
             or target_id.target_id != application_id
             or current.to_deployed_target_reference()
             != ProviderTargetRecord.from_dokploy_records(
@@ -358,7 +366,9 @@ class ApplicationStateVolumeAdapter:
         return {
             **self.plan_result(),
             "applied": True,
-            "configuration_matches": True,
+            "configuration_matches": configuration_verified,
+            "configuration_evidence": "matches" if configuration_verified else "unavailable",
+            "allocation_state": "adopted",
             "setup": setup,
         }
 
@@ -468,8 +478,23 @@ class ApplicationStateVolumeAdapter:
     ) -> ProviderObservation:
         if reconciliation_key != self.reconciliation_key():
             return ProviderObservation("unknown")
+        phase = self._progress_phase(provider_effect_phase)
         try:
-            self._resume_phase(self._progress_phase(provider_effect_phase))
+            # Adoption committed after positive mount readback. Finish that
+            # durable receipt even if provider configuration has since changed;
+            # this does not claim the current mount is still correct.
+            result = self._verify_adopted(phase, configuration_verified=False)
+        except (ValueError, KeyError, FileNotFoundError):
+            pass
+        else:
+            return ProviderObservation(
+                "present",
+                response_payload=provider_operation_response_payload(
+                    trace_id=self.trace, records={}, result=result
+                ),
+            )
+        try:
+            self._resume_phase(phase)
         except Exception:
             return ProviderObservation("unknown")
         # A renewed lease performs all writes and adoption; observation only proves
@@ -486,13 +511,22 @@ class ApplicationStateVolumeAdapter:
 
         phase = self._progress_phase(row.provider_effect_phase)
         # Readback neither adopts records nor repeats provider writes.
-        evidence = "differs"
+        evidence = "unavailable"
         try:
-            data = json.loads(phase)
+            data = json.loads(phase) if phase else {}
             if all(data.get(key) for key in ("application", "environment", "app_name")):
+                host, _token = source.read_dokploy_config(control_plane_root=self.root)
+                if host != self.intent["provider_host"]:
+                    raise InventoryUnavailable("provider_binding_changed")
                 live = self._live(data["application"], data["environment"], data["app_name"])
                 evidence = "matches" if self._mount_matches(live) else "differs"
-        except (click.ClickException, OSError, HTTPException, InventoryUnavailable):
+        except (
+            click.ClickException,
+            OSError,
+            HTTPException,
+            InventoryUnavailable,
+            json.JSONDecodeError,
+        ):
             evidence = "unavailable"
         except (ValueError, KeyError):
             evidence = "differs"
@@ -515,7 +549,10 @@ class ApplicationStateVolumeAdapter:
             LANE_LOCK_PREFIX + self.request.context
         ) as check:
             if check is None:
-                raise ValueError("Testing lane setup is busy; retain the original operation.")
+                raise StateVolumeRefusal(
+                    "application_state_volume_lane_busy",
+                    "Testing lane setup is busy; retry the original operation.",
+                )
             row = self.store.read_idempotency_record(
                 scope=self.scope, route_path=ROUTE, idempotency_key=key
             )
@@ -523,33 +560,19 @@ class ApplicationStateVolumeAdapter:
                 raise ValueError("Retention requires the original operation key and plan.")
 
             def checkpoint() -> None:
-                from control_plane.authz_candidate_preparation import (
-                    is_exclusive_product_lane_context,
-                    product_context_owners,
+                from control_plane.application_state_volume_retention import (
+                    require_state_volume_retention_eligibility,
                 )
 
                 check()
-                profile = self.store.read_product_profile_record(self.product)
                 phase = self._progress_phase(row.provider_effect_phase)
                 allocation = json.loads(phase) if phase else {}
-                try:
-                    current = self.store.read_provider_target_record(
-                        context_name=self.request.context, instance_name="testing"
-                    )
-                except FileNotFoundError:
-                    current = None
-                if current is not None and current.target_id == allocation.get("application"):
-                    raise ValueError(
-                        "Original allocation is already tracked; use original-key recovery."
-                    )
-                if profile.lifecycle_state != "active" or not is_exclusive_product_lane_context(
-                    context=self.request.context,
+                require_state_volume_retention_eligibility(
+                    self.store,
                     product=self.product,
-                    owners=product_context_owners(self.store),
-                ):
-                    raise ValueError(
-                        "Retaining storage custody requires its current active exclusive owner."
-                    )
+                    context=self.request.context,
+                    application_id=allocation.get("application", ""),
+                )
 
             return retain_state_volume_allocation(
                 self.store,
@@ -648,6 +671,8 @@ class ApplicationStateVolumeAdapter:
                 self.checkpoint()
                 live = self._live(value, created["environment"], app_name)
                 if self._mount_matches(live):
+                    created["mount_verified"] = "true"
+                    self._checkpoint_phase(lease, json.dumps(created, sort_keys=True))
                     return response
                 if (
                     live.get("mounts") != []
@@ -678,6 +703,7 @@ class ApplicationStateVolumeAdapter:
                 )
                 if not self._mount_matches(self._live(value, created["environment"], app_name)):
                     raise ValueError("Independent state-volume readback differs.")
+                created["mount_verified"] = "true"
                 self._checkpoint_phase(lease, json.dumps(created, sort_keys=True))
                 execution_check()
                 self.checkpoint()
@@ -727,7 +753,9 @@ class ApplicationStateVolumeAdapter:
                         ),
                     )
                 self.checkpoint()
-                with self.store.provider_evidence_guard(lease.evidence_reservation):
+                with self.store.provider_evidence_guard(
+                    lease.evidence_reservation, authority_checkpoint=self.checkpoint
+                ):
                     execute_dokploy_target_setup(
                         control_plane_root_path=self.root,
                         record_store=self.store,

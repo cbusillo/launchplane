@@ -689,11 +689,101 @@ class ApplicationStateVolumeTests(_DirectorTestingSetupFixture):
                 expected_state_volume_custody_sha256=readback["custody_sha256"],
             )
         self.assertEqual(retained.status_code, 409, retained.text)
+        self.assertEqual(
+            retained.json()["error"]["code"], "application_state_volume_already_adopted"
+        )
         calls = self.provider.call_count
         recovered = await self.post()
         self.assertEqual(recovered.status_code, 202, recovered.text)
         self.assertTrue(recovered.json()["result"]["applied"])
         self.assertEqual(self.provider.call_count, calls)
+
+    async def test_committed_adoption_receipt_recovers_without_provider_evidence(self) -> None:
+        await self.plan()
+        with patch(
+            "control_plane.application_state_volume.ApplicationStateVolumeAdapter._verify_adopted",
+            side_effect=OSError("Fixture: interrupted after adoption"),
+        ):
+            uncertain = await self.post()
+        self.assertEqual(uncertain.status_code, 409, uncertain.text)
+        calls = self.provider.call_count
+        # Receipt completion uses committed authority, even after provider host
+        # rotation, mount edits, or an inventory outage. It proves no live mount.
+        with (
+            patch(
+                "control_plane.dokploy_target_setup_http.dokploy_source.read_dokploy_config",
+                return_value=("https://rotated.example.invalid", "fixture-token"),
+            ),
+            patch(
+                "control_plane.dokploy_inventory.read_dokploy_inventory",
+                side_effect=AssertionError("Receipt must not require provider inventory"),
+            ),
+            patch(
+                "control_plane.dokploy_target_setup_http.fetch_dokploy_target_payload_for_setup",
+                side_effect=AssertionError("Receipt must not require provider readback"),
+            ),
+        ):
+            recovered = await self.post()
+        self.assertEqual(recovered.status_code, 202, recovered.text)
+        result = recovered.json()["result"]
+        self.assertTrue(result["applied"])
+        self.assertEqual(result["allocation_state"], "adopted")
+        self.assertEqual(result["configuration_evidence"], "unavailable")
+        self.assertFalse(result["configuration_matches"])
+        self.assertEqual(self.provider.call_count, calls)
+        self.assertFalse(self.store.list_held_provider_target_reservations())
+        self.assert_production_unchanged()
+
+    async def test_authority_change_at_final_commit_refuses_and_preserves_custody(self) -> None:
+        from datetime import timedelta
+        from control_plane.contracts.idempotency_record import (
+            format_launchplane_mutation_timestamp,
+            parse_launchplane_mutation_timestamp,
+        )
+
+        await self.plan()
+        write = self.store.write_product_authority_bundle
+        changed = self.profile.model_copy(update={"driver_id": "odoo"})
+
+        def change_before_commit(bundle: Any) -> None:
+            self.store.write_product_profile_record(changed)
+            write(bundle)
+
+        with patch.object(
+            self.store, "write_product_authority_bundle", side_effect=change_before_commit
+        ):
+            result = await self.post()
+        self.assertEqual(result.status_code, 409, result.text)
+        self.assertEqual(self.store.read_product_profile_record(self.profile.product), changed)
+        with self.assertRaises(FileNotFoundError):
+            self.store.read_dokploy_target_id_record(
+                context_name=self.context, instance_name="testing"
+            )
+        row = self.store.list_held_provider_target_reservations()[0]
+        readback = (await self.post(mode="readback")).json()["result"]
+        self.assertEqual(
+            json.loads(readback["provider_effect_phase"])["application"], self.live["applicationId"]
+        )
+        now = format_launchplane_mutation_timestamp(
+            parse_launchplane_mutation_timestamp(
+                row.lease_expires_at, field_name="lease_expires_at"
+            )
+            + timedelta(seconds=1)
+        )
+        calls = self.provider.call_count
+        with patch.object(self.store, "_database_mutation_timestamp", return_value=now):
+            retained = await self.post(
+                retain_state_volume_allocation=True,
+                expected_state_volume_custody_sha256=readback["custody_sha256"],
+            )
+        self.assertEqual(retained.status_code, 202, retained.text)
+        self.assertFalse(retained.json()["result"]["applied"])
+        self.assertEqual(self.provider.call_count, calls)
+        self.store.write_product_profile_record(self.profile)
+        fresh = await self.post(mode="dry-run", state_volume_plan_id="", expected_plan_sha256="")
+        self.assertEqual(fresh.status_code, 202, fresh.text)
+        self.assertFalse(self.store.list_held_provider_target_reservations())
+        self.assert_production_unchanged()
 
     async def test_next_artifact_update_preserves_the_same_mount(self) -> None:
         from control_plane.workflows.dokploy_deploy import update_dokploy_target_artifact

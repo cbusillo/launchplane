@@ -9,7 +9,36 @@ from control_plane.contracts.idempotency_record import (
 )
 from control_plane.http_routes.mutation_support import request_fingerprint
 from control_plane.provider_operations import provider_operation_response_payload
+from control_plane.application_state_volume_errors import StateVolumeRefusal
 from control_plane.storage.postgres import PostgresRecordStore
+
+
+def require_state_volume_retention_eligibility(
+    store: PostgresRecordStore, *, product: str, context: str, application_id: str
+) -> None:
+    """Check current lane ownership and untracked custody under the authority lock."""
+    from control_plane.authz_candidate_preparation import (
+        is_exclusive_product_lane_context,
+        product_context_owners,
+    )
+
+    profile = store.read_product_profile_record(product)
+    try:
+        current = store.read_provider_target_record(context_name=context, instance_name="testing")
+    except FileNotFoundError:
+        current = None
+    if current is not None and current.target_id == application_id:
+        raise StateVolumeRefusal(
+            "application_state_volume_already_adopted",
+            "Original allocation is already tracked; use original-key recovery.",
+        )
+    if profile.lifecycle_state != "active" or not is_exclusive_product_lane_context(
+        context=context, product=product, owners=product_context_owners(store)
+    ):
+        raise StateVolumeRefusal(
+            "application_state_volume_owner_changed",
+            "Retaining storage custody requires its current active exclusive owner.",
+        )
 
 
 def read_state_volume_progress(store: PostgresRecordStore, scope: str, plan_id: str) -> str:
@@ -116,7 +145,20 @@ def checkpoint_state_volume_progress(
         current = LaunchplaneIdempotencyRecord.model_validate(row.payload)
         if (
             current.state != "running"
-            or not store._mutation_reservation_matches(current, reservation)
+            or any(
+                getattr(current, field) != getattr(reservation, field)
+                for field in (
+                    "record_id",
+                    "scope",
+                    "route_path",
+                    "idempotency_key",
+                    "request_fingerprint",
+                    "lease_owner",
+                    "attempt",
+                    "provider_target_key",
+                    "reconciliation_key",
+                )
+            )
             or current.provider_effect_phase != phase
             or current.provider_effect_started_at != reservation.provider_effect_started_at
         ):
@@ -323,14 +365,23 @@ def retain_state_volume_allocation(
             checkpoint()
             return result
         if supplied_digest != expected_custody_sha256:
-            raise ValueError("Review the exact original allocation custody before retention.")
+            raise StateVolumeRefusal(
+                "application_state_volume_custody_changed",
+                "Review the exact original allocation custody before retention.",
+            )
         if current != reservation or current.state not in {"running", "reconcile_required"}:
-            raise ValueError("Original allocation custody changed; review retention again.")
+            raise StateVolumeRefusal(
+                "application_state_volume_custody_changed",
+                "Original allocation custody changed; review retention again.",
+            )
         now = store._database_mutation_timestamp(session)
         if not current.lease_expires_at or parse_launchplane_mutation_timestamp(
             current.lease_expires_at, field_name="lease_expires_at"
         ) > parse_launchplane_mutation_timestamp(now, field_name="observed_at"):
-            raise ValueError("The original allocation execution lease is still active.")
+            raise StateVolumeRefusal(
+                "application_state_volume_execution_active",
+                "The original allocation execution lease is still active.",
+            )
         retained = store._updated_idempotency_record(
             current,
             state="completed",

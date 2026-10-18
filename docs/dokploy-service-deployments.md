@@ -192,8 +192,9 @@ lease and the lane lock. A lost mount response resumes only when independent
 readback proves the exact mount exists. Separate lease-fenced progress is bound to the original operation key and
 survives runner retries and process restarts. A completed plan refuses use under
 a new key before effects or a held reservation can remain. Final target adoption
-checks and locks the same live reservation inside its record transaction, so
-retained or expired workers cannot publish a lane target. Duplicate markers, incomplete inventory,
+checks and locks the same live reservation and rechecks reviewed lane authority
+inside its record transaction, so retained, expired or stale workers cannot
+publish a lane target. Duplicate markers, incomplete inventory,
 changed identities and an absent uncertain mount preserve the unresolved operation.
 An empty inventory does not prove a dispatched provider create cannot finish later.
 A different key or plan cannot bypass the held lane reservation. All testing mutations through the service setup route, including adoption and
@@ -217,7 +218,12 @@ It atomically fences the old worker and records
 replay under the original key returns that same retained receipt, not a created
 target; callers must check `applied` and `allocation_state`. If the original
 allocation is already the tracked target, retention refuses; use original-key
-recovery to complete its receipt.
+recovery to complete its receipt. When a verified-mount checkpoint and the exact
+generated target are already committed, original-key recovery completes that
+receipt from database evidence without requiring current provider availability.
+It reports `allocation_state: adopted`, `applied: true` and
+`configuration_evidence: unavailable`; this receipt does not prove the current
+mount configuration. Use readback to inspect that separately.
 This performs no provider mutation, deployment or deletion. Its original intent,
 known ids and pending phase remain retained even if a late create materializes.
 The retained allocation can never resume, including under another key. To keep
@@ -238,6 +244,20 @@ provides no cross-scope transfer. Applications with mounts also fail
 the existing agent retirement guard; use a supported admin retirement/data
 custody path, rather than an unmounted-target deletion command, when retiring
 this testing lane. Creating storage does not authorize its later deletion.
+
+Retention refusals expose stable error codes for caller decisions:
+
+| Code | Next action |
+| --- | --- |
+| `application_state_volume_execution_active` | Wait for the original lease to expire. |
+| `application_state_volume_lane_busy` | Retry the original operation after the executor releases the lane. |
+| `application_state_volume_custody_changed` | Obtain new original-key readback and review its custody digest. |
+| `application_state_volume_already_adopted` | Apply the original key to complete the adoption receipt. |
+| `application_state_volume_owner_changed` | Resolve current ownership through the existing authority process. |
+| `application_state_volume_unqualified` | Correct the request or its reviewed plan before retrying. |
+
+An HTTP 202 alone does not prove creation: callers must inspect both `applied`
+and `allocation_state`, including retained replay responses.
 
 This option is service-only. The local/bootstrap CLI has no storage apply path.
 Actual state retention and isolation still require testing-lane qualification.

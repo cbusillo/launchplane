@@ -26103,6 +26103,7 @@ def create_launchplane_fastapi_app(
                 )
         if setup_request.state_volume_path:
             from control_plane.application_state_volume import ApplicationStateVolumeAdapter
+            from control_plane.application_state_volume_errors import StateVolumeRefusal
 
             try:
                 adapter = ApplicationStateVolumeAdapter.prepare(
@@ -26157,7 +26158,11 @@ def create_launchplane_fastapi_app(
                 raise _launchplane_http_error(
                     status_code=409,
                     trace_id=trace_id,
-                    code="application_state_volume_unqualified",
+                    code=(
+                        error.code
+                        if isinstance(error, StateVolumeRefusal)
+                        else "application_state_volume_unqualified"
+                    ),
                     message=str(error),
                 ) from error
         (

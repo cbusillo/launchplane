@@ -5886,18 +5886,24 @@ class PostgresRecordStore(HumanSessionStore):
 
     @contextmanager
     def provider_evidence_guard(
-        self, reservation_reader: Callable[[], LaunchplaneIdempotencyRecord]
+        self,
+        reservation_reader: Callable[[], LaunchplaneIdempotencyRecord],
+        *,
+        authority_checkpoint: Callable[[], None] | None = None,
     ) -> Iterator[None]:
         """Fence evidence and authority writes to one captured execution identity."""
         previous = getattr(self._provider_evidence_context, "reservation_reader", None)
+        previous_checkpoint = getattr(self._provider_evidence_context, "authority_checkpoint", None)
         # Capture stable lease identity before any row lock. Nested publication
         # can already own that row while the heartbeat waits on it under its mutex.
         expected = reservation_reader().model_copy()
         self._provider_evidence_context.reservation_reader = lambda: expected
+        self._provider_evidence_context.authority_checkpoint = authority_checkpoint
         try:
             yield
         finally:
             self._provider_evidence_context.reservation_reader = previous
+            self._provider_evidence_context.authority_checkpoint = previous_checkpoint
 
     def _lock_landing_authority(self, session: Any, *names: str) -> None:
         if self.database_dialect_name != "postgresql":
@@ -6303,6 +6309,14 @@ class PostgresRecordStore(HumanSessionStore):
             )
             if reservation_reader is not None:
                 self._require_current_provider_evidence(session, reservation_reader())
+            authority_checkpoint = getattr(
+                self._provider_evidence_context, "authority_checkpoint", None
+            )
+            if authority_checkpoint is not None:
+                # Reads only: the global authority lock excludes configuration
+                # writers. Never reacquire the execution lease mutex here while
+                # holding its reservation row against the heartbeat.
+                authority_checkpoint()
             adoption_checkpoint = getattr(
                 self._disposable_authority_context, "adoption_checkpoint", None
             )
