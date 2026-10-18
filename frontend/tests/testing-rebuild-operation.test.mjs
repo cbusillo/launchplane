@@ -112,7 +112,7 @@ test("a lost enqueue reply retains the original payload and key without retrying
 test("a denial is retained and cannot be resubmitted by recovery", async () => {
   let saved;
   let writes = 0;
-  const denied = dependencies({ submit: async () => { writes++; throw new LaunchplaneApiError("Denied", 403, "denial-trace", "authorization_denied"); }, persist: value => { saved = value; } });
+  const denied = dependencies({ submit: async (_product, _payload, options) => { options.onDispatch(); writes++; throw new LaunchplaneApiError("Denied", 403, "denial-trace", "authorization_denied"); }, persist: value => { saved = value; } });
   await assert.rejects(runTestingRebuild(original, denied), error => error.traceId === "denial-trace");
   await assert.rejects(runTestingRebuild(saved, denied));
   assert.equal(writes, 1);
@@ -183,12 +183,16 @@ test("a refusal during uncertain recovery cannot discard the earlier request", a
 });
 
 test("a session failure before POST dispatch returns to fresh inspection", async () => {
-  let saved;
-  await assert.rejects(runTestingRebuild(original, dependencies({
-    submit: async () => { throw new Error("Session request failed before dispatch"); },
-    persist: value => { saved = value; },
-  })));
-  assert.equal(saved, null);
+  for (const error of [new Error("Session request failed before dispatch"),
+    new LaunchplaneApiError("Sign in", 401, "session-trace", "authentication_required"),
+    new LaunchplaneApiError("Session refused", 403, "session-trace", "authorization_denied")]) {
+    let saved;
+    await assert.rejects(runTestingRebuild(original, dependencies({
+      submit: async () => { throw error; },
+      persist: value => { saved = value; },
+    })), observed => observed === error);
+    assert.equal(saved, null);
+  }
 });
 
 test("an absent read-only lookup cannot exclude an original request still in flight", async () => {

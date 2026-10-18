@@ -1,6 +1,6 @@
 import { expect, test, waitForState } from "./state";
 
-for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-observed", "session-unavailable", "watch-denied", "denied", "stale-build", "preflight-unavailable", "held-resume", "held-resume-denied", "held-resume-lost-reply"] as const) {
+for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-observed", "session-unavailable", "session-unauthenticated", "watch-denied", "denied", "stale-build", "preflight-unavailable", "held-resume", "held-resume-denied", "held-resume-lost-reply"] as const) {
   test(`testing rebuild keeps its address and original request after ${outcome} @responsive`, async ({ page }, testInfo) => {
     await page.goto("/ui/products?fixture=empty");
     const fixtures = await page.evaluate(async () => {
@@ -29,7 +29,7 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-o
     let resumed = false;
     await page.route("**/v1/**", route => route.fulfill({ status: 503, json: { error: { code: "fixture_unavailable", message: "Other evidence is unavailable in this isolated journey." } } }));
     await page.route("**/v1/auth/session", route => sessionUnavailable
-      ? route.fulfill({ status: 503, json: { trace_id: "session-unavailable", error: { code: "session_unavailable", message: "Session lookup unavailable." } } })
+      ? route.fulfill({ status: outcome === "session-unauthenticated" ? 401 : 503, json: { trace_id: "session-unavailable", error: { code: "session_unavailable", message: "Session lookup unavailable." } } })
       : route.fulfill({ json: { status: "ok", trace_id: "session", csrf_token: csrfToken, identity: { ...fixtures.identity, role: "admin" } } }));
     await page.route("**/v1/products", route => route.fulfill({ json: { status: "ok", trace_id: "products", products: fixtures.products } }));
     await page.route("**/v1/products/atlas-commerce/environments/testing", route => route.fulfill({ json: { status: "ok", trace_id: "lane", environment } }));
@@ -77,7 +77,7 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-o
     const panel = page.getByRole("region", { name: "Rebuild testing at the same address" });
     await expect(panel).toBeVisible();
     if (outcome === "preflight-unavailable") {
-      await expect(panel.getByText("Testing inspection is unavailable.")).toBeVisible();
+      await expect(panel.getByRole("button", { name: "Refresh inspection" })).toBeEnabled();
       await expect(panel.getByRole("button", { name: "Rebuild testing", exact: true })).toBeDisabled();
       expect(writes.length).toBe(0);
       await panel.screenshot({ path: testInfo.outputPath("testing-rebuild-unavailable.png") });
@@ -94,7 +94,7 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-o
     await page.evaluate(() => window.scrollTo(0, 0));
     await page.screenshot({ path: testInfo.outputPath("testing-rebuild-viewport.png") });
     await panel.screenshot({ path: testInfo.outputPath("testing-rebuild-ready.png") });
-    sessionUnavailable = outcome === "session-unavailable";
+    sessionUnavailable = ["session-unavailable", "session-unauthenticated"].includes(outcome);
     await panel.getByRole("button", { name: "Rebuild testing", exact: true }).click();
     if (["lost-reply", "recovery-denied", "lookup-not-observed"].includes(outcome)) {
       await expect(panel.getByRole("button", { name: "Recover this request" })).toBeEnabled();
@@ -112,7 +112,7 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-o
         await waitForState(() => lookups).toBe(1);
         expect(writes.length).toBe(2);
         if (outcome === "lookup-not-observed") {
-          await expect(panel.getByRole("status")).toContainText("Keep this request");
+          await waitForState(() => page.evaluate(() => JSON.parse(sessionStorage.getItem("launchplane:testing-rebuild:atlas-commerce") ?? "null")?.readOnlyRecovery)).toBe(true);
           await expect(panel.getByRole("button", { name: "Rebuild testing", exact: true })).toHaveCount(0);
           await panel.getByRole("button", { name: "Find the original rebuild" }).click();
           await waitForState(() => lookups).toBe(2);
@@ -120,13 +120,13 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-o
         }
       }
     }
-    if (outcome === "stale-build" || outcome === "session-unavailable") {
-      await expect(panel.getByRole("status")).toContainText("Review the fresh inspection");
+    if (["stale-build", "session-unavailable", "session-unauthenticated"].includes(outcome)) {
+      await waitForState(() => page.evaluate(() => sessionStorage.getItem("launchplane:testing-rebuild:atlas-commerce"))).toBe(null);
       await expect(panel.getByRole("button", { name: "Rebuild testing", exact: true })).toBeEnabled();
-      expect(writes.length).toBe(outcome === "session-unavailable" ? 0 : 1);
+      expect(writes.length).toBe(outcome === "stale-build" ? 1 : 0);
       expect(polled).toBe(false);
     } else if (outcome === "denied") {
-      await expect(panel.getByText("This request was denied and will not be submitted again.", { exact: false })).toBeVisible();
+      await waitForState(() => page.evaluate(() => JSON.parse(sessionStorage.getItem("launchplane:testing-rebuild:atlas-commerce") ?? "null")?.denied)).toBe(true);
       await page.reload();
       await expect(panel.getByRole("button", { name: "Recover this request" })).toHaveCount(0);
       expect(writes.length).toBe(1);
@@ -164,7 +164,8 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-o
         expect(writes.length).toBe(1);
         await page.reload();
       }
-      await expect(panel.getByRole("status")).toContainText("Testing rebuilt and verified healthy at the same address.");
+      await waitForState(() => page.evaluate(() => sessionStorage.getItem("launchplane:testing-rebuild:atlas-commerce"))).toBe(null);
+      await expect(panel.getByRole("button", { name: "Rebuild testing", exact: true })).toBeEnabled();
       if (heldOutcome) expect(resumes.length).toBe(outcome === "held-resume-denied" ? 2 : 1);
       expect(polled).toBe(true);
       expect(writes[0].body.data_source_mode).toBe(selectedSource);

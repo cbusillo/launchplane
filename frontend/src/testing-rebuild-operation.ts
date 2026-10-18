@@ -71,12 +71,12 @@ export async function runTestingRebuild(attempt: TestingRebuildAttempt, dependen
         ? await dependencies.lookup(attempt.product, attempt.payload, { idempotencyKey: attempt.key, signal })
         : await dependencies.submit(attempt.product, attempt.payload, { idempotencyKey: attempt.key, signal, onDispatch });
   } catch (error) {
-    if (error instanceof LaunchplaneApiError && [401, 403].includes(error.statusCode)) {
+    if (!attempt.operationId && !previouslyDispatched && !attempt.dispatchStarted) {
+      dependencies.persist(null);
+    } else if (error instanceof LaunchplaneApiError && [401, 403].includes(error.statusCode)) {
       dependencies.persist(attempt.operationId || previouslyDispatched
         ? { ...attempt, readOnlyRecovery: true }
         : { ...attempt, denied: true });
-    } else if (!attempt.operationId && !previouslyDispatched && !attempt.dispatchStarted) {
-      dependencies.persist(null);
     } else if (!attempt.operationId && !previouslyDispatched && error instanceof LaunchplaneApiError && error.statusCode === 409
       && ["testing_rebuild_not_ready", "testing_staff_hold", "testing_in_use", "testing_needed_copy",
         "testing_production_resources_shared", "testing_credentials_unverified", "testing_restore_source_unconfigured"].includes(error.code)) {
