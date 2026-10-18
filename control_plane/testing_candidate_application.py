@@ -62,6 +62,7 @@ def candidate_private_readiness(
         "web_gate_path": INTEGRATION_READBACK_PASSED_PATH,
         "web_config": compose.ODOO_WEB_CONFIG_PATH,
         "base_url": plan.base_url,
+        "http_port": int(inputs.runtime_environment["ODOO_HTTP_PORT"]),
         "copy_binding_sha256": generation_binding(generation) if generation else "",
         "witness_sql": "SELECT value FROM ir_config_parameter WHERE key='"
         + TESTING_COPY_COMPLETION_PARAMETER
@@ -89,7 +90,10 @@ def candidate_private_readiness(
     return TestingCandidatePrepared(
         plan_sha256=plan.digest,
         runtime_identity=plan.runtime_identity,
-        private_endpoint="http://" + allocation.namespace + ":8069",
+        private_endpoint="http://"
+        + allocation.namespace
+        + ":"
+        + inputs.runtime_environment["ODOO_HTTP_PORT"],
         deployment_id=deployment_id,
         source_witness=generation_binding(generation) if generation else "empty:" + plan.digest,
         integration_isolation_verified=True,

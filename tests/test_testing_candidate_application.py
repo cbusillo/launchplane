@@ -116,6 +116,16 @@ class CandidateApplicationTests(unittest.TestCase):
             source=source,
         )
 
+    def test_private_candidate_uses_the_managed_application_port(self) -> None:
+        self.profile = self.profile.model_copy(update={"runtime_port": 8072})
+        self.store.write_product_profile_record(self.profile)
+        self.fixture.before = self.fixture.authority()
+        inputs = self.inputs(self.allocate())
+        self.assertEqual(
+            inputs.runtime_environment["ODOO_HTTP_PORT"], str(self.profile.runtime_port)
+        )
+        self.fixture.assert_serving_unchanged()
+
     def test_private_build_preserves_the_serving_address_and_generated_passwords(self) -> None:
         allocation = self.allocate()
         inputs = self.inputs(allocation)
