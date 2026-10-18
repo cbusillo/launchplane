@@ -637,6 +637,48 @@ An older image cannot continue the new resource route. After activation, retain
 the qualifying image and forward-fix rather than erasing custody or restoring
 an old database to clear the fence.
 
+## Testing candidate storage before adoption
+
+The rebuild candidate allocator keeps custody in
+`launchplane_testing_candidates`, keyed by its service-generated namespace and
+bound to the original operation, intent and serving target. This record is
+separate from the lane's current generation. Allocation creates a private
+project/environment/compose and independent local volumes without changing
+the lane profile, canonical target records, runtime values, serving inventory or
+public address. It does create a physical provider-target reservation under the
+candidate namespace. Audit and backfill recognize that reservation only while its
+identity matches durable candidate custody, using the same rule for rehearsal
+reservations. They neither invent a serving target pair nor block unrelated
+backfill for a valid reservation; an orphan or mismatched reservation stays blocked.
+The target is reserved in the existing physical provider registry in the same
+transaction as its candidate custody; another lane cannot adopt it.
+Compatibility target-ID records are also fenced, both at capture and before
+subsequent provider effects; an older lane reference cannot become permission
+to qualify or change its target as a candidate.
+
+The caller must hold the authorized lane operation and recheck its authority,
+holds, use, custody and isolation at every checkpoint. Provider effect intent
+and each returned identity are recorded before proceeding. Lost creation
+responses require original-key observation of the complete uniquely named
+placement. Confirmed parents can continue; absent uncertain creates remain
+unknown. Storage retries inspect the original empty, labelled resources and
+refuse changed or in-use storage. Nothing is deleted to make a retry work.
+
+This source component reuses the isolated placement creator used by upgrade
+rehearsals and the existing testing backing-store readback program. It removes
+the need to adopt a candidate as the serving target merely to qualify its
+storage. It does not activate a rebuild endpoint, restore data, move traffic,
+publish a generation or retire the serving copy. Those stages remain part of
+the stable-address rebuild work in [#3963](https://github.com/cbusillo/launchplane/issues/3963)
+and [#3968](https://github.com/cbusillo/launchplane/issues/3968).
+
+The schema migration adds custody without modifying existing lane records.
+Use the normal service schema-migration procedure on delivery. Rolling back
+code retains the candidate table and physical reservations, including uncertain
+effects; recover with the original operation rather than clearing custody or
+reusing its target. Local SQLite tests exercise record semantics; the matching
+PostgreSQL integration cases qualify the actual database path in CI.
+
 ## Service collection
 
 `collect` on the observation API resolves existing service sources itself:

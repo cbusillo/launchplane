@@ -408,6 +408,25 @@ class RehearsalScenario(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "host reached"):
                     adapter.host(record, "apply", lambda: None)
 
+    def test_missing_creation_receipt_requires_recovery_without_starting_a_copy(self) -> None:
+        from control_plane.provider_operations import ProviderOperationLease
+
+        before = self.authority()
+        with (
+            patch(
+                "control_plane.dokploy.sandbox_placement.created_placement",
+                return_value=("", "", ""),
+            ),
+            patch("control_plane.dokploy.api.dokploy_request", return_value={}) as create,
+            patch.object(OdooRehearsalAdapter, "run_script") as storage,
+            self.assertRaises(RehearsalRefused) as refused,
+        ):
+            self.adapter("prepare").apply("original-operation", Mock(spec=ProviderOperationLease))
+        self.assertEqual(refused.exception.code, RehearsalPrerequisite.RECOVERY_REQUIRED)
+        create.assert_called_once()
+        storage.assert_not_called()
+        self.assertEqual(self.authority(), before)
+
     def test_lifecycle_preserves_both_recovery_states_and_all_original_lanes(self) -> None:
         before = self.authority()
         copies = []

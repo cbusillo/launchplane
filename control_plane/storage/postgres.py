@@ -4,6 +4,7 @@ from urllib.parse import urlsplit
 
 from control_plane.contracts.merge_train_stall import MergeTrainStallRecord
 from control_plane.contracts.odoo_upgrade_rehearsal import OdooUpgradeRehearsalRecord
+from control_plane.contracts.testing_candidate import TestingCandidateAllocation
 
 from pathlib import Path
 
@@ -3442,6 +3443,12 @@ class LaunchplaneDisposableReplacementPreparationRow(Base):
 class LaunchplaneDisposableTestingResourceAllocationRow(Base):
     __tablename__ = "launchplane_disposable_testing_resource_allocations"
     operation_id: Mapped[str] = mapped_column(String, primary_key=True)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneTestingCandidateRow(Base):
+    __tablename__ = "launchplane_testing_candidates"
+    namespace: Mapped[str] = mapped_column(String, primary_key=True)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -10655,6 +10662,98 @@ class PostgresRecordStore(HumanSessionStore):
                     observations_before,
                 ),
             )
+
+    def read_testing_candidate(self, namespace: str) -> TestingCandidateAllocation | None:
+        with self._session_factory() as session:
+            row = session.get(LaunchplaneTestingCandidateRow, namespace)
+            return TestingCandidateAllocation.model_validate(row.payload) if row else None
+
+    def compare_and_write_testing_candidate(
+        self, expected: TestingCandidateAllocation | None, replacement: TestingCandidateAllocation
+    ) -> None:
+        replacement = TestingCandidateAllocation.model_validate(replacement.model_dump())
+        if expected is not None:
+            replacement.require_successor(expected)
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            self._lock_landing_authority(session, "testing-candidate:" + replacement.namespace)
+            row = session.get(
+                LaunchplaneTestingCandidateRow, replacement.namespace, with_for_update=True
+            )
+            if (row.payload if row else None) != (
+                self._payload_dict(expected) if expected else None
+            ):
+                raise ValueError("Candidate custody changed; preserve the original operation.")
+            from control_plane.contracts.product_profile_record import (
+                is_exclusive_product_context,
+                product_context_owner_map,
+            )
+
+            profiles = tuple(
+                LaunchplaneProductProfileRecord.model_validate(item.payload)
+                for item in session.scalars(select(LaunchplaneProductProfileRow))
+            )
+            profile = next((item for item in profiles if item.product == replacement.product), None)
+            if (
+                profile is None
+                or profile.driver_id != "odoo"
+                or profile.lifecycle_state != "active"
+                or not any(
+                    lane.context == replacement.context and lane.instance == "testing"
+                    for lane in profile.lanes
+                )
+                or not is_exclusive_product_context(
+                    context=replacement.context,
+                    product=replacement.product,
+                    owners=product_context_owner_map(profiles),
+                )
+            ):
+                raise ValueError("Candidate allocation requires the owned Odoo testing lane.")
+            serving = session.get(LaunchplaneProviderTargetRow, (replacement.context, "testing"))
+            if (
+                serving is None
+                or serving.provider_id != "dokploy"
+                or serving.target_category != "compose"
+                or serving.target_id != replacement.serving_target_id
+            ):
+                raise ValueError("The serving testing target changed during candidate preparation.")
+            if replacement.compose_id:
+                if (
+                    session.scalar(
+                        select(LaunchplaneDokployTargetIdRow)
+                        .where(LaunchplaneDokployTargetIdRow.target_id == replacement.compose_id)
+                        .limit(1)
+                    )
+                    is not None
+                ):
+                    raise ValueError("Candidate identity is already named by a legacy lane target.")
+            if replacement.compose_id and (expected is None or not expected.compose_id):
+                # Physical alias fencing reserves custody without changing the
+                # canonical target, generation, runtime environment or inventory.
+                self._write_provider_target_with_expectation(
+                    session=session,
+                    write=ProviderTargetWrite(
+                        record=ProviderTargetRecord(
+                            context=replacement.namespace,
+                            instance="testing-candidate",
+                            provider_id="dokploy",
+                            target_category="compose",
+                            target_id=replacement.compose_id,
+                            display_name=replacement.namespace,
+                            provider_target_type="compose",
+                            source_label="service:testing-candidate",
+                            updated_at=replacement.created_at.isoformat(),
+                        ),
+                        expected_absent=True,
+                    ),
+                )
+            session.merge(
+                LaunchplaneTestingCandidateRow(
+                    namespace=replacement.namespace, payload=self._payload_dict(replacement)
+                )
+            )
+            session.commit()
 
     def read_odoo_upgrade_rehearsal(self, rehearsal_id: str) -> OdooUpgradeRehearsalRecord | None:
         with self._session_factory() as session:
