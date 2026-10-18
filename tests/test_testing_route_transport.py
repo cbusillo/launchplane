@@ -200,6 +200,11 @@ class TestingRouteTransportTests(unittest.TestCase):
             self.plan, backend, expected_backend=expected, dispatch_guard=self.guard
         )
 
+    def test_container_name_remains_a_qualified_dns_endpoint_without_extra_aliases(self) -> None:
+        self.containers["old"]["NetworkSettings"]["Networks"]["dokploy-network"]["Aliases"] = None
+        self.assertIn(self.plan.old_backend, self.client.read()["old_endpoints"])
+        self.assertEqual(self.effect_count, 0)
+
     def test_proxy_filesystem_permission_error_is_unavailable_without_a_fallback(self) -> None:
         self.deny = True
         self.denial_message = b"mktemp: permission denied"
