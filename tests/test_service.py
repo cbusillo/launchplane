@@ -110,7 +110,8 @@ from control_plane.service_human_auth import (
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
-from control_plane.storage.schema_invariants import EXPECTED_ALEMBIC_HEAD_REVISION
+from control_plane.storage.schema_invariants import RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS
+from control_plane.storage.schema_migration import SCHEMA_MIGRATION_TARGET_REVISION
 
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
 from tests.support.openapi import openapi_document, openapi_response
@@ -5620,11 +5621,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(initial_payload["runtime"]["database_schema_revision"], "")
         self.assertEqual(
             initial_payload["runtime"]["compatible_database_schema_revisions"],
-            [EXPECTED_ALEMBIC_HEAD_REVISION],
+            list(RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS),
         )
         self.assertEqual(
             initial_payload["runtime"]["schema_migration_target_revision"],
-            EXPECTED_ALEMBIC_HEAD_REVISION,
+            SCHEMA_MIGRATION_TARGET_REVISION,
         )
         self.assertEqual(status_code, 403)
         self.assertEqual(payload["error"]["code"], "authorization_denied")
