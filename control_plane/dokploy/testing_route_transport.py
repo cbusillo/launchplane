@@ -22,6 +22,7 @@ from control_plane.dokploy.testing_route import (
     TestingLaneRoute,
     observe_testing_route,
     route_document,
+    redirects_to_https,
 )
 
 TRAEFIK_DYNAMIC_DIRECTORY = "/etc/dokploy/traefik/dynamic"
@@ -36,7 +37,8 @@ name=$2
 expected=$3
 desired=$4
 case "$name" in lp-testing-route-*.yml) ;; *) exit 21 ;; esac
-test -d "$root" && test ! -L "$root"
+test -d "$root"
+test ! -L "$root"
 path="$root/$name"
 if test -L "$path"; then exit 22; fi
 if test -e "$path"; then
@@ -47,8 +49,9 @@ else
 fi
 if test "$current" = "$desired"; then exit 0; fi
 test "$current" = "$expected"
-temporary=$(mktemp "$root/.launchplane-testing.pending.XXXXXX")
+temporary=
 trap 'test -z "$temporary" || rm -f "$temporary"' EXIT HUP INT TERM
+temporary=$(mktemp "$root/.launchplane-testing.pending.XXXXXX")
 umask 077
 cat > "$temporary"
 test "$(sha256sum "$temporary" | cut -d ' ' -f 1)" = "$desired"
@@ -72,9 +75,11 @@ sync -f "$root"
 def testing_route_host_program() -> str:
     """The emitted host program uses the same conservative rule evaluator."""
     return (
-        "import base64,hashlib,ipaddress,json,re,subprocess,sys\n"
+        "import base64,hashlib,ipaddress,json,re,subprocess,sys\nfrom typing import Any\n"
         "from urllib.request import ProxyHandler,build_opener\n"
         + inspect.getsource(host_rule_may_match)
+        + "\n"
+        + inspect.getsource(redirects_to_https)
         + "\nDIRECTORY="
         + repr(TRAEFIK_DYNAMIC_DIRECTORY)
         + "\nSTATIC="
@@ -88,16 +93,10 @@ def testing_route_host_program() -> str:
 def docker(*arguments, stdin=None):
     result = subprocess.run(['docker', *arguments], input=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60, check=False)
     if result.returncode:
-        if any(token in result.stderr.lower() for token in (b'permission denied',b'unauthorized',b'access denied')):
+        if any(token in result.stderr.lower() for token in (b'permission denied while trying to connect to the docker daemon socket',b'authorization denied by plugin',b'error response from daemon: unauthorized',b'error response from daemon: access denied')):
             raise PermissionError('The managed testing route operation was refused')
         raise RuntimeError('The managed testing route operation did not complete')
     return result.stdout
-
-def one(identifier):
-    values=json.loads(docker('inspect',identifier))
-    if not isinstance(values,list) or len(values)!=1:
-        raise RuntimeError('Managed proxy inventory is incomplete')
-    return values[0]
 
 def selected_raw(raw, host, points):
     routers=raw.get('routers')
@@ -111,7 +110,7 @@ def selected_raw(raw, host, points):
             raise RuntimeError('Applied router inventory is incomplete')
         if not set(item['entryPoints']) & set(points) or not host_rule_may_match(str(item.get('rule') or ''),host):
             continue
-        selected[name]={key:item[key] for key in ('rule','service','entryPoints','priority','middlewares','tls','status') if key in item}
+        selected[name]={key:item[key] for key in ('rule','ruleSyntax','service','entryPoints','priority','middlewares','tls','status') if key in item}
         provider=name.rsplit('@',1)[-1]
         service=str(item.get('service') or '')
         service=service if '@' in service else service+'@'+provider
@@ -124,15 +123,18 @@ def selected_raw(raw, host, points):
             middleware=raw.get('middlewares',{}).get(qualified)
             if not isinstance(middleware,dict):
                 raise RuntimeError('Applied middleware inventory is incomplete')
-            middlewares[qualified]={key:middleware[key] for key in ('headers','status') if key in middleware}
+            middlewares[qualified]={key:middleware[key] for key in ('headers','redirectScheme','status') if key in middleware}
     return {'routers':selected,'services':services,'middlewares':middlewares}
 
 def main(spec):
     if not re.fullmatch(r'lp-testing-route-[a-f0-9]{32}',spec['route_id']) or not re.fullmatch(r'[a-zA-Z0-9.-]+',spec['host']):
         raise RuntimeError('Testing route identity is invalid')
-    containers=[one(identifier) for identifier in docker('ps','-aq').decode().splitlines()]
+    identifiers=docker('ps','-aq').decode().splitlines()
+    containers=json.loads(docker('inspect',*identifiers)) if identifiers else []
+    if not isinstance(containers,list) or any(not isinstance(item,dict) for item in containers):
+        raise RuntimeError('Managed container inventory is incomplete')
     proxies=[item for item in containers if item.get('State',{}).get('Status')=='running' and (item.get('Name')=='/dokploy-traefik' or (item.get('Config',{}).get('Labels') or {}).get('com.docker.swarm.service.name')=='dokploy-traefik')]
-    if len(proxies)!=1 or proxies[0].get('State',{}).get('Status')!='running':
+    if len(proxies)!=1:
         raise RuntimeError('Exactly one running managed proxy is required')
     proxy=proxies[0]
     mounts=[item for item in proxy.get('Mounts',[]) if item.get('Destination')==DIRECTORY]
@@ -185,7 +187,7 @@ def main(spec):
                 raise RuntimeError('Testing publication crosses its lane host')
         if not http.get('routers') or spec['desired_backend'] not in spec['allowed_backends'] or http['services'][spec['route_id']].get('loadBalancer',{}).get('servers')!=[{'url':spec['desired_backend']}]:
             raise RuntimeError('Testing publication selected an unbound backend')
-        if http.get('middlewares')!={spec['route_id']+'-connections':{'headers':{'contentSecurityPolicy':CSP}}} or any(spec['route_id']+'-connections@file' not in item.get('middlewares',[]) for item in http['routers'].values()):
+        if http.get('middlewares',{}) not in ({},{spec['route_id']+'-connections':{'headers':{'contentSecurityPolicy':CSP}}}) or any(not redirects_to_https(raw,item) and spec['route_id']+'-connections@file' not in item.get('middlewares',[]) for item in http['routers'].values()):
             raise RuntimeError('Testing publication contains unbound middleware')
         if spec['expected_static_sha256']!=hashlib.sha256(static.encode()).hexdigest() or spec['expected_state_sha256']!=hashlib.sha256(json.dumps(raw,sort_keys=True,separators=(',',':')).encode()).hexdigest() or spec['expected_file_sha256']!=digest:
             raise RuntimeError('Testing route authority changed before publication')

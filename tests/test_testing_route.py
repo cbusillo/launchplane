@@ -42,14 +42,18 @@ class RoutingRuleTests(unittest.TestCase):
 class TestingRouteTests(unittest.TestCase):
     def setUp(self) -> None:
         self.host = "testing.example.invalid"
-        self.old = "http://172.20.0.3:8069"
+        self.old = "http://testing-old-web-1:8069"
+        self.old_address = "http://172.20.0.3:8069"
         self.new = "http://lp-testing-" + "a" * 32 + ":8069"
         self.raw: dict[str, Any] = {
             "routers": {},
             "services": {
                 "old@docker": {
                     "status": "enabled",
-                    "loadBalancer": {"servers": [{"url": self.old}], "passHostHeader": True},
+                    "loadBalancer": {
+                        "servers": [{"url": self.old_address}],
+                        "passHostHeader": True,
+                    },
                 }
             },
             "middlewares": {
@@ -78,6 +82,7 @@ class TestingRouteTests(unittest.TestCase):
             context="example",
             host=self.host,
             old_backend=self.old,
+            old_backend_addresses=(self.old_address,),
             new_backend=self.new,
             raw=self.raw,
             public_entrypoints=("web", "websecure"),
@@ -99,6 +104,47 @@ class TestingRouteTests(unittest.TestCase):
             raw["services"].pop("old@docker", None)
             raw["middlewares"].pop("old-connections@docker", None)
         return raw
+
+    def test_migration_file_uses_the_verified_container_alias_instead_of_its_ip(self) -> None:
+        plan = self.plan()
+        document = route_document(plan, plan.old_backend)
+        self.assertEqual(
+            document["http"]["services"][plan.route_id]["loadBalancer"]["servers"],
+            [{"url": self.old}],
+        )
+        self.assertNotIn(self.old_address, str(document))
+        self.assertEqual(observe_testing_route(plan, self.raw, None), self.old)
+
+    def test_owned_route_refuses_an_ip_backend_or_another_host_template(self) -> None:
+        plan = self.plan()
+        for change in ({"old_backend": self.old_address}, {"host": "another.invalid"}):
+            with self.subTest(change=change), self.assertRaises(ValueError) as error:
+                TestingLaneRoute.model_validate({**plan.model_dump(), **change})
+            self.assertNotIsInstance(error.exception, TestingRoutePending)
+
+    def test_https_redirect_and_tls_options_survive_without_adding_csp_to_redirect(self) -> None:
+        redirect = "redirect-to-https@file"
+        self.raw["middlewares"][redirect] = {
+            "status": "enabled",
+            "redirectScheme": {"scheme": "https", "permanent": True},
+        }
+        self.raw["routers"]["old-http@docker"]["middlewares"] = [redirect]
+        tls = {"certResolver": "fixture-resolver", "options": "default@file"}
+        self.raw["routers"]["old-https@docker"]["tls"] = tls
+        plan = self.plan()
+        document = route_document(plan, self.new)
+        for router in document["http"]["routers"].values():
+            if router["entryPoints"] == ["web"]:
+                self.assertEqual(router["middlewares"], [redirect])
+            else:
+                self.assertEqual(router["tls"], tls)
+        applied = self.apply(plan, self.new, retire_old=True)
+        self.assertEqual(observe_testing_route(plan, applied, document), self.new)
+        middleware = next(iter(document["http"]["middlewares"]))
+        self.assertEqual(
+            applied["middlewares"][middleware + "@file"]["headers"],
+            {"contentSecurityPolicy": TESTING_CONNECTION_CSP},
+        )
 
     def test_migration_first_serves_old_then_switches_same_route_after_candidate_proof(
         self,

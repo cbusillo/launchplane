@@ -552,7 +552,8 @@ an old database to clear the fence.
 ## Stable testing traffic between disposable copies
 
 The native testing route adapter gives the lane one stable dynamic route identity.
-It binds the existing HTTPS hostname to an observed private predecessor backend
+It binds the existing HTTPS hostname to a unique, physically verified private
+DNS alias for the predecessor, never a reusable container IP,
 and the prepared candidate backend. A first migration from Docker-owned routing
 publishes a lane-owned file at strictly higher numeric priority, initially still
 serving the predecessor. The adapter verifies every applicable router and its
@@ -562,7 +563,12 @@ Subsequent rebuilds require the recorded owned template and reuse the same route
 
 The managed testing connection policy is rendered from the same source as Odoo
 Compose routes. It lives in the owned file and survives retirement of its former
-Docker producer. Unknown/broad host rules, unsupported middleware, changed
+Docker producer. This enforces the existing browser connection-isolation rule
+on the owned testing response, including a legacy predecessor rendered without
+generation headers. It can therefore block external connections that the old
+render allowed; that is the testing isolation policy, not transparent header
+preservation. A router that only redirects to HTTPS keeps its redirect middleware
+without adding a response CSP. Unknown/broad host rules, unsupported middleware, changed
 predecessor configuration and unexpected services refuse admission. The host-rule
 check evaluates boolean ownership conservatively; a foreign Host clause joined
 with OR cannot hide another matching path, and Go regex syntax is not evaluated
@@ -579,7 +585,10 @@ must hold and renew the original authorized lane/provider operation throughout,
 including immediately before dispatch. A real provider denial propagates through
 the existing transport; there is no second writer or identity fallback.
 
-An absent reply is reconciled from the owned file and the applied API. A written
+An absent reply does not prove the proxy writer stopped. The caller retains the
+original durable dispatch fence and continues observing it; an old file alone
+cannot exclude a still-running writer or authorize an inverse decision.
+A written
 but partly/unapplied group stays pending without another dispatch. Public health
 and exact runtime identity remain the controller's separate proof before serving
 publication or old-copy retirement. The old physical copy must still be qualified

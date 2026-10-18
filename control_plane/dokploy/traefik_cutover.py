@@ -198,7 +198,31 @@ class TraefikFileRoute:
                     or yaml.safe_load(self.target.route_file.read_text()) != intended
                 ):
                     raise ValueError("route authority changed during publication recovery")
-        atomic_publish_route_file(self.target.route_file, intended)
+        payload = json.dumps(intended, sort_keys=True)
+        temporary: str | None = None
+        try:
+            # No supported file-provider extension while the file is incomplete.
+            with NamedTemporaryFile(
+                mode="w",
+                prefix=".cutover-",
+                suffix=".pending",
+                dir=self.target.route_file.parent,
+                delete=False,
+            ) as stream:
+                temporary = stream.name
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, self.target.route_file)
+            temporary = None
+            descriptor = os.open(self.target.route_file.parent, os.O_RDONLY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        finally:
+            if temporary is not None:
+                Path(temporary).unlink(missing_ok=True)
         return self._wait_applied(backend, expected)
 
     def _wait_applied(self, backend: str, expected: tuple[str, ...]) -> str:
@@ -219,32 +243,3 @@ class TraefikFileRoute:
         return hashlib.sha256(
             (self.observed_target() + datetime.now(UTC).isoformat()).encode()
         ).hexdigest()
-
-
-def atomic_publish_route_file(route_file: Path, document: dict[str, Any]) -> None:
-    """Publish an already admitted owned document without partial watcher input."""
-    payload = json.dumps(document, sort_keys=True)
-    temporary: str | None = None
-    try:
-        # No supported file-provider extension while the file is incomplete.
-        with NamedTemporaryFile(
-            mode="w",
-            prefix=".cutover-",
-            suffix=".pending",
-            dir=route_file.parent,
-            delete=False,
-        ) as stream:
-            temporary = stream.name
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, route_file)
-        temporary = None
-        descriptor = os.open(route_file.parent, os.O_RDONLY)
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-    finally:
-        if temporary is not None:
-            Path(temporary).unlink(missing_ok=True)
