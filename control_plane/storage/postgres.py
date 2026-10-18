@@ -13149,6 +13149,7 @@ class PostgresRecordStore(HumanSessionStore):
         # recovery proof for an abandoned attempt or an arbitrary stored record.
         from control_plane.odoo_testing_drill import DRILL_SCOPE, DRILL_ROUTE
         from control_plane.odoo_testing_restore import generation_binding
+        from control_plane.product_reconcile import reconcile_reservation_scope
 
         with self._session_factory() as session:
             restore_unstarted_drill = (
@@ -13251,6 +13252,23 @@ class PostgresRecordStore(HumanSessionStore):
                         payload["selection_restored"] = True
                         self._sync_idempotency_row(receipt_row, receipt)
             self._sync_odoo_stable_target_replacement_operation_row(row, record)
+            if (
+                record.instance == "testing"
+                and record.status in {"pass", "fail", "cancelled"}
+                and record.authorization is not None
+                and record.authorization.grant == "launchplane_reconcile"
+                and record.idempotency_scope == reconcile_reservation_scope(record.product)
+            ):
+                # Completion changes the testing plan: publish success or advance
+                # its bounded retry chain without waiting for the catch-up sweep.
+                # Keep the wake in this transaction so a crash cannot lose it.
+                target = ProductReconcileTarget(product=record.product, target_kind="testing")
+                self._lock_landing_authority(
+                    session, f"launchplane:product-reconcile:{target.target_key}"
+                )
+                self._fold_product_reconcile_request(
+                    session, target=target, requested_at=completed_at, delivery_id=""
+                )
             session.commit()
             return True
 

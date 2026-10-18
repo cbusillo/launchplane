@@ -96,6 +96,7 @@ from control_plane.product_reconcile import (
     PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS,
     PREVIEW_FEEDBACK_RECOVERY_MAX_FAILED_ATTEMPTS,
     TESTING_FAILURE_DESCRIPTIONS,
+    TESTING_DEPLOY_MAX_FAILED_ATTEMPTS,
     RECONCILE_SOURCE,
     PreviewProviderHooks,
     ProductReconcileError,
@@ -4796,6 +4797,142 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
         feedback = cast(dict[str, object], completed.last_plan["pr_feedback"])
         self.assertEqual(feedback["delivery_status"], "failed")
         self.assertIn("has no GitHub App", cast(str, feedback["error"]))
+
+
+class ProductReconcileCompletionTests(ProductReconcileTestCase):
+    def queued_operation(self) -> OdooStableTargetReplacementOperationRecord:
+        self.github.add_run(20, DEPLOYABLE)
+        self.comments.merged[DEPLOYABLE] = 12
+        self.request()
+        self.reconcile()
+        return self.claim_operation()
+
+    def claim_operation(self) -> OdooStableTargetReplacementOperationRecord:
+        now = datetime.now(timezone.utc)
+        operation = self.store.claim_next_odoo_stable_target_replacement_operation_record(
+            lease_owner="deploy-worker",
+            claimed_at=now.isoformat(),
+            lease_expires_at=(now + timedelta(minutes=5)).isoformat(),
+        )
+        assert operation is not None
+        return operation
+
+    def complete(self, operation: OdooStableTargetReplacementOperationRecord, status: str) -> bool:
+        now = datetime.now(timezone.utc).isoformat()
+        return self.store.complete_odoo_stable_target_replacement_operation_record(
+            record=operation.model_copy(
+                update={
+                    "status": status,
+                    "phase": "completed" if status == "pass" else "failed",
+                    "updated_at": now,
+                    "finished_at": now,
+                    "error_message": "deploy failed" if status == "fail" else "",
+                }
+            ),
+            lease_owner=operation.lease_owner,
+        )
+
+    def test_completion_publishes_testing_feedback_without_an_event_or_sweep(self) -> None:
+        operation = self.queued_operation()
+        manifest = self.store.read_artifact_manifest(operation.request.artifact_id)
+        self.store.write_release_tuple_record(
+            ReleaseTupleRecord(
+                tuple_id="running-testing",
+                context=operation.context,
+                channel="testing",
+                artifact_id=manifest.artifact_id,
+                repo_shas={"site": manifest.source_commit},
+                image_repository=manifest.image.repository,
+                image_digest=manifest.image.digest,
+                provenance="ship",
+                minted_at=datetime.now(timezone.utc).isoformat(),
+            )
+        )
+        self.assertTrue(self.complete(operation, "pass"))
+        self.assertEqual(self.store.read_product_reconcile_request("site:testing").state, "pending")
+        self.assertEqual(self.reconcile()["reason"], "already_deployed")
+        (comment,) = self.comments.on(12)
+        self.assertIn("The testing lane runs this change.", cast(str, comment["body"]))
+        self.assertEqual(len(self.store.list_odoo_stable_target_replacement_operation_records()), 1)
+
+    def test_completion_retries_failures_with_the_existing_budget_without_a_sweep(self) -> None:
+        operation = self.queued_operation()
+        for attempt in range(TESTING_DEPLOY_MAX_FAILED_ATTEMPTS):
+            self.assertTrue(self.complete(operation, "fail"))
+            self.assertEqual(
+                self.store.read_product_reconcile_request("site:testing").state, "pending"
+            )
+            reconciled = self.run_once()
+            if attempt + 1 < TESTING_DEPLOY_MAX_FAILED_ATTEMPTS:
+                self.assertEqual(reconciled.state, "done")
+                operation = self.claim_operation()
+            else:
+                self.assertEqual(reconciled.state, "failed")
+        (comment,) = self.comments.on(12)
+        self.assertIn("testing deploy of this change failed", cast(str, comment["body"]))
+        self.assertIsNone(
+            self.store.claim_next_odoo_stable_target_replacement_operation_record(
+                lease_owner="deploy-worker",
+                claimed_at=datetime.now(timezone.utc).isoformat(),
+                lease_expires_at=(datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
+            )
+        )
+
+    def test_completion_and_reconcile_request_commit_together(self) -> None:
+        operation = self.queued_operation()
+        with patch.object(
+            self.store, "_fold_product_reconcile_request", side_effect=RuntimeError("queue failed")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "queue failed"):
+                self.complete(operation, "pass")
+        self.assertEqual(
+            self.store.read_odoo_stable_target_replacement_operation_record(operation.operation_id),
+            operation,
+        )
+        self.assertEqual(self.store.read_product_reconcile_request("site:testing").state, "done")
+
+    def test_completion_during_another_reconcile_keeps_its_followup_pending(self) -> None:
+        operation = self.queued_operation()
+        self.request()
+        request = self.store.claim_next_product_reconcile_request("other-worker", 300)
+        assert request is not None
+        self.assertTrue(self.complete(operation, "pass"))
+        completed = self.store.complete_product_reconcile_request(
+            request.target_key, "other-worker", "done", dict(request.last_plan)
+        )
+        self.assertEqual(completed.state, "pending")
+
+    def test_pass_without_a_matching_release_does_not_announce_testing_runs_it(self) -> None:
+        operation = self.queued_operation()
+        self.assertTrue(self.complete(operation, "pass"))
+        # A terminal operation alone cannot attest what testing currently runs.
+        self.assertEqual(self.reconcile()["action"], "deploy")
+        (comment,) = self.comments.on(12)
+        self.assertIn("queued the testing deploy", cast(str, comment["body"]))
+
+    def test_lost_lease_cannot_wake_reconciliation(self) -> None:
+        operation = self.queued_operation()
+        self.assertFalse(
+            self.complete(operation.model_copy(update={"lease_owner": "stale"}), "pass")
+        )
+        self.assertEqual(self.store.read_product_reconcile_request("site:testing").state, "done")
+
+    def test_nonterminal_checkpoint_does_not_wake_reconciliation(self) -> None:
+        operation = self.queued_operation()
+        self.assertTrue(
+            self.store.complete_odoo_stable_target_replacement_operation_record(
+                record=operation, lease_owner=operation.lease_owner
+            )
+        )
+        self.assertEqual(self.store.read_product_reconcile_request("site:testing").state, "done")
+
+    def test_independent_testing_operation_does_not_wake_event_reconciliation(self) -> None:
+        operation = self.queued_operation().model_copy(
+            update={"idempotency_scope": "independent-testing-operation"}
+        )
+        self.store.write_odoo_stable_target_replacement_operation_record(operation)
+        self.assertTrue(self.complete(operation, "pass"))
+        self.assertEqual(self.store.read_product_reconcile_request("site:testing").state, "done")
 
 
 class ProductReconcileTestingFeedbackTests(ProductReconcileTestCase):
