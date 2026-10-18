@@ -170,7 +170,14 @@ def main(spec):
         if not isinstance(network,dict) or not network.get('IPAddress'):
             raise RuntimeError('Retained testing backend is not on managed ingress')
         endpoints=['http://'+network['IPAddress']+':'+port]
-        for alias in network.get('Aliases') or []:
+        # User-defined bridge DNS resolves the container name even when Docker
+        # reports no additional network aliases. It remains bound to this exact
+        # testing process, with a complete check for a foreign alias collision.
+        aliases=list(network.get('Aliases') or [])
+        container_name=str(old[0].get('Name') or '').lstrip('/')
+        if container_name and container_name not in aliases:
+            aliases.append(container_name)
+        for alias in aliases:
             if alias.startswith('lp-testing-') or alias.startswith(old_project+'-'):
                 if any(item['Id']!=old[0]['Id'] and alias in (item.get('NetworkSettings',{}).get('Networks',{}).get('dokploy-network',{}).get('Aliases') or []) for item in containers):
                     raise RuntimeError('Retained testing alias is shared')
