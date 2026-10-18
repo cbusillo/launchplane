@@ -202,7 +202,7 @@ class FailedBatchRecoveryTests(unittest.TestCase):
             recorded_at="2026-10-03T12:01:00Z",
             trace_id="recovery",
             mutate=mutate,
-            lease=Mock(record=Mock(updated_at=self.candidate.updated_at)),
+            lease=Mock(record=Mock(updated_at=self.candidate.updated_at, step_payload={})),
         )
         assert result is not None
         return result
@@ -680,7 +680,11 @@ class FailedBatchRecoveryTests(unittest.TestCase):
             or Mock(
                 owner="test",
                 acquisition_token="test",
-                record=Mock(ordinary_job_binding=None, updated_at=self.candidate.updated_at),
+                record=Mock(
+                    ordinary_job_binding=None,
+                    updated_at=self.candidate.updated_at,
+                    step_payload={},
+                ),
             ),
             snapshot=self.snapshot,
         )

@@ -613,9 +613,13 @@ automatic recovery from an unrelated candidate failure.
 
 The controller persists its source-head-bound block decision before applying
 the label, including the previous label event ID. It then confirms the applied
-label event ID. A lost label reply reconciles only through that exact saved
-native lease; ordinary discovery never adopts an abandoned pending intent.
-Recovery requires the confirmed event and exactly one subsequent label event by
+label event ID. A successful POST is also saved as a positive write receipt
+before observing event/detail reads. If both reads lag, that receipt retains
+the causal proof without holding the repository's lease; ordinary queue work
+continues, and later recovery still requires exactly one current label event.
+A lost label reply reconciles only through its exact saved native lease;
+ordinary discovery never adopts an abandoned or uncertain pending intent.
+Recovery requires exactly one subsequent label event by
 the recorded writer App. Its identity comes from the existing token-source App
 ID, independently of the enqueue allowlist; reserved Bot-login metadata resolves
 that ID even when GitHub omits `performed_via_github_app` from label events.
@@ -646,11 +650,19 @@ from PR notes by the preview reconciler, independently of a ready handoff; a
 Client-review PR waits for that current-head check before recovery. An old
 waiting handoff is not a new model-review request.
 
-Confirmation makes at most two consistency observations per pass. A visible
-label whose event is still pending produces managed waiting feedback and retains
-the exact native checkpoint, rather than throwing or repeating POST. That
-uncertain effect remains fenced until provider evidence settles. A confirmed
-absence retires the attempt; an unrelated hold is never adopted.
+Confirmation makes at most two consistency observations per pass. A saved
+successful write produces managed waiting feedback while the event is pending
+or the label still looks absent; later passes do not repeat POST, and unrelated
+queue work proceeds. An uncertain write retains its exact native checkpoint.
+For that state, inspect the saved controller result and provider label/event
+evidence, repair the underlying provider problem, and use the existing
+`POST /v1/work-graph/merge-train/controller/run-once` reconciliation entrypoint
+with the same repository/base selector and existing authorization. Its mutating
+pass re-observes the saved effect without reissuing the label write. Time alone
+never proves whether an uncertain write happened, and this recovery path adds
+no force-clear or remove-label shortcut. A confirmed absence retires only an
+uncertain attempt; an unrelated hold is never adopted. Resumed block feedback
+retains the original failed-check details from its saved checkpoint.
 
 The controller rechecks the head and label history before leased removal.
 Unavailable proof preserves the hold while unrelated queue work proceeds;

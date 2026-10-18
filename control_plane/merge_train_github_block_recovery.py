@@ -227,7 +227,9 @@ def recover_candidate_block(
         events.sort(key=lambda event: int(str(event["id"])))
         if candidate.block_intent is not None:
             intent = candidate.block_intent
-            if intent.label.casefold() != label.casefold() or intent.applied_label_event_id is None:
+            if intent.label.casefold() != label.casefold() or (
+                intent.applied_label_event_id is None and not intent.label_write_succeeded
+            ):
                 return None
             changes = [
                 event for event in events if int(str(event["id"])) > intent.prior_label_event_id
@@ -253,6 +255,7 @@ def recover_candidate_block(
         event = changes[0]
         if (
             candidate.block_intent is not None
+            and candidate.block_intent.applied_label_event_id is not None
             and event["id"] != candidate.block_intent.applied_label_event_id
         ):
             return None

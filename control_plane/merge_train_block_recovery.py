@@ -68,6 +68,9 @@ def recover_candidate_block(
         repository=snapshot.repository, base_branch=snapshot.base_branch, status="superseded"
     )
     recorded_policies: tuple[MergeTrainPolicyRecord, ...] | None = None
+    explicit_batches = {
+        record.candidate.batch_id for record in candidates if record.block_intent is not None
+    }
     # Prefer the explicit decision over legacy reconstruction, regardless of
     # service clock ordering or feedback delivery chronology.
     for candidate in sorted(
@@ -75,9 +78,14 @@ def recover_candidate_block(
     ):
         feedback = receipts.get(candidate.record_id)
         failed = candidate.candidate
+        if candidate.block_intent is None and failed.batch_id in explicit_batches:
+            # A saved decision owns this failure's provenance. An older
+            # generic outcome must not replace its missing current event proof.
+            continue
         if (
             candidate.block_intent is not None
             and candidate.block_intent.applied_label_event_id is None
+            and not candidate.block_intent.label_write_succeeded
         ):
             continue
         if (

@@ -427,6 +427,7 @@ class MergeTrainCandidateBlockIntent(BaseModel):
     applied_label_event_id: int | None = Field(default=None, ge=1)
     writer_app_id: int | None = Field(default=None, ge=1)
     applied_label_actor_id: int | None = Field(default=None, ge=1)
+    label_write_succeeded: bool = False
     source_failed_record_id: str = Field(min_length=1)
 
 

@@ -34,6 +34,9 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
         self.store = FilesystemRecordStore(Path(self.directory.name))
         self.policy = build_test_merge_train_policy(trusted_automation_github_user_ids=(42,))
         self.target = self.policy.policies[0]
+        source_app = self.target.github_token.github_app
+        assert source_app is not None
+        self.writer_app_id = source_app.app_id
         before = MergeTrainPolicyRecord(
             record_id="before", source="test", updated_at="2026-10-18T00:00:00Z", policy=self.policy
         )
@@ -60,6 +63,7 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
                 label=self.target.blocked_label,
                 prior_label_event_id=0,
                 applied_label_event_id=50,
+                writer_app_id=self.writer_app_id,
                 source_failed_record_id="source-failed",
             ),
         ).model_copy(update={"status": "superseded"})
@@ -135,10 +139,7 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
         if "/collaborators/" in path:
             return {"permission": "read"}
         if path == "/apps/train":
-            original = self.store.list_merge_train_policy_records()[-1]
-            app = original.policy.policies[0].github_token.github_app
-            assert app is not None
-            return {"id": app.app_id}
+            return {"id": self.writer_app_id}
         if "/pulls/" in path:
             return {"labels": [{"name": label} for label in self.current.labels]}
         raise AssertionError((method, path))
@@ -181,7 +182,7 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
         self.assertEqual(result["details"]["blocked_head_sha"], self.old.head_sha)
         self.assertEqual(result["details"]["head_sha"], self.current.head_sha)
 
-    def test_mutation_clears_only_proven_old_block_then_requires_normal_ready(self) -> None:
+    def test_mutation_removes_only_the_proven_old_block(self) -> None:
         result = self.advance(mutate=True)
         self.assertEqual(result["controller_action"], "recover_candidate_block")
         self.assertEqual(len(self.mutations), 1)
@@ -349,7 +350,7 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
         self.policy_digest = after.policy_sha256
         self.assertEqual(self.advance()["controller_action"], "recover_candidate_block")
 
-    def test_execution_policy_change_still_requires_fresh_ready_after_recovery(self) -> None:
+    def test_execution_policy_change_does_not_strand_the_recorded_block(self) -> None:
         self.target = self.target.model_copy(update={"enqueue_label": "different-enqueue"})
         self.policy = self.policy.model_copy(update={"policies": (self.target,)})
         after = MergeTrainPolicyRecord(
@@ -614,6 +615,41 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
                 self.assertEqual(self.mutations, [])
 
     def test_real_block_producer_preserves_intent_across_a_lost_label_reply(self) -> None:
+        self._exercise_real_block_producer(lose_label_reply=True)
+
+    def test_successful_block_write_survives_lagging_absence_without_holding_other_work(
+        self,
+    ) -> None:
+        self._exercise_real_block_producer(lose_label_reply=False)
+
+    def test_existing_label_does_not_create_a_successful_write_receipt(self) -> None:
+        from control_plane.merge_train_controller_run_once import _block_failed_candidate_culprit
+
+        held = self.old.model_copy(update={"labels": (self.target.blocked_label,)})
+        dry = build_merge_train_dry_run_result(
+            policy=self.policy,
+            snapshot=self.snapshot.model_copy(update={"pull_requests": (held,)}),
+            batch_landing=True,
+        )
+        before = self.store.list_merge_train_batch_candidate_records()
+        result = _block_failed_candidate_culprit(
+            candidate_store=self.store,
+            active_candidate_record=self.record,
+            github_client=self.client,
+            dry_run_result=dry,
+            details={},
+            repository=self.target.repository,
+            base_branch=self.target.base_branch,
+            mutate=True,
+            lease=self.lease,
+            repository_policy=self.target,
+        )
+        assert result is not None
+        self.assertNotIn("merge_train_batch_candidate_record_id", result)
+        self.assertEqual(self.store.list_merge_train_batch_candidate_records(), before)
+        self.transport.request.assert_not_called()
+
+    def _exercise_real_block_producer(self, *, lose_label_reply: bool) -> None:
         from control_plane.merge_train_controller_run_once import (
             _block_failed_candidate_culprit,
             execute_merge_train_controller_with_client,
@@ -645,11 +681,15 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
                 ]
                 self.assertEqual(len(intents), 1)
                 self.assertEqual(intents[0].candidate.entries[0].head_sha, self.old.head_sha)
-                self.events = [self.label_event]
-                self.current = self.current.model_copy(
-                    update={"labels": (self.target.blocked_label,)}
-                )
-                raise TimeoutError("label reply lost before feedback")
+                if lose_label_reply:
+                    self.events = [self.label_event]
+                    self.current = self.current.model_copy(
+                        update={"labels": (self.target.blocked_label,)}
+                    )
+                    raise TimeoutError("label reply lost before feedback")
+                # The write succeeds, while both event and PR-detail reads
+                # remain absent through the producer's two observations.
+                return []
             return requests(**kwargs)
 
         self.transport.request.side_effect = lost_reply
@@ -668,24 +708,41 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
             adoptable_active_actions=(MERGE_TRAIN_CONTROLLER_ACTIVE_ACTION,),
         )
         lease = MergeTrainControllerLeaseContext(record=state, record_store=self.store)
-        with self.assertRaises(TimeoutError):
-            _block_failed_candidate_culprit(
+        failure_details: dict[str, object] = {
+            "failed_checks": [{"name": "integration", "conclusion": "failure"}]
+        }
+
+        def produce() -> Any:
+            return _block_failed_candidate_culprit(
                 candidate_store=self.store,
                 active_candidate_record=self.record,
                 github_client=self.client,
                 dry_run_result=dry,
-                details={},
+                details=failure_details,
                 repository=self.target.repository,
                 base_branch=self.target.base_branch,
                 mutate=True,
                 lease=lease,
                 repository_policy=self.target,
             )
-        lease.release(
-            reconciliation_status="required",
-            reconciliation_detail="lost label reply",
-            clear_active_state=False,
-        )
+
+        if lose_label_reply:
+            with self.assertRaises(TimeoutError):
+                produce()
+            lease.release(
+                reconciliation_status="required",
+                reconciliation_detail="lost label reply",
+                clear_active_state=False,
+            )
+        else:
+            produced = produce()
+            self.assertNotIn("controller_reconciliation_status", produced)
+            from control_plane.merge_train_controller_feedback import build_feedback_payloads
+
+            self.assertEqual(
+                build_feedback_payloads(response={"result": produced})[0]["event"], "waiting"
+            )
+            lease.release()
         self.current = fixed
         self.snapshot = self.snapshot.model_copy(update={"pull_requests": (fixed,)})
         self.transport.request.side_effect = requests
@@ -717,15 +774,31 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
         # repeats POST, and later observation resumes the exact saved intent.
         self.events = []
         pending = run("pending-label")
-        self.assertEqual(pending.accepted_result["controller_reconciliation_status"], "required")
-        self.assertEqual(
-            build_feedback_payloads(
-                response={"result": pending.accepted_result, "records": pending.records}
-            )[0]["event"],
-            "waiting",
-        )
+        if lose_label_reply:
+            self.assertEqual(
+                pending.accepted_result["controller_reconciliation_status"], "required"
+            )
+            self.assertEqual(
+                build_feedback_payloads(
+                    response={"result": pending.accepted_result, "records": pending.records}
+                )[0]["event"],
+                "waiting",
+            )
+        else:
+            next_pr = self.old.model_copy(
+                update={"number": 3, "head_sha": "c" * 40, "required_checks_status": "pending"}
+            )
+            self.snapshot = self.snapshot.model_copy(update={"pull_requests": (fixed, next_pr)})
+            pending = run("unrelated-queue")
+            self.assertEqual(pending.accepted_result["controller_action"], "wait_for_checks")
+            self.assertEqual(
+                pending.accepted_result["dry_run_result"]["selected_pr"]["number"], next_pr.number
+            )
         self.events = [self.label_event]
-        self.assertEqual(run("confirm-label").accepted_result["controller_action"], "block")
+        if lose_label_reply:
+            confirmed = run("confirm-label").accepted_result
+            self.assertEqual(confirmed["controller_action"], "block")
+            self.assertEqual(confirmed["details"], failure_details)
         self.assertEqual(
             run("recover-new-head").accepted_result["controller_action"], "recover_candidate_block"
         )
