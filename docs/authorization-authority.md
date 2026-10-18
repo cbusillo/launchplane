@@ -110,10 +110,12 @@ in `tests/test_projection_sync.py`; an action without that proof stays `write`.
 Currently only `ingress_route.audit` qualifies. It uses the existing ingress
 endpoint with `instance` and `mode=apply`, verifies lane-owned domains, an exact
 existing host, an exclusive product context and an active DB-backed edge endpoint,
-and records only an unchanged provider route. The audit reuses the existing
+and completes only for an unchanged provider route. The audit reuses the existing
 exact-instance no-op guard: creation, update and enable/disable are forced off
-for every exact-instance apply. Drift refuses
-the request. Shared-host comparison preserves sibling domains, while records and
+for every exact-instance apply. It records pending evidence before the provider
+recheck. Drift refuses the request and leaves that pending audit; route-binding
+reconciliation refuses unresolved latest evidence until a newer terminal audit
+confirms the route. Shared-host comparison preserves sibling domains, while records and
 responses contain only the requested lane's domains and redact provider config
 for inherited standing permission. Domain-authority repair and route-binding
 creation or reconciliation remain writes; an audit never performs them.

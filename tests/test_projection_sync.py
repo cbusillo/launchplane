@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import ExitStack
+from datetime import datetime, timezone
 from unittest.mock import patch
 from typing import cast
 import unittest
@@ -180,6 +181,13 @@ class ProjectionSyncTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(set(ingress.calls) - {"list"})
                 self.assertNotIn("private-provider-config", response.text)
                 self.assertNotIn("provider-meta", response.text)
+                if name == "shared-host":
+                    sibling_domains = set(host.domain_names) - set(
+                        cast(list[str], route["domain_names"])
+                    )
+                    self.assertTrue(sibling_domains)
+                    for domain in sibling_domains:
+                        self.assertNotIn(domain, response.text)
                 self.assertEqual(store.read_product_profile_record(profile.product), profile)
                 self.assertEqual(store.read_edge_endpoint_record(endpoint.endpoint_key), endpoint)
                 records = store.list_ingress_route_audit_records(
@@ -240,6 +248,36 @@ class ProjectionSyncTests(unittest.IsolatedAsyncioTestCase):
                     with self.assertRaises(click.ClickException):
                         apply_npmplus_ingress_route(client=ingress, request=request)
                 self.assertEqual(ingress.calls, ["list"])
+
+    async def test_unauthorized_apply_denial_keeps_requested_action(self) -> None:
+        policy = reader_policy(product="launchplane")
+        policy = policy.model_copy(
+            update={
+                "local_operators": tuple(
+                    rule.model_copy(update={"actions": ("ingress_route.plan",)})
+                    for rule in policy.local_operators
+                )
+            }
+        )
+        with _database_app(policy) as (store, _, app):
+            async with lifespan_client(app) as client:
+                response = await client.post(
+                    "/v1/drivers/ingress/route-apply",
+                    headers={
+                        "Authorization": "Bearer reader-token",
+                        "Idempotency-Key": "denied-ingress-apply",
+                    },
+                    json=_instance_ingress_exact_host_payload(mode="apply"),
+                )
+            self.assertEqual(response.status_code, 403, response.text)
+            payload = response.json()
+            self.assertEqual(payload["error"]["code"], "authorization_denied")
+            denial = store.read_authz_denial_record(
+                trace_id=payload["trace_id"], observed_at=datetime.now(timezone.utc).isoformat()
+            )
+            self.assertIsNotNone(denial)
+            assert denial is not None
+            self.assertEqual(denial.action, "ingress_route.apply")
 
     def test_projection_permission_does_not_broaden_readers_or_other_writes(self) -> None:
         policy = reader_policy(product="launchplane")

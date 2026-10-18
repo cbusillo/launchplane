@@ -23226,6 +23226,15 @@ def create_launchplane_fastapi_app(
                 record_context=False,
             ).decision
             != "allowed"
+            and resolved_authz_policy_runtime.evaluate(
+                identity=identity,
+                action="ingress_route.audit",
+                product=route_request.product,
+                context=route_request.context,
+                target=AuthorizationTarget(scope="instance", instances=(instance_name,)),
+                record_context=False,
+            ).decision
+            == "allowed"
         ):
             authz_action = "ingress_route.audit"
         if not resolved_authz_policy_runtime.allows(
