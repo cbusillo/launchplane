@@ -92,6 +92,7 @@ from control_plane.testing_candidate_application import (
     candidate_terminal_custody_evidence,
 )
 from control_plane.testing_candidate_runtime import (
+    CandidateRuntimeInputsChanged,
     testing_profile_binding,
     CandidateSource,
     TestingCandidateRuntimeInputs,
@@ -149,10 +150,7 @@ class NativeTestingRebuildIntent(FrozenRecord):
 def native_rebuild_effects_started(
     store: PostgresRecordStore, operation: OdooStableTargetReplacementOperationRecord
 ) -> bool:
-    original = store.read_idempotency_record(
-        scope=REBUILD_SCOPE, route_path=REBUILD_ROUTE, idempotency_key=operation.operation_id
-    )
-    return original is not None and bool(original.provider_effect_started_at)
+    return store.native_testing_rebuild_effects_started(operation)
 
 
 def rebuild_source(operation: OdooStableTargetReplacementOperationRecord) -> CandidateSource:
@@ -350,13 +348,14 @@ class NativeTestingRebuildAdapter:
                 result = executor.finish_admission_refusal(error)
             else:
                 result = rebuild_result(record, executor.allocation)
+            assert isinstance(lease, ProviderEvidenceLease)
             return ProviderMutationOutcome(
                 200,
                 {
                     "result": result.model_dump(mode="json"),
                 },
-                provider_effect_performed=native_rebuild_effects_started(
-                    self.store, self.operation
+                provider_effect_performed=bool(
+                    lease.evidence_reservation().provider_effect_started_at
                 ),
             )
 
@@ -457,6 +456,34 @@ class NativeTestingRebuildExecution:
         ):
             raise NativeTestingRebuildPending(str(error)) from error
         candidate = self.store.read_testing_candidate(self.adapter.namespace)
+        if candidate is not None:
+            if candidate.effect in {"project_id", "environment_id", "compose_id"} and not getattr(
+                candidate, candidate.effect
+            ):
+                candidate = observe_candidate_creation(
+                    root=self.root,
+                    store=self.store,
+                    namespace=candidate.namespace,
+                    guard=lambda: self.guard(recovery=True),
+                )
+                if candidate is None:
+                    raise NativeTestingRebuildPending(
+                        "Observe the original candidate creation before ending admission."
+                    ) from error
+            if candidate.effect == "storage" and not candidate.resources_binding_sha256:
+                raise NativeTestingRebuildPending(
+                    "The original candidate storage operation remains unresolved."
+                ) from error
+            app = candidate.application
+            if app is not None and app.phase == "configuring":
+                raise NativeTestingRebuildPending(
+                    "The original candidate configuration writer remains unresolved."
+                ) from error
+            if app is not None and app.phase in {"deploying", "restoring"}:
+                candidate_terminal_custody_evidence(
+                    root=self.root, store=self.store, record=candidate
+                )
+                self.guard(recovery=True)
         frame = self.transport.read()
         self.route = compile_testing_route(
             product=self.operation.product,
@@ -500,7 +527,8 @@ class NativeTestingRebuildExecution:
             self.check_lock()
             self.lease.assert_current()
             self.adapter.checkpoints.save(failed)
-            assert candidate is not None
+            if candidate is None:
+                raise NativeTestingRebuildPending("The original candidate custody is unavailable.")
             result = rebuild_result(failed, candidate)
         else:
             result = OdooStableTargetReplacementApplyResult(
@@ -560,7 +588,10 @@ class NativeTestingRebuildExecution:
         if candidate is not None and candidate.compose_id:
             if current_target == candidate.compose_id:
                 published_testing_copy(
-                    self.store, product=self.operation.product, context=self.operation.context
+                    self.store,
+                    product=self.operation.product,
+                    context=self.operation.context,
+                    recovery_operation_id=self.operation.operation_id if recovery else "",
                 )
             else:
                 require_candidate_target_custody(self.store, candidate)
@@ -742,7 +773,7 @@ class NativeTestingRebuildExecution:
                 source=rebuild_source(self.operation),
                 admitted_profile=self.intent.profile,
             )
-        except ValueError as error:
+        except CandidateRuntimeInputsChanged as error:
             raise NativeTestingRebuildAdmissionChanged(
                 "The admitted candidate runtime inputs are no longer valid."
             ) from error
@@ -761,12 +792,19 @@ class NativeTestingRebuildExecution:
         else:
             if (
                 checkpoint.plan.old != self.intent.old
+                or checkpoint.plan.authority_digest != self.intent.digest
                 or checkpoint.plan.new.copy_id != self.adapter.namespace
                 or checkpoint.plan.base_url != self.base_url
                 or checkpoint.plan.source != rebuild_source(self.operation)
             ):
                 raise ValueError("The original checkpoint belongs to another rebuild intent.")
             self.plan = checkpoint.plan
+            if allocation is not None and (
+                checkpoint.plan.new.target_id != allocation.compose_id
+                or allocation.application is not None
+                and checkpoint.plan != self.build_plan(allocation, allocation.application.plan)
+            ):
+                raise ValueError("The original checkpoint belongs to another candidate plan.")
             if checkpoint.step == "failed" and checkpoint.admission_refusal:
                 if allocation is None:
                     raise NativeTestingRebuildPending(
@@ -1210,6 +1248,7 @@ class NativeTestingRebuildExecution:
             "disable-old-auto-deploy",
             lambda: self.old_provider().get("autoDeploy") is False,
             disable_auto_deploy,
+            recovery=True,
         )
 
         def stop_compose() -> None:
@@ -1232,6 +1271,7 @@ class NativeTestingRebuildExecution:
                 )["stopped"]
             ),
             lambda dispatch: dispatch(stop_compose),
+            recovery=True,
         )
 
     def retirement_exclusion(self, plan: TestingRebuildPlan) -> TestingCopyReadiness | None:
@@ -1354,6 +1394,15 @@ class NativeTestingRebuildExecution:
                     return ProviderMutationOutcome(200, provider_effect_performed=False)
 
                 def dispatch(send: Callable[[], None]) -> None:
+                    if phase in {"disable-old-auto-deploy", "retire-old"}:
+                        target = parent.store.read_dokploy_target_record(
+                            context_name=parent.operation.context,
+                            instance_name="testing",
+                        )
+                        if target.policies.staff_testing_hold is not None:
+                            raise NativeTestingRebuildPending(
+                                "Staff testing holds retirement of the old copy."
+                            )
                     parent.guard(recovery=recovery)
                     lease.assert_current()
                     parent.lease.checkpoint_effect(phase)

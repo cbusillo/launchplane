@@ -15,7 +15,7 @@ from control_plane.testing_publication_storage import read_publication, read_sna
 
 
 def published_testing_copy(
-    store: PostgresRecordStore, *, product: str, context: str
+    store: PostgresRecordStore, *, product: str, context: str, recovery_operation_id: str = ""
 ) -> TestingPublicationRecord | None:
     try:
         target = store.read_dokploy_target_record(context_name=context, instance_name="testing")
@@ -43,6 +43,8 @@ def published_testing_copy(
         raise ValueError("Serving testing copy publication is unavailable.")
     plan = record.plan
     candidate = plan.candidate
+    if recovery_operation_id and recovery_operation_id != candidate.operation_id:
+        raise ValueError("Published-copy recovery belongs to another original operation.")
     app = candidate.application
     assert app is not None and plan.after.binding is not None
     profile = store.read_product_profile_record(product)
@@ -62,7 +64,11 @@ def published_testing_copy(
     )
     if (candidate.product, candidate.context) != (product, context) or (
         lane is None
-        or profile.runtime_port != plan.profile.runtime_port
+        # The original executor finishes physical retirement under its admitted
+        # port. A later profile edit cannot change the already-running copy.
+        # Ordinary maintenance still requires the current profile to agree.
+        or not recovery_operation_id
+        and profile.runtime_port != plan.profile.runtime_port
         or lane.base_url.rstrip("/") != app.plan.base_url
         or snapshot.target_id.target_id != candidate.compose_id
         or snapshot.provider.target_id != candidate.compose_id

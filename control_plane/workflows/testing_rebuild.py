@@ -400,7 +400,7 @@ def execute_testing_rebuild(
             return record
 
         if record.step == "retiring":
-            provider.guard(plan)
+            provider.guard(plan, recovery=True)
             save(retirement_started=True)
             provider.retire_old(plan)
             save(step="complete", route=observation, ended_at=clock())

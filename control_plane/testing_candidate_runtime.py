@@ -58,6 +58,10 @@ from control_plane.testing_replacement_bootstrap import (
 CandidateSource = Literal["empty", "production", "upstream"]
 
 
+class CandidateRuntimeInputsChanged(ValueError):
+    """Explicit persisted input drift, distinct from unavailable observations."""
+
+
 @dataclass(frozen=True)
 class TestingCandidateRuntimeInputs:
     plan: TestingCandidateApplicationPlan
@@ -168,17 +172,21 @@ def candidate_runtime_inputs(
         artifact_id=artifact_id,
         source=source,
     ):
-        raise ValueError("Candidate build/source differs from its original admitted operation.")
+        raise CandidateRuntimeInputsChanged(
+            "Candidate build/source differs from its original admitted operation."
+        )
     resources = candidate_resources(allocation)
     if allocation.resources_binding_sha256 != resources.binding_sha256:
-        raise ValueError("Candidate needs its independent storage receipt first.")
+        raise CandidateRuntimeInputsChanged(
+            "Candidate needs its independent storage receipt first."
+        )
     require_candidate_target_custody(store, allocation)
     profile = store.read_product_profile_record(allocation.product)
     if admitted_profile is not None:
         if testing_profile_binding(profile, allocation.context) != testing_profile_binding(
             admitted_profile, allocation.context
         ):
-            raise ValueError("The admitted testing runtime profile changed.")
+            raise CandidateRuntimeInputsChanged("The admitted testing runtime profile changed.")
         profile = admitted_profile
     lane = next(
         lane
@@ -189,7 +197,9 @@ def candidate_runtime_inputs(
     if not artifact_manifest_matches_image_repository(
         artifact, expected_repository=profile.image.repository
     ) or missing_required_odoo_modules_from_artifact(artifact):
-        raise ValueError("Candidate requires its product's admitted Odoo artifact/modules.")
+        raise CandidateRuntimeInputsChanged(
+            "Candidate requires its product's admitted Odoo artifact/modules."
+        )
     omitted = testing_credential_omissions(store, allocation.context, None)
     require_testing_credential_safety(store, allocation.context, omitted)
     delivered = site_delivered_secret_bindings_from_store(
@@ -203,7 +213,7 @@ def candidate_runtime_inputs(
             or binding.value_source != "generated"
             or binding.declared_secret_class != "testing"
         ):
-            raise ValueError(
+            raise CandidateRuntimeInputsChanged(
                 "Candidate requires the existing service-generated testing-local credentials."
             )
         record = store.read_secret_record(binding.secret_id)
@@ -213,7 +223,9 @@ def candidate_runtime_inputs(
             "testing",
             "context_instance",
         ) or version.secret_id != record.secret_id:
-            raise ValueError("Candidate local credential provenance is inconsistent.")
+            raise CandidateRuntimeInputsChanged(
+                "Candidate local credential provenance is inconsistent."
+            )
         credentials.append(
             {
                 "binding": binding.model_dump(mode="json"),
@@ -231,7 +243,7 @@ def candidate_runtime_inputs(
         secret_binding_keys=FRESH_TESTING_LOCAL_CREDENTIAL_KEYS,
     )
     if any(not runtime.values.get(key) for key in FRESH_TESTING_LOCAL_CREDENTIAL_KEYS):
-        raise ValueError("Candidate local credentials are unavailable.")
+        raise CandidateRuntimeInputsChanged("Candidate local credentials are unavailable.")
     target = store.read_dokploy_target_record(
         context_name=allocation.context, instance_name="testing"
     )
@@ -347,7 +359,9 @@ def candidate_runtime_inputs(
         omitted_runtime_keys=tuple(sorted(omitted)),
     )
     if previous is not None and previous != plan:
-        raise ValueError("Candidate input authority changed; preserve its original operation.")
+        raise CandidateRuntimeInputsChanged(
+            "Candidate input authority changed; preserve its original operation."
+        )
     values = {
         key: value
         for key, value in runtime.values.items()

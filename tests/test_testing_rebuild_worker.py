@@ -18,7 +18,12 @@ from control_plane.contracts.odoo_stable_target_replacement_operation import (
 )
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.promotion_record import HealthcheckEvidence
-from control_plane.contracts.testing_rebuild import TestingCopy, TestingRebuildRecord
+from control_plane.contracts.testing_rebuild import (
+    REBUILD_SCOPE,
+    REBUILD_ROUTE,
+    TestingCopy,
+    TestingRebuildRecord,
+)
 from control_plane.contracts.testing_candidate import testing_candidate_namespace
 from control_plane.contracts.testing_candidate_application import TestingCandidatePrepared
 from control_plane.dokploy.testing_route import route_document, compile_testing_route
@@ -32,7 +37,7 @@ from control_plane.testing_serving_copy import (
     render_maintained_testing_copy,
 )
 from control_plane.odoo_testing_usage import OdooTestingUsage
-from control_plane.testing_publication_storage import read_snapshot
+from control_plane.testing_publication_storage import read_snapshot, publish as publication_write
 from tests import test_testing_publication as publication_tests
 from tests import test_testing_route as route_tests
 from tests.test_testing_rebuild_service import exercise_published_copy_maintenance
@@ -205,6 +210,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertEqual(kwargs["payload"]["composeId"], self.intent.old.target_id)
         self.assertIsNotNone(self.owned)
         self.assertEqual(self.current().target_id.target_id, self.fixture.candidate.compose_id)
+
         self.assertFalse(self.fail_public)
         self.effects.append("stop-old")
         self.retained["stopped"] = self.retained["web_stopped"] = True
@@ -311,6 +317,23 @@ class NativeTestingWorkerTests(unittest.TestCase):
         )
 
     def test_native_cancellation_before_execution_has_no_provider_effect(self) -> None:
+        from control_plane.storage.postgres import LaunchplaneTestingCandidateRow
+
+        # This fixture otherwise starts with a real, fully prepared private copy.
+        # An unstarted allocation can exist, but has no provider effect or ids.
+        with self.store._session_factory.begin() as session:
+            row = session.get(LaunchplaneTestingCandidateRow, self.fixture.candidate.namespace)
+            assert row is not None
+            row.payload = self.fixture.candidate.model_copy(
+                update={
+                    "effect": "",
+                    "project_id": "",
+                    "environment_id": "",
+                    "compose_id": "",
+                    "resources_binding_sha256": "",
+                    "application": None,
+                }
+            ).model_dump(mode="json")
         self.store.write_odoo_stable_target_replacement_operation_record(self.operation)
         self.assertTrue(
             self.store.cancel_pending_odoo_stable_target_replacement_operation_record(
@@ -318,6 +341,20 @@ class NativeTestingWorkerTests(unittest.TestCase):
             )
         )
         self.assertEqual(self.effects, [])
+
+    def test_private_candidate_without_a_current_outer_marker_cannot_be_cancelled(self) -> None:
+        self.store.write_odoo_stable_target_replacement_operation_record(self.operation)
+        self.assertFalse(
+            self.store.cancel_pending_odoo_stable_target_replacement_operation_record(
+                self.cancellation()
+            )
+        )
+        self.assertEqual(
+            self.store.read_odoo_stable_target_replacement_operation_record(
+                self.operation.operation_id
+            ),
+            self.operation,
+        )
 
     def test_pending_native_effect_cannot_be_cancelled_and_original_observation_completes(
         self,
@@ -533,7 +570,14 @@ class NativeTestingWorkerTests(unittest.TestCase):
         result = self.execute()
         self.assertEqual(result.deploy_status, "fail")
         self.assertEqual(result.error_code, "testing_rebuild_admission_changed")
-        self.assertFalse(service.native_rebuild_effects_started(self.store, self.operation))
+        original = self.store.read_idempotency_record(
+            scope=REBUILD_SCOPE,
+            route_path=REBUILD_ROUTE,
+            idempotency_key=self.operation.operation_id,
+        )
+        self.assertIsNotNone(original)
+        assert original is not None
+        self.assertFalse(original.provider_effect_started_at)
         self.assertEqual(self.effects, [])
 
     def hold_after_private_candidate_effects(self, *, prepared: bool = False) -> None:
@@ -609,6 +653,169 @@ class NativeTestingWorkerTests(unittest.TestCase):
         for flag in ("publication_started", "retirement_started", "rollback_started"):
             with self.subTest(flag=flag), self.assertRaises(ValueError):
                 TestingRebuildRecord.model_validate({**failed.model_dump(), flag: True})
+
+    def test_unavailable_production_probe_is_not_permanent_admission_drift(self) -> None:
+        from control_plane import testing_candidate_runtime as compiler
+        from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
+
+        operation = self.operation.model_copy(
+            update={
+                "request": self.operation.request.model_copy(
+                    update={"data_source_mode": "production_restore", "allow_empty_data": False},
+                )
+            }
+        )
+        allocation = self.fixture.candidate.model_copy(
+            update={
+                "application": None,
+                "intent_sha256": compiler.candidate_application_intent(
+                    product=operation.product,
+                    context=operation.context,
+                    artifact_id=operation.request.artifact_id,
+                    source="production",
+                ),
+            }
+        )
+        executor = service.NativeTestingRebuildExecution(
+            service.NativeTestingRebuildAdapter(
+                self.root, self.store, operation, self.intent, self.authorize
+            ),
+            Mock(),
+            Mock(),
+        )
+        unavailable = NativeSourceUnavailable("Fixture source handshake unavailable")
+        with (
+            patch.object(compiler, "native_testing_source_authority", return_value=Mock()),
+            patch.object(
+                compiler, "resolve_native_testing_source", side_effect=unavailable
+            ) as probe,
+            self.assertRaises(NativeSourceUnavailable) as caught,
+        ):
+            executor.current_candidate_inputs(allocation)
+        self.assertIs(caught.exception, unavailable)
+        probe.assert_called_once()
+        self.assertTrue(probe.call_args.kwargs["probe"])
+        self.assertEqual(self.effects, [])
+
+    def test_input_store_failure_is_not_relabelled_as_permanent_admission_drift(self) -> None:
+        self.hold_after_private_candidate_effects()
+        with (
+            patch.object(
+                service,
+                "candidate_runtime_inputs",
+                side_effect=ValueError("Fixture metadata read unavailable"),
+            ),
+            self.assertRaises(service.NativeTestingRebuildPending),
+        ):
+            self.execute()
+        self.assertEqual(self.effects, [])
+
+    def test_admission_drift_preserves_unknown_allocation_custody(self) -> None:
+        candidate = self.fixture.candidate.model_copy(
+            update={
+                "application": None,
+                "compose_id": "",
+                "effect": "compose_id",
+                "resources_binding_sha256": "",
+            }
+        )
+        profile = self.store.read_product_profile_record(self.operation.product)
+        self.store.write_product_profile_record(
+            profile.model_copy(update={"runtime_port": profile.runtime_port + 1})
+        )
+        with (
+            patch.object(self.store, "read_testing_candidate", return_value=candidate),
+            patch.object(service, "observe_candidate_creation", return_value=None) as observe,
+            self.assertRaises(service.NativeTestingRebuildPending),
+        ):
+            self.execute()
+        observe.assert_called_once()
+        self.assertEqual(self.effects, [])
+        self.assertEqual(self.current().target_id, self.fixture.before.target_id)
+
+    def test_admission_drift_cannot_outlive_an_original_candidate_job(self) -> None:
+        for phase in ("configuring", "deploying", "restoring"):
+            with self.subTest(phase=phase):
+                app = self.app.model_copy(update={"phase": phase, "prepared": None})
+                candidate = self.fixture.candidate.model_copy(update={"application": app})
+                profile = self.store.read_product_profile_record(self.operation.product)
+                self.store.write_product_profile_record(
+                    profile.model_copy(update={"runtime_port": profile.runtime_port + 1})
+                )
+                with (
+                    patch.object(self.store, "read_testing_candidate", return_value=candidate),
+                    patch.object(
+                        service,
+                        "candidate_terminal_custody_evidence",
+                        side_effect=candidate_application.CandidateObservationUnavailable(
+                            "Fixture original job is running"
+                        ),
+                    ) as observe,
+                    self.assertRaises(service.NativeTestingRebuildPending),
+                ):
+                    self.execute()
+                self.assertEqual(observe.call_count, 0 if phase == "configuring" else 1)
+                self.assertEqual(self.effects, [])
+                self.assertFalse(self.retained["stopped"])
+
+        with (
+            patch.object(self.store, "read_testing_candidate", return_value=candidate),
+            patch.object(
+                service,
+                "candidate_terminal_custody_evidence",
+                return_value="fixture-original-job:done",
+            ) as terminal,
+        ):
+            result = self.execute()
+        terminal.assert_called_once()
+        self.assertEqual(result.error_code, "testing_rebuild_admission_changed")
+        self.assertEqual(self.effects, [])
+
+    def test_terminal_admission_receipt_cannot_replay_under_another_intent(self) -> None:
+        self.hold_after_private_candidate_effects()
+        profile = self.store.read_product_profile_record(self.operation.product)
+        self.store.write_product_profile_record(
+            profile.model_copy(update={"runtime_port": profile.runtime_port + 1})
+        )
+        self.assert_admission_changed_before_cutover()
+        changed = self.intent.model_copy(update={"project": self.intent.project + "-changed"})
+        executor = service.NativeTestingRebuildExecution(
+            service.NativeTestingRebuildAdapter(
+                self.root, self.store, self.operation, changed, self.authorize
+            ),
+            Mock(),
+            Mock(),
+        )
+        with self.assertRaises(ValueError):
+            executor.run()
+        self.assertEqual(self.effects, [])
+
+    def test_profile_drift_after_publication_does_not_strand_old_copy_retirement(self) -> None:
+        publish = publication_write
+
+        def changed(*args: Any, **kwargs: Any) -> Any:
+            result = publish(*args, **kwargs)
+            profile = self.store.read_product_profile_record(self.operation.product)
+            self.store.write_product_profile_record(
+                profile.model_copy(update={"runtime_port": profile.runtime_port + 1})
+            )
+            return result
+
+        with patch.object(service, "publish", side_effect=changed):
+            self.assertEqual(self.execute().deploy_status, "pass")
+        self.assertEqual(self.effects, ["switch-new", "stop-old"])
+        self.assertEqual(self.current().target_id.target_id, self.fixture.candidate.compose_id)
+        with self.assertRaises(ValueError):
+            published_testing_copy(
+                self.store, product=self.operation.product, context=self.operation.context
+            )
+        with self.assertRaises(ValueError):
+            published_testing_copy(
+                self.store,
+                product=self.operation.product,
+                context=self.operation.context,
+                recovery_operation_id=self.operation.operation_id + "-foreign",
+            )
 
     def test_runtime_edit_after_candidate_effects_has_a_finite_result(self) -> None:
         self.hold_after_private_candidate_effects()
@@ -1282,13 +1489,34 @@ class NativeTestingWorkerTests(unittest.TestCase):
         )
         self.store.write_odoo_stable_target_replacement_operation_record(operation)
         denial = NativeSourceAuthorizationDenied("Fixture provider authorization denial")
+
+        def denied_after_retry(**kwargs: Any) -> Any:
+            authorize = kwargs["authorize"]
+
+            def checkpoint(phase: str) -> None:
+                authorize(phase)
+                if phase == "testing_rebuild_checkpoint":
+                    original = self.store.read_idempotency_record(
+                        scope=REBUILD_SCOPE,
+                        route_path=REBUILD_ROUTE,
+                        idempotency_key=operation.operation_id,
+                    )
+                    assert original is not None
+                    self.assertGreater(original.attempt, 1)
+                    self.assertFalse(original.provider_effect_started_at)
+                    raise denial
+
+            return service.execute_native_testing_rebuild(**{**kwargs, "authorize": checkpoint})
+
         with (
             patch.object(
                 worker,
                 "read_active_authz_policy_record",
                 return_value=durable_operation_policy_record(authorization),
             ),
-            patch.object(worker, "execute_native_testing_rebuild", side_effect=denial) as execute,
+            patch.object(
+                worker, "execute_native_testing_rebuild", side_effect=denied_after_retry
+            ) as execute,
         ):
             self.assertTrue(
                 worker._execute_target_replacement_with_checkpoint(

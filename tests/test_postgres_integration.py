@@ -13819,6 +13819,25 @@ class RealPostgresTestingPublicationTests(unittest.TestCase):
 
 
 class RealPostgresNativeTestingWorkerTests(unittest.TestCase):
+    def test_private_candidate_history_cannot_be_cancelled_after_marker_reset(self) -> None:
+        self.run_worker_case(
+            "test_private_candidate_without_a_current_outer_marker_cannot_be_cancelled"
+        )
+
+    def test_admission_drift_retains_unknown_candidate_creation(self) -> None:
+        self.run_worker_case("test_admission_drift_preserves_unknown_allocation_custody")
+
+    def test_admission_drift_retains_inflight_candidate_jobs(self) -> None:
+        self.run_worker_case("test_admission_drift_cannot_outlive_an_original_candidate_job")
+
+    def test_terminal_admission_receipt_remains_bound_to_original_intent(self) -> None:
+        self.run_worker_case("test_terminal_admission_receipt_cannot_replay_under_another_intent")
+
+    def test_profile_drift_after_publication_finishes_original_retirement(self) -> None:
+        self.run_worker_case(
+            "test_profile_drift_after_publication_does_not_strand_old_copy_retirement"
+        )
+
     def test_retired_testing_lane_has_a_finite_original_failure(self) -> None:
         self.run_worker_case("test_retired_testing_lane_after_effects_has_a_finite_result")
 

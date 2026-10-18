@@ -894,10 +894,15 @@ exercised during preparation, healthy publication and interrupted inverse.
 A lasting local admission change before cutover, such as changed runtime inputs,
 credential selection or context ownership, records a finite failed result after
 proving the old route is still selected and neither original route writer has
-dispatched. The candidate and its independent effect fences are retained. An
+dispatched. Unknown candidate creation must first be observed under recovery;
+unresolved storage or configuration, and dispatched build or restore jobs without
+terminal custody evidence, remain pending. The candidate and its independent
+effect fences are retained. An
 existing preparation receipt is preserved in the failed checkpoint, which also
 records the safe refusal cause. A lost checkpoint reply returns that original
-failure even while application preparation is incomplete. A fresh inspection
+failure even while application preparation is incomplete, provided no original
+candidate writer remains unresolved. Terminal recovery binds the original
+authority digest, candidate target and available application plan. A fresh inspection
 can then admit a new rebuild using current settings. Staff holds, current use
 and unfinished provider work remain pending with their concrete reason. After
 route or retirement intent, recovery continues under the original fences and
@@ -910,6 +915,16 @@ effect, rather than before initial read-only admission checks. A refused initial
 check with no effect can end without locking the lane indefinitely. Unexpected
 post-dispatch errors, including lost execution locks and malformed observations,
 remain pending on the original keys. Real authorization denials stay denied.
+Renewing an outer attempt clears only its current dispatch marker. Historical
+ownership comes from the existing candidate custody, child effects, publication
+and checkpoint intents; worker failures, denials and cancellation use that
+history. Completion uses only the live attempt's marker. A denial after renewal
+therefore retains the original lane fence and cannot become a terminal generic
+failure. Temporary source or metadata observations do not become permanent input
+drift. After publication, original-copy retirement uses recovery safety and the
+admitted physical port, while a current staff hold still pauses its dispatch.
+The published-copy recovery check is bound to that original operation; ordinary
+maintenance continues to require the current profile port.
 
 Required recovery work remains in #4016 (explicit authorized resumption of the
 same denied operation) and #4017 (managed-host outcome evidence for an interrupted

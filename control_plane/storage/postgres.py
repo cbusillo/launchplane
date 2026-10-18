@@ -10240,6 +10240,104 @@ class PostgresRecordStore(HumanSessionStore):
             limit=limit,
         )
 
+    def native_testing_rebuild_effects_started(
+        self, operation: OdooStableTargetReplacementOperationRecord
+    ) -> bool:
+        with self._session_factory() as session:
+            return self._native_testing_rebuild_effects_started(session, operation)
+
+    def _native_testing_rebuild_effects_started(
+        self, session: Session, operation: OdooStableTargetReplacementOperationRecord
+    ) -> bool:
+        """Historical custody survives renewal of the current provider attempt."""
+        from control_plane.contracts.testing_candidate import testing_candidate_namespace
+        from control_plane.contracts.testing_rebuild import REBUILD_SCOPE, REBUILD_ROUTE
+        from control_plane.testing_rebuild_storage import (
+            REBUILD_CHECKPOINT_SCOPE,
+            REBUILD_CHECKPOINT_ROUTE,
+        )
+        from control_plane.testing_publication_storage import PUBLICATION_SCOPE, PUBLICATION_ROUTE
+
+        outer = session.scalar(
+            self._idempotency_statement(
+                scope=REBUILD_SCOPE,
+                route_path=REBUILD_ROUTE,
+                idempotency_key=operation.operation_id,
+            )
+        )
+        if (
+            outer is not None
+            and LaunchplaneIdempotencyRecord.model_validate(
+                outer.payload
+            ).provider_effect_started_at
+        ):
+            return True
+        candidate = session.get(
+            LaunchplaneTestingCandidateRow,
+            testing_candidate_namespace(
+                operation.product,
+                operation.context,
+                operation.operation_id,
+            ),
+        )
+        if candidate is not None:
+            allocation = TestingCandidateAllocation.model_validate(candidate.payload)
+            if any(
+                (
+                    allocation.effect,
+                    allocation.project_id,
+                    allocation.environment_id,
+                    allocation.compose_id,
+                    allocation.resources_binding_sha256,
+                    allocation.application,
+                )
+            ):
+                return True
+        children = session.scalars(
+            select(LaunchplaneIdempotencyRow).where(
+                LaunchplaneIdempotencyRow.scope == REBUILD_SCOPE,
+                LaunchplaneIdempotencyRow.route_path == REBUILD_ROUTE + ":effect",
+                LaunchplaneIdempotencyRow.idempotency_key.startswith(
+                    operation.operation_id + ":", autoescape=True
+                ),
+            )
+        )
+        for row in children:
+            child = LaunchplaneIdempotencyRecord.model_validate(row.payload)
+            if child.provider_effect_started_at or child.state != "completed":
+                return True
+        key = canonical_json_sha256(
+            {
+                "product": operation.product,
+                "context": operation.context,
+                "operation": operation.operation_id,
+            }
+        )
+        publication = session.scalar(
+            self._idempotency_statement(
+                scope=PUBLICATION_SCOPE,
+                route_path=PUBLICATION_ROUTE,
+                idempotency_key=key,
+            )
+        )
+        if publication is not None:
+            return True
+        checkpoint = session.scalar(
+            self._idempotency_statement(
+                scope=REBUILD_CHECKPOINT_SCOPE,
+                route_path=REBUILD_CHECKPOINT_ROUTE,
+                idempotency_key=key,
+            )
+        )
+        if checkpoint is not None:
+            record = TestingRebuildRecord.model_validate(
+                LaunchplaneIdempotencyRecord.model_validate(checkpoint.payload).response_payload
+            )
+            return (
+                record.publication_started or record.retirement_started or record.rollback_started
+            )
+        return False
+
     def cancel_pending_odoo_stable_target_replacement_operation_record(
         self,
         record: OdooStableTargetReplacementOperationRecord,
@@ -10278,38 +10376,12 @@ class PostgresRecordStore(HumanSessionStore):
             )
             from control_plane.testing_replacement_recovery import service_testing_operation
 
-            if current_record.is_native_testing_rebuild:
-                from control_plane.contracts.testing_rebuild import REBUILD_SCOPE, REBUILD_ROUTE
-
-                outer = session.scalar(
-                    self._idempotency_statement(
-                        scope=REBUILD_SCOPE,
-                        route_path=REBUILD_ROUTE,
-                        idempotency_key=current_record.operation_id,
-                    )
-                )
-                if (
-                    outer is not None
-                    and self._read_payload(
-                        model_type=LaunchplaneIdempotencyRecord, payload=outer.payload
-                    ).provider_effect_started_at
-                ):
-                    return False
-                child = session.scalar(
-                    select(LaunchplaneIdempotencyRow)
-                    .where(
-                        LaunchplaneIdempotencyRow.scope == REBUILD_SCOPE,
-                        LaunchplaneIdempotencyRow.route_path == REBUILD_ROUTE + ":effect",
-                        LaunchplaneIdempotencyRow.idempotency_key.startswith(
-                            current_record.operation_id + ":", autoescape=True
-                        ),
-                    )
-                    .limit(1)
-                )
-                if child is not None:
-                    # The original worker observes or reverses these effects.
-                    # A caller's generic cancellation cannot release their lane.
-                    return False
+            if (
+                current_record.is_native_testing_rebuild
+                and self._native_testing_rebuild_effects_started(session, current_record)
+            ):
+                # Only the original worker can settle these effects and custody.
+                return False
 
             if (
                 current_record.status == "reconciliation_required"
