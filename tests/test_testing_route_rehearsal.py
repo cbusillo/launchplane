@@ -20,9 +20,18 @@ from control_plane.dokploy.testing_route import (
     TestingLaneRoute,
 )
 from control_plane.dokploy.testing_route_transport import (
-    ATOMIC_TESTING_ROUTE_WRITER,
     TRAEFIK_DYNAMIC_DIRECTORY,
 )
+from control_plane.dokploy.testing_route_execution import (
+    TestingRouteExecutionCustody,
+    TestingRouteExecutionIntent,
+    ALLOCATE_TESTING_ROUTE_LOCK,
+    FENCED_TESTING_ROUTE_WRITER,
+    READ_TESTING_ROUTE_FENCE,
+    parse_testing_route_fence,
+    TestingRouteFence,
+)
+from control_plane.contracts.canonical_json import canonical_json_sha256
 
 
 def docker(*arguments: str, content: bytes | None = None) -> str:
@@ -131,6 +140,104 @@ class TestingRouteRehearsalTests(unittest.TestCase):
                     "--entrypoints.web.address=:80",
                 )
                 containers.append(proxy)
+                custody = TestingRouteExecutionCustody(
+                    mount_source=str(root),
+                    filesystem=docker(
+                        "exec", proxy, "stat", "-c", "%d:%i", TRAEFIK_DYNAMIC_DIRECTORY
+                    ),
+                )
+                epoch = docker(
+                    "exec",
+                    proxy,
+                    "sh",
+                    "-c",
+                    "cat /proc/sys/kernel/random/boot_id; cat /proc/1/stat; if test -e /proc/self/timens_offsets; then sed -n '/^boottime/p' /proc/self/timens_offsets; else printf 'boottime 0 0\\n'; fi",
+                ).splitlines()
+                process_epoch = ":".join(
+                    [epoch[0], epoch[1].rsplit(") ", 1)[-1].split()[19], *epoch[2].split()[1:]]
+                )
+                lock = docker(
+                    "exec",
+                    proxy,
+                    "sh",
+                    "-c",
+                    ALLOCATE_TESTING_ROUTE_LOCK,
+                    "_",
+                    TRAEFIK_DYNAMIC_DIRECTORY,
+                    route_file.name,
+                    custody.filesystem,
+                    process_epoch,
+                )
+                generation = hashlib.sha256(prefix.encode()).hexdigest()
+                docker(
+                    "exec",
+                    "-i",
+                    proxy,
+                    "sh",
+                    "-c",
+                    FENCED_TESTING_ROUTE_WRITER,
+                    "_",
+                    TRAEFIK_DYNAMIC_DIRECTORY,
+                    route_file.name,
+                    custody.filesystem,
+                    "initialize",
+                    generation,
+                    "0",
+                    generation,
+                    "absent",
+                    generation,
+                    "absent",
+                    lock,
+                    process_epoch,
+                )
+
+                def writer_arguments(
+                    backend: str, operation: str, expected: str, mode: str = "publish"
+                ) -> list[str]:
+                    execution = TestingRouteExecutionIntent(
+                        operation_id=operation,
+                        server_id=proxy,
+                        route_id=plan.route_id,
+                        route_digest=plan.digest,
+                        backend=backend,
+                        document_sha256=canonical_json_sha256(route_document(plan, backend)),
+                        custody=custody,
+                    )
+                    return [
+                        "sh",
+                        "-c",
+                        FENCED_TESTING_ROUTE_WRITER,
+                        "_",
+                        TRAEFIK_DYNAMIC_DIRECTORY,
+                        route_file.name,
+                        custody.filesystem,
+                        mode,
+                        generation,
+                        str(
+                            TestingRouteFence.model_validate(
+                                parse_testing_route_fence(
+                                    docker(
+                                        "exec",
+                                        proxy,
+                                        "sh",
+                                        "-c",
+                                        READ_TESTING_ROUTE_FENCE,
+                                        "_",
+                                        TRAEFIK_DYNAMIC_DIRECTORY,
+                                        route_file.name,
+                                        custody.filesystem,
+                                    )
+                                )["fence"]
+                            ).revision
+                        ),
+                        execution.key(attempt=1),
+                        expected,
+                        execution.document_sha256,
+                        generation,
+                        lock,
+                        process_epoch,
+                    ]
+
                 initial = json.dumps(
                     route_document(plan, old_url), sort_keys=True, separators=(",", ":")
                 ).encode()
@@ -138,14 +245,7 @@ class TestingRouteRehearsalTests(unittest.TestCase):
                     "exec",
                     "-i",
                     proxy,
-                    "sh",
-                    "-c",
-                    ATOMIC_TESTING_ROUTE_WRITER,
-                    "_",
-                    TRAEFIK_DYNAMIC_DIRECTORY,
-                    route_file.name,
-                    "absent",
-                    hashlib.sha256(initial).hexdigest(),
+                    *writer_arguments(old_url, prefix + "-initial", "absent"),
                     content=initial,
                 )
                 docker("network", "connect", network, proxy)
@@ -189,24 +289,96 @@ class TestingRouteRehearsalTests(unittest.TestCase):
 
                 reader = threading.Thread(target=probe)
                 reader.start()
-                for backend in (old_url, new_url, old_url):
+                for index, backend in enumerate((old_url, new_url, old_url)):
                     desired = json.dumps(
                         route_document(plan, backend), sort_keys=True, separators=(",", ":")
                     ).encode()
-                    docker(
-                        "exec",
-                        "-i",
-                        proxy,
-                        "sh",
-                        "-c",
-                        ATOMIC_TESTING_ROUTE_WRITER,
-                        "_",
-                        TRAEFIK_DYNAMIC_DIRECTORY,
-                        route_file.name,
+                    arguments = writer_arguments(
+                        backend,
+                        prefix + "-" + str(index),
                         hashlib.sha256(route_file.read_bytes()).hexdigest(),
-                        hashlib.sha256(desired).hexdigest(),
-                        content=desired,
                     )
+                    if backend != new_url:
+                        docker("exec", "-i", proxy, *arguments, content=desired)
+                    else:
+                        # Disconnect the real Docker exec client while the
+                        # original managed writer can still rename its file.
+                        binary = root / ".writer-bin"
+                        binary.mkdir()
+                        entered, release = root / "entered", root / "release"
+                        gate = binary / "mv"
+                        gate.write_text(
+                            "#!/bin/sh\nfor destination do :; done\n"
+                            'if test "$destination" = "$ROUTE_FILE"; then\n'
+                            ' printf entered > "$GATE_ENTERED"\n'
+                            ' while test ! -e "$GATE_RELEASE"; do sleep .02; done\n'
+                            'fi\nexec /bin/mv "$@"\n'
+                        )
+                        gate.chmod(0o700)
+                        process = subprocess.Popen(
+                            [
+                                "docker",
+                                "exec",
+                                "-i",
+                                "-e",
+                                "PATH="
+                                + TRAEFIK_DYNAMIC_DIRECTORY
+                                + "/.writer-bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                                "-e",
+                                "ROUTE_FILE=" + route_file.name,
+                                "-e",
+                                "GATE_ENTERED=" + TRAEFIK_DYNAMIC_DIRECTORY + "/entered",
+                                "-e",
+                                "GATE_RELEASE=" + TRAEFIK_DYNAMIC_DIRECTORY + "/release",
+                                proxy,
+                                *arguments,
+                            ],
+                            stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                        )
+                        try:
+                            assert process.stdin is not None
+                            process.stdin.write(desired)
+                            process.stdin.close()
+                            process.stdin = None
+                            deadline = time.monotonic() + 10
+                            while not entered.exists():
+                                if process.poll() is not None or time.monotonic() >= deadline:
+                                    details = (
+                                        process.communicate(timeout=5)
+                                        if process.poll() is not None
+                                        else (b"", b"")
+                                    )
+                                    self.fail(
+                                        "The isolated Docker writer did not reach its rename gate: "
+                                        + repr(details)
+                                    )
+                                stop.wait(0.01)
+                            process.kill()
+                            process.communicate(timeout=5)
+                            settlement = arguments.copy()
+                            settlement[settlement.index("publish")] = "settle"
+                            self.assertEqual(
+                                docker("exec", "-i", proxy, *settlement, content=b""),
+                                "busy",
+                            )
+                            self.assertEqual(observed(), old_url)
+                            release.touch()
+                            deadline = time.monotonic() + 10
+                            while True:
+                                outcome = docker("exec", "-i", proxy, *settlement, content=b"")
+                                if outcome != "busy":
+                                    self.assertEqual(outcome, "applied")
+                                    break
+                                if time.monotonic() >= deadline:
+                                    self.fail("The original isolated writer did not finish")
+                                stop.wait(0.01)
+                        finally:
+                            release.touch()
+                            if process.poll() is None:
+                                process.kill()
+                            process.communicate(timeout=5)
                     wait_for(backend)
                     expected = "old" if backend == old_url else "new"
                     deadline = time.monotonic() + 5

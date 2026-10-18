@@ -1,6 +1,7 @@
 """Plan canonical adoption from the prepared copy, without reading secret values."""
 
 from datetime import datetime
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
@@ -44,13 +45,14 @@ def plan_testing_publication(
     route: TestingLaneRoute,
     reservation: LaunchplaneIdempotencyRecord,
     now: datetime,
+    admitted_profile: LaunchplaneProductProfileRecord | None = None,
 ) -> TestingPublicationPlan:
     app = candidate.application
     if app is None or app.prepared is None or app.phase != "prepared":
         raise ValueError("Publication planning requires a prepared candidate.")
     plan = app.plan
     stamp = now.isoformat()
-    profile = store.read_product_profile_record(candidate.product)
+    profile = admitted_profile or store.read_product_profile_record(candidate.product)
     key = canonical_json_sha256(
         {
             "product": candidate.product,

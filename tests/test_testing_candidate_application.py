@@ -149,6 +149,42 @@ class CandidateApplicationTests(unittest.TestCase):
         )
         self.fixture.assert_serving_unchanged()
 
+    def test_private_probe_distinguishes_returned_failure_from_transport_or_denial(self) -> None:
+        from control_plane.dokploy.native_copy_stream import (
+            NativeProgramFailed,
+            NativeSourceUnavailable,
+            NativeSourceAuthorizationDenied,
+        )
+
+        real_readiness = application.candidate_private_readiness
+        self.execution()
+        allocation = self.prepare_application()
+        assert allocation.application is not None
+        inputs = self.inputs(allocation)
+        for error, expected in (
+            (
+                NativeProgramFailed("fixture failed frame"),
+                application.CandidatePrivateReadinessFailed,
+            ),
+            (NativeSourceUnavailable("fixture lost connection"), NativeSourceUnavailable),
+            (
+                NativeSourceAuthorizationDenied("fixture provider refused"),
+                NativeSourceAuthorizationDenied,
+            ),
+        ):
+            with (
+                self.subTest(error=type(error).__name__),
+                patch.object(application, "_read_remote", side_effect=error),
+            ):
+                with self.assertRaises(expected):
+                    real_readiness(
+                        host="https://provider.invalid",
+                        token="fixture",
+                        allocation=allocation,
+                        inputs=inputs,
+                        deployment_id=allocation.application.deployment_id,
+                    )
+
     def test_private_build_preserves_the_serving_address_and_generated_passwords(self) -> None:
         allocation = self.allocate()
         inputs = self.inputs(allocation)

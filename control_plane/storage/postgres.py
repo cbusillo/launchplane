@@ -9626,6 +9626,7 @@ class PostgresRecordStore(HumanSessionStore):
         instance: str,
         include_synchronous: bool = True,
         exclude_initial_preparation: str = "",
+        exclude_operation: OdooStableLaneOperationOwner | None = None,
     ) -> OdooStableLaneOperationOwner | None:
         if include_synchronous and not _try_odoo_synchronous_lane_lock(
             session, product=product, context=context, instance=instance
@@ -9691,6 +9692,8 @@ class PostgresRecordStore(HumanSessionStore):
                     operation_kind=operation_kind,
                     operation_id=str(operation_id),
                 )
+                if owner == exclude_operation:
+                    continue
                 candidates.append(
                     (
                         odoo_stable_lane_operation_priority(
@@ -10239,6 +10242,247 @@ class PostgresRecordStore(HumanSessionStore):
             limit=limit,
         )
 
+    def native_testing_rebuild_effects_started(
+        self, operation: OdooStableTargetReplacementOperationRecord
+    ) -> bool:
+        with self._session_factory() as session:
+            return self._native_testing_rebuild_effects_started(session, operation)
+
+    def _native_testing_rebuild_effects_started(
+        self, session: Session, operation: OdooStableTargetReplacementOperationRecord
+    ) -> bool:
+        """Historical custody survives renewal of the current provider attempt."""
+        from control_plane.contracts.testing_candidate import testing_candidate_namespace
+        from control_plane.contracts.testing_rebuild import REBUILD_SCOPE, REBUILD_ROUTE
+        from control_plane.testing_rebuild_storage import (
+            REBUILD_CHECKPOINT_SCOPE,
+            REBUILD_CHECKPOINT_ROUTE,
+        )
+        from control_plane.testing_publication_storage import PUBLICATION_SCOPE, PUBLICATION_ROUTE
+
+        outer = session.scalar(
+            self._idempotency_statement(
+                scope=REBUILD_SCOPE,
+                route_path=REBUILD_ROUTE,
+                idempotency_key=operation.operation_id,
+            )
+        )
+        if (
+            outer is not None
+            and LaunchplaneIdempotencyRecord.model_validate(
+                outer.payload
+            ).provider_effect_started_at
+        ):
+            return True
+        candidate = session.get(
+            LaunchplaneTestingCandidateRow,
+            testing_candidate_namespace(
+                operation.product,
+                operation.context,
+                operation.operation_id,
+            ),
+        )
+        if candidate is not None:
+            allocation = TestingCandidateAllocation.model_validate(candidate.payload)
+            if any(
+                (
+                    allocation.effect,
+                    allocation.project_id,
+                    allocation.environment_id,
+                    allocation.compose_id,
+                    allocation.resources_binding_sha256,
+                    allocation.application,
+                )
+            ):
+                return True
+        children = session.scalars(
+            select(LaunchplaneIdempotencyRow).where(
+                LaunchplaneIdempotencyRow.scope == REBUILD_SCOPE,
+                LaunchplaneIdempotencyRow.route_path == REBUILD_ROUTE + ":effect",
+                LaunchplaneIdempotencyRow.idempotency_key.startswith(
+                    operation.operation_id + ":", autoescape=True
+                ),
+            )
+        )
+        for row in children:
+            child = LaunchplaneIdempotencyRecord.model_validate(row.payload)
+            if child.provider_effect_started_at or child.state != "completed":
+                return True
+        key = canonical_json_sha256(
+            {
+                "product": operation.product,
+                "context": operation.context,
+                "operation": operation.operation_id,
+            }
+        )
+        publication = session.scalar(
+            self._idempotency_statement(
+                scope=PUBLICATION_SCOPE,
+                route_path=PUBLICATION_ROUTE,
+                idempotency_key=key,
+            )
+        )
+        if publication is not None:
+            return True
+        checkpoint = session.scalar(
+            self._idempotency_statement(
+                scope=REBUILD_CHECKPOINT_SCOPE,
+                route_path=REBUILD_CHECKPOINT_ROUTE,
+                idempotency_key=key,
+            )
+        )
+        if checkpoint is not None:
+            record = TestingRebuildRecord.model_validate(
+                LaunchplaneIdempotencyRecord.model_validate(checkpoint.payload).response_payload
+            )
+            return (
+                record.publication_started or record.retirement_started or record.rollback_started
+            )
+        return False
+
+    def resume_native_testing_rebuild(
+        self,
+        *,
+        operation: OdooStableTargetReplacementOperationRecord,
+        authorization: DurableOperationAuthorization,
+        expected_updated_at: str,
+        expected_attempt: int,
+        trace_id: str,
+        now: str,
+    ) -> OdooStableTargetReplacementOperationRecord:
+        from control_plane.contracts.testing_rebuild import REBUILD_SCOPE, REBUILD_ROUTE
+        from control_plane.testing_rebuild_resume import (
+            RESUME_SCOPE,
+            RESUME_ROUTE,
+            TestingRebuildResumeRefused,
+            require_resume_authorization,
+            resume_key,
+        )
+
+        with self._session_factory() as session:
+            self._lock_odoo_stable_lane(
+                session, product=operation.product, context=operation.context, instance="testing"
+            )
+            row = session.get(
+                LaunchplaneOdooStableTargetReplacementOperationRow,
+                operation.operation_id,
+                with_for_update=True,
+            )
+            if row is None:
+                raise FileNotFoundError(operation.operation_id)
+            current = OdooStableTargetReplacementOperationRecord.model_validate(row.payload)
+            if not current.is_native_testing_rebuild or (
+                current.product,
+                current.context,
+                current.request_fingerprint,
+                current.idempotency_scope,
+                current.idempotency_key,
+            ) != (
+                operation.product,
+                operation.context,
+                operation.request_fingerprint,
+                operation.idempotency_scope,
+                operation.idempotency_key,
+            ):
+                raise TestingRebuildResumeRefused("The original testing request changed.")
+            require_resume_authorization(current, authorization)
+            key = resume_key(
+                current, expected_updated_at=expected_updated_at, expected_attempt=expected_attempt
+            )
+            receipt = session.scalar(
+                self._idempotency_statement(
+                    scope=RESUME_SCOPE,
+                    route_path=RESUME_ROUTE,
+                    idempotency_key=key,
+                    for_update=True,
+                )
+            )
+            if receipt is not None:
+                prior = LaunchplaneIdempotencyRecord.model_validate(receipt.payload)
+                if (
+                    prior.state != "completed"
+                    or prior.request_fingerprint != key
+                    or prior.response_payload.get("operation_id") != current.operation_id
+                ):
+                    raise TestingRebuildResumeRefused("The original resume receipt conflicts.")
+                return current
+            if current.status != "reconciliation_required" or (
+                current.updated_at,
+                current.attempt,
+            ) != (expected_updated_at, expected_attempt):
+                raise TestingRebuildResumeRefused(
+                    "Inspect the current held operation before resuming."
+                )
+            other_owner = self._active_odoo_stable_lane_operation_owner(
+                session,
+                product=current.product,
+                context=current.context,
+                instance=current.instance,
+                exclude_operation=OdooStableLaneOperationOwner(
+                    operation_kind="target_replacement", operation_id=current.operation_id
+                ),
+            )
+            if other_owner is not None:
+                raise TestingRebuildResumeRefused(
+                    "Another operation currently owns this testing lane."
+                )
+            outer = session.scalar(
+                self._idempotency_statement(
+                    scope=REBUILD_SCOPE,
+                    route_path=REBUILD_ROUTE,
+                    idempotency_key=current.operation_id,
+                    for_update=True,
+                )
+            )
+            original = LaunchplaneIdempotencyRecord.model_validate(outer.payload) if outer else None
+            if original is None or original.request_fingerprint != current.request_fingerprint:
+                raise TestingRebuildResumeRefused(
+                    "The original native execution receipt is unavailable."
+                )
+            replacement = OdooStableTargetReplacementOperationRecord.model_validate(
+                {
+                    **current.model_dump(),
+                    "authorization": authorization,
+                    "status": "pending",
+                    "phase": "created",
+                    "updated_at": now,
+                    "error_code": "",
+                    "error_message": "",
+                    "error_detail_keys": (),
+                    "error_description": "",
+                    "runner_trace_id": "",
+                }
+            )
+            receipt_record = LaunchplaneIdempotencyRecord(
+                record_id=build_launchplane_mutation_reservation_id(
+                    scope=RESUME_SCOPE, route_path=RESUME_ROUTE, idempotency_key=key
+                ),
+                scope=RESUME_SCOPE,
+                route_path=RESUME_ROUTE,
+                idempotency_key=key,
+                request_fingerprint=key,
+                created_at=now,
+                updated_at=now,
+                recorded_at=now,
+                response_status_code=200,
+                response_trace_id=trace_id,
+                response_payload={
+                    "operation_id": current.operation_id,
+                    "held_updated_at": current.updated_at,
+                    "held_attempt": current.attempt,
+                    "prior_error_code": current.error_code,
+                    "prior_error_message": current.error_message,
+                    "prior_authorization": current.authorization.model_dump(mode="json")
+                    if current.authorization
+                    else None,
+                    "authorization": authorization.model_dump(mode="json"),
+                },
+            )
+            self._sync_odoo_stable_target_replacement_operation_row(row, replacement)
+            session.add(self._idempotency_row(receipt_record))
+            session.commit()
+            return replacement
+
     def cancel_pending_odoo_stable_target_replacement_operation_record(
         self,
         record: OdooStableTargetReplacementOperationRecord,
@@ -10276,6 +10520,13 @@ class PostgresRecordStore(HumanSessionStore):
                 payload=row.payload,
             )
             from control_plane.testing_replacement_recovery import service_testing_operation
+
+            if (
+                current_record.is_native_testing_rebuild
+                and self._native_testing_rebuild_effects_started(session, current_record)
+            ):
+                # Only the original worker can settle these effects and custody.
+                return False
 
             if (
                 current_record.status == "reconciliation_required"
@@ -10723,12 +10974,87 @@ class PostgresRecordStore(HumanSessionStore):
             row = session.get(LaunchplaneTestingCandidateRow, namespace)
             return TestingCandidateAllocation.model_validate(row.payload) if row else None
 
+    def find_testing_candidate_by_target(self, target_id: str) -> TestingCandidateAllocation | None:
+        with self._session_factory() as session:
+            rows = tuple(
+                session.scalars(
+                    select(LaunchplaneTestingCandidateRow)
+                    .where(
+                        LaunchplaneTestingCandidateRow.payload["compose_id"].as_string()
+                        == target_id
+                    )
+                    .limit(2)
+                )
+            )
+            if len(rows) > 1:
+                raise ValueError("The physical testing candidate has ambiguous custody.")
+            return TestingCandidateAllocation.model_validate(rows[0].payload) if rows else None
+
     def compare_and_write_testing_candidate(
-        self, expected: TestingCandidateAllocation | None, replacement: TestingCandidateAllocation
+        self,
+        expected: TestingCandidateAllocation | None,
+        replacement: TestingCandidateAllocation,
+        *,
+        observation_only: bool = False,
     ) -> None:
         replacement = TestingCandidateAllocation.model_validate(replacement.model_dump())
         if expected is not None:
             replacement.require_successor(expected)
+        if observation_only:
+            from control_plane.odoo_testing_resources import OdooTestingResources
+
+            if expected is None or not expected.compose_id:
+                raise ValueError("Candidate observation requires its original physical custody.")
+            resources = OdooTestingResources(
+                product=expected.product,
+                context=expected.context,
+                operation_id=expected.operation_id,
+                target_id=expected.compose_id,
+                namespace=expected.namespace,
+            )
+            app = expected.application
+            storage_observation = (
+                expected.effect == "storage"
+                and app is None
+                and replacement
+                == expected.model_copy(
+                    update={"resources_binding_sha256": resources.binding_sha256}
+                )
+            )
+            configuration_observation = (
+                app is not None
+                and app.phase == "configuring"
+                and bool(app.configuration_sha256)
+                and replacement
+                == expected.model_copy(
+                    update={"application": app.model_copy(update={"phase": "configured"})}
+                )
+            )
+            abandonment_receipts: tuple[str, ...] = ()
+            if app is not None:
+                if app.phase == "configuring":
+                    abandonment_receipts += (app.unapplied_configuration_evidence,)
+                if app.configuration_sha256:
+                    abandonment_receipts += (app.retained_configuration_evidence,)
+            configuration_abandonment = (
+                app is not None
+                and app.configuration_only
+                and any(
+                    replacement
+                    == expected.model_copy(
+                        update={
+                            "application": app.model_copy(
+                                update={"phase": "abandoned", "abandonment_evidence": evidence}
+                            )
+                        }
+                    )
+                    for evidence in abandonment_receipts
+                )
+            )
+            if not (storage_observation or configuration_observation or configuration_abandonment):
+                raise ValueError(
+                    "Candidate observation cannot change intent or dispatch an effect."
+                )
         with self._session_factory() as session:
             self._begin_serialized_write(session)
             self._lock_product_authority_bundle_write(session)
@@ -10750,7 +11076,7 @@ class PostgresRecordStore(HumanSessionStore):
                 for item in session.scalars(select(LaunchplaneProductProfileRow))
             )
             profile = next((item for item in profiles if item.product == replacement.product), None)
-            if (
+            if not observation_only and (
                 profile is None
                 or profile.driver_id != "odoo"
                 or profile.lifecycle_state != "active"
@@ -10774,6 +11100,15 @@ class PostgresRecordStore(HumanSessionStore):
             ):
                 raise ValueError("The serving testing target changed during candidate preparation.")
             if replacement.compose_id:
+                custody = session.get(
+                    LaunchplaneProviderTargetRow, (replacement.namespace, "testing-candidate")
+                )
+                if observation_only and (
+                    custody is None
+                    or (custody.provider_id, custody.target_category, custody.target_id)
+                    != ("dokploy", "compose", replacement.compose_id)
+                ):
+                    raise ValueError("The observed candidate physical reservation changed.")
                 if (
                     session.scalar(
                         select(LaunchplaneDokployTargetIdRow)
@@ -13331,7 +13666,24 @@ class PostgresRecordStore(HumanSessionStore):
                     payload=row.payload,
                 )
                 affected_operation_ids.append(record.operation_id)
-                if record.phase in safe_phases and record.attempt < max_attempts:
+                if record.is_native_testing_rebuild:
+                    # Its component intents and original provider fences remain
+                    # authoritative after process death. Requeue observation,
+                    # without releasing a fence or repeating an unknown effect.
+                    recovered_record = record.model_copy(
+                        update={
+                            "status": "pending",
+                            "phase": "created",
+                            "updated_at": now,
+                            "lease_owner": "",
+                            "lease_expires_at": "",
+                            "heartbeat_at": "",
+                            "finished_at": "",
+                            "error_code": "testing_rebuild_observation_pending",
+                            "error_message": "Continue observing the original native testing rebuild.",
+                        }
+                    )
+                elif record.phase in safe_phases and record.attempt < max_attempts:
                     recovered_record = record.model_copy(
                         update={
                             "status": "pending",

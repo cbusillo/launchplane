@@ -123,6 +123,10 @@ class OdooStableTargetReplacementOperationRecord(BaseModel):
     )
 
     @property
+    def is_native_testing_rebuild(self) -> bool:
+        return self.instance == "testing" and self.request.strategy == "replace-and-cutover"
+
+    @property
     def execution_failure(self) -> OdooTargetReplacementExecutionFailure | None:
         # Existing journal storage is intentionally extensible. Older service
         # images can still read this row after an emergency rollback.

@@ -9,13 +9,26 @@ from collections.abc import Callable
 import hashlib
 import inspect
 import json
-from typing import Any, cast
+import re
+from typing import Any, Literal, cast
 
 import yaml
 
 from control_plane.contracts.runtime_identity import RuntimeIdentity, parse_runtime_identity_payload
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.dokploy.compose import TESTING_CONNECTION_CSP
+from control_plane.dokploy.testing_route_execution import (
+    ALLOCATE_TESTING_ROUTE_LOCK,
+    FENCED_TESTING_ROUTE_WRITER,
+    READ_TESTING_ROUTE_FENCE,
+    TestingRouteExecutionCustody,
+    TestingRouteExecutionIntent,
+    TestingRouteFence,
+    TestingRouteInitializer,
+    TestingRouteWriterAttempt,
+    parse_testing_route_fence,
+)
+from control_plane.docker_errors import docker_daemon_authorization_denied
 from control_plane.dokploy.native_copy_stream import _read_remote, NativeSourceUnavailable
 from control_plane.dokploy.route_rules import host_rule_may_match
 from control_plane.dokploy.testing_route import (
@@ -33,65 +46,29 @@ class TestingRouteWriteNotStarted(NativeSourceUnavailable):
     """The fixed program returned before invoking its only route writer."""
 
 
-# Run by the already managed proxy container, with the same provider identity.
-# The file name is service-derived; callers cannot provide a path or command.
-ATOMIC_TESTING_ROUTE_WRITER = r"""
-set -eu
-root=$1
-name=$2
-expected=$3
-desired=$4
-case "$name" in lp-testing-route-*.yml) ;; *) exit 21 ;; esac
-test -d "$root"
-test ! -L "$root"
-path="$root/$name"
-if test -L "$path"; then exit 22; fi
-if test -e "$path"; then
-    test -f "$path"
-    current=$(sha256sum "$path" | cut -d ' ' -f 1)
-else
-    current=absent
-fi
-if test "$current" = "$desired"; then exit 0; fi
-test "$current" = "$expected"
-temporary=
-trap 'test -z "$temporary" || rm -f "$temporary"' EXIT HUP INT TERM
-temporary=$(mktemp "$root/.launchplane-testing.pending.XXXXXX")
-umask 077
-cat > "$temporary"
-test "$(sha256sum "$temporary" | cut -d ' ' -f 1)" = "$desired"
-sync -f "$temporary"
-# The lane lease and original-effect fence exclude concurrent managed writers.
-# Recheck the preimage immediately before rename, including an absent new file.
-if test -L "$path"; then exit 22; fi
-if test -e "$path"; then
-    test -f "$path"
-    current=$(sha256sum "$path" | cut -d ' ' -f 1)
-else
-    current=absent
-fi
-test "$current" = "$expected"
-mv -f "$temporary" "$path"
-temporary=
-sync -f "$root"
-"""
-
-
 def testing_route_host_program() -> str:
     """The emitted host program uses the same conservative rule evaluator."""
     return (
-        "import base64,hashlib,ipaddress,json,re,subprocess,sys\nfrom typing import Any\n"
+        "import base64,hashlib,ipaddress,json,os,re,subprocess,sys\nfrom typing import Any\n"
         "from urllib.request import ProxyHandler,build_opener\n"
         "from urllib.parse import urlsplit\n"
         + inspect.getsource(host_rule_may_match)
         + "\n"
         + inspect.getsource(redirects_to_https)
+        + "\n"
+        + inspect.getsource(docker_daemon_authorization_denied)
+        + "\n"
+        + inspect.getsource(parse_testing_route_fence)
         + "\nDIRECTORY="
         + repr(TRAEFIK_DYNAMIC_DIRECTORY)
         + "\nSTATIC="
         + repr(TRAEFIK_STATIC_CONFIGURATION)
-        + "\nWRITER="
-        + repr(ATOMIC_TESTING_ROUTE_WRITER)
+        + "\nFENCED_WRITER="
+        + repr(FENCED_TESTING_ROUTE_WRITER)
+        + "\nFENCE_READER="
+        + repr(READ_TESTING_ROUTE_FENCE)
+        + "\nLOCK_ALLOCATOR="
+        + repr(ALLOCATE_TESTING_ROUTE_LOCK)
         + "\nCSP="
         + repr(TESTING_CONNECTION_CSP)
         + r"""
@@ -99,7 +76,7 @@ def testing_route_host_program() -> str:
 def docker(*arguments, stdin=None):
     result = subprocess.run(['docker', *arguments], input=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60, check=False)
     if result.returncode:
-        if any(token in result.stderr.lower() for token in (b'permission denied while trying to connect to the docker daemon socket',b'authorization denied by plugin',b'error response from daemon: unauthorized',b'error response from daemon: access denied')):
+        if docker_daemon_authorization_denied(result.stderr):
             raise PermissionError('The managed testing route operation was refused')
         raise RuntimeError('The managed testing route operation did not complete')
     return result.stdout
@@ -114,7 +91,7 @@ def selected_raw(raw, host, points):
     for name,item in routers.items():
         if not isinstance(item,dict) or not isinstance(item.get('entryPoints'),list):
             raise RuntimeError('Applied router inventory is incomplete')
-        if not set(item['entryPoints']) & set(points) or not host_rule_may_match(str(item.get('rule') or ''),host):
+        if (points and not set(item['entryPoints']) & set(points)) or not host_rule_may_match(str(item.get('rule') or ''),host):
             continue
         selected[name]={key:item[key] for key in ('rule','ruleSyntax','service','entryPoints','priority','middlewares','tls','status') if key in item}
         provider=name.rsplit('@',1)[-1]
@@ -146,6 +123,26 @@ def proxy_dns_names(container, proxy_networks):
             names.add(container_name.casefold())
     return names
 
+def read_fence(proxy_id, name, filesystem):
+    return parse_testing_route_fence(docker('exec',proxy_id,'sh','-c',FENCE_READER,'_',DIRECTORY,name,filesystem).decode())
+
+def same_physical_root(left, right):
+    return all(left.get(key)==right[key] for key in ('proxy_id','filesystem','proxy_started_at','process_epoch'))
+
+def fenced_call(proxy_id, spec, custody, mode, document=b''):
+    global WRITE_STARTED
+    previous=spec.get('fence')
+    generation=spec['generation']
+    revision=str(previous['revision']) if previous is not None else '0'
+    prior_generation=previous['generation'] if previous is not None else 'absent'
+    lock_identity=spec.get('lock_identity') or (previous['lock_identity'] if previous is not None else 'absent')
+    prior_lock_identity=previous['lock_identity'] if previous is not None else lock_identity
+    key=spec.get('execution_key') or generation
+    expected=spec.get('expected_file_sha256','absent')
+    desired=spec.get('document_sha256') or hashlib.sha256(document).hexdigest()
+    WRITE_STARTED=True
+    return docker('exec','-i',proxy_id,'sh','-c',FENCED_WRITER,'_',DIRECTORY,spec['route_id']+'.yml',custody['filesystem'],mode,generation,revision,key,expected,desired,prior_generation,lock_identity,custody['process_epoch'],prior_lock_identity,spec.get('retired_boot_id',''),stdin=document).decode()
+
 def main(spec):
     global WRITE_STARTED
     if not re.fullmatch(r'lp-testing-route-[a-f0-9]{32}',spec['route_id']) or not re.fullmatch(r'[a-zA-Z0-9.-]+',spec['host']):
@@ -158,10 +155,65 @@ def main(spec):
     if len(proxies)!=1:
         raise RuntimeError('Exactly one running managed proxy is required')
     proxy=proxies[0]
+    if proxy.get('HostConfig',{}).get('PidMode','') not in {'','private'}:
+        raise RuntimeError('Managed proxy requires its own process namespace')
     proxy_networks=proxy.get('NetworkSettings',{}).get('Networks',{})
     mounts=[item for item in proxy.get('Mounts',[]) if item.get('Destination')==DIRECTORY]
-    if len(mounts)!=1 or mounts[0].get('Type')!='bind' or mounts[0].get('RW') is not True:
+    if len(mounts)!=1 or mounts[0].get('Type')!='bind' or mounts[0].get('RW') is not True or not mounts[0].get('Source'):
         raise RuntimeError('Managed proxy must watch a writable directory mount')
+    filesystem=docker('exec',proxy['Id'],'sh','-c','set -eu; command -v flock >/dev/null; test -d "$1"; test ! -L "$1"; stat -c "%d:%i" "$1"','_',DIRECTORY).decode().strip()
+    if not re.fullmatch(r'[0-9]+:[0-9]+',filesystem):
+        raise RuntimeError('Managed proxy route filesystem is unavailable')
+    epoch=docker('exec',proxy['Id'],'sh','-c',"cat /proc/sys/kernel/random/boot_id; cat /proc/1/stat; cat /proc/uptime; if test -e /proc/self/timens_offsets; then sed -n '/^boottime/p' /proc/self/timens_offsets; else printf 'boottime 0 0\\n'; fi").decode().splitlines()
+    if len(epoch)!=4 or not re.fullmatch(r'[a-f0-9-]{36}',epoch[0]):
+        raise RuntimeError('Managed proxy process identity is unavailable')
+    start=epoch[1].rsplit(') ',1)[-1].split()[19]
+    if not start.isdigit() or int(float(epoch[2].split()[0])) <= int(start)//os.sysconf('SC_CLK_TCK')+1:
+        raise RuntimeError('Managed proxy process identity has not stabilized')
+    current_proxy=json.loads(docker('inspect',proxy['Id']))[0]
+    started_at=proxy.get('State',{}).get('StartedAt')
+    if not started_at or current_proxy.get('State',{}).get('StartedAt')!=started_at:
+        raise RuntimeError('Managed proxy restarted during route observation')
+    offset=epoch[3].split()
+    if len(offset)!=3 or offset[0]!='boottime' or any(not re.fullmatch(r'-?[0-9]+',value) for value in offset[1:]):
+        raise RuntimeError('Managed proxy clock identity is unavailable')
+    custody={'mount_source':mounts[0]['Source'],'filesystem':filesystem,'proxy_id':proxy['Id'],'proxy_started_at':started_at,'process_epoch':':'.join([epoch[0],start,*offset[1:]])}
+    if spec['mode'] in {'allocate_lock_v2','read_lock_v2','initialize_v2','inspect_initializer_v2','settle_v2'}:
+        original=spec['execution_custody']
+        binding={key:spec[key] for key in ('execution_key','document_sha256','generation') if key in spec}
+        readonly=spec['mode'] in {'read_lock_v2','inspect_initializer_v2'}
+        matches=original.get('filesystem')==filesystem if readonly else same_physical_root(original,custody)
+        if not matches:
+            return {'type':'complete','writer_outcome':'retired','execution_custody':custody,**binding}
+        if spec['mode']=='allocate_lock_v2':
+            WRITE_STARTED=True
+            value=docker('exec','-i',proxy['Id'],'sh','-c',LOCK_ALLOCATOR,'_',DIRECTORY,spec['route_id']+'.yml',filesystem,custody['process_epoch'],stdin=b'').decode().strip()
+            return {'type':'complete','execution_custody':custody,'lock_identity':value}
+        if spec['mode']=='read_lock_v2':
+            return {'type':'complete','execution_custody':custody,'execution_fence':read_fence(proxy['Id'],spec['route_id']+'.yml',filesystem)}
+        if spec['mode']=='initialize_v2':
+            content=fenced_call(proxy['Id'],spec,custody,'initialize')
+            if content.strip() in {'busy','not-started'}:
+                return {'type':'route_initializer_not_started'}
+            state=parse_testing_route_fence('ready\n'+content)
+            return {'type':'complete','execution_custody':custody,'execution_fence':state}
+        state=read_fence(proxy['Id'],spec['route_id']+'.yml',filesystem)
+        if spec['mode']=='inspect_initializer_v2':
+            return {'type':'complete','execution_custody':custody,'execution_fence':state}
+        fence=state.get('fence')
+        expected_fence=spec['fence']
+        if state['status']!='ready' or not isinstance(fence,dict):
+            outcome='unknown' if state['status']!='busy' else 'busy'
+        elif fence['lock_identity']!=expected_fence['lock_identity']:
+            outcome='unknown'
+        elif fence['generation']!=spec['generation']:
+            outcome='retired'
+        else:
+            outcome=fenced_call(proxy['Id'],spec,custody,'settle').strip()
+            if outcome=='superseded': outcome='retired'
+        if outcome not in {'applied','excluded','busy','unknown','retired'}:
+            raise RuntimeError('The original route execution outcome is unavailable')
+        return {'type':'complete','writer_outcome':outcome,'execution_custody':custody,**binding}
     address=proxy.get('NetworkSettings',{}).get('Networks',{}).get('dokploy-network',{}).get('IPAddress')
     if not isinstance(address,str) or not ipaddress.ip_address(address).is_private:
         raise RuntimeError('Managed proxy API endpoint is unavailable')
@@ -204,7 +256,10 @@ def main(spec):
                 if any(item['Id']!=old[0]['Id'] and alias.casefold() in proxy_dns_names(item,proxy_networks) for item in containers):
                     raise RuntimeError('Retained testing alias is shared')
                 endpoints.append('http://'+alias+':'+port)
-    if spec['mode']=='publish':
+    if spec['mode']=='publish_v2':
+        custody_matches=same_physical_root(spec['execution_custody'],custody)
+        if not custody_matches or not re.fullmatch(r'[a-f0-9]{64}',spec['execution_key']):
+            raise RuntimeError('The original route execution custody changed')
         if spec['retained_backend'] not in endpoints or not isinstance(old_identity,dict) or spec['expected_old_identity_sha256']!=hashlib.sha256(json.dumps(old_identity,sort_keys=True,separators=(',',':')).encode()).hexdigest():
             raise RuntimeError('The retained physical testing copy changed')
         desired=urlsplit(spec['desired_backend'])
@@ -244,10 +299,13 @@ def main(spec):
         document=json.dumps(spec['document'],sort_keys=True,separators=(',',':')).encode()
         # One provider path, with no alternate identity or host-file fallback.
         WRITE_STARTED=True
-        docker('exec','-i',proxy['Id'],'sh','-c',WRITER,'_',DIRECTORY,name,digest,hashlib.sha256(document).hexdigest(),stdin=document)
+        outcome=fenced_call(proxy['Id'],spec,custody,'publish',document).strip()
+        if outcome not in {'applied','excluded','busy','unknown','superseded'}:
+            raise RuntimeError('The original route execution outcome is unavailable')
+        return {'type':'complete','execution_key':spec['execution_key'],'document_sha256':hashlib.sha256(document).hexdigest(),'execution_custody':custody,'writer_outcome':outcome}
     elif spec['mode']!='read':
         raise RuntimeError('Unsupported testing route operation')
-    return {'type':'complete','static_configuration':static,'raw':raw,'owned_file':observed,'file_sha256':digest,'old_endpoints':endpoints,'proxy_id':proxy['Id'],'old_identity':old_identity}
+    return {'type':'complete','static_configuration':static,'raw':raw,'owned_file':observed,'file_sha256':digest,'old_endpoints':endpoints,'proxy_id':proxy['Id'],'old_identity':old_identity,'execution_custody':custody,'execution_fence':read_fence(proxy['Id'],name,filesystem)}
 
 if __name__=='__main__':
     payload={}
@@ -258,7 +316,7 @@ if __name__=='__main__':
         print(sys.argv[2]+json.dumps({'type':'denied'}),flush=True)
         sys.exit(1)
     except Exception:
-        kind='route_write_not_started' if payload.get('mode')=='publish' and not WRITE_STARTED else 'failed'
+        kind='route_write_not_started' if payload.get('mode') in {'publish_v2','initialize_v2','allocate_lock_v2'} and not WRITE_STARTED else 'failed'
         print(sys.argv[2]+json.dumps({'type':kind}),flush=True)
         sys.exit(1)
 """
@@ -300,8 +358,18 @@ class DokployTestingRouteTransport:
         frames: list[dict[str, object]] = []
 
         def receive(frame: dict[str, object]) -> None:
+            if frame.get("type") == "route_initializer_not_started":
+                if payload.get("mode") != "initialize_v2":
+                    raise ValueError("An initializer receipt cannot qualify a route writer.")
+                raise TestingRouteWriteNotStarted(
+                    "The initializer returned before creating its nonce."
+                )
             if frame.get("type") == "route_write_not_started":
-                if payload.get("mode") != "publish":
+                if payload.get("mode") not in {
+                    "publish_v2",
+                    "initialize_v2",
+                    "allocate_lock_v2",
+                }:
                     raise ValueError("A route writer receipt cannot qualify an observation.")
                 raise TestingRouteWriteNotStarted("The original route writer was not started.")
             frames.append(frame)
@@ -336,6 +404,173 @@ class DokployTestingRouteTransport:
             raise ValueError("Retained testing runtime identity changed.")
         return frame
 
+    def execution_intent(
+        self, plan: TestingLaneRoute, backend: str, *, operation_id: str
+    ) -> TestingRouteExecutionIntent:
+        if (plan.route_id, plan.host) != (
+            self.payload["route_id"],
+            self.payload["host"],
+        ) or backend not in {plan.old_backend, plan.new_backend}:
+            raise ValueError("The route execution crosses its original lane.")
+        frame = self.read()
+        return TestingRouteExecutionIntent(
+            operation_id=operation_id,
+            server_id=self.server_id,
+            route_id=plan.route_id,
+            route_digest=plan.digest,
+            backend=backend,
+            document_sha256=canonical_json_sha256(route_document(plan, backend)),
+            custody=TestingRouteExecutionCustody.model_validate(frame["execution_custody"]),
+        )
+
+    def allocate_execution_lock(
+        self,
+        custody: TestingRouteExecutionCustody,
+        *,
+        dispatch_guard: Callable[[Callable[[], None]], None],
+    ) -> str:
+        frame = self._run(
+            {
+                "mode": "allocate_lock_v2",
+                "execution_custody": custody.model_dump(mode="json"),
+            },
+            dispatch_guard=dispatch_guard,
+        )
+        value = frame.get("lock_identity")
+        if (
+            TestingRouteExecutionCustody.model_validate(frame["execution_custody"]).physical_sha256
+            != custody.physical_sha256
+            or not isinstance(value, str)
+            or re.fullmatch(r"[0-9]+:[0-9]+", value) is None
+        ):
+            raise NativeSourceUnavailable("The permanent route lock remains unqualified.")
+        return value
+
+    def read_execution_fence(self, custody: TestingRouteExecutionCustody) -> dict[str, Any]:
+        frame = self._run(
+            {
+                "mode": "read_lock_v2",
+                "execution_custody": custody.model_dump(mode="json"),
+            }
+        )
+        state = frame.get("execution_fence", {})
+        if TestingRouteExecutionCustody.model_validate(
+            frame["execution_custody"]
+        ).directory_sha256 != custody.directory_sha256 or state.get("status") not in {
+            "ready",
+            "partial",
+            "missing",
+            "busy",
+            "rebound",
+        }:
+            raise NativeSourceUnavailable("The original permanent route lock remains unknown.")
+        return cast(dict[str, Any], state)
+
+    def observe_execution_lock(self, custody: TestingRouteExecutionCustody) -> str:
+        state = self.read_execution_fence(custody)
+        if state["status"] not in {"ready", "partial", "rebound"}:
+            raise NativeSourceUnavailable("The original permanent route lock remains unknown.")
+        return str(state["lock_identity"])
+
+    def initialize_execution(
+        self,
+        initializer: TestingRouteInitializer,
+        *,
+        dispatch_guard: Callable[[Callable[[], None]], None],
+    ) -> TestingRouteFence:
+        self._require_initializer_target(initializer)
+        frame = self._run(
+            {
+                "mode": "initialize_v2",
+                "execution_custody": initializer.custody.model_dump(mode="json"),
+                "generation": initializer.generation,
+                "fence": initializer.previous.model_dump(mode="json")
+                if initializer.previous is not None
+                else None,
+                "lock_identity": initializer.lock_identity,
+                "retired_boot_id": initializer.retired_boot_id,
+            },
+            dispatch_guard=dispatch_guard,
+        )
+        return self._initializer_witness(frame, initializer)
+
+    def observe_initializer(self, initializer: TestingRouteInitializer) -> TestingRouteFence:
+        self._require_initializer_target(initializer)
+        frame = self._run(
+            {
+                "mode": "inspect_initializer_v2",
+                "execution_custody": initializer.custody.model_dump(mode="json"),
+            }
+        )
+        return self._initializer_witness(frame, initializer)
+
+    def _require_initializer_target(self, initializer: TestingRouteInitializer) -> None:
+        if (initializer.server_id, initializer.route_id) != (
+            self.server_id,
+            self.payload["route_id"],
+        ):
+            raise ValueError("The original route initializer belongs to another target.")
+        if (
+            initializer.previous is not None
+            and initializer.previous.lock_identity != initializer.lock_identity
+            and (
+                not initializer.retired_boot_id
+                or initializer.retired_boot_id == initializer.custody.boot_id
+            )
+        ):
+            raise ValueError("The route initializer changed its original lock identity.")
+
+    @staticmethod
+    def _initializer_witness(
+        frame: dict[str, Any], initializer: TestingRouteInitializer
+    ) -> TestingRouteFence:
+        if (
+            TestingRouteExecutionCustody.model_validate(frame["execution_custody"]).directory_sha256
+            != initializer.custody.directory_sha256
+            or frame.get("execution_fence", {}).get("status") != "ready"
+        ):
+            raise NativeSourceUnavailable("The original route initializer remains unknown.")
+        fence = TestingRouteFence.model_validate(frame["execution_fence"]["fence"])
+        if (
+            fence.generation != initializer.generation
+            or fence.lock_identity != initializer.lock_identity
+        ):
+            raise NativeSourceUnavailable("The original route initializer witness changed.")
+        return fence
+
+    def settle_attempt(
+        self,
+        attempt: TestingRouteWriterAttempt,
+        *,
+        dispatch_guard: Callable[[Callable[[], None]], None],
+    ) -> Literal["applied", "excluded", "busy", "unknown", "retired"]:
+        if (attempt.execution.server_id, attempt.execution.route_id) != (
+            self.server_id,
+            self.payload["route_id"],
+        ):
+            raise ValueError("The original route attempt belongs to another target.")
+        frame = self._run(
+            {
+                "mode": "settle_v2",
+                "execution_custody": attempt.custody.model_dump(mode="json"),
+                "execution_key": attempt.key,
+                "document_sha256": attempt.execution.document_sha256,
+                "generation": attempt.fence.generation,
+                "fence": attempt.fence.model_dump(mode="json"),
+                "expected_file_sha256": attempt.expected_file_sha256,
+            },
+            dispatch_guard=dispatch_guard,
+        )
+        outcome = frame.get("writer_outcome")
+        if (
+            frame.get("execution_key") != attempt.key
+            or frame.get("document_sha256") != attempt.execution.document_sha256
+            or frame.get("generation") != attempt.fence.generation
+            or outcome not in {"applied", "excluded", "busy", "unknown", "retired"}
+        ):
+            raise NativeSourceUnavailable("The original route attempt outcome is unavailable.")
+        return cast(Literal["applied", "excluded", "busy", "unknown", "retired"], outcome)
+
     def publish(
         self,
         plan: TestingLaneRoute,
@@ -344,7 +579,12 @@ class DokployTestingRouteTransport:
         expected_backend: str,
         dispatch_guard: Callable[[Callable[[], None]], None],
         desired_runtime_identity: RuntimeIdentity,
-    ) -> None:
+        execution: TestingRouteExecutionIntent,
+        execution_key: str,
+        writer_attempt: TestingRouteWriterAttempt,
+    ) -> Literal["applied", "excluded", "busy", "unknown", "superseded"]:
+        if not self.payload["entrypoints"]:
+            raise ValueError("Testing publication requires its discovered entrypoints to be bound.")
         if (plan.route_id, plan.host) != (
             self.payload["route_id"],
             self.payload["host"],
@@ -360,7 +600,27 @@ class DokployTestingRouteTransport:
             "testing",
         ):
             raise ValueError("The desired testing runtime belongs to another lane.")
+        if (
+            execution.server_id,
+            execution.route_id,
+            execution.route_digest,
+            execution.backend,
+            execution.document_sha256,
+        ) != (
+            self.server_id,
+            plan.route_id,
+            plan.digest,
+            backend,
+            canonical_json_sha256(route_document(plan, backend)),
+        ):
+            raise ValueError("The original route execution intent changed.")
+        if writer_attempt.execution != execution or writer_attempt.key != execution_key:
+            raise ValueError("The physical writer attempt changed its original intent.")
         frame = self.read()
+        custody = TestingRouteExecutionCustody.model_validate(frame["execution_custody"])
+        custody_matches = custody.physical_sha256 == writer_attempt.custody.physical_sha256
+        if not custody_matches:
+            raise ValueError("The original route execution filesystem changed.")
         owned = None if frame["owned_file"] is None else json.loads(frame["owned_file"])
         if frame["owned_file"] is not None and not isinstance(owned, dict):
             raise ValueError("Testing route file is not an owned document.")
@@ -369,15 +629,24 @@ class DokployTestingRouteTransport:
             raise ValueError("Testing route no longer identifies its admitted previous copy.")
         intended = route_document(plan, backend)
         if owned == intended:
-            return
+            return "applied"
         if (
             plan.old_backend not in frame["old_endpoints"]
             or parse_runtime_identity_payload(frame.get("old_identity")) is None
         ):
             raise ValueError("Testing route no longer identifies its retained physical copy.")
-        self._run(
+        state = frame.get("execution_fence", {})
+        if (
+            state.get("status") != "ready"
+            or TestingRouteFence.model_validate(state.get("fence")) != writer_attempt.fence
+            or frame["file_sha256"] != writer_attempt.expected_file_sha256
+        ):
+            raise TestingRouteWriteNotStarted("The original route attempt is no longer current.")
+        receipt = self._run(
             {
-                "mode": "publish",
+                "mode": "publish_v2",
+                "execution_key": execution_key,
+                "execution_custody": writer_attempt.custody.model_dump(mode="json"),
                 "document": intended,
                 "retained_backend": plan.old_backend,
                 "desired_backend": backend,
@@ -391,11 +660,20 @@ class DokployTestingRouteTransport:
                     frame["static_configuration"].encode()
                 ).hexdigest(),
                 "expected_state_sha256": canonical_json_sha256(frame["raw"]),
+                "generation": writer_attempt.fence.generation,
+                "fence": writer_attempt.fence.model_dump(mode="json"),
             },
             dispatch_guard=dispatch_guard,
         )
-        # The controller keeps switching until this later applied read succeeds.
-        latest = self.read()
-        actual = None if latest["owned_file"] is None else json.loads(latest["owned_file"])
-        if observe_testing_route(plan, latest["raw"], actual) != backend:
-            raise ValueError("Testing route publication is not yet applied.")
+        outcome = receipt.get("writer_outcome")
+        if (
+            receipt.get("execution_key") != writer_attempt.key
+            or receipt.get("document_sha256") != execution.document_sha256
+            or TestingRouteExecutionCustody.model_validate(
+                receipt.get("execution_custody")
+            ).physical_sha256
+            != writer_attempt.custody.physical_sha256
+            or outcome not in {"applied", "excluded", "busy", "unknown", "superseded"}
+        ):
+            raise NativeSourceUnavailable("The original physical route receipt changed.")
+        return cast(Literal["applied", "excluded", "busy", "unknown", "superseded"], outcome)

@@ -55,6 +55,7 @@ class CandidateHostProbeTests(unittest.TestCase):
         self.gate_ok = True
         self.image_ok = True
         self.container_probe: CandidateContainerProbeTests | None = None
+        self.integration_error: bytes | None = None
         namespace: dict[str, Any] = {"__name__": "probe_test"}
         exec(compile(probe.CANDIDATE_HOST_PROBE, "<candidate-probe>", "exec"), namespace)
         self.program = namespace["probe"]
@@ -70,6 +71,11 @@ class CandidateHostProbeTests(unittest.TestCase):
             if data == b"fixture witness":
                 result = self.witness.encode()
             elif data == b"fixture integration program":
+                if self.integration_error is not None:
+                    self.fixture.calls.append(command)
+                    return subprocess.CompletedProcess(
+                        command, 1, stdout=b"", stderr=self.integration_error
+                    )
                 result = b"integration_readback_ok=true\n"
             elif (
                 "-c" in command
@@ -104,6 +110,25 @@ class CandidateHostProbeTests(unittest.TestCase):
         with patch("subprocess.run", side_effect=self.command):
             return cast(dict[str, object], self.program(self.spec))
 
+    def failure_frame(self, side_effect: object | None = None) -> dict[str, object]:
+        import sys
+
+        output = io.StringIO()
+        encoded = base64.b64encode(json.dumps(self.spec).encode()).decode()
+        with (
+            patch.object(sys, "argv", ["probe", encoded, "frame:"]),
+            patch(
+                "subprocess.run", side_effect=self.command if side_effect is None else side_effect
+            ),
+            redirect_stdout(output),
+            self.assertRaises(SystemExit),
+        ):
+            exec(
+                compile(probe.CANDIDATE_HOST_PROBE, "<candidate-probe>", "exec"),
+                {"__name__": "__main__"},
+            )
+        return cast(dict[str, object], json.loads(output.getvalue().removeprefix("frame:")))
+
     def test_private_probe_checks_installed_copy_and_never_stops_or_restarts_anything(self) -> None:
         self.assertTrue(self.run_probe()["private_readiness_verified"])
         self.assertFalse(
@@ -125,26 +150,9 @@ class CandidateHostProbeTests(unittest.TestCase):
                 setattr(self, field, original)
 
     def test_provider_permission_refusal_remains_a_denial_on_the_wire(self) -> None:
-        import sys
-
-        output = io.StringIO()
-        encoded = base64.b64encode(json.dumps(self.spec).encode()).decode()
-        with (
-            patch.object(sys, "argv", ["probe", encoded, "frame:"]),
-            patch("subprocess.run", side_effect=PermissionError("fixture denied")),
-            redirect_stdout(output),
-            self.assertRaises(SystemExit),
-        ):
-            exec(
-                compile(probe.CANDIDATE_HOST_PROBE, "<candidate-probe>", "exec"),
-                {"__name__": "__main__"},
-            )
-        frame = json.loads(output.getvalue().removeprefix("frame:"))
-        self.assertEqual(frame["type"], "denied")
+        self.assertEqual(self.failure_frame(PermissionError("fixture denied")), {"type": "denied"})
 
     def test_bad_database_password_is_a_failed_probe_not_a_provider_denial(self) -> None:
-        import sys
-
         container_probe = CandidateContainerProbeTests()
         container_probe.setUp()
         self.addCleanup(container_probe.doCleanups)
@@ -152,20 +160,35 @@ class CandidateHostProbeTests(unittest.TestCase):
             "password authentication failed for user fixture"
         )
         self.container_probe = container_probe
-        encoded = base64.b64encode(json.dumps(self.spec).encode()).decode()
-        output = io.StringIO()
-        with (
-            patch.object(sys, "argv", ["probe", encoded, "frame:"]),
-            patch("subprocess.run", side_effect=self.command),
-            redirect_stdout(output),
-            self.assertRaises(SystemExit),
+        self.assertEqual(self.failure_frame(), {"type": "failed"})
+
+    def test_integration_readback_errors_fail_before_the_credential_program(self) -> None:
+        for error in (
+            b'psycopg2.OperationalError: password authentication failed for user "fixture"',
+            b"psycopg2.errors.InsufficientPrivilege: permission denied for table res_users",
+            b"PermissionError: permission denied opening candidate configuration",
         ):
-            exec(
-                compile(probe.CANDIDATE_HOST_PROBE, "<candidate-probe>", "exec"),
-                {"__name__": "__main__"},
-            )
-        self.assertEqual(json.loads(output.getvalue().removeprefix("frame:"))["type"], "failed")
-        self.assertNotIn("password authentication", output.getvalue())
+            with self.subTest(error=error):
+                self.integration_error = error
+                self.fixture.calls.clear()
+                self.assertEqual(self.failure_frame(), {"type": "failed"})
+                self.assertFalse(
+                    any(
+                        probe.CANDIDATE_CONTAINER_PROBE in command for command in self.fixture.calls
+                    )
+                )
+
+    def test_docker_daemon_refusal_during_readback_remains_denied(self) -> None:
+        for error in (
+            b"permission denied while trying to connect to the Docker daemon socket",
+            b"permission denied while trying to connect to the docker API at unix:///socket",
+            b"Error response from daemon: authorization denied by plugin: fixture",
+            b"Error response from daemon: unauthorized",
+            b"Error response from daemon: access denied",
+        ):
+            with self.subTest(error=error):
+                self.integration_error = error
+                self.assertEqual(self.failure_frame(), {"type": "denied"})
 
     def test_shared_or_published_runtime_refuses_before_credential_check(self) -> None:
         self.fixture.containers["web"]["HostConfig"]["PortBindings"] = {

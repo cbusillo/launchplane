@@ -52,6 +52,10 @@ checkpoint evidence, while the payload keeps the actual rebuild stage. It is not
 an execution lease or a replacement for a
 durable provider fence. The adapter must hold the existing lane/worker lease and
 recheck authorization, holds/use, custody and production isolation before effects.
+The native rebuild protects a current staff hold or positive use unless the
+existing repair rule qualifies a historical report through verified downtime.
+A staff hold always wins. UNKNOWN usage alone does not require downtime or a declaration of non-use; it does not supply
+any missing custody, resource-isolation or credential evidence.
 Provider calls reconcile their original dispatch keys before any replay. A
 foreign route, changed plan or inaccessible authority refuses continuation.
 Permission and transport exceptions propagate without a fallback or automatic
@@ -803,7 +807,11 @@ health request bypasses proxy environment settings and refuses redirects. A
 read-only connection using the running web configuration checks the generated
 database password and the active local administrator's stored password hash.
 The login follows startup's trimmed value or `admin` default. Local database
-authentication failure is a failed candidate check, not a provider denial.
+authentication or SQL/file permission failure in either the integration readback
+or credential program is a failed candidate check. Only a Docker socket/API,
+daemon or authorization-plugin refusal is reported as a provider denial. The
+candidate, restore and route host programs share one classification and drop
+private driver stderr; none retries or selects another identity after a refusal.
 The plaintext master value and database settings are checked for consistency
 with the running container environment. These local comparisons do not attest
 that a stored provider environment update was deployed; provider configuration,
@@ -875,6 +883,367 @@ It does not activate a service/UI action, stop an old copy or prove CM testing.
 The parent integration still wires the controller/provider lifecycle, preserves
 the private backend alias during later ordinary deploys, and qualifies live CM.
 No production mutation or new authorization grant is part of this stage.
+
+## Native testing worker integration
+
+The existing durable target-replacement action accepts testing-only
+`replace-and-cutover` requests with an explicit `empty`, `production_restore`
+or `upstream_restore` source and an immutable artifact/source pair. The native
+worker joins candidate allocation, private application/copy preparation,
+stable-address routing, atomic publication and retained-copy retirement. It
+uses the same action authorization and queue; it adds no grant or alternate
+provider identity. The shared service record store is required.
+
+An original intent retains the serving metadata, observed runtime, actual
+private backend, server and container/data custody before candidate writes.
+Every boundary rechecks current authorization, exclusive execution and
+provider leases, protected-copy reports, physical target aliases and resource
+isolation. Forward admission also checks staff holds, profile/serving authority
+and actual login/session use immediately before the route effect is checkpointed.
+Profile binding covers this lane's driver, address, port, health path, image
+repository and exclusive context. Unrelated product labels, timestamps or other
+lanes do not invalidate the admitted copy. Its original complete profile remains
+the immutable private-input provenance; publication compares the current runtime
+binding and uses the current locked profile for its authority transaction.
+That original cutover admission is not re-qualified against downtime after the
+rebuild itself restores health or changes the monitor identity. A new forward
+effect still respects a current hold or changed authority. Observation and an
+inverse of the original route can proceed while preserving those changed
+records. DB-only publication records an already observed healthy cutover under a
+new staff hold, carrying that hold forward; retirement still refuses it. Serving
+comparison excludes that current hold and the hold writer's target timestamp
+and source label. Publication preparation uses the same comparison. Serving
+identity and runtime configuration remain strict. The real hold writer is
+exercised during preparation, healthy publication and interrupted inverse.
+
+A lasting local admission change before cutover, such as changed runtime inputs,
+credential selection or context ownership, records a finite failed result after
+proving the old route is still selected and neither original route writer has
+dispatched. Unknown candidate creation must first be observed under recovery;
+unresolved storage or configuration, and dispatched build or restore jobs without
+terminal custody evidence, remain pending. The candidate and its independent
+effect fences are retained. An
+existing preparation receipt is preserved in the failed checkpoint, which also
+records the safe refusal cause. A lost checkpoint reply returns that original
+failure even while application preparation is incomplete, provided no original
+candidate writer remains unresolved. Terminal recovery binds the original
+authority digest, candidate target and available application plan. A fresh inspection
+can then admit a new rebuild using current settings. Staff holds, current use
+and unfinished provider work remain pending with their concrete reason. After
+route or retirement intent, recovery continues under the original fences and
+requires outcome/exclusion proof. Pending causes are retained in queue evidence
+and logged at warning level; provider payloads are omitted. Storage qualification
+runs before application execution. A resumed populated candidate uses its
+original custody and private proof instead of requiring empty storage again.
+The outer dispatch marker is written before an actual candidate or route/stop
+effect, rather than before initial read-only admission checks. A refused initial
+check with no effect can end without locking the lane indefinitely. Unexpected
+post-dispatch errors, including lost execution locks and malformed observations,
+remain pending on the original keys. Real authorization denials stay denied.
+Renewing an outer attempt clears only its current dispatch marker. Historical
+ownership comes from the existing candidate custody, child effects, publication
+and checkpoint intents; worker failures, denials and cancellation use that
+history. Completion uses only the live attempt's marker. A denial after renewal
+therefore retains the original lane fence and cannot become a terminal generic
+failure. Temporary source or metadata observations do not become permanent input
+drift. After publication, original-copy retirement uses recovery safety and the
+admitted physical port, while a current staff hold still pauses its dispatch.
+The published-copy recovery check is bound to that original operation; ordinary
+maintenance continues to require the current profile port. A fresh rebuild
+qualifies the predecessor against its recorded physical port and prepares its
+successor at the desired current port, without reverting the profile or changing
+the public address.
+
+Staff holds and the hold writer's timestamp/source label are excluded from the
+shared serving-target input projection. A hold pauses preparation and cutover;
+lifting it resumes the same candidate rather than changing its input authority.
+After admission changes, original private storage is inspected only in readback
+mode. A still-running or unknown schedule stays pending; the inspector's terminal
+empty/incomplete result cannot dispatch preparation again. Configuration records
+bind the exact intended private configuration before the update. Recovery reads
+that binding without resolving changed inputs or sending another update. A
+nonempty mismatched readback remains pending; an older missing binding cannot
+qualify a configured copy.
+
+If the same owned compose is still empty, on its original server/environment and
+namespace, with no environment, source, domain or deployment history, readback can
+instead retain it as abandoned. No application build/restore receipt may exist.
+The provider's generated optional app-name suffix is accepted while the exact
+compose id, namespace name, server and environment remain bound.
+The evidence binds the original plan and any recorded configuration fingerprint;
+an older absent fingerprint stays absent. The operation can finish failed without
+holding the lane forever. A late original update can only configure that retained
+private copy with deployment disabled, and its abandoned record/lease cannot
+advance to a build. Even an empty readback may later receive that original full
+configuration, including credentials. Retention and eventual cleanup must treat
+every such copy as credential-bearing; the unapplied receipt is an observation,
+not proof of cancellation or absence of secrets. Original request evidence,
+physical custody and volumes stay retained; no update is retried, excluded or
+declared cancelled, and the next
+intent uses its own namespace.
+
+If original configuration is positively matched but preparation now fails before
+any deployment, the same observation may retain that configured private copy
+with a configuration-retained receipt binding its original plan and fingerprint.
+This also handles a lost update reply and a testing secret rotation before the
+first build. Admission-change recovery uses this same retention for both
+configuring and configured copies; it does not advance an observed copy to a
+runnable phase after refusing the operation. The original configuration must
+match, deployment history and restore/build receipts must be absent, custody must
+remain private and current guards/leases must pass. A nonempty mismatch stays unknown. No fresh inputs are
+written or deployed. A replay uses the retained receipt and keeps old traffic
+selected.
+
+These observations can update only the original candidate's storage receipt,
+configuring-to-configured phase, or exact configuration-only abandonment, under
+its custody CAS, physical reservation and unchanged serving target;
+they cannot allocate, change intent, deploy, publish or retire a copy.
+The trusted store validates the exact successor shape and intent binding; its
+CAS is not a separate attestation that a provider read occurred. That read is
+the guarded observer's responsibility. Newly recorded protected data, production
+sharing or aliases pause recovery with an
+explicit cause instead of being reclassified as a new admission refusal.
+
+An explicit resume of the same held operation is described below (#4016).
+Managed-proxy execution receipts for interrupted writers are described below
+(#4017). These continuations are integrated in the joined native source. Its PR
+remains held from ready until their reviews are weighed and that head is
+validated. Neither clearing a queue/browser
+record nor replaying an unknown writer is a supported substitute; #3963 is
+incomplete.
+Candidate reservations are rechecked before cutover, and unresolved predecessor
+deployments refuse further effects. Whole-project retirement requires only the
+owned Odoo services in that project, not an unrelated application sharing its
+project label.
+
+The restore intent distinguishes a new workflow with no dispatched effect from
+an older or unknown dispatch. A crash before the first effect can continue the
+original workflow; unknown intents are observed without repeating it. A known
+terminal failed build or restore can be abandoned while retaining candidate
+custody and the old serving selection. Historical terminal receipts replay
+without fresh runtime resolution or provider credential reads.
+For private readiness, a received failed probe frame starts a persisted grace
+period using the target's deployment timeout. A failed probe after that period
+can report terminal failure only before any forward route dispatch and after
+fresh proof of the original terminal build/restore and retained private custody.
+The failed candidate remains retained, with its historic receipts intact; no
+container, volume or credential is removed. A lost connection, incomplete probe,
+running/unknown original job or permission denial cannot qualify that failure.
+The first failure timestamp cannot be reset to prolong the same operation.
+
+Route writes and retirement have separate original-effect fences within the
+lane operation. A lost reply is observed before continuation; an old or absent
+outcome does not permit a blind duplicate. A crashed queue worker resumes
+observation with the same operation and keys. Explicit provider permission
+failures are distinct from a fixed program's `route_write_not_started` receipt.
+That receipt completes the original forward child fence without a route effect;
+after verifying the old route, the rebuild reports failure and retains its copy.
+An interrupted worker reads that receipt without rechecking candidate readiness
+or starting another forward writer. For an inverse, the receipt proves only that
+the same original writer may be retried under its existing lease and guards.
+A lost frame or any failure after invoking the atomic writer proves no such
+exclusion and remains observation-only. Explicit provider permission
+failures remain authorization failures and are not retried as pending work.
+If effects have already begun, a denial holds the operation in
+`reconciliation_required`, preserving its denial code and lane exclusion without
+automatic worker replay. Generic cancellation cannot release a native rebuild
+with an outer dispatched effect or a child effect receipt. An unstarted request
+can still be cancelled; otherwise the original worker's observation/recovery
+path owns completion, not a caller assertion that the provider looks idle.
+Only after fresh public health and identity at the unchanged address and atomic
+canonical publication does retirement disable the predecessor's automatic
+deploys and call the existing [Compose stop API](https://docs.dokploy.com/docs/api/compose).
+Readback requires every service in the old testing project to be stopped. Its
+provider object, containers, volumes and custody remain; no volume is deleted.
+The host helper only reads custody and health. It shares the existing backing-path
+inspection with copy/rehearsal code, including refusing bind aliases of testing
+volumes used by another project. A restarted process with the same runtime and
+data is still the same retained copy.
+If the original stop is proven never dispatched and rollback restores that copy,
+its recorded original automatic-deploy setting is restored through a separate
+effect fence after canonical publication. An unknown stop or an older intent
+without that original setting cannot silently qualify this recovery.
+
+The old copy does not need its passwords rotated or compared with production.
+The new private copy independently proves its testing-only generated credentials
+and connection isolation before receiving traffic. Existing current local secret
+versions are preserved, including across successive rebuilds.
+
+Ordinary deploys of a published native copy preserve its private backend alias,
+local database coordinates and recorded restore witness. Credential selection
+excludes production/shared bindings before reading values. Existing local
+credential versions are retained; installing changed local versions requires a
+fresh private copy through the same rebuild action.
+
+This is staged integration under [#3987](https://github.com/cbusillo/launchplane/issues/3987),
+not live qualification. Supported agent activation, recovery from a
+fully stopped initial legacy predecessor, a live host second-rebuild/next-deploy
+rehearsal and CM testing proof remain under #3963. The legacy local apply command
+is not a live-service fallback. No CM or production mutation is proved by these
+source tests.
+
+### Signed-in testing rebuild and native preflight
+
+The testing Actions page replaces the unavailable generic replacement cards with
+a typed administrator control for fresh empty,
+sanitized production and configured upstream copies. It shows the unchanged
+address and selected short commit. Selection uses the ordinary testing planner's
+current-release inputs and forward-build guard; an unavailable current manifest
+cannot silently move testing to its ancestor. The audit reason is prefilled and may be edited; a ready
+lane can be rebuilt with the primary button without entering build IDs or text.
+`GET /v1/products/{product}/testing-rebuild/inputs`
+reads that selection, actual retained-copy/route admission, current use/hold and
+generated credential provenance. It does not record an artifact, reserve a copy,
+create a lease or dispatch a mutation. Its `candidate_verification: pending`
+does not prove a new copy or completed restore. The worker still checks the
+source, generated values, independent resources, health and identity before
+cutover. The machine target-replacement plan route supports the same native
+read without a provider write.
+
+`POST /v1/products/{product}/testing-rebuild` takes the inspected build/source
+pair, a concrete reason and the original request key. Existing administrator
+cookie/CSRF and current policy checks precede admission. The server re-verifies
+the selected current build, records its existing immutable artifact contract,
+captures existing durable administrator authority and enqueues the same native
+replacement operation. It accepts no destination instance, target, credential or
+arbitrary replacement payload. New native machine admissions also require a
+reason; already admitted operations remain readable and recoverable.
+
+The browser persists the original payload/key and accepted operation ID. A
+reload watches a known operation with GET; a lost enqueue reply requires an
+explicit recovery of that same request. A denied request is retained and never
+automatically resubmitted. Typed operation views expose status and phase without
+provider payloads, authorization records or requester text. The browser
+distinguishes a confirmed first-submit denial from an unavailable watch or denied
+recovery of an earlier uncertain dispatch. The latter retain the original request
+and operation. After a denied recovery, `POST /testing-rebuild/lookup` on the same
+product prefix only reads the original key and exact intent; it cannot enqueue,
+reselect a build or call a provider. Like the existing browser POSTs, lookup
+requires the signed-in administrator's current Origin/CSRF evidence; the browser
+client supplies it through the same supported session path. A new attempt is
+marked dispatched by that client's existing callback after session lookup;
+failures proven before POST dispatch return to inspection. Absence is not proof
+that an earlier request cannot still arrive, so lookup retains the uncertain
+request. Authoritative settlement of an unobserved request is tracked in #4014
+before full activation; clearing browser state alone cannot exclude it. Known operation IDs
+resume with GET after sign-in. A confirmed first-submit denial can be discarded
+locally to refresh inspection, without another submit. Provider 401/403 preflight
+refusals carry a denial trace. Other known pre-admission failures use a fixed
+not-ready response; an uncertain create/commit reply remains uncertain. GitHub
+rate limits and expired artifact-storage URLs stop build selection as unavailable,
+without trying an older candidate or misreporting an identity denial.
+The source feature
+requires normal train delivery and service activation; its tests and mocked
+browser journey do not establish CM health or rebuild timing.
+
+`POST /v1/products/{product}/testing-rebuild/operations/{operation_id}/resume`
+explicitly resumes a held native rebuild. It requires the original request's
+`Idempotency-Key`, the observed `expected_updated_at` and `expected_attempt`, and
+fresh authority for the existing target-replacement action from the original
+caller. A signed-in human is bound by immutable GitHub ID; supported
+`local_operator`/`local_admin` callers retain their original type, subject and token label.
+This route uses the existing `read_operator_mutation_identity` dependency, which
+refuses terminal-agent credentials. It follows the current target-replacement
+action policy rather than adding the administrator gate used by the browser's
+inspect/read routes. A caller admitted only by an action rule may resume through
+the API but still be unable to use that administrator browser view.
+The configured bearer value can rotate while those identity fields remain
+unchanged. Changing the label changes the caller; resume does not transfer a
+held request to that new identity or to an administrator.
+A workflow or service identity cannot substitute. Cookie callers also need the
+normal Origin/CSRF evidence. This action creates no authorization grant.
+New native rebuilds reject workflow/service original callers at admission,
+before creating an operation or dispatching an effect, using the same caller
+boundary as resume. Existing receipts still replay before this new-admission
+check. Historical workflow/service originals remain fenced; their independent
+successor recovery is tracked in #4013, without transferring authority or
+claiming the old effect ended.
+
+Under the existing lane and row locks, resume records its fresh authorization
+and prior held error in an audit receipt, and queues the same operation in one
+transaction. It preserves the original request, build, source, operation ID,
+request key and all provider dispatch fences. Another operation holding the lane
+or a changed held revision refuses the transition. Repeating the same resume receipt returns
+the current original operation without resetting a running worker. The worker
+rechecks current authority and observes existing effects before continuing.
+Requeueing does not certify that an original writer is excluded, regardless of
+the held error code. Only the original provider fences can qualify dispatch.
+This is not the legacy denied-operation fence-release flow: it releases no
+provider fence and grants no alternate identity a replay.
+
+The browser offers **Resume this rebuild** only for a known held operation.
+Reload and sign-in recovery only read that operation; neither resumes it.
+After a denied or lost resume reply, the browser retains the request and requires
+a fresh operation read before another explicit resume. An unknown original
+route writer still waits for managed-host outcome proof (#4017); resume does not
+make an old route file or a timeout proof that dispatch was excluded.
+
+Each native route effect retains its logical intent in the existing private
+original-intent record. Each physical writer child separately retains its actual
+proxy process, boot/clock epoch, directory identity, original fence, preimage and
+execution key before dispatch. A replacement directory gets a new physical child;
+the first child's custody never changes. No application receives a provider
+credential or host mount, and there is no direct host-file fallback.
+
+The managed proxy keeps one permanent descriptor lock and one latest-generation
+receipt beside the owned route. The writer pins that directory before checking
+its identity; rename and sync children inherit the descriptor. It removes only
+abandoned staging files while holding that lock. Completed rebuilds do not add
+per-key directories or files. The previous per-execution writer is removed.
+
+Lock allocation has its own creation-only durable child.
+An empty lock with no resource receipt for this directory in the current boot
+can be bound before the first nonce, including after a reboot interrupted
+initialization. A historical resource still requires its original actual lock.
+Each actual generation initializer invocation gets a unique durable nonce and
+never resends that nonce.
+A positive witness can be adopted read-only; a lost pre-nonce call can be fenced
+by another unique invocation under the same original lock. Ordinary writers and
+settlements cannot create a missing lock or generation. They compare the exact
+generation and revision before changing the latest slot. An old settlement cannot
+seal a successor, and losing a same-boot historical lock is not permission to
+bootstrap another one.
+
+Every mutating shell checks its captured private proxy process identity, boot ID
+and boot-time clock offset before filesystem writes. Capture requires the process
+to have aged beyond its exported start tick and rechecks Docker's start identity.
+A proxy restart can read and reuse a preserved directory fence. Its prior runtime
+cannot write if an older directory returns. After a confirmed fresh boot, a
+preserved known generation can advance under its actual current lock even if
+Linux renumbered the device. The transition records the retired boot and original
+slot; all older boot-bound calls reject. Unrecorded generations are not adopted.
+
+After a lost writer reply, authorized recovery settles the immutable physical
+attempt under its original lock. A busy lock remains unknown, including when a
+killed shell left a child able to rename. Exclusive settlement records either the
+exact applied document or exclusion. A retired runtime/root proves that its
+writer cannot affect the current route; it does not claim the old writer never
+ran. A confirmed non-applied forward attempt keeps the old copy serving. An
+excluded or retired inverse may obtain a fresh physical attempt through the
+existing durable retry transaction, preserving the rebuild and request key.
+A completed busy reply proves that its call never entered the writer's critical
+section. It retries with a fresh attempt after current admission checks, instead
+of sealing that contention as a failed forward cutover. An in-flight busy lock
+without that completed reply remains unknown.
+Timeouts and denials never establish exclusion. Legacy dispatches remain
+observation-only; recovery never guesses their original custody.
+
+These are provider execution receipts in the existing operation journal, not
+another desired-state journal. The isolated Traefik rehearsal disconnects a real
+Docker exec client before rename and observes its inherited lock. Shell and
+emitted-host tests also cover surviving children, generation/revision races,
+missing fences, returning roots, restart adoption and fresh-boot recovery. They
+do not replace managed-host qualification or the CM proof required by #3963.
+
+The worker regression executes a second application's configure/deploy/initialize
+stages and same-address adoption, then the ordinary replacement and post-deploy
+workflows for a newer artifact. It verifies retained route, storage, generated
+credential versions, private alias and both contract-owned image references.
+Provider IO and build ordering are mocked, storage is prequalified, and this
+does not constitute a live host rehearsal.
+Continuing native-route refresh is tracked in [#3995](https://github.com/cbusillo/launchplane/issues/3995).
+Scheduled native restores, retained-copy maintenance and capacity integration
+are tracked in [#3996](https://github.com/cbusillo/launchplane/issues/3996).
 
 ## Service collection
 

@@ -1,4 +1,7 @@
 import type {
+  SubmitTestingRebuildData,
+  LookupTestingRebuildData,
+  ResumeTestingRebuildData,
   DecideBackupPolicyProposalData,
   ExecuteProductRetirementData,
   RebindBackupWorkerCredentialsData,
@@ -36,6 +39,9 @@ import type {
 } from "./generated/openapi.ts";
 
 export const BROWSER_WRITE_ROUTES = {
+  testingRebuild: "/v1/products/{product}/testing-rebuild" satisfies SubmitTestingRebuildData["url"],
+  testingRebuildLookup: "/v1/products/{product}/testing-rebuild/lookup" satisfies LookupTestingRebuildData["url"],
+  testingRebuildResume: "/v1/products/{product}/testing-rebuild/operations/{operation_id}/resume" satisfies ResumeTestingRebuildData["url"],
   backupPolicyDecision: "/v1/production-backup-authority/proposals/{operation_id}/decision" satisfies DecideBackupPolicyProposalData["url"],
   localConsumerDelivery: "/v1/local-consumer-deliveries" satisfies DeliverTestingLocalConsumerData["url"],
   productRetirement: "/v1/product-retirement" satisfies ExecuteProductRetirementData["url"],

@@ -35,7 +35,7 @@ from pathlib import Path
 from threading import Event, Thread
 from typing import Literal, Protocol, cast
 from urllib.error import HTTPError
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlsplit
 from uuid import uuid4
 
 import click
@@ -52,6 +52,7 @@ from control_plane.client_release_repositories import recorded_train_candidate
 from control_plane import secrets
 from control_plane.runtime_environments import RuntimeEnvironmentRecordStore
 from control_plane.dokploy.api import DokployRequestFailed
+from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 from control_plane.build_provenance import (
     BUILD_WORKFLOW_PATH,
     BuildProvenanceError,
@@ -2838,6 +2839,62 @@ def _has_repository_identity(
     except ProductRepositoryIdentityRefusal:
         return False
     return True
+
+
+def _testing_build_read[Result](read: Callable[[str], Result], path: str) -> Result:
+    try:
+        return read(path)
+    except BuildProvenanceError as error:
+        failure = error.__cause__
+        if isinstance(failure, HTTPError) and failure.code in {401, 403}:
+            # The shared selector may skip an invalid build. An identity refusal
+            # is not an invalid build and must stop before another candidate read.
+            rate_limited = failure.code == 403 and (
+                failure.headers.get("Retry-After") is not None
+                or failure.headers.get("X-RateLimit-Remaining") == "0"
+            )
+            if urlsplit(failure.geturl()).hostname == "api.github.com" and not rate_limited:
+                raise NativeSourceAuthorizationDenied(
+                    "The existing build reader refused access."
+                ) from error
+            raise ProductReconcileError(
+                "The current build read is unavailable.", code="testing_build_unavailable"
+            ) from error
+        raise
+
+
+@dataclass(frozen=True)
+class _TestingRebuildBuildReads:
+    transport: BuildProvenanceTransport
+
+    def get_json(self, path: str) -> object:
+        return _testing_build_read(self.transport.get_json, path)
+
+    def get_bytes(self, path: str) -> bytes:
+        return _testing_build_read(self.transport.get_bytes, path)
+
+
+def latest_verified_testing_build(
+    record_store: object, profile: LaunchplaneProductProfileRecord, lane: ProductLaneProfile
+) -> VerifiedBuildArtifact:
+    """Reuse testing's verified-build selection for an explicit native rebuild."""
+    if profile.driver_id != "odoo" or lane.instance != "testing":
+        raise ValueError("Native rebuild build selection requires an Odoo testing lane.")
+    identity = product_repository_identity(record_store, profile)
+    plan, verified = _plan_testing_target(
+        record_store=cast(ProductReconcileStore, record_store),
+        transport=_TestingRebuildBuildReads(
+            resolve_build_provenance_transport(record_store, profile)
+        ),
+        profile=profile,
+        repository_id=identity.repository_id,
+    )
+    if not isinstance(verified, VerifiedBuildArtifact):
+        raise ProductReconcileError(
+            "No current verified testing build.",
+            code=str(plan.get("reason") or "no_verified_build"),
+        )
+    return verified
 
 
 def _desired_release(

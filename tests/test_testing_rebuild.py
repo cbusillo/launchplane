@@ -20,7 +20,10 @@ from control_plane.contracts.testing_rebuild import (
 )
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_rebuild_storage import RecordTestingRebuildStore
-from control_plane.workflows.testing_rebuild import execute_testing_rebuild
+from control_plane.workflows.testing_rebuild import (
+    execute_testing_rebuild,
+    TestingRebuildPreparationFailure,
+)
 
 
 def rebuild_plan(source: str = "production") -> TestingRebuildPlan:
@@ -71,6 +74,7 @@ class TestingProvider:
         self.pending_switch = False
         self.refuse_stop = False
         self.stop_refused_before_dispatch = False
+        self.stop_excluded = False
         self.lose_stop_reply = False
         self.old_running = True
         self.actions: list[str] = []
@@ -90,9 +94,12 @@ class TestingProvider:
     def exclusive(self, plan: TestingRebuildPlan) -> nullcontext[None]:
         return nullcontext()
 
-    def guard(self, plan: TestingRebuildPlan) -> None:
+    def guard(self, plan: TestingRebuildPlan, *, recovery: bool = False) -> None:
         if self.deny_retirement and self.published == plan.new:
             raise PermissionError("fixture authorization_denied")
+
+    def route_exclusion(self, plan: TestingRebuildPlan) -> bool:
+        return False
 
     def current_route(self, plan: TestingRebuildPlan) -> TestingRouteObservation:
         if self.serving == plan.new:
@@ -189,9 +196,18 @@ class TestingProvider:
         if self.lose_stop_reply:
             raise TimeoutError("fixture stop reply lost")
 
+    def retirement_exclusion(self, plan: TestingRebuildPlan) -> TestingCopyReadiness | None:
+        if not self.stop_excluded:
+            return None
+        return self.old_readiness(plan)
+
     def unstarted_retirement(self, plan: TestingRebuildPlan) -> TestingCopyReadiness | None:
         if not self.stop_refused_before_dispatch or not self.old_running:
             return None
+        self.stop_excluded = True
+        return self.old_readiness(plan)
+
+    def old_readiness(self, plan: TestingRebuildPlan) -> TestingCopyReadiness:
         return TestingCopyReadiness(
             copy_id=plan.old.copy_id,
             host=self.host,
@@ -281,6 +297,37 @@ class TestingRebuildTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.store.save(record)
         self.assertTrue(self.store.load(self.plan).publication_started)
+
+    def test_terminal_candidate_failure_keeps_old_serving_and_allows_historical_replay(
+        self,
+    ) -> None:
+        failure = TestingRebuildPreparationFailure(
+            copy_id=self.plan.new.copy_id, evidence_id="original-candidate-terminal-custody"
+        )
+        with patch.object(self.provider, "prepare", side_effect=failure):
+            result = self.run_rebuild()
+        self.assertEqual(result.step, "failed")
+        self.assertEqual(result.preparation_failure_evidence, failure.evidence_id)
+        self.assertTrue(self.provider.old_running)
+        self.assertEqual(self.provider.serving, self.plan.old)
+        self.assertEqual(self.provider.published, self.plan.old)
+        self.assertNotIn("retire", self.provider.actions)
+        with patch.object(self.provider, "prepare", side_effect=AssertionError("No replay effect")):
+            self.assertEqual(self.run_rebuild(), result)
+
+    def test_preparation_denial_or_foreign_failure_proof_is_never_terminal_success(self) -> None:
+        for failure in (
+            PermissionError("fixture refusal"),
+            TestingRebuildPreparationFailure(copy_id="foreign", evidence_id="foreign"),
+        ):
+            with (
+                self.subTest(failure=type(failure).__name__),
+                patch.object(self.provider, "prepare", side_effect=failure),
+            ):
+                with self.assertRaises((PermissionError, ValueError)):
+                    self.run_rebuild()
+                self.assertEqual(self.store.load(self.plan).step, "preparing")
+                self.assertTrue(self.provider.old_running)
 
     def test_rebuild_and_both_restore_sources_keep_the_address(self) -> None:
         for source in ("empty", "production", "upstream"):
@@ -718,3 +765,27 @@ class TestingRebuildTests(unittest.TestCase):
         ):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 TestingRebuildPlan.model_validate({**self.plan.model_dump(), **changes})
+
+    def test_interrupted_retirement_exclusion_preserves_rollback_decision_after_health_recovers(
+        self,
+    ) -> None:
+        self.provider.refuse_stop = True
+        with self.assertRaises(PermissionError):
+            self.run_rebuild()
+        self.provider.bad_public = True
+        original = self.provider.unstarted_retirement
+
+        def lost(plan: TestingRebuildPlan) -> TestingCopyReadiness | None:
+            original(plan)
+            self.provider.bad_public = False
+            raise TimeoutError("fixture lost stop-exclusion receipt")
+
+        with (
+            patch.object(self.provider, "unstarted_retirement", side_effect=lost),
+            self.assertRaises(TimeoutError),
+        ):
+            self.run_rebuild()
+        self.assertEqual(self.run_rebuild().step, "failed")
+        self.assertTrue(self.provider.old_running)
+        self.assertEqual(self.provider.serving, self.plan.old)
+        self.assertNotIn("retire", self.provider.actions)
