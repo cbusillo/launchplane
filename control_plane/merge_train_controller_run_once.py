@@ -1,4 +1,5 @@
 import hashlib
+from control_plane.merge_train_pr_feedback import queue_landing_planning_feedback
 from control_plane.merge_train_policy_binding import merge_train_policy_bindings_match
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -2196,6 +2197,13 @@ def _finish_landed_merge_train_batch(
         raise MergeTrainControllerRequestError(
             "merge train cleanup requires a fully landed batch record"
         )
+    if request.mutate:
+        queue_landing_planning_feedback(
+            store=stack_collapse_store,
+            landing_record=landed_record,
+            repository_policy=repository_policy,
+            trace_id=trace_id,
+        )
     collapse_records = stack_collapse_records_for_completed_landing(
         record_store=stack_collapse_store,
         github_client=github_client,
@@ -2313,6 +2321,13 @@ def _reconcile_completed_landing_after_policy_change(
                 "Completed landing no longer matches the merged PR and target branch.",
                 status_code=409,
             )
+    if request.mutate:
+        queue_landing_planning_feedback(
+            store=stack_collapse_store,
+            landing_record=landed_record,
+            repository_policy=repository_policy,
+            trace_id=trace_id,
+        )
     collapse_records = stack_collapse_records_for_completed_landing(
         record_store=stack_collapse_store,
         github_client=github_client,
