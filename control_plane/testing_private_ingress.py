@@ -320,6 +320,29 @@ class TestingPrivateIngressAdapter:
                 return True
         return False
 
+    def _can_resume_effects(
+        self,
+        provider_key: str,
+        snapshot: dict[str, object],
+        desired: NpmplusProxyHostPayload,
+        existing: NpmplusProxyHost | None,
+    ) -> bool:
+        if not self._pending_matches(
+            provider_key, desired, cast(dict[str, object], snapshot["authority"])
+        ):
+            return False
+        if existing is None:
+            return self.request.operation == "create"
+        # The snapshot already verifies receipt ownership and full config.
+        # Retry only the idempotent toggle, without recreating an application
+        # domain that disappeared after the reviewed enable request.
+        return (
+            bool(snapshot["domain_present"])
+            and existing.enabled != desired.enabled
+            and _host_payload(existing)
+            == _host_payload(desired.model_copy(update={"enabled": existing.enabled}))
+        )
+
     def _snapshot(
         self,
         recovery_key: str = "",
@@ -666,16 +689,12 @@ class TestingPrivateIngressAdapter:
         started = False
         try:
             snapshot, desired, existing = self._snapshot(provider_operation_key)
-            resuming_missing_effects = (
-                self.request.operation == "create"
-                and existing is None
-                and self._pending_matches(
-                    provider_operation_key, desired, cast(dict[str, object], snapshot["authority"])
-                )
+            resuming_effects = self._can_resume_effects(
+                provider_operation_key, snapshot, desired, existing
             )
             if (
                 canonical_json_sha256(snapshot) != self.request.reviewed_plan_sha256
-                and not resuming_missing_effects
+                and not resuming_effects
             ):
                 raise ValueError("The reviewed private hostname plan changed.")
             actual_hosts: list[NpmplusProxyHost] = []
@@ -784,21 +803,12 @@ class TestingPrivateIngressAdapter:
                 if not provider_effect_phase:
                     return ProviderObservation("absent", retry_safe=True)
                 # Observation never performs provider effects. Exact completed
-                # effects can be adopted; independently proven absence can let
-                # the original request resume only its missing edge.
+                # effects can be adopted; independent readback can admit the
+                # original request's remaining effects.
                 snapshot, desired, existing = self._snapshot(provider_operation_key)
-                if (
-                    self.request.operation == "create"
-                    and existing is None
-                    and self._pending_matches(
-                        provider_operation_key,
-                        desired,
-                        cast(dict[str, object], snapshot["authority"]),
-                    )
-                ):
-                    # Independent readback proves no edge exists, and the
-                    # application domain is either absent or exactly ours.
-                    # Resume only this original request's missing effects.
+                if self._can_resume_effects(provider_operation_key, snapshot, desired, existing):
+                    # Resume missing create effects or an unchanged owned
+                    # route's idempotent enable/disable toggle.
                     return ProviderObservation("absent", retry_safe=True)
                 if (
                     existing is None

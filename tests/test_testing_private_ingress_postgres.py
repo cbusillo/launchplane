@@ -15,6 +15,113 @@ from tests.test_postgres_integration import _head_postgres_database
 
 
 class RealPostgresTestingPrivateIngressRecoveryTests(private_ingress_tests.PrivateIngressFixture):
+    def test_late_toggle_response_is_adopted_without_repeating_toggle(self) -> None:
+        self.create()
+        for operation, method in (
+            ("disable", "disable_proxy_host"),
+            ("create", "enable_proxy_host"),
+        ):
+            with self.subTest(operation=operation):
+                digest = self.adapter(operation=operation).plan()["plan_sha256"]
+                adapter = self.adapter(operation=operation, reviewed_plan_sha256=digest)
+                toggle = getattr(self.client, method)
+
+                def lost_response(host_id: int) -> Any:
+                    toggle(host_id)
+                    raise TimeoutError("toggle landed before response loss")
+
+                with patch.object(self.client, method, side_effect=lost_response):
+                    self.assertEqual(
+                        self.run_ingress(adapter, operation).status, "reconcile_required"
+                    )
+                with patch.object(self.client, method, wraps=toggle) as repeated:
+                    self.assertEqual(self.run_ingress(adapter, operation).status, "adopted")
+                    repeated.assert_not_called()
+                self.assertEqual(self.client.proxy_hosts[0].enabled, operation == "create")
+        self.assertEqual(self.dokploy_calls, ["/api/domain.create"])
+
+    def test_original_key_resumes_rejected_disable_toggle(self) -> None:
+        self.create()
+        digest = self.adapter(operation="disable").plan()["plan_sha256"]
+        adapter = self.adapter(operation="disable", reviewed_plan_sha256=digest)
+        with patch.object(
+            self.client, "disable_proxy_host", side_effect=ValueError("toggle rejected")
+        ) as toggle:
+            self.assertEqual(self.run_ingress(adapter, "disable-key").status, "reconcile_required")
+            toggle.assert_called_once()
+        self.assertTrue(self.client.proxy_hosts[0].enabled)
+        self.assertEqual(self.run_ingress(adapter, "different-key").status, "target_busy")
+        self.assertEqual(self.run_ingress(adapter, "disable-key").status, "completed")
+        self.assertFalse(self.client.proxy_hosts[0].enabled)
+        self.assertEqual(self.dokploy_calls, ["/api/domain.create"])
+        self.assertEqual(sum(call.startswith("disable:") for call in self.client.calls), 1)
+
+    def test_original_key_resumes_rejected_enable_toggle_after_metadata_change(self) -> None:
+        self.create()
+        digest = self.adapter(operation="disable").plan()["plan_sha256"]
+        self.assertEqual(
+            self.run_ingress(
+                self.adapter(operation="disable", reviewed_plan_sha256=digest), "disable-key"
+            ).status,
+            "completed",
+        )
+        digest = self.adapter().plan()["plan_sha256"]
+        adapter = self.adapter(reviewed_plan_sha256=digest)
+        with patch.object(
+            self.client, "enable_proxy_host", side_effect=TimeoutError("toggle not landed")
+        ):
+            self.assertEqual(self.run_ingress(adapter, "enable-key").status, "reconcile_required")
+        self.assertFalse(self.client.proxy_hosts[0].enabled)
+        self.assertEqual(self.run_ingress(adapter, "different-key").status, "target_busy")
+        self.store.write_product_profile_record(
+            self.profile.model_copy(update={"display_name": "Updated description"})
+        )
+        self.assertEqual(self.run_ingress(adapter, "enable-key").status, "completed")
+        self.assertTrue(self.client.proxy_hosts[0].enabled)
+        self.assertEqual(self.dokploy_calls, ["/api/domain.create"])
+        self.assertEqual(sum(call.startswith("enable:") for call in self.client.calls), 1)
+
+    def test_toggle_retry_retains_hold_for_drift_and_failed_read(self) -> None:
+        self.create()
+        digest = self.adapter(operation="disable").plan()["plan_sha256"]
+        adapter = self.adapter(operation="disable", reviewed_plan_sha256=digest)
+        with patch.object(
+            self.client, "disable_proxy_host", side_effect=ValueError("toggle rejected")
+        ):
+            self.assertEqual(self.run_ingress(adapter, "disable-key").status, "reconcile_required")
+        self.client.proxy_hosts[0].access_list_id = 0
+        self.assertEqual(self.run_ingress(adapter, "disable-key").status, "reconcile_required")
+        self.client.proxy_hosts[0].access_list_id = self.body.access_list_id
+        with patch.object(self.client, "get_proxy_host", side_effect=RuntimeError("read failed")):
+            self.assertEqual(self.run_ingress(adapter, "disable-key").status, "reconcile_required")
+        self.assertEqual(
+            adapter.observe("wrong-key", "apply_private_testing_edge", "key").outcome, "unknown"
+        )
+        self.assertEqual(self.run_ingress(adapter, "different-key").status, "target_busy")
+        self.assertTrue(self.client.proxy_hosts[0].enabled)
+
+    def test_reenable_retry_does_not_recreate_a_removed_application_domain(self) -> None:
+        self.create()
+        digest = self.adapter(operation="disable").plan()["plan_sha256"]
+        self.assertEqual(
+            self.run_ingress(
+                self.adapter(operation="disable", reviewed_plan_sha256=digest), "disable-key"
+            ).status,
+            "completed",
+        )
+        digest = self.adapter().plan()["plan_sha256"]
+        adapter = self.adapter(reviewed_plan_sha256=digest)
+        with patch.object(
+            self.client, "enable_proxy_host", side_effect=ValueError("toggle rejected")
+        ):
+            self.assertEqual(self.run_ingress(adapter, "enable-key").status, "reconcile_required")
+        self.domains.clear()
+        self.assertEqual(self.run_ingress(adapter, "enable-key").status, "reconcile_required")
+        self.assertEqual(self.run_ingress(adapter, "different-key").status, "target_busy")
+        self.assertEqual(self.domains, [])
+        self.assertFalse(self.client.proxy_hosts[0].enabled)
+        self.assertEqual(self.dokploy_calls, ["/api/domain.create"])
+
     def test_corrected_authority_replans_after_proven_absence(self) -> None:
         digest = self.adapter().plan()["plan_sha256"]
         adapter = self.adapter(reviewed_plan_sha256=digest)

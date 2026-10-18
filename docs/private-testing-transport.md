@@ -73,6 +73,16 @@ provider record or unverified effect retains the prior pending operation's hold
 even before that retry reaches its first new checkpoint. A fresh operation with
 no pending receipt still rejects pre-effect failures.
 
+A rejected or unlanded enable/disable toggle can also resume with the original
+request and key. Readback must prove the exact receipt-owned route differs only
+in `enabled`, and the pending receipt must match the stable authority and desired
+route. Re-enable additionally requires the application's domain still present;
+toggle recovery never recreates a domain removed after planning. The acquired
+retry checks the same conditions and the immediate pre-effect snapshot before
+repeating only the idempotent toggle. A toggle that already landed is adopted
+without another provider write. Changed route configuration, wrong keys and
+failed reads retain the hold.
+
 If authority was corrected permanently, or a clean pre-effect rejection left a
 pending receipt, retry the original key first. Before any new effects, the
 service can complete that key with `applied=false`, `replan_required=true` and
@@ -94,6 +104,8 @@ If the original domain remains present after permanent authority drift, keep the
 hold. Supported receipt-bound cleanup and private-endpoint retirement/evidence
 invalidation are tracked separately in #4004. No direct provider deletion or
 reservation clearing is a supported recovery path.
+Legacy hostname spelling normalization across ownership comparisons and
+PostgreSQL name fences is tracked separately in #4005.
 
 Disable uses a fresh reviewed plan and the same lane's exact receipt-owned route,
 retaining its original endpoint and edge keys. It only toggles that route even
