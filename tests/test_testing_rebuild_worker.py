@@ -1,7 +1,7 @@
 """The durable worker joins preparation, unchanged routing, adoption and retirement."""
 
 from copy import deepcopy
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import json
 from urllib.parse import urlsplit
 from typing import Any, Literal
@@ -1048,6 +1048,75 @@ class NativeTestingWorkerTests(unittest.TestCase):
         ):
             self.assertEqual(self.execute().deploy_status, "fail")
         self.assertEqual(self.effects, [])
+
+    def test_terminal_private_probe_failure_is_bounded_and_keeps_old_copy_serving(self) -> None:
+        from control_plane.dokploy import DEFAULT_DOKPLOY_DEPLOY_TIMEOUT_SECONDS
+        from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
+        from control_plane.testing_candidate_application import (
+            CandidatePrivateReadinessFailed,
+            CandidateObservationUnavailable,
+        )
+        from control_plane.testing_rebuild_storage import RecordTestingRebuildStore
+
+        original_readiness = service.NativeTestingRebuildExecution.readiness
+        plans: list[Any] = []
+
+        def readiness(executor: Any, plan: Any) -> Any:
+            plans.append(plan)
+            return original_readiness(executor, plan)
+
+        with (
+            patch.object(
+                service,
+                "candidate_private_readiness",
+                side_effect=CandidatePrivateReadinessFailed("fixture credential mismatch"),
+            ),
+            patch.object(service.NativeTestingRebuildExecution, "readiness", readiness),
+        ):
+            with self.assertRaises(service.NativeTestingRebuildPending):
+                self.execute()
+            checkpoint = RecordTestingRebuildStore(self.store)
+            record = checkpoint.load(plans[0])
+            self.assertIsNotNone(record.private_readiness_failed_at)
+            with self.assertRaises(ValueError):
+                checkpoint.save(record.model_copy(update={"private_readiness_failed_at": None}))
+            timeout = DEFAULT_DOKPLOY_DEPLOY_TIMEOUT_SECONDS
+            future = datetime.now(UTC) + timedelta(seconds=timeout + 1)
+            with patch.object(service, "datetime") as clock:
+                clock.now.return_value = future
+                with (
+                    patch.object(
+                        service,
+                        "candidate_private_readiness",
+                        side_effect=NativeSourceUnavailable("fixture lost connection"),
+                    ),
+                    patch.object(service, "candidate_terminal_custody_evidence") as terminal,
+                    self.assertRaises(service.NativeTestingRebuildPending),
+                ):
+                    self.execute()
+                terminal.assert_not_called()
+                with (
+                    patch.object(
+                        service,
+                        "candidate_terminal_custody_evidence",
+                        side_effect=CandidateObservationUnavailable(
+                            "fixture original job still running"
+                        ),
+                    ),
+                    self.assertRaises(service.NativeTestingRebuildPending),
+                ):
+                    self.execute()
+                with patch.object(
+                    service,
+                    "candidate_terminal_custody_evidence",
+                    return_value="original-restore:done",
+                ):
+                    self.assertEqual(
+                        self.execute().error_code, "candidate_private_readiness_failed"
+                    )
+        self.assertEqual(self.effects, [])
+        self.assertEqual(self.current(), self.fixture.before)
+        self.assertFalse(self.retained["stopped"])
 
     def test_route_writer_excluded_before_dispatch_fails_with_old_copy_serving(self) -> None:
         from control_plane.dokploy.testing_route_transport import TestingRouteWriteNotStarted

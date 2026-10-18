@@ -890,6 +890,14 @@ original workflow; unknown intents are observed without repeating it. A known
 terminal failed build or restore can be abandoned while retaining candidate
 custody and the old serving selection. Historical terminal receipts replay
 without fresh runtime resolution or provider credential reads.
+For private readiness, a received failed probe frame starts a persisted grace
+period using the target's deployment timeout. A failed probe after that period
+can report terminal failure only before any forward route dispatch and after
+fresh proof of the original terminal build/restore and retained private custody.
+The failed candidate remains retained, with its historic receipts intact; no
+container, volume or credential is removed. A lost connection, incomplete probe,
+running/unknown original job or permission denial cannot qualify that failure.
+The first failure timestamp cannot be reset to prolong the same operation.
 
 Route writes and retirement have separate original-effect fences within the
 lane operation. A lost reply is observed before continuation; an old or absent

@@ -11,7 +11,7 @@ from control_plane.contracts.testing_candidate_application import (
     TestingCandidatePrepared,
 )
 from control_plane.dokploy import api, compose, post_deploy, source
-from control_plane.dokploy.native_copy_stream import _read_remote
+from control_plane.dokploy.native_copy_stream import _read_remote, NativeProgramFailed
 from control_plane.dokploy.target_source_setup import require_empty_compose_source
 from control_plane.dokploy_target_setup_http import fetch_dokploy_compose_domains_for_target_setup
 from control_plane.integration_readback import (
@@ -31,6 +31,10 @@ from control_plane.testing_candidate_runtime import TestingCandidateRuntimeInput
 
 class CandidateObservationUnavailable(ValueError):
     """The original candidate effect or its private health needs observation."""
+
+
+class CandidatePrivateReadinessFailed(CandidateObservationUnavailable):
+    """The fixed read-only probe returned a failure, rather than losing its transport."""
 
 
 def candidate_private_readiness(
@@ -80,15 +84,18 @@ def candidate_private_readiness(
         "credential_program": base64.b64encode(CANDIDATE_CONTAINER_PROBE.encode()).decode(),
     }
     frames: list[dict[str, object]] = []
-    _read_remote(
-        host=host,
-        token=token,
-        server_id=allocation.server_id,
-        program=CANDIDATE_HOST_PROBE,
-        payload=spec,
-        receive=frames.append,
-        timeout_seconds=120,
-    )
+    try:
+        _read_remote(
+            host=host,
+            token=token,
+            server_id=allocation.server_id,
+            program=CANDIDATE_HOST_PROBE,
+            payload=spec,
+            receive=frames.append,
+            timeout_seconds=120,
+        )
+    except NativeProgramFailed:
+        raise CandidatePrivateReadinessFailed("The private probe returned a failure.") from None
     if frames != [{"type": "complete", "private_readiness_verified": True}]:
         raise CandidateObservationUnavailable("Candidate private readiness is unverified.")
     return TestingCandidatePrepared(
@@ -479,27 +486,16 @@ def candidate_build_terminal(*, host: str, token: str, record: TestingCandidateA
     return key + ":" + status
 
 
-def abandon_candidate_application(
+def candidate_terminal_custody_evidence(
     *,
     root: Path,
     store: PostgresRecordStore,
-    namespace: str,
-    lease: ProviderOperationLease,
-    guard: Callable[[], None],
-) -> TestingCandidateAllocation:
-    """Record terminal abandonment while keeping the copy and all custody records.
-
-    This does not delete storage, stop the old copy, clear fences or cancel a
-    running/unknown provider request. A replacement operation gets its own copy.
-    """
-    lease.assert_current()
-    guard()
-    record = store.read_testing_candidate(namespace)
-    if record is None or record.application is None:
+    record: TestingCandidateAllocation,
+) -> str:
+    """Read original terminal jobs and retained private custody without changing the copy."""
+    if record.application is None:
         raise ValueError("Candidate application is unavailable.")
     app = record.application
-    if app.phase == "abandoned":
-        return record
     require_candidate_target_custody(store, record)
     host, token = source.read_dokploy_config(
         control_plane_root=root, database_url=store.database_url
@@ -536,6 +532,27 @@ def abandon_candidate_application(
         not in api._DEPLOYMENT_SUCCESS_STATUSES | api._DEPLOYMENT_FAILURE_STATUSES
     ):
         raise ValueError("Candidate deployment is still running or changed.")
+    return evidence
+
+
+def abandon_candidate_application(
+    *,
+    root: Path,
+    store: PostgresRecordStore,
+    namespace: str,
+    lease: ProviderOperationLease,
+    guard: Callable[[], None],
+) -> TestingCandidateAllocation:
+    """Retain failed-copy custody; never cancel unknown jobs, stop a copy or delete storage."""
+    lease.assert_current()
+    guard()
+    record = store.read_testing_candidate(namespace)
+    if record is None or record.application is None:
+        raise ValueError("Candidate application is unavailable.")
+    app = record.application
+    if app.phase == "abandoned":
+        return record
+    evidence = candidate_terminal_custody_evidence(root=root, store=store, record=record)
     lease.assert_current()
     guard()
     require_candidate_target_custody(store, record)

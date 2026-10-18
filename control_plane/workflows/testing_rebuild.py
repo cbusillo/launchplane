@@ -125,9 +125,10 @@ class TestingRebuildObservationUnavailable(ValueError):
 class TestingRebuildPreparationFailure(ValueError):
     """A terminal original candidate job failed and its custody is retained."""
 
-    def __init__(self, *, copy_id: str, evidence_id: str) -> None:
+    def __init__(self, *, copy_id: str, evidence_id: str, private_readiness: bool = False) -> None:
         super().__init__("Candidate preparation failed; its original custody is retained.")
         self.copy_id, self.evidence_id = copy_id, evidence_id
+        self.private_readiness = private_readiness
 
 
 class TestingRebuildHealthFailure(ValueError):
@@ -242,7 +243,9 @@ def execute_testing_rebuild(
                 save(
                     step="failed",
                     ended_at=clock(),
-                    error="candidate_preparation_failed",
+                    error="candidate_private_readiness_failed"
+                    if failure.private_readiness
+                    else "candidate_preparation_failed",
                     preparation_failure_evidence=failure.evidence_id,
                 )
                 return record
@@ -270,7 +273,28 @@ def execute_testing_rebuild(
                         ended_at=clock(),
                     )
                     return record
-                readiness = provider.readiness(plan)
+                try:
+                    readiness = provider.readiness(plan)
+                except TestingRebuildPreparationFailure as failure:
+                    if (
+                        not failure.private_readiness
+                        or failure.copy_id != plan.new.copy_id
+                        or not failure.evidence_id
+                    ):
+                        raise ValueError(
+                            "Private failure proof differs from the admitted candidate."
+                        ) from None
+                    observation = provider.current_route(plan)
+                    _route(observation, plan, plan.old)
+                    provider.guard(plan, recovery=True)
+                    save(
+                        step="failed",
+                        error="candidate_private_readiness_failed",
+                        route=observation,
+                        ended_at=clock(),
+                        preparation_failure_evidence=failure.evidence_id,
+                    )
+                    return record
                 if (readiness.copy_id, readiness.host) != (plan.new.copy_id, plan.host):
                     raise ValueError("Readiness belongs to another copy or address.")
                 require_fresh_readiness(

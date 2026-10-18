@@ -122,3 +122,8 @@ def require_rebuild_successor(
             record.retirement_recovery != current.retirement_recovery
         ):
             raise ValueError("A rebuild cannot replace its retirement recovery proof.")
+        if (
+            current.private_readiness_failed_at is not None
+            and record.private_readiness_failed_at != current.private_readiness_failed_at
+        ):
+            raise ValueError("A rebuild cannot replace its first private probe failure.")

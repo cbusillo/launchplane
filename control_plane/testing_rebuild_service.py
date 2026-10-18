@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 from urllib.parse import urlsplit
 
 from pydantic import Field
@@ -85,6 +85,8 @@ from control_plane.testing_candidate_application import (
     candidate_restore_terminal,
     candidate_build_terminal,
     CandidateObservationUnavailable,
+    CandidatePrivateReadinessFailed,
+    candidate_terminal_custody_evidence,
 )
 from control_plane.testing_candidate_runtime import (
     CandidateSource,
@@ -193,7 +195,8 @@ def capture_rebuild_intent(
         before.target.target_name,
     ) or not provider.get("appName"):
         raise ValueError("The actual testing target differs from its record.")
-    if type(provider.get("autoDeploy")) is not bool:
+    old_auto_deploy = provider.get("autoDeploy")
+    if not isinstance(old_auto_deploy, bool):
         raise ValueError("The original testing automatic-deploy setting is unavailable.")
     server = require_registered_remote_server(provider.get("serverId"))
     project = str(provider["appName"])
@@ -274,7 +277,7 @@ def capture_rebuild_intent(
         ),
         retained=retained,
         public_entrypoints=points,
-        old_auto_deploy=provider["autoDeploy"],
+        old_auto_deploy=old_auto_deploy,
         recorded_template=template,
     )
 
@@ -765,6 +768,8 @@ class NativeTestingRebuildExecution:
                 lease=self.lease,
                 guard=self.guard,
             )
+        except CandidatePrivateReadinessFailed:
+            self.failed_private_readiness(plan)
         except (ValueError, api.DokployDeploymentFailed, api.DokployScheduleExecutionFailed):
             current = self.store.read_testing_candidate(self.allocation.namespace)
             if (
@@ -820,13 +825,16 @@ class NativeTestingRebuildExecution:
 
     def readiness(self, plan: TestingRebuildPlan) -> TestingCopyReadiness:
         assert self.inputs is not None and self.allocation.application is not None
-        prepared = candidate_private_readiness(
-            host=self.host,
-            token=self.token,
-            allocation=self.allocation,
-            inputs=self.inputs,
-            deployment_id=self.allocation.application.deployment_id,
-        )
+        try:
+            prepared = candidate_private_readiness(
+                host=self.host,
+                token=self.token,
+                allocation=self.allocation,
+                inputs=self.inputs,
+                deployment_id=self.allocation.application.deployment_id,
+            )
+        except CandidatePrivateReadinessFailed:
+            self.failed_private_readiness(plan)
         assert isinstance(self.lease, ProviderEvidenceLease)
         self.publication = self.publication or plan_testing_publication(
             self.store,
@@ -846,6 +854,52 @@ class NativeTestingRebuildExecution:
             runtime_identity=prepared.runtime_identity,
             healthy=True,
             evidence_id=prepared.source_witness,
+        )
+
+    def failed_private_readiness(self, plan: TestingRebuildPlan) -> NoReturn:
+        from control_plane.dokploy import DEFAULT_DOKPLOY_DEPLOY_TIMEOUT_SECONDS
+
+        assert self.inputs is not None
+        if self.cutover_started():
+            raise NativeTestingRebuildPending(
+                "Observe the original route before candidate failure."
+            )
+        checkpoint = self.adapter.checkpoints.load(plan)
+        now = datetime.now(UTC)
+        if checkpoint.private_readiness_failed_at is None:
+            self.adapter.checkpoints.save(
+                checkpoint.model_copy(
+                    update={
+                        "private_readiness_failed_at": now,
+                        "updated_at": now,
+                    }
+                )
+            )
+            raise NativeTestingRebuildPending(
+                "The private candidate is within its readiness grace."
+            )
+        grace = (
+            self.intent.before.target.deploy_timeout_seconds
+            or DEFAULT_DOKPLOY_DEPLOY_TIMEOUT_SECONDS
+        )
+        if (now - checkpoint.private_readiness_failed_at).total_seconds() < grace:
+            raise NativeTestingRebuildPending(
+                "The private candidate is within its readiness grace."
+            )
+        self.guard(recovery=True)
+        current = self.store.read_testing_candidate(self.allocation.namespace)
+        if current is None or current != self.allocation:
+            raise NativeTestingRebuildPending("The original private candidate custody changed.")
+        evidence = candidate_terminal_custody_evidence(
+            root=self.root, store=self.store, record=current
+        )
+        self.guard(recovery=True)
+        raise TestingRebuildPreparationFailure(
+            copy_id=plan.new.copy_id,
+            evidence_id=evidence
+            + ":private-readiness:"
+            + checkpoint.private_readiness_failed_at.isoformat(),
+            private_readiness=True,
         )
 
     def current_route(self, plan: TestingRebuildPlan) -> TestingRouteObservation:
