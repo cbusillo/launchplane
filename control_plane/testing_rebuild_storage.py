@@ -2,13 +2,12 @@
 
 from typing import Protocol
 
+from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.idempotency_record import (
     LaunchplaneIdempotencyRecord,
     build_launchplane_mutation_reservation_id,
 )
-from control_plane.contracts.testing_rebuild import TestingRebuildRecord
-from control_plane.contracts.testing_rebuild import TestingRebuildPlan
-from control_plane.contracts.canonical_json import canonical_json_sha256
+from control_plane.contracts.testing_rebuild import TestingRebuildPlan, TestingRebuildRecord
 
 REBUILD_CHECKPOINT_SCOPE = "launchplane:testing-rebuild-checkpoint:v1"
 REBUILD_CHECKPOINT_ROUTE = "service:testing-rebuild-checkpoint"
@@ -86,6 +85,10 @@ class RecordTestingRebuildStore:
                 record.retirement_recovery != current.retirement_recovery
             ):
                 raise ValueError("A rebuild cannot replace its retirement recovery proof.")
+            if current.preparation is not None and record.preparation != current.preparation:
+                raise ValueError("A rebuild cannot replace its independent-copy receipt.")
+            if current.error and record.error != current.error:
+                raise ValueError("A rebuild cannot replace its recorded failure.")
         key = canonical_json_sha256(
             {
                 "product": record.plan.product,

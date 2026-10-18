@@ -402,6 +402,57 @@ class TestingRebuildTests(unittest.TestCase):
         recovery = next(record for record in checkpoints if record.retirement_recovery)
         self.assertEqual(recovery.step, "rolling_back")
 
+    def test_store_preserves_preparation_and_failure_evidence(self) -> None:
+        self.provider.bad_public = True
+        # Reach rollback and interrupt its original switch, leaving a live checkpoint.
+        original_switch = self.provider.switch
+
+        def switch(
+            plan: TestingRebuildPlan,
+            previous: TestingCopy,
+            desired: TestingCopy,
+            *,
+            reconcile_only: bool,
+        ) -> None:
+            if desired == self.plan.old:
+                self.provider.pending_switch = True
+            original_switch(plan, previous, desired, reconcile_only=reconcile_only)
+
+        with patch.object(self.provider, "switch", side_effect=switch):
+            with self.assertRaises(TimeoutError):
+                self.run_rebuild()
+        record = self.store.load(self.plan)
+        self.assertEqual(record.step, "rolling_back")
+        self.assertIsNotNone(record.preparation)
+        assert record.preparation is not None
+        for changes in (
+            {"preparation": record.preparation.model_copy(update={"evidence_id": "other-copy"})},
+            {"error": ""},
+        ):
+            with self.subTest(changes=changes):
+                with self.assertRaises(ValueError):
+                    self.store.save(record.model_copy(update=changes))
+                self.assertEqual(self.store.load(self.plan), record)
+
+    def test_rollback_checkpoint_after_stop_requires_original_recovery_proof(self) -> None:
+        self.provider.refuse_stop = True
+        with self.assertRaises(PermissionError):
+            self.run_rebuild()
+        self.provider.bad_public = True
+        recovered = self.run_rebuild()
+        for step in ("rolling_back", "failed"):
+            with self.subTest(step=step):
+                payload = recovered.model_dump()
+                payload.update(
+                    step=step,
+                    ended_at=recovered.ended_at if step == "failed" else None,
+                    retirement_recovery=None,
+                )
+                with self.assertRaises(ValueError):
+                    TestingRebuildRecord.model_validate(payload)
+                payload["retirement_recovery"] = recovered.retirement_recovery
+                TestingRebuildRecord.model_validate(payload)
+
     def test_stable_address_change_is_refused_against_existing_route_observation(self) -> None:
         self.plan = self.plan.model_copy(update={"base_url": "https://another.invalid"})
         with self.assertRaises(ValueError):

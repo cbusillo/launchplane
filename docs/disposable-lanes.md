@@ -47,8 +47,9 @@ The checkpoint retains whether forward publication started and passes that fact
 to inverse publication, including after a lost commit reply.
 
 `testing_rebuild_storage.py` stores checkpoints in the existing DB-backed record
-payloads, scoped by product, context and operation key. The envelope is completed checkpoint evidence, while the payload keeps
-the actual rebuild stage. It is not an execution lease or a replacement for a
+payloads, scoped by product, context and operation key. The envelope is completed
+checkpoint evidence, while the payload keeps the actual rebuild stage. It is not
+an execution lease or a replacement for a
 durable provider fence. The adapter must hold the existing lane/worker lease and
 recheck authorization, holds/use, custody and production isolation before effects.
 Provider calls reconcile their original dispatch keys before any replay. A
@@ -60,12 +61,16 @@ After an interrupted route switch, read actual applied authority and public
 identity; never issue a second switch merely because its acknowledgement was
 lost. Resumption calls the adapter in reconciliation mode, which can redispatch
 only with the original provider fence's explicit proof that the effect was
-never dispatched and is safe to run. After an interrupted stop, preserve the retirement intent: the old copy
-may already be stopped, so it cannot be advertised as a healthy rollback target.
+never dispatched and is safe to run. After an interrupted stop, preserve the
+retirement intent: the old copy may already be stopped, so it cannot be
+advertised as a healthy rollback target.
 The supported exception requires an original stop proven terminal and never
 dispatched, plus fresh private readiness for the old copy. The checkpoint keeps
-that recovery proof before moving back; pending, dispatched and unknown stops
+that recovery proof before moving back; its contract refuses rollback without
+that proof once a stop intent exists. Pending, dispatched and unknown stops
 cannot use this path. A refusal propagates before any inverse action.
+Preparation and failure evidence cannot be replaced once recorded; readiness
+and route observations continue to refresh as the operation progresses.
 An interrupted preparation retains its candidate, copy receipt and original key.
 Use a compatible controller/adapter for continuation and preserve unresolved
 provider effects, rather than deleting checkpoints or replaying a legacy
