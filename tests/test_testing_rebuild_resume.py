@@ -313,6 +313,63 @@ class TestingRebuildResumeTests(unittest.IsolatedAsyncioTestCase):
         self.assert_original_fences()
 
     async def test_original_worker_continues_without_another_route_dispatch(self) -> None:
+        await self.resume_and_complete_original_worker()
+
+    async def test_worker_denial_holds_original_fences_before_explicit_resume(self) -> None:
+        from datetime import timedelta
+        from control_plane.workflows import odoo_stable_operation_worker as worker
+        from control_plane.durable_operation_authorization import (
+            DurableOperationAuthorizationDeniedError,
+            DurableOperationAuthorizationGuard,
+        )
+
+        pending = self.held.model_copy(
+            update={
+                "status": "pending",
+                "phase": self.worker.operation.phase,
+                "error_code": "",
+                "error_message": "",
+            }
+        )
+        self.store.write_odoo_stable_target_replacement_operation_record(pending)
+        now = datetime.now(UTC)
+        claimed = self.store.claim_next_odoo_stable_target_replacement_operation_record(
+            lease_owner="denied-worker",
+            claimed_at=now.isoformat(),
+            lease_expires_at=(now + timedelta(minutes=5)).isoformat(),
+        )
+        assert claimed is not None
+        denial = DurableOperationAuthorizationDeniedError(
+            code="fixture_checkpoint_denied", message="Fixture provider checkpoint refused"
+        )
+        with patch.object(
+            DurableOperationAuthorizationGuard, "recheck_provider_effect", side_effect=denial
+        ):
+            self.assertTrue(
+                worker._execute_target_replacement_with_checkpoint(
+                    record_store=self.store,
+                    control_plane_root_path=self.worker.root,
+                    operation=claimed,
+                    lease_owner=claimed.lease_owner,
+                    lease_seconds=300,
+                    heartbeat_seconds=60,
+                )
+            )
+        self.held = self.store.read_odoo_stable_target_replacement_operation_record(
+            claimed.operation_id
+        )
+        self.assertEqual(self.held.status, "reconciliation_required")
+        self.assertEqual(self.held.error_code, denial.code)
+        self.assertEqual(self.held.authorization, claimed.authorization)
+        self.assertFalse(self.held.lease_owner)
+        self.payload = {
+            "expected_updated_at": self.held.updated_at,
+            "expected_attempt": self.held.attempt,
+        }
+        self.assert_original_fences()
+        await self.resume_and_complete_original_worker()
+
+    async def resume_and_complete_original_worker(self) -> None:
         from datetime import timedelta
         from control_plane.workflows import odoo_stable_operation_worker as worker
 
