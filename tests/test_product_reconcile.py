@@ -1,4 +1,5 @@
 from control_plane.contracts.odoo_target_replacement_failures import TESTING_RESTORE_REQUIRED_CODE
+from control_plane.odoo_testing_restore import FreshOdooTestingGeneration
 from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
 from control_plane.dokploy.api import DokployRequestFailed
 from control_plane.contracts.record_failures import record_failure_summary
@@ -96,6 +97,7 @@ from control_plane.product_reconcile import (
     PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS,
     PREVIEW_FEEDBACK_RECOVERY_MAX_FAILED_ATTEMPTS,
     TESTING_FAILURE_DESCRIPTIONS,
+    TESTING_DEPLOY_MAX_FAILED_ATTEMPTS,
     RECONCILE_SOURCE,
     PreviewProviderHooks,
     ProductReconcileError,
@@ -1316,6 +1318,72 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
                 for operation in self.store.list_odoo_stable_target_replacement_operation_records()
             )
         )
+
+    def test_fresh_generation_keeps_history_and_gets_its_own_bounded_attempts(self) -> None:
+        self.github.add_run(20, DEPLOYABLE)
+        with patch("control_plane.product_reconcile._utc_now", return_value="2026-09-29T12:00:00Z"):
+            for _ in range(TESTING_DEPLOY_MAX_FAILED_ATTEMPTS):
+                self.request()
+                old_operation_id = cast(str, self.reconcile()["queued_operation_id"])
+                self.finish(old_operation_id, "fail")
+        retained = self.store.list_odoo_stable_target_replacement_operation_records()
+        generation = FreshOdooTestingGeneration(
+            product="site",
+            context="cm",
+            operation_id="initial-testing-fixture",
+            target_id="independent-testing-target",
+            namespace="lp-testing-" + "a" * 32,
+            domain_host="fresh.example.invalid",
+            resources_binding_sha256="b" * 64,
+            bootstrap_plan_sha256="c" * 64,
+            request_sha256="d" * 64,
+            prepared_at="2026-09-30T12:00:00Z",
+            reconcile_requested_at="2026-09-30T12:01:00Z",
+        )
+        with (
+            patch(
+                "control_plane.odoo_testing_restore.read_current_testing_generation",
+                return_value=generation,
+            ),
+            patch("control_plane.product_reconcile._utc_now", return_value=generation.prepared_at),
+        ):
+            old_operation = self.store.read_odoo_stable_target_replacement_operation_record(
+                old_operation_id
+            )
+            self.store.write_odoo_stable_target_replacement_operation_record(
+                old_operation.model_copy(
+                    update={
+                        "status": "reconciliation_required",
+                        "finished_at": "",
+                        "error_code": "provider_outcome_unknown",
+                    }
+                )
+            )
+            self.request()
+            unresolved = self.reconcile()
+            self.assertEqual(unresolved["queued_operation_id"], old_operation_id)
+            self.assertEqual(unresolved["queued_operation_status"], "reconciliation_required")
+            self.store.write_odoo_stable_target_replacement_operation_record(old_operation)
+            for _ in range(TESTING_DEPLOY_MAX_FAILED_ATTEMPTS):
+                self.request()
+                queued = cast(str, self.reconcile()["queued_operation_id"])
+                operation = self.store.read_odoo_stable_target_replacement_operation_record(queued)
+                self.assertEqual(operation.request.data_source_mode, "upstream_restore")
+                self.request()
+                self.assertEqual(self.reconcile()["queued_operation_id"], queued)
+                self.finish(queued, "fail")
+            self.request()
+            with self.assertLogs("control_plane.product_reconcile", "WARNING"):
+                exhausted = self.run_once()
+        self.assertEqual(exhausted.state, "failed")
+        self.assertNotIn("queued_operation_id", exhausted.last_plan)
+        for operation in retained:
+            self.assertEqual(
+                self.store.read_odoo_stable_target_replacement_operation_record(
+                    operation.operation_id
+                ),
+                operation,
+            )
 
     def fail_with_provider_text(self, operation_id: str) -> None:
         operation = self.store.read_odoo_stable_target_replacement_operation_record(operation_id)

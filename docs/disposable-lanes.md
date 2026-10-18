@@ -1945,6 +1945,12 @@ walkthrough provisioning. Read back that completion through the supported lane
 and walkthrough paths after the worker finishes. A ready source PR does not
 establish those runtime facts.
 
+Testing reconciliation follows the original artifact attempt chain after bootstrap.
+Terminal failures from operations created before this qualified generation was
+prepared remain in history but do not consume its retry budget. Operations
+created at or after preparation keep the ordinary retry limit. An unresolved
+earlier operation still prevents a new attempt; no key, fence or effect is cleared.
+
 Keep the service image that understands initial preparation fences active while
 one is open; forward-fix an interrupted preparation. An older image cannot
 interpret its exclusion contract. Never roll back storage or erase custody to
