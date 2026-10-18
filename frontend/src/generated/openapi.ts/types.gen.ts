@@ -5115,6 +5115,46 @@ export type TestingHoldRehearsal = {
     target_updated_at: string;
 };
 
+export type TestingRebuildOperationView = {
+    attempt: number;
+    instance: 'testing';
+    operation_id: string;
+    phase: string;
+    product: string;
+    status: string;
+    updated_at: string;
+};
+
+export type TestingRebuildPreflight = {
+    artifact_id: string;
+    base_url: string;
+    candidate_verification: 'pending';
+    context: string;
+    data_source_mode: 'empty' | 'production_restore' | 'upstream_restore';
+    instance: 'testing';
+    observed_at: string;
+    product: string;
+    source_git_ref: string;
+    status: 'pass';
+};
+
+export type TestingRebuildResponse = {
+    operation: TestingRebuildOperationView;
+    trace_id: string;
+};
+
+export type TestingRebuildResume = {
+    expected_attempt: number;
+    expected_updated_at: string;
+};
+
+export type TestingRebuildSubmit = {
+    artifact_id: string;
+    data_source_mode: 'empty' | 'production_restore' | 'upstream_restore';
+    reason: string;
+    source_git_ref: string;
+};
+
 export type UrgentReleaseReviewEnvelope = {
     adopt_comment_id?: number | null;
     adopt_issue_number?: number | null;
@@ -6456,6 +6496,61 @@ export type ReadProductEnvironmentPublicIngressIncidentResponses = {
 
 export type ReadProductEnvironmentPublicIngressIncidentResponse = ReadProductEnvironmentPublicIngressIncidentResponses[keyof ReadProductEnvironmentPublicIngressIncidentResponses];
 
+export type InspectTestingRebuildData = {
+    body?: never;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path: {
+        product: string;
+    };
+    query?: {
+        data_source_mode?: 'empty' | 'production_restore' | 'upstream_restore';
+    };
+    url: '/v1/products/{product}/testing-rebuild/inputs';
+};
+
+export type InspectTestingRebuildErrors = {
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type InspectTestingRebuildError = InspectTestingRebuildErrors[keyof InspectTestingRebuildErrors];
+
+export type InspectTestingRebuildResponses = {
+    200: TestingRebuildPreflight;
+};
+
+export type InspectTestingRebuildResponse = InspectTestingRebuildResponses[keyof InspectTestingRebuildResponses];
+
+export type ReadTestingRebuildData = {
+    body?: never;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path: {
+        product: string;
+        operation_id: string;
+    };
+    query?: never;
+    url: '/v1/products/{product}/testing-rebuild/operations/{operation_id}';
+};
+
+export type ReadTestingRebuildErrors = {
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ReadTestingRebuildError = ReadTestingRebuildErrors[keyof ReadTestingRebuildErrors];
+
+export type ReadTestingRebuildResponses = {
+    200: TestingRebuildResponse;
+};
+
+export type ReadTestingRebuildResponse = ReadTestingRebuildResponses[keyof ReadTestingRebuildResponses];
+
 export type ReadReleaseReviewData = {
     body?: never;
     headers?: {
@@ -7549,6 +7644,88 @@ export type DispatchProductPromotionWorkflowResponses = {
 };
 
 export type DispatchProductPromotionWorkflowResponse = DispatchProductPromotionWorkflowResponses[keyof DispatchProductPromotionWorkflowResponses];
+
+export type SubmitTestingRebuildData = {
+    body: TestingRebuildSubmit;
+    headers?: {
+        'Idempotency-Key'?: string;
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path: {
+        product: string;
+    };
+    query?: never;
+    url: '/v1/products/{product}/testing-rebuild';
+};
+
+export type SubmitTestingRebuildErrors = {
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type SubmitTestingRebuildError = SubmitTestingRebuildErrors[keyof SubmitTestingRebuildErrors];
+
+export type SubmitTestingRebuildResponses = {
+    200: TestingRebuildResponse;
+};
+
+export type SubmitTestingRebuildResponse = SubmitTestingRebuildResponses[keyof SubmitTestingRebuildResponses];
+
+export type LookupTestingRebuildData = {
+    body: TestingRebuildSubmit;
+    headers: {
+        'Idempotency-Key': string;
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path: {
+        product: string;
+    };
+    query?: never;
+    url: '/v1/products/{product}/testing-rebuild/lookup';
+};
+
+export type LookupTestingRebuildErrors = {
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type LookupTestingRebuildError = LookupTestingRebuildErrors[keyof LookupTestingRebuildErrors];
+
+export type LookupTestingRebuildResponses = {
+    200: TestingRebuildResponse;
+};
+
+export type LookupTestingRebuildResponse = LookupTestingRebuildResponses[keyof LookupTestingRebuildResponses];
+
+export type ResumeTestingRebuildData = {
+    body: TestingRebuildResume;
+    headers: {
+        'Idempotency-Key': string;
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path: {
+        product: string;
+        operation_id: string;
+    };
+    query?: never;
+    url: '/v1/products/{product}/testing-rebuild/operations/{operation_id}/resume';
+};
+
+export type ResumeTestingRebuildErrors = {
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ResumeTestingRebuildError = ResumeTestingRebuildErrors[keyof ResumeTestingRebuildErrors];
+
+export type ResumeTestingRebuildResponses = {
+    200: TestingRebuildResponse;
+};
+
+export type ResumeTestingRebuildResponse = ResumeTestingRebuildResponses[keyof ResumeTestingRebuildResponses];
 
 export type WriteReleaseReviewDecisionData = {
     body: ReleaseReviewDecisionEnvelope;

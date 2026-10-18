@@ -16,6 +16,12 @@ import yaml
 from control_plane.contracts.runtime_identity import RuntimeIdentity, parse_runtime_identity_payload
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.dokploy.compose import TESTING_CONNECTION_CSP
+from control_plane.dokploy.testing_route_execution import (
+    ATOMIC_TESTING_ROUTE_WRITER as ATOMIC_TESTING_ROUTE_WRITER,
+    TestingRouteExecutionCustody,
+    TestingRouteExecutionIntent,
+    TestingRouteExecutionOutcome,
+)
 from control_plane.dokploy.native_copy_stream import _read_remote, NativeSourceUnavailable
 from control_plane.dokploy.route_rules import host_rule_may_match
 from control_plane.dokploy.testing_route import (
@@ -31,50 +37,6 @@ TRAEFIK_STATIC_CONFIGURATION = "/etc/traefik/traefik.yml"
 
 class TestingRouteWriteNotStarted(NativeSourceUnavailable):
     """The fixed program returned before invoking its only route writer."""
-
-
-# Run by the already managed proxy container, with the same provider identity.
-# The file name is service-derived; callers cannot provide a path or command.
-ATOMIC_TESTING_ROUTE_WRITER = r"""
-set -eu
-root=$1
-name=$2
-expected=$3
-desired=$4
-case "$name" in lp-testing-route-*.yml) ;; *) exit 21 ;; esac
-test -d "$root"
-test ! -L "$root"
-path="$root/$name"
-if test -L "$path"; then exit 22; fi
-if test -e "$path"; then
-    test -f "$path"
-    current=$(sha256sum "$path" | cut -d ' ' -f 1)
-else
-    current=absent
-fi
-if test "$current" = "$desired"; then exit 0; fi
-test "$current" = "$expected"
-temporary=
-trap 'test -z "$temporary" || rm -f "$temporary"' EXIT HUP INT TERM
-temporary=$(mktemp "$root/.launchplane-testing.pending.XXXXXX")
-umask 077
-cat > "$temporary"
-test "$(sha256sum "$temporary" | cut -d ' ' -f 1)" = "$desired"
-sync -f "$temporary"
-# The lane lease and original-effect fence exclude concurrent managed writers.
-# Recheck the preimage immediately before rename, including an absent new file.
-if test -L "$path"; then exit 22; fi
-if test -e "$path"; then
-    test -f "$path"
-    current=$(sha256sum "$path" | cut -d ' ' -f 1)
-else
-    current=absent
-fi
-test "$current" = "$expected"
-mv -f "$temporary" "$path"
-temporary=
-sync -f "$root"
-"""
 
 
 def testing_route_host_program() -> str:
@@ -160,8 +122,21 @@ def main(spec):
     proxy=proxies[0]
     proxy_networks=proxy.get('NetworkSettings',{}).get('Networks',{})
     mounts=[item for item in proxy.get('Mounts',[]) if item.get('Destination')==DIRECTORY]
-    if len(mounts)!=1 or mounts[0].get('Type')!='bind' or mounts[0].get('RW') is not True:
+    if len(mounts)!=1 or mounts[0].get('Type')!='bind' or mounts[0].get('RW') is not True or not mounts[0].get('Source'):
         raise RuntimeError('Managed proxy must watch a writable directory mount')
+    filesystem=docker('exec',proxy['Id'],'sh','-c','set -eu; command -v flock >/dev/null; test -d "$1"; test ! -L "$1"; stat -c "%d:%i" "$1"','_',DIRECTORY).decode().strip()
+    if not re.fullmatch(r'[0-9]+:[0-9]+',filesystem):
+        raise RuntimeError('Managed proxy route filesystem is unavailable')
+    custody={'mount_source':mounts[0]['Source'],'filesystem':filesystem}
+    if spec['mode']=='settle':
+        if spec['execution_custody']!=custody or not re.fullmatch(r'[a-f0-9]{64}',spec['execution_key']) or not re.fullmatch(r'[a-f0-9]{64}',spec['document_sha256']):
+            raise RuntimeError('The original route execution custody changed')
+        custody_sha=hashlib.sha256(json.dumps(custody,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+        WRITE_STARTED=True
+        outcome=docker('exec','-i',proxy['Id'],'sh','-c',WRITER,'_',DIRECTORY,spec['route_id']+'.yml','sealed',spec['document_sha256'],spec['execution_key'],filesystem,custody_sha,'settle',stdin=b'').decode().strip()
+        if outcome not in {'applied','excluded','busy','unknown'}:
+            raise RuntimeError('The original route execution outcome is unavailable')
+        return {'type':'complete','execution_key':spec['execution_key'],'document_sha256':spec['document_sha256'],'execution_custody':custody,'writer_outcome':outcome}
     address=proxy.get('NetworkSettings',{}).get('Networks',{}).get('dokploy-network',{}).get('IPAddress')
     if not isinstance(address,str) or not ipaddress.ip_address(address).is_private:
         raise RuntimeError('Managed proxy API endpoint is unavailable')
@@ -205,6 +180,8 @@ def main(spec):
                     raise RuntimeError('Retained testing alias is shared')
                 endpoints.append('http://'+alias+':'+port)
     if spec['mode']=='publish':
+        if spec['execution_custody']!=custody or not re.fullmatch(r'[a-f0-9]{64}',spec['execution_key']):
+            raise RuntimeError('The original route execution custody changed')
         if spec['retained_backend'] not in endpoints or not isinstance(old_identity,dict) or spec['expected_old_identity_sha256']!=hashlib.sha256(json.dumps(old_identity,sort_keys=True,separators=(',',':')).encode()).hexdigest():
             raise RuntimeError('The retained physical testing copy changed')
         desired=urlsplit(spec['desired_backend'])
@@ -244,10 +221,14 @@ def main(spec):
         document=json.dumps(spec['document'],sort_keys=True,separators=(',',':')).encode()
         # One provider path, with no alternate identity or host-file fallback.
         WRITE_STARTED=True
-        docker('exec','-i',proxy['Id'],'sh','-c',WRITER,'_',DIRECTORY,name,digest,hashlib.sha256(document).hexdigest(),stdin=document)
+        custody_sha=hashlib.sha256(json.dumps(custody,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+        outcome=docker('exec','-i',proxy['Id'],'sh','-c',WRITER,'_',DIRECTORY,name,digest,hashlib.sha256(document).hexdigest(),spec['execution_key'],filesystem,custody_sha,'publish',stdin=document).decode().strip()
+        if outcome not in {'applied','excluded','busy','unknown'}:
+            raise RuntimeError('The original route execution outcome is unavailable')
+        return {'type':'complete','execution_key':spec['execution_key'],'document_sha256':hashlib.sha256(document).hexdigest(),'execution_custody':custody,'writer_outcome':outcome}
     elif spec['mode']!='read':
         raise RuntimeError('Unsupported testing route operation')
-    return {'type':'complete','static_configuration':static,'raw':raw,'owned_file':observed,'file_sha256':digest,'old_endpoints':endpoints,'proxy_id':proxy['Id'],'old_identity':old_identity}
+    return {'type':'complete','static_configuration':static,'raw':raw,'owned_file':observed,'file_sha256':digest,'old_endpoints':endpoints,'proxy_id':proxy['Id'],'old_identity':old_identity,'execution_custody':custody}
 
 if __name__=='__main__':
     payload={}
@@ -336,6 +317,57 @@ class DokployTestingRouteTransport:
             raise ValueError("Retained testing runtime identity changed.")
         return frame
 
+    def execution_intent(
+        self, plan: TestingLaneRoute, backend: str, *, operation_id: str
+    ) -> TestingRouteExecutionIntent:
+        if (plan.route_id, plan.host) != (
+            self.payload["route_id"],
+            self.payload["host"],
+        ) or backend not in {plan.old_backend, plan.new_backend}:
+            raise ValueError("The route execution crosses its original lane.")
+        frame = self.read()
+        return TestingRouteExecutionIntent(
+            operation_id=operation_id,
+            server_id=self.server_id,
+            route_id=plan.route_id,
+            route_digest=plan.digest,
+            backend=backend,
+            document_sha256=canonical_json_sha256(route_document(plan, backend)),
+            custody=TestingRouteExecutionCustody.model_validate(frame["execution_custody"]),
+        )
+
+    def _execution_outcome(
+        self, frame: dict[str, Any], execution: TestingRouteExecutionIntent, key: str
+    ) -> TestingRouteExecutionOutcome:
+        if (
+            frame.get("execution_key") != key
+            or frame.get("document_sha256") != execution.document_sha256
+            or frame.get("execution_custody") != execution.custody.model_dump(mode="json")
+            or frame.get("writer_outcome") not in {"applied", "excluded", "busy", "unknown"}
+        ):
+            raise NativeSourceUnavailable("The original route execution receipt is unavailable.")
+        return cast(TestingRouteExecutionOutcome, frame["writer_outcome"])
+
+    def settle_execution(
+        self,
+        execution: TestingRouteExecutionIntent,
+        key: str,
+        *,
+        dispatch_guard: Callable[[Callable[[], None]], None],
+    ) -> TestingRouteExecutionOutcome:
+        if (execution.server_id, execution.route_id) != (self.server_id, self.payload["route_id"]):
+            raise ValueError("The original route execution belongs to another target.")
+        frame = self._run(
+            {
+                "mode": "settle",
+                "execution_key": key,
+                "execution_custody": execution.custody.model_dump(mode="json"),
+                "document_sha256": execution.document_sha256,
+            },
+            dispatch_guard=dispatch_guard,
+        )
+        return self._execution_outcome(frame, execution, key)
+
     def publish(
         self,
         plan: TestingLaneRoute,
@@ -344,6 +376,8 @@ class DokployTestingRouteTransport:
         expected_backend: str,
         dispatch_guard: Callable[[Callable[[], None]], None],
         desired_runtime_identity: RuntimeIdentity,
+        execution: TestingRouteExecutionIntent,
+        execution_key: str,
     ) -> None:
         if not self.payload["entrypoints"]:
             raise ValueError("Testing publication requires its discovered entrypoints to be bound.")
@@ -362,7 +396,23 @@ class DokployTestingRouteTransport:
             "testing",
         ):
             raise ValueError("The desired testing runtime belongs to another lane.")
+        if (
+            execution.server_id,
+            execution.route_id,
+            execution.route_digest,
+            execution.backend,
+            execution.document_sha256,
+        ) != (
+            self.server_id,
+            plan.route_id,
+            plan.digest,
+            backend,
+            canonical_json_sha256(route_document(plan, backend)),
+        ):
+            raise ValueError("The original route execution intent changed.")
         frame = self.read()
+        if frame["execution_custody"] != execution.custody.model_dump(mode="json"):
+            raise ValueError("The original route execution filesystem changed.")
         owned = None if frame["owned_file"] is None else json.loads(frame["owned_file"])
         if frame["owned_file"] is not None and not isinstance(owned, dict):
             raise ValueError("Testing route file is not an owned document.")
@@ -377,9 +427,11 @@ class DokployTestingRouteTransport:
             or parse_runtime_identity_payload(frame.get("old_identity")) is None
         ):
             raise ValueError("Testing route no longer identifies its retained physical copy.")
-        self._run(
+        receipt = self._run(
             {
                 "mode": "publish",
+                "execution_key": execution_key,
+                "execution_custody": execution.custody.model_dump(mode="json"),
                 "document": intended,
                 "retained_backend": plan.old_backend,
                 "desired_backend": backend,
@@ -396,6 +448,11 @@ class DokployTestingRouteTransport:
             },
             dispatch_guard=dispatch_guard,
         )
+        outcome = self._execution_outcome(receipt, execution, execution_key)
+        if outcome == "excluded":
+            raise TestingRouteWriteNotStarted("The original route execution was durably excluded.")
+        if outcome != "applied":
+            raise NativeSourceUnavailable("The original route execution has not finished.")
         # The controller keeps switching until this later applied read succeeds.
         latest = self.read()
         actual = None if latest["owned_file"] is None else json.loads(latest["owned_file"])

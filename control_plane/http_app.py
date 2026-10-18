@@ -304,6 +304,10 @@ from control_plane.http_routes.odoo_prod_release_operation import (
     OdooProdReleaseOperationRouteDependencies,
     register_odoo_prod_release_operation_routes,
 )
+from control_plane.http_routes.testing_rebuild import (
+    TestingRebuildRouteDependencies,
+    register_testing_rebuild_routes,
+)
 from control_plane.http_routes.production_backup_credentials import (
     register_production_backup_credential_routes,
 )
@@ -10682,11 +10686,31 @@ def create_launchplane_fastapi_app(
             )
 
         try:
-            driver_result = build_odoo_stable_target_replacement_plan(
-                control_plane_root=resolved_control_plane_root,
-                record_store=cast(OdooStableTargetReplacementStore, record_store),
-                request=plan_request.replacement,
-            )
+            if plan_request.replacement.strategy == "replace-and-cutover":
+                from control_plane.testing_rebuild_preflight import inspect_testing_rebuild
+
+                if not isinstance(record_store, PostgresRecordStore):
+                    raise ValueError("Native testing preflight requires database storage.")
+                native_preflight = inspect_testing_rebuild(
+                    root=resolved_control_plane_root,
+                    store=record_store,
+                    request=plan_request.replacement,
+                )
+                plan_payload = native_preflight.model_dump(mode="json")
+            else:
+                driver_result = build_odoo_stable_target_replacement_plan(
+                    control_plane_root=resolved_control_plane_root,
+                    record_store=cast(OdooStableTargetReplacementStore, record_store),
+                    request=plan_request.replacement,
+                )
+                plan_payload = driver_result.model_dump(mode="json")
+        except NativeSourceAuthorizationDenied as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="The provider refused the native testing preflight read.",
+            ) from error
         except (ValueError, click.ClickException) as error:
             raise _launchplane_http_error(
                 status_code=400,
@@ -10698,7 +10722,7 @@ def create_launchplane_fastapi_app(
         return accepted_evidence_response(
             trace_id=trace_id,
             records={},
-            result=driver_result.model_dump(mode="json"),
+            result=plan_payload,
         )
 
     async def write_odoo_target_replacement_apply(
@@ -28436,6 +28460,14 @@ def create_launchplane_fastapi_app(
             read_mutation_identity=read_operator_mutation_identity,
             cancel_pending_operation=cancel_pending_durable_operation,
             control_plane_root=resolved_control_plane_root,
+        ),
+    )
+    register_testing_rebuild_routes(
+        app,
+        dependencies=TestingRebuildRouteDependencies(
+            common=read_route_dependencies,
+            mutation_identity=read_operator_mutation_identity,
+            root=resolved_control_plane_root,
         ),
     )
 

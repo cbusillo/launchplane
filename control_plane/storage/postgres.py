@@ -9627,6 +9627,7 @@ class PostgresRecordStore(HumanSessionStore):
         instance: str,
         include_synchronous: bool = True,
         exclude_initial_preparation: str = "",
+        exclude_operation: OdooStableLaneOperationOwner | None = None,
     ) -> OdooStableLaneOperationOwner | None:
         if include_synchronous and not _try_odoo_synchronous_lane_lock(
             session, product=product, context=context, instance=instance
@@ -9692,6 +9693,8 @@ class PostgresRecordStore(HumanSessionStore):
                     operation_kind=operation_kind,
                     operation_id=str(operation_id),
                 )
+                if owner == exclude_operation:
+                    continue
                 candidates.append(
                     (
                         odoo_stable_lane_operation_priority(
@@ -10337,6 +10340,149 @@ class PostgresRecordStore(HumanSessionStore):
                 record.publication_started or record.retirement_started or record.rollback_started
             )
         return False
+
+    def resume_native_testing_rebuild(
+        self,
+        *,
+        operation: OdooStableTargetReplacementOperationRecord,
+        authorization: DurableOperationAuthorization,
+        expected_updated_at: str,
+        expected_attempt: int,
+        trace_id: str,
+        now: str,
+    ) -> OdooStableTargetReplacementOperationRecord:
+        from control_plane.contracts.testing_rebuild import REBUILD_SCOPE, REBUILD_ROUTE
+        from control_plane.testing_rebuild_resume import (
+            RESUME_SCOPE,
+            RESUME_ROUTE,
+            TestingRebuildResumeRefused,
+            require_resume_authorization,
+            resume_key,
+        )
+
+        with self._session_factory() as session:
+            self._lock_odoo_stable_lane(
+                session, product=operation.product, context=operation.context, instance="testing"
+            )
+            row = session.get(
+                LaunchplaneOdooStableTargetReplacementOperationRow,
+                operation.operation_id,
+                with_for_update=True,
+            )
+            if row is None:
+                raise FileNotFoundError(operation.operation_id)
+            current = OdooStableTargetReplacementOperationRecord.model_validate(row.payload)
+            if not current.is_native_testing_rebuild or (
+                current.product,
+                current.context,
+                current.request_fingerprint,
+                current.idempotency_scope,
+                current.idempotency_key,
+            ) != (
+                operation.product,
+                operation.context,
+                operation.request_fingerprint,
+                operation.idempotency_scope,
+                operation.idempotency_key,
+            ):
+                raise TestingRebuildResumeRefused("The original testing request changed.")
+            require_resume_authorization(current, authorization)
+            key = resume_key(
+                current, expected_updated_at=expected_updated_at, expected_attempt=expected_attempt
+            )
+            receipt = session.scalar(
+                self._idempotency_statement(
+                    scope=RESUME_SCOPE,
+                    route_path=RESUME_ROUTE,
+                    idempotency_key=key,
+                    for_update=True,
+                )
+            )
+            if receipt is not None:
+                prior = LaunchplaneIdempotencyRecord.model_validate(receipt.payload)
+                if (
+                    prior.state != "completed"
+                    or prior.request_fingerprint != key
+                    or prior.response_payload.get("operation_id") != current.operation_id
+                ):
+                    raise TestingRebuildResumeRefused("The original resume receipt conflicts.")
+                return current
+            if current.status != "reconciliation_required" or (
+                current.updated_at,
+                current.attempt,
+            ) != (expected_updated_at, expected_attempt):
+                raise TestingRebuildResumeRefused(
+                    "Inspect the current held operation before resuming."
+                )
+            other_owner = self._active_odoo_stable_lane_operation_owner(
+                session,
+                product=current.product,
+                context=current.context,
+                instance=current.instance,
+                exclude_operation=OdooStableLaneOperationOwner(
+                    operation_kind="target_replacement", operation_id=current.operation_id
+                ),
+            )
+            if other_owner is not None:
+                raise TestingRebuildResumeRefused(
+                    "Another operation currently owns this testing lane."
+                )
+            outer = session.scalar(
+                self._idempotency_statement(
+                    scope=REBUILD_SCOPE,
+                    route_path=REBUILD_ROUTE,
+                    idempotency_key=current.operation_id,
+                    for_update=True,
+                )
+            )
+            original = LaunchplaneIdempotencyRecord.model_validate(outer.payload) if outer else None
+            if original is None or original.request_fingerprint != current.request_fingerprint:
+                raise TestingRebuildResumeRefused(
+                    "The original native execution receipt is unavailable."
+                )
+            replacement = OdooStableTargetReplacementOperationRecord.model_validate(
+                {
+                    **current.model_dump(),
+                    "authorization": authorization,
+                    "status": "pending",
+                    "phase": "created",
+                    "updated_at": now,
+                    "error_code": "",
+                    "error_message": "",
+                    "error_detail_keys": (),
+                    "error_description": "",
+                    "runner_trace_id": "",
+                }
+            )
+            receipt_record = LaunchplaneIdempotencyRecord(
+                record_id=build_launchplane_mutation_reservation_id(
+                    scope=RESUME_SCOPE, route_path=RESUME_ROUTE, idempotency_key=key
+                ),
+                scope=RESUME_SCOPE,
+                route_path=RESUME_ROUTE,
+                idempotency_key=key,
+                request_fingerprint=key,
+                created_at=now,
+                updated_at=now,
+                recorded_at=now,
+                response_status_code=200,
+                response_trace_id=trace_id,
+                response_payload={
+                    "operation_id": current.operation_id,
+                    "held_updated_at": current.updated_at,
+                    "held_attempt": current.attempt,
+                    "prior_error_code": current.error_code,
+                    "prior_error_message": current.error_message,
+                    "prior_authorization": current.authorization.model_dump(mode="json")
+                    if current.authorization
+                    else None,
+                    "authorization": authorization.model_dump(mode="json"),
+                },
+            )
+            self._sync_odoo_stable_target_replacement_operation_row(row, replacement)
+            session.add(self._idempotency_row(receipt_record))
+            session.commit()
+            return replacement
 
     def cancel_pending_odoo_stable_target_replacement_operation_record(
         self,
