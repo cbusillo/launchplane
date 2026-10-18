@@ -239,6 +239,34 @@ class TestingPathCheckHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(steps[WalkthroughPrerequisite.GENERATION.value]["state"], "blocked")
         self.assertNotIn("private token", response.text)
 
+    async def test_generation_use_reports_the_same_stopped_runtime_repair_eligibility(self) -> None:
+        from datetime import datetime, timezone
+        from tests.support.down_lanes import record_lane_health
+
+        self.query = urlencode({"path": "testing", "intent": "generation"})
+        record_lane_health(
+            self.store,
+            self.fixture.profile.product,
+            self.fixture.context,
+            datetime.now(timezone.utc),
+            status=404,
+        )
+        for reason, expected in (
+            ("serving_container_stopped", "clear"),
+            ("service_ambiguous_or_stopped", "unknown"),
+        ):
+            with (
+                self.subTest(reason=reason),
+                patch(
+                    "control_plane.testing_initial_generation.read_odoo_testing_usage",
+                    return_value=OdooTestingUsage(reason_code=reason),
+                ),
+            ):
+                response = await self.read()
+            self.assertEqual(response.status_code, 200, response.text)
+            steps = {step["step_id"]: step for step in response.json()["check"]["steps"]}
+            self.assertEqual(steps["testing_generation_use"]["state"], expected)
+
 
 class TestingResourceResumePathTests(unittest.TestCase):
     def test_stranded_replacement_does_not_require_initial_generation_use(self) -> None:

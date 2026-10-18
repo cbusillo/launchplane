@@ -688,13 +688,12 @@ class OdooRehearsalAdapter:
             ProviderMutationRejectedError,
             provider_operation_response_payload,
         )
-        from control_plane.dokploy.sandbox_placement import created_placement
-        from control_plane.testing_local_credentials import prepare_rehearsal_local_credentials
-        from control_plane.workflows.dokploy_target_adoption import (
-            PROJECT_CREATE_PATH,
-            ENVIRONMENT_CREATE_PATH,
-            COMPOSE_CREATE_PATH,
+        from control_plane.dokploy.sandbox_placement import (
+            IsolatedPlacementObservationRequired,
+            create_isolated_placement,
+            created_placement,
         )
+        from control_plane.testing_local_credentials import prepare_rehearsal_local_credentials
 
         with self.store.testing_replacement_execution_lock(self.request.rehearsal_id) as check:
             if check is None:
@@ -736,60 +735,25 @@ class OdooRehearsalAdapter:
                 )
                 self.store.compare_and_write_odoo_upgrade_rehearsal(record, updated)
                 record = updated
-                host, token = source.read_dokploy_config(control_plane_root=self.root)
-                creates: tuple[tuple[str, str, Callable[[], api.JsonObject]], ...] = (
-                    (
-                        "project_id",
-                        PROJECT_CREATE_PATH,
-                        lambda: {
-                            "name": record.rehearsal_id,
-                            "description": "Isolated Odoo rehearsal",
-                        },
-                    ),
-                    (
-                        "environment_id",
-                        ENVIRONMENT_CREATE_PATH,
-                        lambda: {
-                            "name": record.rehearsal_id,
-                            "projectId": record.project_id,
-                            "description": "Isolated Odoo rehearsal",
-                        },
-                    ),
-                    (
-                        "compose_id",
-                        COMPOSE_CREATE_PATH,
-                        lambda: {
-                            "name": record.rehearsal_id,
-                            "appName": record.rehearsal_id,
-                            "environmentId": record.environment_id,
-                            "serverId": record.server_id,
-                            "composeType": "docker-compose",
-                        },
-                    ),
-                )
-                for field, path, payload in creates:
-                    checkpoint()
-                    lease.checkpoint_effect(field)
-                    response = api.as_json_object(
-                        api.dokploy_request(
-                            host=host, token=token, path=path, method="POST", payload=payload()
-                        )
-                    )
-                    identifier = str(
-                        (response or {}).get(
-                            {
-                                "project_id": "projectId",
-                                "environment_id": "environmentId",
-                                "compose_id": "composeId",
-                            }[field]
-                        )
-                        or ""
-                    )
-                    if not identifier:
-                        raise RehearsalRefused(RehearsalPrerequisite.RECOVERY_REQUIRED)
+
+                def record_identity(field: str, identifier: str) -> None:
+                    nonlocal record
                     updated = record.model_copy(update={field: identifier})
                     self.store.compare_and_write_odoo_upgrade_rehearsal(record, updated)
                     record = updated
+
+                try:
+                    create_isolated_placement(
+                        self.root,
+                        namespace=record.rehearsal_id,
+                        server_id=record.server_id,
+                        description="Isolated Odoo rehearsal",
+                        checkpoint=checkpoint,
+                        before_create=lease.checkpoint_effect,
+                        record_identity=record_identity,
+                    )
+                except IsolatedPlacementObservationRequired:
+                    raise RehearsalRefused(RehearsalPrerequisite.RECOVERY_REQUIRED) from None
                 resources = rehearsal_resource(record)
                 checkpoint()
                 lease.checkpoint_effect("independent_storage")

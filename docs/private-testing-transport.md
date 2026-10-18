@@ -4,10 +4,142 @@ title: Private testing HTTPS and WSS through an existing edge
 
 A no-website generic-web service can use an existing TLS edge, including NPMplus,
 for its private testing HTTPS `/health` and WSS `/agent-session/connect` authority.
-The edge keeps its existing certificate, private key and renewal. Launchplane
-publishes the testing runtime's HTTP port on one RFC1918 interface; it generates
-no TLS sidecar, certificate mounts, private issuer or client trust-store changes.
+The edge keeps its existing certificate, private key and renewal. Application
+lanes use their ordinary application edge. The Compose path publishes the testing
+runtime's HTTP port on one RFC1918 interface; neither path generates a TLS
+sidecar, certificate mounts, private issuer or client trust-store changes.
 The product still owns its immutable runtime template and build.
+
+## Application testing lanes
+
+A conventional generic-web application lane uses its recorded non-production
+server's existing HTTP edge. It does not publish a host port or use the Compose
+activation below. `POST /v1/products/{product}/testing-private-ingress` supplies
+`dry-run`, reviewed `apply`, and independent `readback` for the Director agent.
+The request names only `context`, `instance=testing`, the active private health
+`endpoint_key`, the existing `edge_endpoint_key`, positive `access_list_id` and
+`certificate_id`, `operation=create|disable`, and `reason`. Apply/readback also
+require `reviewed_plan_sha256`; apply retains its original Idempotency-Key.
+
+The service derives the one hostname from that lane's active HTTPS `/health`
+endpoint and the application/port from its product and target records. It checks
+exclusive lane and application ownership, actual server placement against the
+edge record, the existing wildcard certificate's coverage and expiry, and a
+read of the named existing access list before effects. The access-list read
+does not expand authentication entries; the plan digest covers its non-secret
+metadata. It
+creates the application's HTTP hostname and its own edge route; it does not
+rewrite existing application domains or an unrelated edge route. A successful
+receipt owns later disablement. The active private endpoint is the hostname's
+recorded claim; the public-host write guard also checks that claim before any
+provider effect for another lane. Successful creation or original-key adoption
+also records it in the application's `domains`, under the existing name fences,
+without making it a public website. The edge retains its certificate, key, renewal
+and access list. The application owns its HTTP paths and bearer checks; the edge
+preserves authorization and WebSocket headers. Provider readback retains the
+access list, certificate and complete route configuration. No DNS operation is performed.
+The existing scoped ingress planner also accepts an active testing private
+endpoint hostname when an access list is supplied; public-route rules remain.
+
+The edge-to-application hop uses the same plaintext LAN HTTP transport as other
+application testing lanes. Q453 accepted this topology instead of the
+Compose-only upstream binding and its host firewall requirement. It does not
+change the restrictions on the Compose path below or any production record.
+
+Planning changes no provider state. Apply uses a dedicated lane-private-ingress
+provider-operation fence, saves its pending receipt before effects, then records
+independent provider readback. Active application-hostname creation also holds
+the testing event executor lock, excluding a concurrent event deployment. A lost
+final response can be adopted from the same key only when both effects and the
+pending receipt match. That receipt binds stable lane/application/endpoint/edge,
+runtime port, certificate and access-list identity/policy plus the exact desired
+route. Certificate renewal and descriptive metadata updates do not change that
+identity; current ownership, placement, certificate validity and access-list
+existence are still checked again. Dokploy's absent nullable domain fields may
+be null or empty, as in other domain readers.
+
+For a partial create, retry the original apply request, reviewed plan and
+Idempotency-Key. The service first observes both providers. If the matching
+application domain is either absent or exactly matches the request, and
+independent readback proves the edge route is absent, the existing durable
+runner reacquires the original reservation and creates only the missing effects.
+This also recovers a rejected or lost domain-create request when neither effect
+landed. If both exact effects exist, it adopts their
+receipt without provider writes. Different keys cannot take over. Unavailable,
+foreign or materially changed evidence remains `reconcile_required` on the
+private route, without holding the application's deployment reservation. Do not
+clear a genuine unknown or repeat it with a new key. A busy executor, missing
+provider record or unverified effect retains the prior pending operation's hold
+even before that retry reaches its first new checkpoint. A fresh operation with
+no pending receipt still rejects pre-effect failures.
+
+A rejected or unlanded enable/disable toggle can also resume with the original
+request and key. Readback must prove the exact receipt-owned route differs only
+in `enabled`, and the pending receipt must match the stable authority and desired
+route. Re-enable additionally requires the application's domain still present;
+toggle recovery never recreates a domain removed after planning. The acquired
+retry checks the same conditions and the immediate pre-effect snapshot before
+repeating only the idempotent toggle. A toggle that already landed is adopted
+without another provider write. Changed route configuration, wrong keys and
+failed reads retain the hold.
+
+If authority was corrected permanently, or a clean pre-effect rejection left a
+pending receipt, retry the original key first. Before any new effects, the
+service can complete that key with `applied=false`, `replan_required=true` and
+`previous_effects_absent=true`. This requires fresh independent inventories
+proving the requested hostname absent from both the edge and the receipt-bound
+original application, while fencing that original application's executor. The
+receipt retains its original application ID even after the lane binding changes;
+legacy receipts without that identity cannot establish absence. A busy executor,
+overlapping wildcard/regex or other edge host, existing domain, malformed evidence
+or failed read keeps the hold. The acquired original-key retry repeats the proof
+under its lease before recording the durable result. Same-key replay returns that
+result without provider writes. Only after that result should the caller obtain
+a fresh reviewed plan and new key. This uses the same provider read-after-write
+assumption as missing-effect recovery; an empty inventory does not independently
+prove a timed-out provider request can never land later. A late effect must still
+pass strict ownership and payload checks in any subsequent plan.
+
+If the original domain remains present after permanent authority drift, keep the
+hold. Supported receipt-bound cleanup and private-endpoint retirement/evidence
+invalidation are tracked separately in #4004. No direct provider deletion or
+reservation clearing is a supported recovery path.
+Legacy hostname spelling normalization across ownership comparisons and
+PostgreSQL name fences is tracked separately in #4005.
+
+Disable uses a fresh reviewed plan and the same lane's exact receipt-owned route,
+retaining its original endpoint and edge keys. It only toggles that route even
+after the old application or edge record disappears, and leaves the application
+hostname and bot state in place. Disabled routes need no loaded-nginx flag, but
+retain the same hidden-config checks; enabled routes must be loaded.
+Neither operation deploys a workload
+or proves TLS, WSS, remote tailnet access or healthy runtime identity.
+
+Disable and verify the edge route **before** retiring its private endpoint or
+product, removing the lane declaration, or assigning the context elsewhere.
+Disable requires that current lane authority even when the old application and
+edge records have disappeared. It intentionally retains the application's
+hostname and domain claim. First-testing setup remains limited to empty targets;
+disabling the edge alone does not make an activated target empty or authorize
+its replacement.
+Private ingress receipts cannot supply managed route-binding evidence, whether
+selected automatically or passed explicitly. An active testing private-endpoint
+hostname cannot authorize a managed route binding through any receipt, including
+an ordinary audit from a generic scoped no-op. Recording the domain does not
+declare a public website. Older ship/promotion URL inference can derive HTTPS
+health URLs from target domains; that inference is not private reachability
+proof. Private probe support and access-list qualification remain prerequisites
+for this lane (#3989 and #3777), rather than a reason to run a public probe or
+change its access list.
+
+The HTTP surface is projected into the agent/admin contract. Installed caller
+support must include this operation before operational use; do not call a raw
+provider API or use an arbitrary local CLI as a substitute. After source delivery,
+qualify the actual route through its access list from the service and intended
+clients, including a remote tailnet peer and public denial. Existing private HTTP
+probes still require RFC1918-only DNS answers; a wildcard resolving to the public
+edge needs a supported probe continuation before monitoring can pass. Do not
+change DNS or weaken that check as a workaround.
 
 ## Endpoint and outbound boundary
 
@@ -16,10 +148,19 @@ covered by an existing wildcard certificate. Other lane instances retain the exi
 record rule; their credential-bearing consumers do not gain new DNS authorities.
 Registration validates URL syntax;
 it does not resolve DNS or claim reachability. Existing non-public literal records remain readable, including loopback and
-tailnet addresses; this preserves record readback, not permission to connect. At every check, the private HTTP client resolves the host again and accepts
-only a nonempty answer set entirely within `10/8`, `172.16/12` or `192.168/16`.
-Public, mixed, loopback, link-local, CGNAT and IPv6 answers fail closed. Every
-redirect is checked again before opening its connection.
+tailnet addresses; record readback alone does not permit a connection. At every
+check, every product's private HTTP client resolves the host again and accepts
+only a nonempty answer set entirely within RFC1918 (`10/8`, `172.16/12`,
+`192.168/16`) or RFC6598 shared address space (`100.64.0.0/10`, used by tailnets).
+Answers mixing those allowed ranges are accepted; an answer set containing any
+public, loopback, link-local, other reserved or IPv6 address fails closed. Every
+redirect is checked again before opening its connection. Public HTTP probes
+continue to reject tailnet addresses.
+
+This restores probing for existing non-public literal endpoint records in
+`100.64.0.0/10`, including Discord Blue's `discord-blue-prod-runtime`, without
+rewriting their URL, scope or monitoring policy. Health and runtime identity
+still have to pass through ordinary monitoring after normal deployment.
 
 Connections use only the validated numeric socket addresses, without a second
 DNS lookup. HTTP Host, TLS SNI and certificate name verification retain the

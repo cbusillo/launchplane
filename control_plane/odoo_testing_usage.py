@@ -32,6 +32,7 @@ ODOO_USAGE_PROBE_REASON_CODES = frozenset(
         "serving_configuration_mismatch",
         "serving_process_absent",
         "serving_container_absent",
+        "serving_container_stopped",
         "session_alias_unsupported",
         "session_file_unavailable",
         "session_file_unreadable",
@@ -271,7 +272,9 @@ def containers():
         service=labels.get('com.docker.compose.service')
         if service not in {'web','database'}:
             continue
-        if service in services or value['State'].get('Running') is not True:
+        if service in services or type(value['State'].get('Running')) is not bool:
+            raise UsageUnavailable('service_ambiguous_or_stopped')
+        if service=='database' and value['State']['Running'] is not True:
             raise UsageUnavailable('service_ambiguous_or_stopped')
         services[service]=value
     if set(services)!={'web','database'}:
@@ -290,12 +293,17 @@ def containers():
         raise UsageUnavailable('database_network_unavailable')
     return {key:{'Id':value['Id'],'Config':value['Config'],'Mounts':value['Mounts'],
                  'NetworkSettings':value['NetworkSettings'],
+                 'Running':value['State']['Running'],
                  'StartedAt':value['State']['StartedAt']} for key,value in services.items()}
 
 try:
     before=containers()
     checkpoint='container_probe_unavailable'
-    if before:
+    if before and before['web']['Running'] is False:
+        # This is current serving availability, never a negative login/session
+        # assertion. Both complete snapshots must still agree before publication.
+        output=json.dumps({'type':'complete','unavailable':True,'reason_code':'serving_container_stopped'})
+    elif before:
         output=docker('exec','-i',before['web']['Id'],'python3','-',stdin=spec['container_program'].encode())
     else:
         output=json.dumps({'type':'complete','unavailable':True,'reason_code':'serving_container_absent'})

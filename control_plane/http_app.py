@@ -474,6 +474,7 @@ from control_plane.merge_train_stack_collapse import (
     execute_merge_train_stack_collapse_run_once,
     require_merge_train_stack_collapse_plan_record_store,
 )
+from control_plane.launchplane_reconcile_authorization import TESTING_INSTANCE
 from control_plane.launchplane_self_deploy_http import (
     LAUNCHPLANE_SELF_DEPLOY_ROUTE as _LAUNCHPLANE_SELF_DEPLOY_ROUTE,
     LaunchplaneSelfDeployEnvelope,
@@ -974,6 +975,9 @@ from control_plane.http_routes.testing_replacement_bootstrap import (
     register_testing_replacement_bootstrap_routes,
 )
 from control_plane.http_routes.testing_public_ingress import register_testing_public_ingress_routes
+from control_plane.http_routes.testing_private_ingress import (
+    register_testing_private_ingress_routes,
+)
 from control_plane.http_routes.testing_verification import register_testing_verification_routes
 from control_plane.http_routes.testing_generation_retirement import (
     register_testing_generation_retirement_routes,
@@ -17017,6 +17021,9 @@ def create_launchplane_fastapi_app(
             isinstance(identity, LocalOperatorIdentity)
             and (product_config_request.mode == "apply" or not director_agent_identity(identity))
             and config_profile.production_use == "live"
+            # The profile's live status describes production, not its owned
+            # testing lane. Target ownership and instance scope are checked above.
+            and product_config_request.instance != TESTING_INSTANCE
             and product_config_has_undeclared_runtime_settings(
                 profile=config_profile, payload=request_payload
             )
@@ -17025,7 +17032,7 @@ def create_launchplane_fastapi_app(
                 status_code=403,
                 trace_id=trace_id,
                 code="live_product_requires_operator",
-                message="A live product's undeclared settings are recorded by an admin, "
+                message="A live production lane's or context's undeclared settings are recorded by an admin, "
                 "not with the local_operator credential the Director's agent uses.",
             )
         if (
@@ -23209,6 +23216,31 @@ def create_launchplane_fastapi_app(
             else native_routes.native_driver_route_alternate_authz_action(apply_ingress_route)
         )
         instance_name = route_request.instance.strip()
+        # The audit permission reaches only the guarded exact-instance no-op
+        # below. General provider mutation still requires ingress_route.apply.
+        if (
+            instance_name
+            and route_request.ingress.mode == "apply"
+            and resolved_authz_policy_runtime.evaluate(
+                identity=identity,
+                action=authz_action,
+                product=route_request.product,
+                context=route_request.context,
+                target=AuthorizationTarget(scope="instance", instances=(instance_name,)),
+                record_context=False,
+            ).decision
+            != "allowed"
+            and resolved_authz_policy_runtime.evaluate(
+                identity=identity,
+                action="ingress_route.audit",
+                product=route_request.product,
+                context=route_request.context,
+                target=AuthorizationTarget(scope="instance", instances=(instance_name,)),
+                record_context=False,
+            ).decision
+            == "allowed"
+        ):
+            authz_action = "ingress_route.audit"
         if not resolved_authz_policy_runtime.allows(
             identity=identity,
             action=authz_action,
@@ -23262,13 +23294,19 @@ def create_launchplane_fastapi_app(
                 ):
                     raise control_plane_ingress_route_scope.IngressRouteInstanceScopeError(
                         code="invalid_ingress_instance_scope",
-                        message="Planning requires the named product's exclusive context.",
+                        message="Standing access requires the named product's exclusive context.",
                     )
                 control_plane_ingress_route_scope.validate_ingress_route_instance_scope(
                     profile=profile,
                     context=route_request.context,
                     instance=instance_name,
                     requested_domains=route_request.ingress.route.domain_names,
+                    private_endpoints=(
+                        record_store.list_private_health_endpoint_records()
+                        if isinstance(record_store, PostgresRecordStore)
+                        else ()
+                    ),
+                    access_list_id=route_request.ingress.route.access_list_id,
                 )
             except TypeError as error:
                 raise _launchplane_http_error(
@@ -29900,6 +29938,13 @@ def create_launchplane_fastapi_app(
         run_provider_mutation=run_provider_mutation,
     )
     register_testing_public_ingress_routes(
+        app,
+        dependencies=read_route_dependencies,
+        mutation_identity=read_browser_mutation_identity,
+        root=resolved_control_plane_root,
+        run_provider_mutation=run_provider_mutation,
+    )
+    register_testing_private_ingress_routes(
         app,
         dependencies=read_route_dependencies,
         mutation_identity=read_browser_mutation_identity,

@@ -8,6 +8,79 @@ the only needed copy of data, production resources and live credentials remain
 protected. A label, missing staff hold, distinct volume name or distinct secret
 version is not proof of those facts.
 
+## Stable-address rebuild lifecycle
+
+`workflows/testing_rebuild.py` provides the service-side lifecycle for a testing
+lane with one stable HTTPS address and a separate candidate copy. It is a source
+component: the existing resource/bootstrap endpoints below do not yet call it.
+It exposes no new HTTP operation, UI control or permission. Its tests qualify the
+controller and checkpoint storage, not a real provider, restored data or a live
+lane.
+
+The immutable plan binds the existing route/address, old and new target/resource
+identities, the candidate build and a managed source reference. Empty rebuilds,
+production-copy restores and configured upstream restores use the same lifecycle.
+The service adapter resolves those references from admitted records; these are
+not caller-supplied provider coordinates. Production destinations and shared
+copy identities are rejected. Different resource names are only a contract
+check; the adapter must independently inspect actual backing resources.
+
+Preparation leaves the serving copy and lane metadata authoritative. A bound
+receipt must verify independent resources, local credentials and removal of live
+connections before candidate startup. Fresh private health and exact runtime
+identity precede switching the existing route. Applied/public health and identity
+at the original address precede metadata adoption and old-copy retirement.
+Retirement drains/stops the old runtime and preserves its storage and custody;
+physical deletion is outside this operation. Public probe URLs must use the
+stable lane origin. Missing, stale, unverified or skipped evidence preserves the
+intent for observation; only a fresh verified failure or identity mismatch
+starts automatic rollback.
+
+Failed preparation or private readiness leaves the old copy serving. Failed
+public verification, including immediately before metadata adoption or before
+the old stop begins, persists an inverse route intent. The controller verifies
+the original copy at the same address and restores its original metadata before
+reporting failure. Publication is a DB-only atomic compare/write/readback under
+the original operation and authority-writer lock. An unavailable publication
+outcome cannot be replaced with an assertion that the old metadata still wins.
+The checkpoint retains whether forward publication started and passes that fact
+to inverse publication, including after a lost commit reply.
+
+`testing_rebuild_storage.py` stores checkpoints in the existing DB-backed record
+payloads, scoped by product, context and operation key. The envelope is completed
+checkpoint evidence, while the payload keeps the actual rebuild stage. It is not
+an execution lease or a replacement for a
+durable provider fence. The adapter must hold the existing lane/worker lease and
+recheck authorization, holds/use, custody and production isolation before effects.
+Provider calls reconcile their original dispatch keys before any replay. A
+foreign route, changed plan or inaccessible authority refuses continuation.
+Permission and transport exceptions propagate without a fallback or automatic
+retry.
+
+After an interrupted route switch, read actual applied authority and public
+identity; never issue a second switch merely because its acknowledgement was
+lost. Resumption calls the adapter in reconciliation mode, which can redispatch
+only with the original provider fence's explicit proof that the effect was
+never dispatched and is safe to run. After an interrupted stop, preserve the
+retirement intent: the old copy may already be stopped, so it cannot be
+advertised as a healthy rollback target.
+The supported exception requires an original stop proven terminal and never
+dispatched, plus fresh private readiness for the old copy. The checkpoint keeps
+that recovery proof before moving back; its contract refuses rollback without
+that proof once a stop intent exists. Pending, dispatched and unknown stops
+cannot use this path. A refusal propagates before any inverse action.
+Preparation and failure evidence cannot be replaced once recorded; readiness
+and route observations continue to refresh as the operation progresses.
+An interrupted preparation retains its candidate, copy receipt and original key.
+Use a compatible controller/adapter for continuation and preserve unresolved
+provider effects, rather than deleting checkpoints or replaying a legacy
+bootstrap against that copy. Terminal checkpoint reads return their historical
+receipt even after a later rebuild moves the lane. They do not reacquire a
+mutation lease or claim current live health; the service caller still authorizes
+the read. Worker/HTTP integration in [#3968](https://github.com/cbusillo/launchplane/issues/3968)
+must supply cancellation/abandonment for failed preparation with retained
+candidate custody before this component is activated as a rebuild control.
+
 ## Repair usage rule
 
 `control_plane/lane_usage.py` owns the usage decision for disposable repair.
@@ -32,6 +105,17 @@ do not. Public and declared private checks both count. Provider-only or
 unmonitored states remain unverified. No probe or live action is initiated by
 this decision. The guard logs the durable monitor record IDs and interval;
 the drill also preserves those references in its private admission receipt.
+
+For initial Odoo generation preparation and its resource/bootstrap rechecks,
+HTTP 404 also qualifies when the same call's fixed host probe independently
+verifies the exact testing web container is stopped. Complete container
+inventories before and after must agree on identity, running state, start time,
+configuration, mounts and networks, and the provider placement must remain
+unchanged. Ambiguous services, an unavailable database, custom web commands or
+changed snapshots do not qualify. The normal two-slot, every-URL monitor rule
+still applies. A 404 alone, HTTP 401/403, a running web container, production or
+a staff hold never gains this exception. This proves present unavailability
+for repair; login/session usage remains UNKNOWN and no custody fact is supplied.
 
 These observations describe Launchplane's monitor vantage. A network, DNS or
 TLS fault in that vantage can look like a lane outage even if a person can reach
@@ -151,6 +235,10 @@ unreadable store as historical non-use. `web_configuration_unavailable`,
 missing read. Provider transport, ambiguous/stopped services and changed runtime
 snapshots have separate codes. All these failures leave usage UNKNOWN with null
 booleans; `complete` accompanies the qualified positive or negative read.
+`serving_container_stopped` identifies a stable, exact stopped testing web
+container. It remains UNKNOWN for usage; only the bounded repair rule above
+can combine it with current monitor evidence. It does not qualify walkthrough
+accounts, never-served history, data custody or production isolation.
 
 For a stranded runtime, deliver the diagnostics image through the normal service
 deploy and collect again through the same client, without starting, restarting or
@@ -625,6 +713,48 @@ continuous public old/new/switch-back responses while retaining the old copy. It
 cleans up its own containers/networks. Initial Docker migration, stale provider
 state, partial application, foreign routing and denial paths also have fixture
 behavior tests. These are distinct from managed-host and live CM qualification.
+
+## Testing candidate storage before adoption
+
+The rebuild candidate allocator keeps custody in
+`launchplane_testing_candidates`, keyed by its service-generated namespace and
+bound to the original operation, intent and serving target. This record is
+separate from the lane's current generation. Allocation creates a private
+project/environment/compose and independent local volumes without changing
+the lane profile, canonical target records, runtime values, serving inventory or
+public address. It does create a physical provider-target reservation under the
+candidate namespace. Audit and backfill recognize that reservation only while its
+identity matches durable candidate custody, using the same rule for rehearsal
+reservations. They neither invent a serving target pair nor block unrelated
+backfill for a valid reservation; an orphan or mismatched reservation stays blocked.
+The target is reserved in the existing physical provider registry in the same
+transaction as its candidate custody; another lane cannot adopt it.
+Compatibility target-ID records are also fenced, both at capture and before
+subsequent provider effects; an older lane reference cannot become permission
+to qualify or change its target as a candidate.
+
+The caller must hold the authorized lane operation and recheck its authority,
+holds, use, custody and isolation at every checkpoint. Provider effect intent
+and each returned identity are recorded before proceeding. Lost creation
+responses require original-key observation of the complete uniquely named
+placement. Confirmed parents can continue; absent uncertain creates remain
+unknown. Storage retries inspect the original empty, labelled resources and
+refuse changed or in-use storage. Nothing is deleted to make a retry work.
+
+This source component reuses the isolated placement creator used by upgrade
+rehearsals and the existing testing backing-store readback program. It removes
+the need to adopt a candidate as the serving target merely to qualify its
+storage. It does not activate a rebuild endpoint, restore data, move traffic,
+publish a generation or retire the serving copy. Those stages remain part of
+the stable-address rebuild work in [#3963](https://github.com/cbusillo/launchplane/issues/3963)
+and [#3968](https://github.com/cbusillo/launchplane/issues/3968).
+
+The schema migration adds custody without modifying existing lane records.
+Use the normal service schema-migration procedure on delivery. Rolling back
+code retains the candidate table and physical reservations, including uncertain
+effects; recover with the original operation rather than clearing custody or
+reusing its target. Local SQLite tests exercise record semantics; the matching
+PostgreSQL integration cases qualify the actual database path in CI.
 
 ## Service collection
 

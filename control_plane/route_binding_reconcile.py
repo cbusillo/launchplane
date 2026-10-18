@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from typing import Literal, Protocol
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
@@ -9,7 +10,11 @@ from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.edge_endpoint_record import EdgeEndpointRecord
-from control_plane.contracts.ingress_route_audit_record import IngressRouteAuditRecord
+from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
+from control_plane.contracts.ingress_route_audit_record import (
+    IngressRouteAuditRecord,
+    TESTING_PRIVATE_INGRESS_AUDIT_PREFIX,
+)
 from control_plane.contracts.route_binding_record import (
     EnvironmentRouteBindingRecord,
     RouteBindingDomain,
@@ -27,6 +32,8 @@ _EVIDENCE_REFRESH_THRESHOLD = timedelta(hours=12)
 
 
 class RouteBindingReconcileStore(Protocol):
+    def list_private_health_endpoint_records(self) -> tuple[PrivateHealthEndpointRecord, ...]: ...
+
     def read_provider_target_record(
         self, *, context_name: str, instance_name: str
     ) -> ProviderTargetRecord: ...
@@ -326,6 +333,22 @@ def build_route_binding_candidate(
             current_record_sha256=current_record_sha256,
         )
 
+    if any(
+        endpoint.status == "active"
+        and endpoint.instance == "testing"
+        and (urlsplit(endpoint.url).hostname or "").rstrip(".").lower() in domains
+        for endpoint in record_store.list_private_health_endpoint_records()
+    ):
+        return _blocked_plan(
+            findings=(
+                RouteBindingReconcileFinding(
+                    code="private_testing_endpoint_not_route_binding_evidence",
+                    detail="An active private testing hostname cannot authorize a managed route binding.",
+                ),
+            ),
+            current_record=current_record,
+            current_record_sha256=current_record_sha256,
+        )
     if audit_record is None:
         audit_record = _resolve_ingress_audit(
             record_store=record_store,
@@ -344,6 +367,18 @@ def build_route_binding_candidate(
     if audit_record is None:
         return _blocked_plan(
             findings=findings,
+            current_record=current_record,
+            current_record_sha256=current_record_sha256,
+        )
+    if audit_record.record_id.startswith(TESTING_PRIVATE_INGRESS_AUDIT_PREFIX):
+        return _blocked_plan(
+            findings=(
+                *findings,
+                RouteBindingReconcileFinding(
+                    code="private_testing_ingress_not_route_binding_evidence",
+                    detail="A private testing ingress receipt does not authorize a managed route binding.",
+                ),
+            ),
             current_record=current_record,
             current_record_sha256=current_record_sha256,
         )

@@ -321,10 +321,37 @@ def run_resource_schedule(
     mode: Literal["prepare", "readback"],
     checkpoint: Callable[[], None],
     allowed_domain_hosts: tuple[str, ...] = (),
+    candidate_target: source.DokployTargetDefinition | None = None,
+    candidate_server_id: str = "",
 ) -> dict[str, str]:
-    target = store.read_dokploy_target_record(
-        context_name=resources.context, instance_name="testing"
-    )
+    if candidate_target is not None:
+        # A rebuild qualifies its candidate without first adopting it as the
+        # serving target. The explicit definition contains no routes or values
+        # inherited from the retained application.
+        if (
+            candidate_target.context != resources.context
+            or candidate_target.instance != "testing"
+            or candidate_target.target_type != "compose"
+            or candidate_target.target_id != resources.target_id
+            or candidate_target.target_name != resources.namespace
+            or candidate_target.project_name != resources.namespace
+            or candidate_target.env
+            or candidate_target.domains
+            or candidate_target.public_hosts
+            or candidate_target.pending_public_host_effects
+            or allowed_domain_hosts
+            or not candidate_server_id.strip()
+        ):
+            raise ValueError("Candidate storage requires its exact empty, unrouted definition.")
+        definition = candidate_target
+    else:
+        target = store.read_dokploy_target_record(
+            context_name=resources.context, instance_name="testing"
+        )
+        definition = source.DokployTargetDefinition(
+            **target.model_dump(exclude={"schema_version", "updated_at", "source_label"}),
+            target_id=resources.target_id,
+        )
     host, token = source.read_dokploy_config(control_plane_root=root)
     payload = api.fetch_dokploy_target_payload(
         host=host,
@@ -332,6 +359,8 @@ def run_resource_schedule(
         target_type="compose",
         target_id=resources.target_id,
     )
+    if candidate_target is not None and payload.get("serverId") != candidate_server_id:
+        raise ValueError("Candidate placement changed before storage qualification.")
     # This stage has no application or credential. A caller cannot use resource
     # preparation as permission to inspect or overwrite an already running lane.
     require_empty_compose_source(payload, resources.target_id)
@@ -358,7 +387,7 @@ def run_resource_schedule(
         host=host,
         token=token,
         compose_id=resources.target_id,
-        compose_name=target.target_name,
+        compose_name=definition.target_name,
         target_payload=payload,
     )
     name = "Launchplane testing replacement resources"
@@ -378,10 +407,7 @@ def run_resource_schedule(
         evidence = post_deploy.run_manual_data_schedule(
             host=host,
             token=token,
-            target_definition=source.DokployTargetDefinition(
-                **target.model_dump(exclude={"schema_version", "updated_at", "source_label"}),
-                target_id=resources.target_id,
-            ),
+            target_definition=definition,
             schedule_lookup_id=lookup_id,
             schedule_type=schedule_type,
             schedule_name=name,

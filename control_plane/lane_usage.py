@@ -62,6 +62,7 @@ def _down_observations(
     target: DokployTargetRecord,
     target_id: DokployTargetIdRecord,
     now: datetime,
+    runtime_stopped: bool = False,
 ) -> tuple[PublicIngressObservationRecord, ...]:
     # Use the monitor's actual target resolution for every driver, including
     # inherited drivers and private endpoints. A diagnostic failure is not an
@@ -147,7 +148,13 @@ def _down_observations(
                     "redirect_loop",
                     "self_redirect",
                 }
-                or (probe.http_status is not None and probe.http_status < 500)
+                or (
+                    probe.http_status is not None
+                    and probe.http_status < 500
+                    and not (
+                        runtime_stopped and profile.driver_id == "odoo" and probe.http_status == 404
+                    )
+                )
                 or (
                     probe.failure_code in {"http_error", "health_status_error"}
                     and probe.http_status is None
@@ -179,9 +186,12 @@ def evaluate_lane_usage(
     usage: str,
     require_unused: bool = True,
     now: datetime | None = None,
+    runtime_stopped: bool = False,
 ) -> LaneUsageDecision:
     """A hold always wins. Only verified non-production downtime overrides usage.
 
+    runtime_stopped is supplied only by a current fixed Odoo host probe, never
+    by a stored usage observation or a caller's declaration of non-use.
     Callers that historically protect only positive use (retirement, isolation
     and preview refresh) retain that contract through require_unused=False.
     Data custody, resource separation, execution and release gates are separate.
@@ -201,7 +211,12 @@ def evaluate_lane_usage(
     if instance != "prod" and target is not None and target_id is not None:
         try:
             records = _down_observations(
-                store, profile, target, target_id, now or datetime.now(timezone.utc)
+                store,
+                profile,
+                target,
+                target_id,
+                now or datetime.now(timezone.utc),
+                runtime_stopped=runtime_stopped,
             )
         except Exception:
             logging.getLogger(__name__).warning(

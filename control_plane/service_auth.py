@@ -12,7 +12,11 @@ from typing import Annotated, Any, Literal, Protocol, TypeAlias, cast
 from weakref import WeakKeyDictionary
 
 import jwt
-from control_plane.action_effects import AGENT_READ_ROLE_ACTION, agent_read_role_covers
+from control_plane.action_effects import (
+    AGENT_READ_ROLE_ACTION,
+    agent_read_role_covers,
+    director_agent_standing_covers,
+)
 from pydantic import (
     AfterValidator,
     BaseModel,
@@ -1194,7 +1198,7 @@ class LaunchplaneAuthzPolicy(BaseModel):
             allowed = (
                 inherit_agent_read_role
                 and director_agent_identity(identity)
-                and agent_read_role_covers(action)
+                and director_agent_standing_covers(action)
             ) or any(
                 rule.allows(
                     identity=identity,
@@ -1222,7 +1226,7 @@ class LaunchplaneAuthzPolicy(BaseModel):
             allowed = (
                 inherit_agent_read_role
                 and director_agent_identity(identity)
-                and agent_read_role_covers(action)
+                and director_agent_standing_covers(action)
             ) or any(
                 rule.allows(
                     identity=identity,
