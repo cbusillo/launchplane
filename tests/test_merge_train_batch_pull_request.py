@@ -102,6 +102,8 @@ class _BatchProvider:
                 return _conversation_rule(self.requires_conversation_resolution)
             assert variables["number"] == self.number
             return _review_threads(*self.batch_threads)
+        if method == "GET" and "/events?" in path:
+            return []
         if method == "GET" and "/rules/branches/" in path:
             return []
         if method == "GET" and "/pulls?" in path:

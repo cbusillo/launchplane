@@ -324,6 +324,27 @@ self-hosted candidate lanes. Shared-host CPU count is not a per-job browser
 budget. Local runs retain Playwright's default concurrency; use its `--workers`
 option for a measured diagnostic comparison.
 
+CI divides the unchanged suite into two jobs with Playwright's built-in
+`--shard` option. Each job retains four workers, zero retries, the isolation
+probe and browser diagnostics. `BROWSER_SMOKE_SHARD=1/2` (or `2/2`) selects a
+partition through `pnpm --dir frontend test:browser`; without that variable,
+the local command still runs the whole browser suite and checks all screenshots.
+Sharded runs write Playwright JSON reports under `tmp/browser-smoke/reports`.
+After both jobs succeed, CI downloads their evidence into a freshly cleared
+directory, independently discovers the complete current suite and requires
+each discovered test to pass exactly once across the reports. Missing,
+duplicated, skipped, retried or failed tests and report errors fail the gate.
+The combined evidence must also pass the existing complete screenshot check.
+Artifact names identify the shard within the current workflow run. Re-running
+failed jobs replaces that shard's evidence and retains successful siblings
+from the same immutable head; re-running only evidence verification can reuse
+both successful artifacts. Downloads remain scoped to the current workflow
+run and use a freshly cleared directory, so another head's proof cannot enter.
+`ci-gate` requires both browser execution and evidence verification, including
+on forks. This reduces the browser critical path without reducing coverage;
+it adds one runner job and an evidence job, so shared runner contention and
+the other CI lanes still bound the whole-run saving.
+
 Browser smoke runs in every CI run that needs fresh proof, including main pushes. The verified-tree
 shortcut above can reuse a previously successful tree; it does not selectively
 skip browser coverage. Keep that reuse rather than duplicating a full browser
