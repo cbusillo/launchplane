@@ -886,10 +886,23 @@ effect still respects a current hold or changed authority. Observation and an
 inverse of the original route can proceed while preserving those changed
 records. DB-only publication records an already observed healthy cutover under a
 new staff hold, carrying that hold forward; retirement still refuses it. Serving
-comparison excludes only that current hold and its target observation timestamp.
-Other authority drift refuses publication. Such a refusal
-after effects began remains pending with its original intent and fences rather
-than becoming a terminal failure. Storage qualification
+comparison excludes that current hold and the hold writer's target timestamp
+and source label. Publication preparation uses the same comparison. Serving
+identity and runtime configuration remain strict. The real hold writer is
+exercised during preparation, healthy publication and interrupted inverse.
+
+A lasting local admission change before cutover, such as changed runtime inputs,
+credential selection or context ownership, records a finite failed result after
+proving the old route is still selected and neither original route writer has
+dispatched. The candidate and its independent effect fences are retained. An
+existing preparation receipt is preserved in the failed checkpoint, which also
+records the safe refusal cause. A lost checkpoint reply returns that original
+failure even while application preparation is incomplete. A fresh inspection
+can then admit a new rebuild using current settings. Staff holds, current use
+and unfinished provider work remain pending with their concrete reason. After
+route or retirement intent, recovery continues under the original fences and
+requires outcome/exclusion proof. Pending causes are retained in queue evidence
+and logged at warning level; provider payloads are omitted. Storage qualification
 runs before application execution. A resumed populated candidate uses its
 original custody and private proof instead of requiring empty storage again.
 The outer dispatch marker is written before an actual candidate or route/stop

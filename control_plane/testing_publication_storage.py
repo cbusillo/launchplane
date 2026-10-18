@@ -43,11 +43,12 @@ def _same(left: object, right: object) -> bool:
 def serving_snapshot_matches(
     actual: TestingServingSnapshot, expected: TestingServingSnapshot
 ) -> bool:
-    """Staff holds are current operator policy, not serving-copy identity."""
+    """Current staff policy and its writer provenance do not identify a serving copy."""
     values = []
     for snapshot in (actual, expected):
         payload = snapshot.model_dump(mode="json")
         payload["target"].pop("updated_at", None)
+        payload["target"].pop("source_label", None)
         payload["target"]["policies"].pop("staff_testing_hold", None)
         values.append(payload)
     return _same(*values)
@@ -238,11 +239,9 @@ def prepare_publication(
         if existing is not None:
             return existing
         _sources(store, session, plan)
-        if not _same(
-            _snapshot(store, session, plan.candidate.product, plan.candidate.context).model_dump(
-                mode="json"
-            ),
-            plan.before.model_dump(mode="json"),
+        if not serving_snapshot_matches(
+            _snapshot(store, session, plan.candidate.product, plan.candidate.context),
+            plan.before,
         ):
             raise ValueError("Serving authority changed before publication preparation.")
         record = TestingPublicationRecord(plan=plan, updated_at=plan.created_at)

@@ -18,7 +18,7 @@ from control_plane.contracts.odoo_stable_target_replacement_operation import (
 )
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.promotion_record import HealthcheckEvidence
-from control_plane.contracts.testing_rebuild import TestingCopy
+from control_plane.contracts.testing_rebuild import TestingCopy, TestingRebuildRecord
 from control_plane.contracts.testing_candidate import testing_candidate_namespace
 from control_plane.contracts.testing_candidate_application import TestingCandidatePrepared
 from control_plane.dokploy.testing_route import route_document, compile_testing_route
@@ -248,7 +248,8 @@ class NativeTestingWorkerTests(unittest.TestCase):
     ) -> None:
         def publish() -> None:
             if backend == plan.new_backend:
-                self.assertEqual(self.current(), self.fixture.before)
+                self.assertEqual(self.current().target_id, self.fixture.before.target_id)
+                self.assertEqual(self.current().provider, self.fixture.before.provider)
             self.assertFalse(self.retained["stopped"])
             self.effects.append("switch-new" if backend == plan.new_backend else "switch-old")
             self.owned = route_document(plan, backend)
@@ -429,31 +430,63 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertFalse(self.retained["stopped"])
         self.assertEqual(self.current(), self.fixture.before)
 
-    def test_hold_after_cutover_does_not_block_inverse_or_erase_the_hold(self) -> None:
-        from control_plane.contracts.dokploy_target_record import DokployTargetStaffTestingHold
+    def apply_staff_hold(self, held: bool, reason: str) -> Any:
+        from control_plane.testing_lane_hold import (
+            TestingHoldApplyRequest,
+            apply_testing_hold_plan,
+            build_testing_hold_plan,
+        )
 
+        request = TestingHoldApplyRequest(
+            product=self.operation.product,
+            context=self.operation.context,
+            instance="testing",
+            hold=held,
+            reason=reason,
+        )
+        plan, _ = build_testing_hold_plan(
+            record_store=self.store, request=request, actor="fixture-admin"
+        )
+        apply_testing_hold_plan(
+            record_store=self.store,
+            request=request.model_copy(
+                update={"mode": "apply", "reviewed_plan_sha256": plan.plan_sha256}
+            ),
+            actor="fixture-admin",
+            required_context_owner=(self.operation.product, self.operation.context),
+        )
+        return self.current().target.policies.staff_testing_hold
+
+    def test_real_hold_set_and_clear_during_preparation_allows_completion(self) -> None:
+        original = service.NativeTestingRebuildExecution.prepare
+
+        def changed(executor: Any, plan: Any) -> Any:
+            receipt = original(executor, plan)
+            self.apply_staff_hold(True, "Fixture staff test during preparation")
+            self.apply_staff_hold(False, "Fixture staff test complete")
+            return receipt
+
+        with patch.object(service.NativeTestingRebuildExecution, "prepare", changed):
+            self.assertEqual(self.execute().deploy_status, "pass")
+        self.assertIsNone(self.current().target.policies.staff_testing_hold)
+        self.assertEqual(self.effects, ["switch-new", "stop-old"])
+
+    def test_hold_after_cutover_does_not_block_inverse_or_erase_the_hold(self) -> None:
         self.fail_public = True
-        hold = DokployTargetStaffTestingHold(reason="Staff need the testing lane")
+        hold: Any = None
 
         def held(plan: Any, backend: str, **kwargs: Any) -> None:
+            nonlocal hold
             self.switch(plan, backend, **kwargs)
             if backend == plan.new_backend:
-                target = self.current().target
-                self.store.write_dokploy_target_record(
-                    target.model_copy(
-                        update={
-                            "policies": target.policies.model_copy(
-                                update={"staff_testing_hold": hold}
-                            )
-                        }
-                    )
-                )
+                hold = self.apply_staff_hold(True, "Staff need the testing lane")
 
         with (
             patch.object(DokployTestingRouteTransport, "publish", side_effect=held),
         ):
             self.assertEqual(self.execute().deploy_status, "fail")
         self.assertEqual(self.effects, ["switch-new", "switch-old"])
+        self.assertIsNotNone(hold)
         self.assertEqual(self.current().target.policies.staff_testing_hold, hold)
         self.assertFalse(self.retained["stopped"])
         self.assertEqual(self.current().target_id, self.fixture.before.target_id)
@@ -497,27 +530,199 @@ class NativeTestingWorkerTests(unittest.TestCase):
                 }
             )
         )
-        with self.assertRaises(ValueError) as caught:
-            self.execute()
-        self.assertNotIsInstance(caught.exception, service.NativeTestingRebuildPending)
+        result = self.execute()
+        self.assertEqual(result.deploy_status, "fail")
+        self.assertEqual(result.error_code, "testing_rebuild_admission_changed")
         self.assertFalse(service.native_rebuild_effects_started(self.store, self.operation))
         self.assertEqual(self.effects, [])
 
-    def test_new_hold_after_healthy_cutover_records_reality_and_preserves_old_copy(self) -> None:
-        from control_plane.contracts.dokploy_target_record import DokployTargetStaffTestingHold
+    def hold_after_private_candidate_effects(self, *, prepared: bool = False) -> None:
+        from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
+        from control_plane.testing_rebuild_storage import RecordTestingRebuildStore
 
-        hold = DokployTargetStaffTestingHold(reason="Staff hold after cutover")
+        stage = "readiness" if prepared else "prepare"
+        original = getattr(service.NativeTestingRebuildExecution, stage)
+        save = RecordTestingRebuildStore.save
+        captured: list[TestingRebuildRecord] = []
+
+        def remembered(store: Any, record: TestingRebuildRecord) -> None:
+            save(store, record)
+            captured.append(record)
+
+        def interrupted(executor: Any, plan: Any) -> Any:
+            if not prepared:
+                original(executor, plan)
+            # This fixture already created/configured the independent candidate.
+            # Reconstruct the original executor's persisted dispatch boundary,
+            # then lose its reply before the preparation receipt is saved.
+            executor.lease.checkpoint_effect("candidate_configuration")
+            raise NativeSourceUnavailable("Fixture lost the private preparation reply")
+
+        with (
+            patch.object(service.NativeTestingRebuildExecution, stage, interrupted),
+            patch.object(RecordTestingRebuildStore, "save", remembered),
+            self.assertRaises(service.NativeTestingRebuildPending),
+        ):
+            self.execute()
+        self.assertTrue(service.native_rebuild_effects_started(self.store, self.operation))
+        self.assertEqual(self.effects, [])
+        self.admission_checkpoint = captured[-1]
+
+    def assert_admission_changed_before_cutover(self) -> TestingRebuildRecord:
+        from control_plane.testing_rebuild_storage import RecordTestingRebuildStore
+
+        save = RecordTestingRebuildStore.save
+        captured: list[TestingRebuildRecord] = []
+
+        def remembered(store: Any, record: TestingRebuildRecord) -> None:
+            save(store, record)
+            captured.append(record)
+
+        before = self.store.read_testing_candidate(self.fixture.candidate.namespace)
+        with patch.object(RecordTestingRebuildStore, "save", remembered):
+            result = self.execute()
+        self.assertEqual(result.deploy_status, "fail")
+        self.assertEqual(result.error_code, "testing_rebuild_admission_changed")
+        self.assertTrue(result.error_message)
+        self.assertEqual(self.current().target_id, self.fixture.before.target_id)
+        self.assertEqual(
+            self.store.read_testing_candidate(self.fixture.candidate.namespace), before
+        )
+        self.assertEqual(self.effects, [])
+        self.assertFalse(self.retained["stopped"])
+        self.assertEqual(self.execute(), result)
+        failed = captured[-1]
+        self.assertEqual(failed.step, "failed")
+        self.assertEqual(failed.preparation, self.admission_checkpoint.preparation)
+        self.assertEqual(failed.admission_refusal, result.error_message)
+        return failed
+
+    def test_profile_drift_after_candidate_effects_ends_before_cutover(self) -> None:
+        self.hold_after_private_candidate_effects(prepared=True)
+        profile = self.store.read_product_profile_record(self.operation.product)
+        assert profile.runtime_port is not None
+        self.store.write_product_profile_record(
+            profile.model_copy(update={"runtime_port": profile.runtime_port + 1})
+        )
+        failed = self.assert_admission_changed_before_cutover()
+        self.assertIsNotNone(failed.preparation)
+        for flag in ("publication_started", "retirement_started", "rollback_started"):
+            with self.subTest(flag=flag), self.assertRaises(ValueError):
+                TestingRebuildRecord.model_validate({**failed.model_dump(), flag: True})
+
+    def test_runtime_edit_after_candidate_effects_has_a_finite_result(self) -> None:
+        self.hold_after_private_candidate_effects()
+        runtime = self.current().runtime
+        assert runtime is not None
+        self.store.write_runtime_environment_record(
+            runtime.model_copy(
+                update={
+                    "env": {**runtime.env, "ODOO_ADMIN_LOGIN": "new-testing-login"},
+                    "updated_at": datetime.now(UTC).isoformat(),
+                }
+            )
+        )
+        self.assert_admission_changed_before_cutover()
+
+    def test_context_loss_after_candidate_effects_ends_without_route_dispatch(self) -> None:
+        self.hold_after_private_candidate_effects()
+        profile = self.store.read_product_profile_record(self.operation.product)
+        self.store.write_product_profile_record(
+            profile.model_copy(
+                update={
+                    "lanes": tuple(
+                        lane for lane in profile.lanes if lane.context != self.operation.context
+                    )
+                }
+            )
+        )
+        self.assert_admission_changed_before_cutover()
+
+    def test_retired_testing_lane_after_effects_has_a_finite_result(self) -> None:
+        self.hold_after_private_candidate_effects()
+        profile = self.store.read_product_profile_record(self.operation.product)
+        self.store.write_product_profile_record(
+            profile.model_copy(
+                update={
+                    "lanes": tuple(
+                        lane
+                        for lane in profile.lanes
+                        if (lane.context, lane.instance) != (self.operation.context, "testing")
+                    ),
+                    "historical_contexts": tuple(
+                        sorted({*profile.historical_contexts, self.operation.context})
+                    ),
+                }
+            )
+        )
+        self.assert_admission_changed_before_cutover()
+
+    def test_changed_testing_credentials_before_cutover_preserve_candidate_custody(self) -> None:
+        from control_plane.testing_local_credentials import generation_bundle
+        from control_plane.odoo_testing_restore import FRESH_TESTING_LOCAL_CREDENTIAL_KEYS
+
+        self.hold_after_private_candidate_effects()
+        profile = self.store.read_product_profile_record(self.operation.product)
+        self.store.write_product_authority_bundle(
+            generation_bundle(
+                self.store,
+                profile,
+                self.operation.context,
+                actor="fixture-admin",
+                generation="changed-fixture-generation",
+                only_keys=FRESH_TESTING_LOCAL_CREDENTIAL_KEYS,
+            )
+        )
+        self.assert_admission_changed_before_cutover()
+
+    def test_admission_failure_with_partial_application_survives_a_lost_checkpoint_reply(
+        self,
+    ) -> None:
+        from control_plane.testing_rebuild_storage import RecordTestingRebuildStore
+
+        self.hold_after_private_candidate_effects()
+        candidate = self.store.read_testing_candidate(self.fixture.candidate.namespace)
+        assert candidate is not None
+        partial = candidate.model_copy(update={"application": None})
+        read = self.store.read_testing_candidate
+        save = RecordTestingRebuildStore.save
+        profile = self.store.read_product_profile_record(self.operation.product)
+        self.store.write_product_profile_record(
+            profile.model_copy(update={"runtime_port": profile.runtime_port + 1})
+        )
+
+        def candidate_read(namespace: str) -> Any:
+            return partial if namespace == partial.namespace else read(namespace)
+
+        def lost_reply(store: Any, record: TestingRebuildRecord) -> None:
+            save(store, record)
+            if record.admission_refusal:
+                raise RuntimeError("Fixture lost a committed admission-failure reply")
+
+        with patch.object(self.store, "read_testing_candidate", side_effect=candidate_read):
+            with patch.object(RecordTestingRebuildStore, "save", lost_reply):
+                with self.assertRaises(service.NativeTestingRebuildPending):
+                    self.execute()
+            with patch.object(
+                DokployTestingRouteTransport,
+                "publish",
+                side_effect=AssertionError("A terminal refusal never dispatches"),
+            ):
+                result = self.execute()
+        self.assertEqual(result.error_code, "testing_rebuild_admission_changed")
+        self.assertEqual(result.artifact_id, self.operation.request.artifact_id)
+        self.assertTrue(result.error_message)
+        self.assertEqual(self.store.read_testing_candidate(candidate.namespace), candidate)
+        self.assertEqual(self.effects, [])
+        self.assertFalse(self.retained["stopped"])
+
+    def test_new_hold_after_healthy_cutover_records_reality_and_preserves_old_copy(self) -> None:
+        hold: Any = None
 
         def held(plan: Any, backend: str, **kwargs: Any) -> None:
+            nonlocal hold
             self.switch(plan, backend, **kwargs)
-            target = self.current().target
-            self.store.write_dokploy_target_record(
-                target.model_copy(
-                    update={
-                        "policies": target.policies.model_copy(update={"staff_testing_hold": hold})
-                    }
-                )
-            )
+            hold = self.apply_staff_hold(True, "Staff hold after cutover")
 
         with (
             patch.object(DokployTestingRouteTransport, "publish", side_effect=held),
@@ -525,23 +730,15 @@ class NativeTestingWorkerTests(unittest.TestCase):
         ):
             self.execute()
         self.assertEqual(self.current().target_id.target_id, self.fixture.candidate.compose_id)
+        self.assertIsNotNone(hold)
         self.assertEqual(self.current().target.policies.staff_testing_hold, hold)
         self.assertEqual(self.effects, ["switch-new"])
         self.assertFalse(self.retained["stopped"])
-        target = self.current().target
-        self.store.write_dokploy_target_record(
-            target.model_copy(
-                update={
-                    "policies": target.policies.model_copy(update={"staff_testing_hold": None}),
-                    "updated_at": datetime.now(UTC).isoformat(),
-                }
-            )
-        )
+        self.apply_staff_hold(False, "Staff testing complete")
         self.assertEqual(self.execute().deploy_status, "pass")
         self.assertEqual(self.effects, ["switch-new", "stop-old"])
 
     def test_hold_after_interrupted_cutover_still_allows_original_inverse_on_resume(self) -> None:
-        from control_plane.contracts.dokploy_target_record import DokployTargetStaffTestingHold
         from control_plane.contracts.promotion_record import HealthcheckEvidence
 
         def health(base_url: str, path: str) -> HealthcheckEvidence:
@@ -554,13 +751,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
             self.assertRaises(service.NativeTestingRebuildPending),
         ):
             self.execute()
-        target = self.current().target
-        hold = DokployTargetStaffTestingHold(reason="Staff hold during the interrupted cutover")
-        self.store.write_dokploy_target_record(
-            target.model_copy(
-                update={"policies": target.policies.model_copy(update={"staff_testing_hold": hold})}
-            )
-        )
+        hold = self.apply_staff_hold(True, "Staff hold during the interrupted cutover")
         self.fail_public = True
         self.assertEqual(self.execute().deploy_status, "fail")
         self.assertEqual(self.effects, ["switch-new", "switch-old"])
@@ -746,6 +937,8 @@ class NativeTestingWorkerTests(unittest.TestCase):
     def test_existing_queue_selects_native_execution_and_preserves_pending_observations(
         self,
     ) -> None:
+        import logging
+        from contextlib import nullcontext
         from control_plane.contracts.durable_operation_authorization import (
             DurableOperationAuthorization,
         )
@@ -810,6 +1003,9 @@ class NativeTestingWorkerTests(unittest.TestCase):
                     "complete_odoo_stable_target_replacement_operation_record",
                     return_value=True,
                 ) as complete,
+                self.assertLogs(level=logging.WARNING)
+                if isinstance(response, Exception)
+                else nullcontext(),
             ):
                 self.assertTrue(
                     worker._execute_target_replacement_with_checkpoint(
@@ -828,6 +1024,8 @@ class NativeTestingWorkerTests(unittest.TestCase):
                 terminal.status, "pending" if isinstance(response, Exception) else "pass"
             )
             self.assertFalse(terminal.finished_at if isinstance(response, Exception) else False)
+            if isinstance(response, service.NativeTestingRebuildPending):
+                self.assertEqual(terminal.error_message, str(response))
 
     def test_lost_execution_lock_after_route_dispatch_keeps_original_observation(self) -> None:
         from contextlib import contextmanager

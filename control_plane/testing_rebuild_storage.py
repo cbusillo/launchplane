@@ -36,8 +36,15 @@ class RecordTestingRebuildStore:
         self.store = store
 
     def load(self, plan: TestingRebuildPlan) -> TestingRebuildRecord:
+        return self.load_operation(
+            product=plan.product, context=plan.context, operation_id=plan.operation_id
+        )
+
+    def load_operation(
+        self, *, product: str, context: str, operation_id: str
+    ) -> TestingRebuildRecord:
         key = canonical_json_sha256(
-            {"product": plan.product, "context": plan.context, "operation": plan.operation_id}
+            {"product": product, "context": context, "operation": operation_id}
         )
         row = self.store.read_idempotency_record(
             scope=REBUILD_CHECKPOINT_SCOPE,
@@ -45,12 +52,12 @@ class RecordTestingRebuildStore:
             idempotency_key=key,
         )
         if row is None:
-            raise FileNotFoundError(plan.operation_id)
+            raise FileNotFoundError(operation_id)
         record = TestingRebuildRecord.model_validate(row.response_payload)
         if (record.plan.product, record.plan.context, record.plan.operation_id) != (
-            plan.product,
-            plan.context,
-            plan.operation_id,
+            product,
+            context,
+            operation_id,
         ) or row.request_fingerprint != record.plan.digest:
             raise ValueError("The stored rebuild checkpoint has a different operation binding.")
         return record

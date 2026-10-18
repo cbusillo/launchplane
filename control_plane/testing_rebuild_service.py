@@ -122,6 +122,10 @@ class NativeTestingRebuildPending(ValueError):
     """The original effects need another observation, never an alternate dispatch."""
 
 
+class NativeTestingRebuildAdmissionChanged(ValueError):
+    """A source-defined admission refusal with a safe, useful operator cause."""
+
+
 _ROUTE_WRITE_EXCLUDED_PHASE = "route_write_not_started"
 
 
@@ -340,11 +344,16 @@ class NativeTestingRebuildAdapter:
             if check is None:
                 raise NativeTestingRebuildPending("The original rebuild still has an executor.")
             executor = NativeTestingRebuildExecution(self, lease, check)
-            record = executor.run()
+            try:
+                record = executor.run()
+            except NativeTestingRebuildAdmissionChanged as error:
+                result = executor.finish_admission_refusal(error)
+            else:
+                result = rebuild_result(record, executor.allocation)
             return ProviderMutationOutcome(
                 200,
                 {
-                    "result": rebuild_result(record, executor.allocation).model_dump(mode="json"),
+                    "result": result.model_dump(mode="json"),
                 },
                 provider_effect_performed=native_rebuild_effects_started(
                     self.store, self.operation
@@ -410,6 +419,106 @@ class NativeTestingRebuildExecution:
             and original.provider_target_key == self.adapter.target_key() + ":" + phase
         )
 
+    def finish_admission_refusal(
+        self, error: NativeTestingRebuildAdmissionChanged
+    ) -> OdooStableTargetReplacementApplyResult:
+        import logging
+
+        self.check_lock()
+        self.lease.assert_current()
+        self.adapter.authorize("testing_rebuild_checkpoint")
+        for copy_id in (self.intent.old.copy_id, self.adapter.namespace):
+            route = self.store.read_idempotency_record(
+                scope=REBUILD_SCOPE,
+                route_path=REBUILD_ROUTE + ":effect",
+                idempotency_key=self.operation.operation_id + ":route:" + copy_id,
+            )
+            if route is not None and route.provider_effect_started_at:
+                raise NativeTestingRebuildPending(str(error)) from error
+        checkpoint = None
+        if hasattr(self, "plan"):
+            try:
+                checkpoint = self.adapter.checkpoints.load(self.plan)
+            except FileNotFoundError:
+                pass
+        if checkpoint is not None and (
+            checkpoint.step not in {"preparing", "prepared", "switching"}
+            or checkpoint.publication_started
+            or checkpoint.retirement_started
+            or checkpoint.rollback_started
+        ):
+            raise NativeTestingRebuildPending(str(error)) from error
+        current = read_snapshot(
+            self.store, product=self.operation.product, context=self.operation.context
+        )
+        if (
+            current.target_id.target_id != self.intent.old.target_id
+            or current.provider.target_id != self.intent.before.provider.target_id
+        ):
+            raise NativeTestingRebuildPending(str(error)) from error
+        candidate = self.store.read_testing_candidate(self.adapter.namespace)
+        frame = self.transport.read()
+        self.route = compile_testing_route(
+            product=self.operation.product,
+            context=self.operation.context,
+            host=str(urlsplit(self.base_url).hostname),
+            old_backend=self.intent.old.private_url,
+            old_backend_addresses=tuple(frame["old_endpoints"]),
+            new_backend=f"http://{self.adapter.namespace}:{self.intent.profile.runtime_port}",
+            raw=frame["raw"],
+            public_entrypoints=self.intent.public_entrypoints,
+            owned_document=json.loads(frame["owned_file"])
+            if frame["owned_file"] is not None
+            else None,
+            recorded_template=self.intent.recorded_template,
+        )
+        if (
+            observe_testing_route(
+                self.route,
+                frame["raw"],
+                json.loads(frame["owned_file"]) if frame["owned_file"] is not None else None,
+            )
+            != self.intent.old.private_url
+        ):
+            raise NativeTestingRebuildPending(str(error)) from error
+        if checkpoint is not None:
+            observation = self.current_route(checkpoint.plan)
+            if observation.slot_id != checkpoint.plan.old.copy_id:
+                raise NativeTestingRebuildPending(str(error)) from error
+            now = datetime.now(UTC)
+            failed = TestingRebuildRecord.model_validate(
+                {
+                    **checkpoint.model_dump(),
+                    "step": "failed",
+                    "error": "testing_rebuild_admission_changed",
+                    "admission_refusal": str(error),
+                    "route": observation,
+                    "updated_at": now,
+                    "ended_at": now,
+                }
+            )
+            self.check_lock()
+            self.lease.assert_current()
+            self.adapter.checkpoints.save(failed)
+            assert candidate is not None
+            result = rebuild_result(failed, candidate)
+        else:
+            result = OdooStableTargetReplacementApplyResult(
+                product=self.operation.product,
+                context=self.operation.context,
+                instance="testing",
+                strategy="replace-and-cutover",
+                deploy_status="fail",
+                target_id=self.intent.old.target_id,
+                artifact_id=self.operation.request.artifact_id,
+                error_code="testing_rebuild_admission_changed",
+                error_message=str(error),
+            )
+        logging.warning(
+            "Testing rebuild %s ended before cutover: %s", self.operation.operation_id, error
+        )
+        return result
+
     def guard(self, plan: TestingRebuildPlan | None = None, *, recovery: bool = False) -> None:
         self.check_lock()
         self.lease.assert_current()
@@ -419,16 +528,30 @@ class NativeTestingRebuildExecution:
             product=self.operation.product,
             owners=product_context_owner_map(self.store.list_product_profile_records()),
         ):
-            raise ValueError("The testing context no longer belongs exclusively to this product.")
-        if not recovery and testing_profile_binding(
-            self.store.read_product_profile_record(self.operation.product), self.operation.context
-        ) != testing_profile_binding(self.intent.profile, self.operation.context):
-            raise ValueError("The original testing profile changed.")
+            raise NativeTestingRebuildAdmissionChanged(
+                "The testing context no longer belongs exclusively to this product."
+            )
+        if not recovery:
+            try:
+                current_profile = testing_profile_binding(
+                    self.store.read_product_profile_record(self.operation.product),
+                    self.operation.context,
+                )
+            except (ValueError, FileNotFoundError) as error:
+                raise NativeTestingRebuildAdmissionChanged(
+                    "The admitted testing runtime is no longer configured."
+                ) from error
+            if current_profile != testing_profile_binding(
+                self.intent.profile, self.operation.context
+            ):
+                raise NativeTestingRebuildAdmissionChanged(
+                    "The original testing runtime profile changed."
+                )
         target = self.store.read_dokploy_target_record(
             context_name=self.operation.context, instance_name="testing"
         )
         if not recovery and target.policies.staff_testing_hold is not None:
-            raise ValueError("Staff testing holds this lane.")
+            raise NativeTestingRebuildPending("Staff testing holds this lane.")
         self.old_provider()
         current_target = self.store.read_dokploy_target_id_record(
             context_name=self.operation.context, instance_name="testing"
@@ -446,7 +569,9 @@ class NativeTestingRebuildExecution:
             and (item.context, item.instance) != (self.operation.context, "testing")
             for item in self.store.list_dokploy_target_id_records()
         ):
-            raise ValueError("A rebuild copy aliases another serving lane.")
+            raise NativeTestingRebuildAdmissionChanged(
+                "A rebuild copy aliases another serving lane."
+            )
 
         safety = self.store.read_disposable_lane_safety(
             self.operation.product, self.operation.context, "testing"
@@ -455,7 +580,7 @@ class NativeTestingRebuildExecution:
             safety.data == "only_copy"
             or safety.production_resources in {"shared", "separation_ready"}
         ):
-            raise ValueError(
+            raise NativeTestingRebuildAdmissionChanged(
                 "The lane has a recorded protected copy or shared production resource."
             )
         if not recovery and not self.cutover_started():
@@ -478,7 +603,7 @@ class NativeTestingRebuildExecution:
                 require_unused=reported_usage != "unknown",
             )
             if decision.protected:
-                raise ValueError("The retained testing copy is in use.")
+                raise NativeTestingRebuildPending("The retained testing copy is in use.")
         # The original route effect checkpoints the final admission check.
         # Completing that same cutover must not re-qualify historical use after
         # its own health/identity publication invalidates the old down evidence.
@@ -498,7 +623,9 @@ class NativeTestingRebuildExecution:
             else self.intent.before
         )
         if not recovery and not serving_snapshot_matches(current, expected):
-            raise ValueError("Testing serving authority changed outside the original rebuild.")
+            raise NativeTestingRebuildAdmissionChanged(
+                "Testing serving configuration changed outside the original rebuild."
+            )
         if not post_deploy.compose_data_workflow_is_quiescent(
             host=self.host,
             token=self.token,
@@ -509,7 +636,9 @@ class NativeTestingRebuildExecution:
                 target_id=self.intent.old.target_id,
             ),
         ):
-            raise ValueError("The retained testing copy still has a data workflow.")
+            raise NativeTestingRebuildPending(
+                "The retained testing copy still has a data workflow."
+            )
         deployments = api.list_deployments_for_target(
             host=self.host,
             token=self.token,
@@ -522,7 +651,9 @@ class NativeTestingRebuildExecution:
             not in api._DEPLOYMENT_SUCCESS_STATUSES | api._DEPLOYMENT_FAILURE_STATUSES
             for item in deployments
         ):
-            raise ValueError("The retained testing copy still has an unresolved deployment.")
+            raise NativeTestingRebuildPending(
+                "The retained testing copy still has an unresolved deployment."
+            )
 
     @property
     def publication_key(self) -> str:
@@ -599,9 +730,50 @@ class NativeTestingRebuildExecution:
             new=new,
         )
 
+    def current_candidate_inputs(
+        self, allocation: TestingCandidateAllocation
+    ) -> TestingCandidateRuntimeInputs:
+        try:
+            return candidate_runtime_inputs(
+                root=self.root,
+                store=self.store,
+                allocation=allocation,
+                artifact_id=self.operation.request.artifact_id,
+                source=rebuild_source(self.operation),
+                admitted_profile=self.intent.profile,
+            )
+        except ValueError as error:
+            raise NativeTestingRebuildAdmissionChanged(
+                "The admitted candidate runtime inputs are no longer valid."
+            ) from error
+
     def run(self) -> TestingRebuildRecord:
         allocation = self.store.read_testing_candidate(self.adapter.namespace)
         historical: TestingRebuildRecord | None = None
+        try:
+            checkpoint = self.adapter.checkpoints.load_operation(
+                product=self.operation.product,
+                context=self.operation.context,
+                operation_id=self.operation.operation_id,
+            )
+        except FileNotFoundError:
+            pass
+        else:
+            if (
+                checkpoint.plan.old != self.intent.old
+                or checkpoint.plan.new.copy_id != self.adapter.namespace
+                or checkpoint.plan.base_url != self.base_url
+                or checkpoint.plan.source != rebuild_source(self.operation)
+            ):
+                raise ValueError("The original checkpoint belongs to another rebuild intent.")
+            self.plan = checkpoint.plan
+            if checkpoint.step == "failed" and checkpoint.admission_refusal:
+                if allocation is None:
+                    raise NativeTestingRebuildPending(
+                        "The original candidate custody is unavailable."
+                    )
+                self.allocation = allocation
+                return checkpoint
         if allocation is not None and allocation.application is not None:
             historical_plan = self.build_plan(allocation, allocation.application.plan)
             try:
@@ -718,14 +890,7 @@ class NativeTestingRebuildExecution:
                 # A resumed populated copy is proved by its original custody
                 # and private readiness, never by another empty-volume gate.
                 require_candidate_target_custody(self.store, allocation)
-            self.inputs = candidate_runtime_inputs(
-                root=self.root,
-                store=self.store,
-                allocation=allocation,
-                artifact_id=self.operation.request.artifact_id,
-                source=rebuild_source(self.operation),
-                admitted_profile=self.intent.profile,
-            )
+            self.inputs = self.current_candidate_inputs(allocation)
             app_plan = self.inputs.plan
         else:
             self.publication = existing_publication.plan
@@ -735,14 +900,7 @@ class NativeTestingRebuildExecution:
             assert allocation is not None and allocation.application is not None
             app_plan = allocation.application.plan
             if existing_publication.state == "planned" and not self.cutover_started():
-                self.inputs = candidate_runtime_inputs(
-                    root=self.root,
-                    store=self.store,
-                    allocation=allocation,
-                    artifact_id=self.operation.request.artifact_id,
-                    source=rebuild_source(self.operation),
-                    admitted_profile=self.intent.profile,
-                )
+                self.inputs = self.current_candidate_inputs(allocation)
         self.allocation = allocation
         self.plan = self.build_plan(allocation, app_plan)
         if self.publication is not None:
@@ -1289,7 +1447,8 @@ def rebuild_result(
             "copy_source": app.plan.source if app else record.plan.source,
         },
         error_code=record.error,
-        error_message="The candidate failed; the original testing copy remains selected."
+        error_message=record.admission_refusal
+        or "The candidate failed; the original testing copy remains selected."
         if not complete
         else "",
     )
@@ -1365,6 +1524,8 @@ def execute_native_testing_rebuild(
         raise
     except TimeoutError:
         # The worker already preserves timeout uncertainty on the same operation.
+        raise
+    except NativeTestingRebuildPending:
         raise
     except Exception as error:
         if native_rebuild_effects_started(store, operation):

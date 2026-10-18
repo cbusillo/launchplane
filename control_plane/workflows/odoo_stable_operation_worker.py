@@ -2393,8 +2393,17 @@ def _execute_target_replacement_with_checkpoint(
                 and native_rebuild_effects_started(record_store, operation)
             )
         )
+        rebuild_message = (
+            str(error)
+            if isinstance(error, NativeTestingRebuildPending)
+            else f"Continue observing the original testing effects after {type(error).__name__}."
+        )
         if rebuild_pending:
-            logging.info("The original native testing rebuild will continue through observation.")
+            logging.warning(
+                "Native testing rebuild %s remains pending: %s",
+                operation.operation_id,
+                rebuild_message,
+            )
         elif storage_pending:
             logging.info("Odoo testing storage reconciliation will continue in the worker queue.")
         else:
@@ -2406,7 +2415,7 @@ def _execute_target_replacement_with_checkpoint(
             _retry_source_order_read(
                 operation,
                 code="testing_rebuild_observation_pending",
-                message="Continue observing the original private copy, route and retirement effects.",
+                message=rebuild_message,
             )
             if rebuild_pending
             else _retry_source_order_read(

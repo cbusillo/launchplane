@@ -13819,6 +13819,33 @@ class RealPostgresTestingPublicationTests(unittest.TestCase):
 
 
 class RealPostgresNativeTestingWorkerTests(unittest.TestCase):
+    def test_retired_testing_lane_has_a_finite_original_failure(self) -> None:
+        self.run_worker_case("test_retired_testing_lane_after_effects_has_a_finite_result")
+
+    def test_changed_testing_credential_selection_keeps_original_custody(self) -> None:
+        self.run_worker_case(
+            "test_changed_testing_credentials_before_cutover_preserve_candidate_custody"
+        )
+
+    def test_partial_application_failure_survives_lost_checkpoint_reply(self) -> None:
+        self.run_worker_case(
+            "test_admission_failure_with_partial_application_survives_a_lost_checkpoint_reply"
+        )
+
+    def test_real_hold_set_and_clear_during_preparation_keeps_rebuild_live(self) -> None:
+        self.run_worker_case("test_real_hold_set_and_clear_during_preparation_allows_completion")
+
+    def test_post_allocation_profile_change_has_a_finite_failure(self) -> None:
+        self.run_worker_case("test_profile_drift_after_candidate_effects_ends_before_cutover")
+
+    def test_post_allocation_runtime_change_has_a_finite_failure(self) -> None:
+        self.run_worker_case("test_runtime_edit_after_candidate_effects_has_a_finite_result")
+
+    def test_post_allocation_context_loss_does_not_dispatch_a_route(self) -> None:
+        self.run_worker_case(
+            "test_context_loss_after_candidate_effects_ends_without_route_dispatch"
+        )
+
     def test_profile_edit_during_cutover_preserves_original_publication(self) -> None:
         self.run_worker_case(
             "test_unrelated_profile_edit_after_cutover_does_not_strand_publication"

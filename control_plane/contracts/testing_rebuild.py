@@ -143,7 +143,9 @@ class TestingRebuildRecord(FrozenRecord):
         "candidate_preparation_failed",
         "candidate_route_not_applied",
         "candidate_private_readiness_failed",
+        "testing_rebuild_admission_changed",
     ] = ""
+    admission_refusal: str = Field(default="", exclude_if=lambda value: not value)
     preparation_failure_evidence: str = Field(default="", exclude_if=lambda value: not value)
     private_readiness_failed_at: datetime | None = Field(
         default=None, exclude_if=lambda value: value is None
@@ -188,6 +190,29 @@ class TestingRebuildRecord(FrozenRecord):
         private_failed = (
             self.step == "failed" and self.error == "candidate_private_readiness_failed"
         )
+        admission_failed = (
+            self.step == "failed" and self.error == "testing_rebuild_admission_changed"
+        )
+        if (
+            bool(self.admission_refusal) != admission_failed
+            or admission_failed
+            and (
+                self.publication_started
+                or self.retirement_started
+                or self.rollback_started
+                or self.route is None
+                or self.route.slot_id != self.plan.old.copy_id
+                or self.preparation is not None
+                and (self.preparation.plan_digest, self.preparation.copy_id)
+                != (self.plan.digest, self.plan.new.copy_id)
+                or self.readiness is not None
+                and (self.readiness.copy_id, self.readiness.host, self.readiness.runtime_identity)
+                != (self.plan.new.copy_id, self.plan.host, self.plan.new.runtime_identity)
+            )
+        ):
+            raise ValueError(
+                "An admission refusal requires the original copy before traffic effects."
+            )
         if private_failed and (
             self.private_readiness_failed_at is None
             or self.publication_started
@@ -214,7 +239,7 @@ class TestingRebuildRecord(FrozenRecord):
                 "Preparation failure requires retained custody before any traffic effect."
             )
         if (
-            not (preparation_failed or private_failed)
+            not (preparation_failed or private_failed or admission_failed)
             and self.step != "preparing"
             and (
                 self.preparation is None
@@ -224,7 +249,7 @@ class TestingRebuildRecord(FrozenRecord):
         ):
             raise ValueError("Rebuild progress requires its independent-copy receipt.")
         if (
-            not (preparation_failed or private_failed)
+            not (preparation_failed or private_failed or admission_failed)
             and self.step not in {"preparing", "prepared"}
             and (
                 self.readiness is None
