@@ -4490,6 +4490,33 @@ def _advance_from_live_snapshot(
             repository=request.repository,
             base_branch=request.base_branch,
         )
+    if lease.record.ordinary_job_binding is None:
+        from control_plane.merge_train_block_recovery import recover_candidate_block
+
+        repository_policy = policy.find_repository_policy(
+            repository=request.repository, base_branch=request.base_branch
+        )
+
+        def checkpoint_block_recovery(record_id: str, number: int) -> None:
+            lease.checkpoint(
+                active_action=MERGE_TRAIN_CONTROLLER_ACTIVE_ACTION,
+                active_phase="recover_candidate_block",
+                active_record_id=record_id,
+                active_pull_request_number=number,
+                step_payload={"blocked_label": repository_policy.blocked_label},
+            )
+
+        recovery = recover_candidate_block(
+            snapshot=snapshot,
+            policy=repository_policy,
+            policy_sha256=policy_sha256,
+            store=candidate_store,
+            client=github_client,
+            mutate=request.mutate,
+            before_remove=checkpoint_block_recovery,
+        )
+        if recovery is not None:
+            return recovery
     held_out = _surviving_held_out_entries(
         policy=policy,
         snapshot=snapshot,

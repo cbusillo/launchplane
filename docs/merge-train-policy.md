@@ -600,8 +600,27 @@ its own blocked PR. Dry-run reports the intent without applying it.
 For service batches, a PR carrying `blocked_label` is excluded from subsequent
 queue selection,
 including label-free dependency updates, so the next controller pass can select
-other eligible work. Remove the block label after resolving the failure to admit
-that PR again. Applied-block PR feedback explains the failure and how to rejoin.
+other eligible work. Applied-block PR feedback explains the failure and how to rejoin.
+
+For a service-recorded isolated candidate failure, push the fix on a different
+head, wait for green current-head checks, and post the weighed review with
+`gh-pr.py comment --reviewed-head FULL_SHA`. Between candidates, the controller
+can clear its old block after verifying the singleton failed candidate and its
+delivered scheduler feedback against the current block-label event. The labeler
+must be the trusted automation actor that delivered the recorded feedback; a
+later reapplication, a manual label, missing provenance or changed policy keeps
+the hold. No agent removes that label by hand. The controller reports
+`recover_candidate_block`, records the failed record and both source heads,
+and updates its PR feedback. Run the ordinary checked `gh-pr.py ready` after
+recovery; clearing the block does not enqueue, admit or merge the PR.
+
+The same blocked head never qualifies, including after a green rerun. Recovery
+also refuses pending, failing or unreadable current-head evidence, conflicting
+or unknown mergeability, stale/missing/unweighed review, a renewed review request
+or engineering wait, drafts, a different base, forks and unresolved required
+review conversations. The controller rechecks the head and latest label event
+before its leased removal; a provider refusal or uncertain result retains the
+normal reconciliation fence. It never changes policy or identity to clear a hold.
 
 Within-major dependency updates admitted through the required-label exception use
 current-head check and mergeability evidence for holds, rather than acquiring a
@@ -622,9 +641,9 @@ rerunning its checks. Landing admission checks only the plan's members. A new
 head or a moved base releases the hold; a new head still waits until the active
 candidate finishes under the admission rule below. The hold posts no PR feedback.
 Every existing block label remains a hold,
-including labels applied by earlier controller versions: no actor or historical
-record is used to guess that a generic hold may be cleared. Those PRs retain the
-supported remove-label path. The single-transition worker and retained bound-job
+including labels applied by earlier controller versions without the failed-candidate
+and delivered-feedback proof above. A generic hold is never guessed to be a
+recoverable candidate block. The single-transition worker and retained bound-job
 controller compatibility path are unchanged.
 
 Landing admission allows transient unknown mergeability only for exact PR/head

@@ -24,7 +24,11 @@ from control_plane.config_authority_comparison import (
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
-from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidate
+from control_plane.contracts.merge_train_batch import (
+    MergeTrainBatchCandidate,
+    MergeTrainBatchCandidateRecord,
+)
+from control_plane.contracts.merge_train_pr_feedback_record import MergeTrainPrFeedbackRecord
 from control_plane.contracts.merge_train_batch import (
     MergeTrainHeadCheckReuse,
     MergeTrainReusedCheck,
@@ -2426,6 +2430,28 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             method="POST",
             path=f"/repos/{repository_path}/issues/{pull_request_number}/labels",
             body={"labels": [normalized_label]},
+        )
+
+    def recover_candidate_block(
+        self,
+        *,
+        candidate: MergeTrainBatchCandidateRecord,
+        feedback: "MergeTrainPrFeedbackRecord",
+        policy: MergeTrainRepositoryPolicy,
+        expected_head_sha: str,
+        mutate: bool,
+        before_remove: Callable[[], None],
+    ) -> bool:
+        from control_plane.merge_train_github_block_recovery import recover_candidate_block
+
+        return recover_candidate_block(
+            client=self,
+            candidate=candidate,
+            feedback=feedback,
+            policy=policy,
+            expected_head_sha=expected_head_sha,
+            mutate=mutate,
+            before_remove=before_remove,
         )
 
     def update_pull_request_branch(
