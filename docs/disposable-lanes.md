@@ -945,8 +945,9 @@ maintenance continues to require the current profile port.
 
 An explicit resume of the same held operation is described below (#4016).
 Managed-proxy execution receipts for interrupted writers are described below
-(#4017). The native source PR remains held from ready until these
-continuations are integrated and reviewed. Neither clearing a queue/browser
+(#4017). These continuations are integrated in the joined native source. Its PR
+remains held from ready until their reviews are weighed and that head is
+validated. Neither clearing a queue/browser
 record nor replaying an unknown writer is a supported substitute; #3963 is
 incomplete.
 Candidate reservations are rechecked before cutover, and unresolved predecessor

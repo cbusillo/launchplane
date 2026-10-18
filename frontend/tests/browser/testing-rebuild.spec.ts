@@ -146,7 +146,7 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-o
         await panel.screenshot({ path: testInfo.outputPath("testing-rebuild-held.png") });
         await panel.getByRole("button", { name: "Resume this rebuild", exact: true }).click();
         if (outcome !== "held-resume") {
-          await expect(panel.getByRole("status")).toContainText("Read the original operation");
+          await waitForState(() => page.evaluate(() => JSON.parse(sessionStorage.getItem("launchplane:testing-rebuild:atlas-commerce") ?? "null")?.resumeNeedsRead)).toBe(true);
           await expect(panel.getByRole("button", { name: "Resume this rebuild", exact: true })).toBeDisabled();
           expect(resumes.length).toBe(1);
           await panel.screenshot({ path: testInfo.outputPath("testing-rebuild-resume-needs-read.png") });
