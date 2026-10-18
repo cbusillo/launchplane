@@ -707,8 +707,13 @@ images, runtime and copy identity, integration settings and the web-start gate,
 and verifies the testing-local credentials without signing in. The private HTTP
 health request bypasses proxy environment settings and refuses redirects. A
 read-only connection using the running web configuration checks the generated
-database password and the active local administrator's stored password hash;
-the running master password is also checked. Readiness never creates a session
+database password and the active local administrator's stored password hash.
+The login follows startup's trimmed value or `admin` default. Local database
+authentication failure is a failed candidate check, not a provider denial.
+The plaintext master value and database settings are checked for consistency
+with the running container environment. These local comparisons do not attest
+that a stored provider environment update was deployed; provider configuration,
+installed runtime identity and image are checked separately. Readiness never creates a session
 or login-history row, which would otherwise protect the new copy from its next
 rebuild. Passwords, hashes and raw program output stay private to the provider
 transport. This checks credential installation, not an interactive browser
