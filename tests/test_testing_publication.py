@@ -77,6 +77,7 @@ class TestingPublicationTests(unittest.TestCase):
             context=self.candidate.context,
             host=host,
             old_backend=routed.old,
+            old_backend_addresses=(routed.old_address,),
             new_backend=app.prepared.private_endpoint,
             raw=routed.raw,
             public_entrypoints=("web", "websecure"),
