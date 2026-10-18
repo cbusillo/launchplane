@@ -14,6 +14,7 @@ from uuid import uuid4
 
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.dokploy import api, source
+from control_plane.dokploy_inventory import InventoryUnavailable
 from control_plane.http_routes.mutation_support import request_fingerprint
 from control_plane.provider_operations import (
     ProviderMutationOutcome,
@@ -269,6 +270,8 @@ class ApplicationStateVolumeAdapter:
             ):
                 raise ValueError("Application is aliased by another lane.")
         live = fetch_dokploy_target_payload_for_setup(host, token, "application", application_id)
+        if live.get("applicationId") != application_id:
+            raise InventoryUnavailable("target_identity_unavailable")
         if any(
             live.get(key) != value
             for key, value in {
@@ -489,7 +492,7 @@ class ApplicationStateVolumeAdapter:
             if all(data.get(key) for key in ("application", "environment", "app_name")):
                 live = self._live(data["application"], data["environment"], data["app_name"])
                 evidence = "matches" if self._mount_matches(live) else "differs"
-        except (click.ClickException, OSError, HTTPException):
+        except (click.ClickException, OSError, HTTPException, InventoryUnavailable):
             evidence = "unavailable"
         except (ValueError, KeyError):
             evidence = "differs"
@@ -520,8 +523,33 @@ class ApplicationStateVolumeAdapter:
                 raise ValueError("Retention requires the original operation key and plan.")
 
             def checkpoint() -> None:
+                from control_plane.authz_candidate_preparation import (
+                    is_exclusive_product_lane_context,
+                    product_context_owners,
+                )
+
                 check()
-                self.checkpoint()
+                profile = self.store.read_product_profile_record(self.product)
+                phase = self._progress_phase(row.provider_effect_phase)
+                allocation = json.loads(phase) if phase else {}
+                try:
+                    current = self.store.read_provider_target_record(
+                        context_name=self.request.context, instance_name="testing"
+                    )
+                except FileNotFoundError:
+                    current = None
+                if current is not None and current.target_id == allocation.get("application"):
+                    raise ValueError(
+                        "Original allocation is already tracked; use original-key recovery."
+                    )
+                if profile.lifecycle_state != "active" or not is_exclusive_product_lane_context(
+                    context=self.request.context,
+                    product=self.product,
+                    owners=product_context_owners(self.store),
+                ):
+                    raise ValueError(
+                        "Retaining storage custody requires its current active exclusive owner."
+                    )
 
             return retain_state_volume_allocation(
                 self.store,
@@ -547,11 +575,27 @@ class ApplicationStateVolumeAdapter:
             _extract_provider_id,
         )
 
-        from control_plane.application_state_volume_retention import state_volume_plan_is_retained
+        from control_plane.application_state_volume_retention import (
+            state_volume_plan_is_retained,
+            state_volume_progress_operation_key,
+        )
 
+        allocation_key = state_volume_progress_operation_key(
+            self.store, self.scope, self.intent["plan_id"]
+        )
+        if allocation_key and allocation_key != self.operation_key:
+            raise ProviderMutationRejectedError(
+                ValueError(
+                    "Preserve this allocation's original operation key; review a fresh plan for new work."
+                )
+            )
         if state_volume_plan_is_retained(self.store, self.scope, self.intent["plan_id"]):
             raise ProviderMutationRejectedError(
                 ValueError("This allocation is retained; review a fresh storage plan.")
+            )
+        if not isinstance(lease, ProviderEvidenceLease):
+            raise ProviderMutationRejectedError(
+                ValueError("Storage adoption requires its live evidence lease.")
             )
         started = False
         original = self.store.read_idempotency_record(
@@ -683,21 +727,22 @@ class ApplicationStateVolumeAdapter:
                         ),
                     )
                 self.checkpoint()
-                execute_dokploy_target_setup(
-                    control_plane_root_path=self.root,
-                    record_store=self.store,
-                    request=self.request.model_copy(
-                        update={
-                            "app_name": self.intent["app_name"],
-                            "project_name": self.intent["project_marker"],
-                            "environment_name": self.intent["environment_marker"],
-                            "target_name": self.intent["target_marker"],
-                        }
-                    ),
-                    lane_lock_held=True,
-                    required_context_owner=(self.product, self.request.context),
-                    application_mutate=mutate,
-                )
+                with self.store.provider_evidence_guard(lease.evidence_reservation):
+                    execute_dokploy_target_setup(
+                        control_plane_root_path=self.root,
+                        record_store=self.store,
+                        request=self.request.model_copy(
+                            update={
+                                "app_name": self.intent["app_name"],
+                                "project_name": self.intent["project_marker"],
+                                "environment_name": self.intent["environment_marker"],
+                                "target_name": self.intent["target_marker"],
+                            }
+                        ),
+                        lane_lock_held=True,
+                        required_context_owner=(self.product, self.request.context),
+                        application_mutate=mutate,
+                    )
                 lease.assert_current()
                 result = self._verify_adopted(json.dumps(created))
                 return ProviderMutationOutcome(

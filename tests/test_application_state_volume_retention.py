@@ -6,13 +6,19 @@ from typing import Any
 import unittest
 from unittest.mock import Mock, patch
 
-from control_plane.application_state_volume import PLAN_ROUTE, ROUTE, state_volume_target_key
+from control_plane.application_state_volume import (
+    PLAN_ROUTE,
+    ROUTE,
+    _normalized,
+    state_volume_target_key,
+)
 from control_plane.application_state_volume_retention import (
     checkpoint_state_volume_progress,
     read_state_volume_progress,
     retain_state_volume_allocation,
     state_volume_custody_sha256,
     state_volume_plan_is_retained,
+    state_volume_progress_operation_key,
 )
 from control_plane.contracts.idempotency_record import (
     LaunchplaneIdempotencyRecord,
@@ -25,11 +31,13 @@ from control_plane.storage.postgres import PostgresRecordStore
 
 
 class ApplicationStateVolumeRetentionTests(unittest.TestCase):
-    def setUp(self) -> None:
+    def database_url(self) -> str:
         directory = self.enterContext(TemporaryDirectory())
-        self.store = PostgresRecordStore(
-            database_url=f"sqlite+pysqlite:///{Path(directory) / 'retention.sqlite3'}"
-        )
+        return f"sqlite+pysqlite:///{Path(directory) / 'retention.sqlite3'}"
+
+    def setUp(self) -> None:
+        self.store = PostgresRecordStore(database_url=self.database_url())
+        self.addCleanup(self.store.close)
         self.store.ensure_schema()
         request = DokployTargetSetupEnvelope(
             operation="create-application",
@@ -43,22 +51,16 @@ class ApplicationStateVolumeRetentionTests(unittest.TestCase):
         )
         plan_id = "a" * 32
         self.intent: dict[str, Any] = {
-            "request": request.model_dump(
-                mode="json",
-                exclude={
-                    "mode",
-                    "confirmation",
-                    "reason",
-                    "state_volume_plan_id",
-                    "expected_plan_sha256",
-                },
-            ),
+            "request": _normalized(request),
             "product": "example",
             "binding": "fixture-binding",
             "provider_host": "https://provider.example.invalid",
             "plan_id": plan_id,
             "volume_name": "lp-testing-state-" + plan_id,
             "app_name": "lp-testing-app-" + plan_id + "-state",
+            "project_marker": "lp-testing-project-" + plan_id,
+            "environment_marker": "lp-testing-environment-" + plan_id,
+            "target_marker": "lp-testing-target-" + plan_id,
         }
         self.intent["plan_sha256"] = request_fingerprint(self.intent)
         self.scope = "terminal-agent:retention-fixture"
@@ -134,8 +136,13 @@ class ApplicationStateVolumeRetentionTests(unittest.TestCase):
         self.assertEqual(self.store.read_original_mutation_intent(retained), self.intent)
         self.assertEqual(retained.response_payload["result"], result)
         self.assertEqual(result["allocation_state"], "retained_uncertain")
+        self.assertFalse(result["applied"])
         self.assertTrue(result["resources_retained"])
         self.assertFalse(result["deployment_performed"])
+        self.assertEqual(
+            state_volume_progress_operation_key(self.store, self.scope, self.intent["plan_id"]),
+            self.reservation.idempotency_key,
+        )
         self.assertFalse(self.store.list_held_provider_target_reservations())
         self.assertEqual(
             self.store.renew_mutation_reservation(reservation=self.reservation).status,
@@ -220,6 +227,9 @@ class ApplicationStateVolumeRetentionTests(unittest.TestCase):
         )
 
     def test_live_progress_persists_and_expired_or_retained_worker_cannot_change_it(self) -> None:
+        self.assertEqual(
+            state_volume_progress_operation_key(self.store, self.scope, self.intent["plan_id"]), ""
+        )
         self.assertEqual(
             read_state_volume_progress(self.store, self.scope, self.intent["plan_id"]), ""
         )
@@ -334,6 +344,44 @@ class ApplicationStateVolumeRetentionTests(unittest.TestCase):
         with self.expired(), self.assertRaises(ValueError):
             self.retain()
         self.assertEqual(self.read(), completed)
+
+    def test_completed_allocation_progress_rejects_a_different_operation_key(self) -> None:
+        self.save_progress()
+        completed = self.store._updated_idempotency_record(
+            self.reservation,
+            state="completed",
+            response_status_code=202,
+            response_trace_id="created",
+            recorded_at=self.reservation.updated_at,
+            response_payload={"result": {"applied": True}},
+        )
+        self.store.write_idempotency_record(completed)
+        fresh = self.store.reserve_mutation(
+            scope=self.scope,
+            route_path=ROUTE,
+            idempotency_key="new-key-completed-plan",
+            request_fingerprint=self.intent["plan_sha256"],
+            lease_owner="fresh-worker",
+            reconciliation_key=self.intent["plan_sha256"],
+            provider_target_key=self.reservation.provider_target_key,
+            original_intent=self.intent,
+        ).record
+        assert fresh is not None
+        checkpointed = self.store.checkpoint_mutation_provider_effect(
+            reservation=fresh,
+            effect_phase="unwanted-create",
+        ).record
+        assert checkpointed is not None
+        with self.assertRaises(ValueError):
+            self.save_progress(checkpointed)
+        self.assertEqual(
+            state_volume_progress_operation_key(self.store, self.scope, self.intent["plan_id"]),
+            self.reservation.idempotency_key,
+        )
+        self.assertEqual(
+            read_state_volume_progress(self.store, self.scope, self.intent["plan_id"]),
+            self.reservation.provider_effect_phase,
+        )
 
     def test_other_route_or_target_cannot_use_retention(self) -> None:
         for changes in (

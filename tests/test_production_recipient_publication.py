@@ -199,6 +199,54 @@ class RecipientPublicationTests(unittest.TestCase):
             self.inventory,
         )
 
+    def test_nested_guarded_publication_does_not_reenter_heartbeat_reader_under_row_lock(
+        self,
+    ) -> None:
+        from control_plane import production_recipient_publication as publication_module
+
+        reservation = self.store.reserve_mutation(
+            scope="fixture",
+            route_path="/publication",
+            idempotency_key="nested-publication",
+            request_fingerprint="b" * 64,
+            lease_owner="publication-worker",
+            reconciliation_key="publication-effect",
+        ).record
+        assert reservation is not None
+        locked = False
+        original = publication_module.require_publication_lease
+
+        def require_lease(*args: Any, **kwargs: Any) -> None:
+            nonlocal locked
+            original(*args, **kwargs)
+            locked = True
+
+        def reader() -> Any:
+            if locked:
+                raise RuntimeError("Fixture: heartbeat mutex is waiting on the publication row")
+            return reservation
+
+        with (
+            self.store.provider_evidence_guard(reader),
+            patch.object(
+                publication_module, "require_publication_lease", side_effect=require_lease
+            ),
+        ):
+            published = commit_publication(
+                self.store,
+                self.record,
+                self.publication,
+                validate_release=lambda: None,
+                reservation=reservation,
+            )
+        self.assertTrue(published.publication)
+        self.assertEqual(
+            self.store.read_dokploy_target_id_record(
+                context_name=self.record.context, instance_name="prod"
+            ).target_id,
+            self.record.target_id,
+        )
+
     def test_atomic_publication_and_scoped_inverse_retain_history_and_unrelated_rows(self) -> None:
         published = self.publish()
         self.assertEqual(

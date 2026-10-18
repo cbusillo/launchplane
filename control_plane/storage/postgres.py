@@ -5833,62 +5833,67 @@ class PostgresRecordStore(HumanSessionStore):
             if reservation_reader is not None and isinstance(
                 row, LaunchplaneDeploymentRow | LaunchplanePromotionRow | LaunchplaneInventoryRow
             ):
-                expected = reservation_reader()
                 if not authority_row:
                     self._begin_serialized_write(session)
-                held_row = session.scalar(
-                    self._idempotency_statement(
-                        scope=expected.scope,
-                        route_path=expected.route_path,
-                        idempotency_key=expected.idempotency_key,
-                        for_update=True,
-                    )
-                )
-                current = (
-                    self._read_payload(
-                        model_type=LaunchplaneIdempotencyRecord, payload=held_row.payload
-                    )
-                    if held_row is not None
-                    else None
-                )
-                if (
-                    current is None
-                    or current.state != "running"
-                    or any(
-                        getattr(current, name) != getattr(expected, name)
-                        for name in (
-                            "record_id",
-                            "scope",
-                            "route_path",
-                            "idempotency_key",
-                            "request_fingerprint",
-                            "lease_owner",
-                            "attempt",
-                            "provider_target_key",
-                            "reconciliation_key",
-                        )
-                    )
-                    or parse_launchplane_mutation_timestamp(
-                        current.lease_expires_at, field_name="lease_expires_at"
-                    )
-                    <= parse_launchplane_mutation_timestamp(
-                        self._database_mutation_timestamp(session), field_name="observed_at"
-                    )
-                ):
-                    raise ValueError("Provider operation no longer owns this evidence write.")
+                self._require_current_provider_evidence(session, reservation_reader())
             if isinstance(row, LaunchplaneOdooInstanceOverrideRow):
                 self._merge_odoo_override_row(session, row)
             else:
                 session.merge(row)
             session.commit()
 
+    def _require_current_provider_evidence(
+        self, session: Any, expected: LaunchplaneIdempotencyRecord
+    ) -> None:
+        held_row = session.scalar(
+            self._idempotency_statement(
+                scope=expected.scope,
+                route_path=expected.route_path,
+                idempotency_key=expected.idempotency_key,
+                for_update=True,
+            )
+        )
+        current = (
+            self._read_payload(model_type=LaunchplaneIdempotencyRecord, payload=held_row.payload)
+            if held_row is not None
+            else None
+        )
+        if (
+            current is None
+            or current.state != "running"
+            or any(
+                getattr(current, name) != getattr(expected, name)
+                for name in (
+                    "record_id",
+                    "scope",
+                    "route_path",
+                    "idempotency_key",
+                    "request_fingerprint",
+                    "lease_owner",
+                    "attempt",
+                    "provider_target_key",
+                    "reconciliation_key",
+                )
+            )
+            or parse_launchplane_mutation_timestamp(
+                current.lease_expires_at, field_name="lease_expires_at"
+            )
+            <= parse_launchplane_mutation_timestamp(
+                self._database_mutation_timestamp(session), field_name="observed_at"
+            )
+        ):
+            raise ValueError("Provider operation no longer owns this evidence write.")
+
     @contextmanager
     def provider_evidence_guard(
         self, reservation_reader: Callable[[], LaunchplaneIdempotencyRecord]
     ) -> Iterator[None]:
-        """Fence this thread's promotion evidence writes against its exact live lease."""
+        """Fence evidence and authority writes to one captured execution identity."""
         previous = getattr(self._provider_evidence_context, "reservation_reader", None)
-        self._provider_evidence_context.reservation_reader = reservation_reader
+        # Capture stable lease identity before any row lock. Nested publication
+        # can already own that row while the heartbeat waits on it under its mutex.
+        expected = reservation_reader().model_copy()
+        self._provider_evidence_context.reservation_reader = lambda: expected
         try:
             yield
         finally:
@@ -6293,6 +6298,11 @@ class PostgresRecordStore(HumanSessionStore):
             if not write_transaction_started:
                 self._begin_serialized_write(session)
             self._lock_product_authority_bundle_write(session)
+            reservation_reader = getattr(
+                self._provider_evidence_context, "reservation_reader", None
+            )
+            if reservation_reader is not None:
+                self._require_current_provider_evidence(session, reservation_reader())
             adoption_checkpoint = getattr(
                 self._disposable_authority_context, "adoption_checkpoint", None
             )

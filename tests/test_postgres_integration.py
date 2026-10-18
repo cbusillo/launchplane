@@ -1769,6 +1769,177 @@ class RealPostgresNoTargetRetirementTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RealPostgresSchemaIntegrationTests(unittest.TestCase):
+    def test_state_volume_retention_and_guarded_adoption_serialize_in_both_orders(self) -> None:
+        from control_plane.application_state_volume_retention import state_volume_plan_is_retained
+        from control_plane.storage.product_authority_bundle import (
+            ProductAuthorityBundle,
+            ProviderTargetWrite,
+        )
+        from tests.test_application_state_volume_retention import (
+            ApplicationStateVolumeRetentionTests,
+        )
+
+        for retention_wins in (True, False):
+            with (
+                self.subTest(retention_wins=retention_wins),
+                _head_postgres_database() as database_url,
+            ):
+
+                class RetentionFixture(ApplicationStateVolumeRetentionTests):
+                    def database_url(self) -> str:
+                        return database_url
+
+                fixture = RetentionFixture()
+                try:
+                    fixture.setUp()
+                    known_application_id = "allocation-app"
+                    checkpointed = fixture.store.checkpoint_mutation_provider_effect(
+                        reservation=fixture.reservation,
+                        effect_phase=json.dumps({"application": known_application_id}),
+                    ).record
+                    assert checkpointed is not None
+                    fixture.reservation = checkpointed
+                    fixture.save_progress()
+                    from control_plane.application_state_volume_retention import (
+                        state_volume_custody_sha256,
+                    )
+
+                    fixture.digest = state_volume_custody_sha256(fixture.store, fixture.reservation)
+                    adoption_store = PostgresRecordStore(database_url=database_url)
+                    fixture.addCleanup(adoption_store.close)
+                    target = DokployTargetRecord(
+                        context=fixture.intent["request"]["context"],
+                        instance="testing",
+                        target_type="application",
+                        target_name=fixture.intent["target_marker"],
+                        source_type="raw",
+                        updated_at=fixture.reservation.updated_at,
+                        source_label="test:state-volume-adoption",
+                    )
+                    target_id = DokployTargetIdRecord(
+                        context=target.context,
+                        instance=target.instance,
+                        target_id=known_application_id,
+                        updated_at=target.updated_at,
+                        source_label=target.source_label,
+                    )
+                    bundle = ProductAuthorityBundle(
+                        dokploy_targets=(target,),
+                        dokploy_target_ids=(target_id,),
+                        provider_target_writes=(
+                            ProviderTargetWrite(
+                                record=ProviderTargetRecord.from_dokploy_records(
+                                    target_record=target, target_id_record=target_id
+                                ),
+                                expected_absent=True,
+                            ),
+                        ),
+                    )
+                    winner_locked = threading.Event()
+                    loser_attempted = threading.Event()
+                    release_winner = threading.Event()
+                    retention_lock = fixture.store._lock_product_authority_bundle_write
+                    adoption_lock = adoption_store._lock_product_authority_bundle_write
+
+                    def hold_winner() -> None:
+                        winner_locked.set()
+                        if not release_winner.wait(timeout=10):
+                            raise TimeoutError("Timed out releasing state-volume authority writer.")
+
+                    def retention_authority_lock(session: Any) -> None:
+                        if not retention_wins:
+                            loser_attempted.set()
+                        retention_lock(session)
+                        if retention_wins:
+                            hold_winner()
+
+                    def adoption_authority_lock(session: Any) -> None:
+                        if retention_wins:
+                            loser_attempted.set()
+                        adoption_lock(session)
+                        if not retention_wins:
+                            hold_winner()
+
+                    def require_original_allocation_unbound() -> None:
+                        try:
+                            current = fixture.store.read_provider_target_record(
+                                context_name=target.context, instance_name=target.instance
+                            )
+                        except FileNotFoundError:
+                            return
+                        if current.target_id == known_application_id:
+                            raise ValueError("Original allocation is already the tracked target.")
+
+                    def retain() -> bool:
+                        with fixture.expired():
+                            try:
+                                fixture.retain(checkpoint=require_original_allocation_unbound)
+                            except ValueError:
+                                return False
+                        return True
+
+                    def adopt() -> bool:
+                        try:
+                            with adoption_store.provider_evidence_guard(
+                                lambda: fixture.reservation
+                            ):
+                                adoption_store.write_product_authority_bundle(bundle)
+                        except ValueError:
+                            return False
+                        return True
+
+                    with (
+                        patch.object(
+                            fixture.store,
+                            "_lock_product_authority_bundle_write",
+                            side_effect=retention_authority_lock,
+                        ),
+                        patch.object(
+                            adoption_store,
+                            "_lock_product_authority_bundle_write",
+                            side_effect=adoption_authority_lock,
+                        ),
+                        ThreadPoolExecutor(max_workers=2) as executor,
+                    ):
+                        winner = executor.submit(retain if retention_wins else adopt)
+                        try:
+                            self.assertTrue(winner_locked.wait(timeout=10))
+                            loser = executor.submit(adopt if retention_wins else retain)
+                            self.assertTrue(loser_attempted.wait(timeout=10))
+                        finally:
+                            release_winner.set()
+                        self.assertTrue(winner.result(timeout=10))
+                        self.assertFalse(loser.result(timeout=10))
+                    if retention_wins:
+                        self.assertEqual(fixture.read().state, "completed")
+                        self.assertTrue(
+                            state_volume_plan_is_retained(
+                                fixture.store, fixture.scope, fixture.intent["plan_id"]
+                            )
+                        )
+                        for read in (
+                            fixture.store.read_dokploy_target_record,
+                            fixture.store.read_dokploy_target_id_record,
+                            fixture.store.read_provider_target_record,
+                        ):
+                            with self.assertRaises(FileNotFoundError):
+                                read(context_name=target.context, instance_name=target.instance)
+                    else:
+                        self.assertEqual(fixture.read(), fixture.reservation)
+                        self.assertFalse(
+                            state_volume_plan_is_retained(
+                                fixture.store, fixture.scope, fixture.intent["plan_id"]
+                            )
+                        )
+                        self.assertEqual(
+                            fixture.store.read_dokploy_target_id_record(
+                                context_name=target.context, instance_name=target.instance
+                            ).target_id,
+                            target_id.target_id,
+                        )
+                finally:
+                    fixture.doCleanups()
+
     def test_notification_policy_id_cannot_be_claimed_by_two_scopes(self) -> None:
         from control_plane.contracts.public_ingress_monitoring import (
             NotificationPolicyScopeConflict,

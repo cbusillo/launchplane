@@ -189,13 +189,18 @@ Repeating **apply with the original key** can recover a lost project, environmen
 or application response from exactly one original generated marker in complete
 provider inventory. It resumes only the next undispatched step under a renewed
 lease and the lane lock. A lost mount response resumes only when independent
-readback proves the exact mount exists. Separate lease-fenced progress survives
-runner retries and process restarts. Duplicate markers, incomplete inventory,
+readback proves the exact mount exists. Separate lease-fenced progress is bound to the original operation key and
+survives runner retries and process restarts. A completed plan refuses use under
+a new key before effects or a held reservation can remain. Final target adoption
+checks and locks the same live reservation inside its record transaction, so
+retained or expired workers cannot publish a lane target. Duplicate markers, incomplete inventory,
 changed identities and an absent uncertain mount preserve the unresolved operation.
 An empty inventory does not prove a dispatched provider create cannot finish later.
-A different key or plan cannot bypass the held lane reservation. All testing
-setup mutations, including adoption and source completion, share the lane lock
-and refuse unresolved storage custody.
+A different key or plan cannot bypass the held lane reservation. All testing mutations through the service setup route, including adoption and
+source completion, share the lane lock and refuse unresolved storage custody.
+Direct-DB break-glass and separate recovery paths are outside this route; their
+authority changes make an in-flight creation plan stale, but do not prevent
+retaining its exact custody under current context ownership.
 
 For an uncertain allocation that cannot resume, keep its resources and explicitly
 retain its custody through the service. Obtain current original-key readback.
@@ -203,8 +208,16 @@ Send the unchanged reviewed setup request with `mode: apply`,
 `retain_state_volume_allocation: true`,
 `expected_state_volume_custody_sha256: <custody_sha256>`, the original key/plan,
 and the normal exact confirmation and reason. The service requires the original
-execution lease to have expired, unchanged authority and exact reviewed custody.
-It atomically fences the old worker and records `allocation_state: retained_uncertain`.
+execution lease to have expired, current active exclusive context ownership
+and exact reviewed custody. Retention performs no provider effect and does not
+require the original profile bytes or provider binding to remain unchanged.
+A display-name or policy update therefore cannot strand the old allocation.
+It atomically fences the old worker and records
+`allocation_state: retained_uncertain` and `applied: false`. Ordinary apply
+replay under the original key returns that same retained receipt, not a created
+target; callers must check `applied` and `allocation_state`. If the original
+allocation is already the tracked target, retention refuses; use original-key
+recovery to complete its receipt.
 This performs no provider mutation, deployment or deletion. Its original intent,
 known ids and pending phase remain retained even if a late create materializes.
 The retained allocation can never resume, including under another key. To keep

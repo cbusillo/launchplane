@@ -25,6 +25,7 @@ def read_state_volume_progress(store: PostgresRecordStore, scope: str, plan_id: 
 def _progress_phase(row: LaunchplaneIdempotencyRecord | None) -> str:
     if row is None:
         return ""
+    _progress_operation_key(row)
     phase = row.response_payload.get("phase")
     if (
         row.state != "completed"
@@ -36,6 +37,27 @@ def _progress_phase(row: LaunchplaneIdempotencyRecord | None) -> str:
     ):
         raise ValueError("Original allocation progress is unavailable.")
     return phase
+
+
+def _progress_operation_key(row: LaunchplaneIdempotencyRecord | None) -> str:
+    if row is None:
+        return ""
+    key = row.response_payload.get("operation_key")
+    if row.state != "completed" or not isinstance(key, str) or not key.strip():
+        raise ValueError("Original allocation operation key is unavailable.")
+    return key
+
+
+def state_volume_progress_operation_key(
+    store: PostgresRecordStore, scope: str, plan_id: str
+) -> str:
+    """Return the only operation key allowed to continue this allocation."""
+    from control_plane.application_state_volume import PLAN_ROUTE
+
+    row = store.read_idempotency_record(
+        scope=scope, route_path=PLAN_ROUTE + "/progress", idempotency_key=plan_id
+    )
+    return _progress_operation_key(row)
 
 
 def state_volume_plan_is_retained(store: PostgresRecordStore, scope: str, plan_id: str) -> bool:
@@ -138,6 +160,14 @@ def checkpoint_state_volume_progress(
         )
         if (
             progress_row is not None
+            and _progress_operation_key(
+                LaunchplaneIdempotencyRecord.model_validate(progress_row.payload)
+            )
+            != current.idempotency_key
+        ):
+            raise ValueError("Allocation progress belongs to its original operation key.")
+        if (
+            progress_row is not None
             and progress_row.payload.get("response_payload", {}).get("allocation_state")
             == "retained_uncertain"
         ):
@@ -151,7 +181,7 @@ def checkpoint_state_volume_progress(
             response_status_code=202,
             response_trace_id="application-state-progress",
             recorded_at=now,
-            response_payload={"phase": phase},
+            response_payload={"phase": phase, "operation_key": current.idempotency_key},
         )
         if progress_row is None:
             session.add(store._idempotency_row(progress))
@@ -202,6 +232,7 @@ def retain_state_volume_allocation(
     ):
         raise ValueError("Retention requires an original application state-volume allocation.")
     result: dict[str, object] = {
+        "applied": False,
         "allocation_state": "retained_uncertain",
         "original_key": reservation.idempotency_key,
         "plan_id": plan_id,
@@ -211,6 +242,7 @@ def retain_state_volume_allocation(
     }
     with store._session_factory() as session:
         store._begin_serialized_write(session)
+        store._lock_product_authority_bundle_write(session)
         row = session.scalar(
             store._idempotency_statement(
                 scope=reservation.scope,
@@ -242,11 +274,16 @@ def retain_state_volume_allocation(
                 for_update=True,
             )
         )
-        phase = _progress_phase(
+        progress_record = (
             LaunchplaneIdempotencyRecord.model_validate(progress_row.payload)
             if progress_row is not None
             else None
         )
+        if progress_record is not None and _progress_operation_key(progress_record) != (
+            reservation.idempotency_key
+        ):
+            raise ValueError("Allocation progress belongs to its original operation key.")
+        phase = _progress_phase(progress_record)
         supplied_digest = request_fingerprint(
             {"reservation": reservation.model_dump(mode="json"), "phase": phase}
         )
@@ -315,7 +352,11 @@ def retain_state_volume_allocation(
             response_status_code=202,
             response_trace_id=trace.strip(),
             recorded_at=now,
-            response_payload={"phase": phase, "allocation_state": "retained_uncertain"},
+            response_payload={
+                "phase": phase,
+                "operation_key": current.idempotency_key,
+                "allocation_state": "retained_uncertain",
+            },
         )
         if progress_row is None:
             session.add(store._idempotency_row(retained_progress))

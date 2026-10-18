@@ -324,6 +324,7 @@ class ApplicationStateVolumeTests(_DirectorTestingSetupFixture):
             )
             self.assertEqual(retained.status_code, 202, retained.text)
             self.assertEqual(retained.json()["result"]["allocation_state"], "retained_uncertain")
+            self.assertFalse(retained.json()["result"]["applied"])
             replay = await self.post(
                 retain_state_volume_allocation=True,
                 expected_state_volume_custody_sha256=readback["custody_sha256"],
@@ -331,6 +332,7 @@ class ApplicationStateVolumeTests(_DirectorTestingSetupFixture):
             self.assertEqual(replay.status_code, 202, replay.text)
             old_apply = await self.post()
             self.assertEqual(old_apply.json()["result"]["allocation_state"], "retained_uncertain")
+            self.assertFalse(old_apply.json()["result"]["applied"])
             self.assertEqual(self.provider.call_count, calls)
             forbidden = await self.post(idempotency_key="retained-plan-cannot-resume")
             self.assertEqual(forbidden.status_code, 409, forbidden.text)
@@ -496,6 +498,202 @@ class ApplicationStateVolumeTests(_DirectorTestingSetupFixture):
                 retry = await self.post()
             self.assertEqual(retry.status_code, 409, retry.text)
             self.assertEqual(self.provider.call_count, calls)
+
+    async def test_completed_plan_under_new_key_cannot_hold_the_lane(self) -> None:
+        await self.plan()
+        success = await self.post()
+        self.assertEqual(success.status_code, 202, success.text)
+        self.placement = {}  # Original application later disappears from inventory.
+        calls = self.provider.call_count
+        retry = await self.post(idempotency_key="regenerated-key")
+        self.assertEqual(retry.status_code, 409, retry.text)
+        self.assertEqual(self.store.list_held_provider_target_reservations(), ())
+        self.assertEqual(self.provider.call_count, calls)
+        replay = await self.post()
+        self.assertEqual(replay.status_code, 202, replay.text)
+
+    async def test_profile_metadata_change_does_not_prevent_exact_custody_retention(self) -> None:
+        from datetime import timedelta
+        from control_plane.contracts.idempotency_record import (
+            format_launchplane_mutation_timestamp,
+            parse_launchplane_mutation_timestamp,
+        )
+
+        await self.plan()
+        self.fail_before = PROJECT_CREATE_PATH
+        uncertain = await self.post()
+        self.assertEqual(uncertain.status_code, 409, uncertain.text)
+        updated = self.profile.model_copy(update={"display_name": "Renamed product"})
+        self.store.write_product_profile_record(updated)
+        readback = (await self.post(mode="readback")).json()["result"]
+        row = self.store.list_held_provider_target_reservations()[0]
+        now = format_launchplane_mutation_timestamp(
+            parse_launchplane_mutation_timestamp(
+                row.lease_expires_at, field_name="lease_expires_at"
+            )
+            + timedelta(seconds=1)
+        )
+        with patch.object(self.store, "_database_mutation_timestamp", return_value=now):
+            retained = await self.post(
+                retain_state_volume_allocation=True,
+                expected_state_volume_custody_sha256=readback["custody_sha256"],
+            )
+            self.assertEqual(retained.status_code, 202, retained.text)
+            self.assertFalse(retained.json()["result"]["applied"])
+            fresh = await self.post(
+                mode="dry-run", state_volume_plan_id="", expected_plan_sha256=""
+            )
+            self.assertEqual(fresh.status_code, 202, fresh.text)
+        self.assertEqual(self.store.list_held_provider_target_reservations(), ())
+        self.assertEqual(self.store.read_product_profile_record(self.profile.product), updated)
+
+    async def test_malformed_provider_success_is_unavailable_but_known_mount_difference_is_differs(
+        self,
+    ) -> None:
+        await self.plan()
+        success = await self.post()
+        self.assertEqual(success.status_code, 202, success.text)
+        calls = self.provider.call_count
+        for invalid in (
+            {},
+            {"raw": "private provider details"},
+            {"applicationId": "another-target"},
+        ):
+            with patch(
+                "control_plane.dokploy_target_setup_http.fetch_dokploy_target_payload_for_setup",
+                return_value=invalid,
+            ):
+                readback = await self.post(mode="readback")
+            self.assertEqual(readback.status_code, 202, readback.text)
+            self.assertEqual(readback.json()["result"]["configuration_evidence"], "unavailable")
+            self.assertFalse(readback.json()["result"]["configuration_matches"])
+            self.assertNotIn("private provider details", readback.text)
+        self.live["mounts"][0]["volumeName"] = "changed-volume"
+        changed = await self.post(mode="readback")
+        self.assertEqual(changed.json()["result"]["configuration_evidence"], "differs")
+        self.assertEqual(self.provider.call_count, calls)
+
+    async def test_retained_worker_cannot_publish_its_target(self) -> None:
+        from datetime import timedelta
+        from control_plane.application_state_volume_retention import (
+            retain_state_volume_allocation,
+            state_volume_custody_sha256,
+        )
+        from control_plane.contracts.idempotency_record import (
+            format_launchplane_mutation_timestamp,
+            parse_launchplane_mutation_timestamp,
+        )
+
+        await self.plan()
+        write = self.store.write_product_authority_bundle
+        retained = False
+
+        def retain_before_commit(bundle: Any) -> None:
+            nonlocal retained
+            if not retained:
+                retained = True
+                row = self.store.list_held_provider_target_reservations()[0]
+                now = format_launchplane_mutation_timestamp(
+                    parse_launchplane_mutation_timestamp(
+                        row.lease_expires_at, field_name="lease_expires_at"
+                    )
+                    + timedelta(seconds=1)
+                )
+                # Model failed outer executor exclusion: the final transaction
+                # must independently refuse a worker whose custody was retained.
+                with patch.object(self.store, "_database_mutation_timestamp", return_value=now):
+                    retain_state_volume_allocation(
+                        self.store,
+                        reservation=row,
+                        expected_custody_sha256=state_volume_custody_sha256(self.store, row),
+                        expected_original_intent=self.store.read_original_mutation_intent(row),
+                        trace="fixture-retention",
+                        checkpoint=lambda: None,
+                    )
+            write(bundle)
+
+        with patch.object(
+            self.store, "write_product_authority_bundle", side_effect=retain_before_commit
+        ):
+            await self.post()
+        self.assertTrue(retained)
+        with self.assertRaises(FileNotFoundError):
+            self.store.read_dokploy_target_id_record(
+                context_name=self.context, instance_name="testing"
+            )
+        self.assert_production_unchanged()
+
+    async def test_lease_expiry_at_record_commit_refuses_then_original_key_recovers(self) -> None:
+        from datetime import timedelta
+        from control_plane.contracts.idempotency_record import (
+            format_launchplane_mutation_timestamp,
+            parse_launchplane_mutation_timestamp,
+        )
+
+        await self.plan()
+        write = self.store.write_product_authority_bundle
+
+        def expire_before_commit(bundle: Any) -> None:
+            row = self.store.list_held_provider_target_reservations()[0]
+            now = format_launchplane_mutation_timestamp(
+                parse_launchplane_mutation_timestamp(
+                    row.lease_expires_at, field_name="lease_expires_at"
+                )
+                + timedelta(seconds=1)
+            )
+            with patch.object(self.store, "_database_mutation_timestamp", return_value=now):
+                write(bundle)
+
+        with patch.object(
+            self.store, "write_product_authority_bundle", side_effect=expire_before_commit
+        ):
+            expired = await self.post()
+        self.assertEqual(expired.status_code, 409, expired.text)
+        with self.assertRaises(FileNotFoundError):
+            self.store.read_dokploy_target_id_record(
+                context_name=self.context, instance_name="testing"
+            )
+        calls = self.provider.call_count
+        retry = await self.post()
+        self.assertEqual(retry.status_code, 202, retry.text)
+        self.assertEqual(self.provider.call_count, calls)
+
+    async def test_already_adopted_allocation_recovers_its_receipt_instead_of_retaining(
+        self,
+    ) -> None:
+        from datetime import timedelta
+        from control_plane.contracts.idempotency_record import (
+            format_launchplane_mutation_timestamp,
+            parse_launchplane_mutation_timestamp,
+        )
+
+        await self.plan()
+        with patch(
+            "control_plane.application_state_volume.ApplicationStateVolumeAdapter._verify_adopted",
+            side_effect=OSError("Fixture: interrupted after adoption"),
+        ):
+            uncertain = await self.post()
+        self.assertEqual(uncertain.status_code, 409, uncertain.text)
+        row = self.store.list_held_provider_target_reservations()[0]
+        readback = (await self.post(mode="readback")).json()["result"]
+        self.assertTrue(readback["configuration_matches"])
+        now = format_launchplane_mutation_timestamp(
+            parse_launchplane_mutation_timestamp(
+                row.lease_expires_at, field_name="lease_expires_at"
+            )
+            + timedelta(seconds=1)
+        )
+        with patch.object(self.store, "_database_mutation_timestamp", return_value=now):
+            retained = await self.post(
+                retain_state_volume_allocation=True,
+                expected_state_volume_custody_sha256=readback["custody_sha256"],
+            )
+        self.assertEqual(retained.status_code, 409, retained.text)
+        calls = self.provider.call_count
+        recovered = await self.post()
+        self.assertEqual(recovered.status_code, 202, recovered.text)
+        self.assertTrue(recovered.json()["result"]["applied"])
+        self.assertEqual(self.provider.call_count, calls)
 
     async def test_next_artifact_update_preserves_the_same_mount(self) -> None:
         from control_plane.workflows.dokploy_deploy import update_dokploy_target_artifact
