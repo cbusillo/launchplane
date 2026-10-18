@@ -167,7 +167,7 @@ def plan_testing_publication(
     selected_runtime = RuntimeEnvironmentSetExpectation(
         contexts=(candidate.context,),
         instances=((candidate.context, "testing"),),
-        include_global=True,
+        include_global=False,
         records=(),
     )
     selected_runtime = selected_runtime.model_copy(

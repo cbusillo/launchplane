@@ -768,7 +768,7 @@ The native publication stage stores the exact predecessor and prepared successor
 metadata before any traffic switch, using existing DB evidence storage. This is
 an internal worker capability, not a caller-supplied target or permission. The
 original provider reservation, current lease holder and expiry, exclusive product
-context, candidate custody, global/context/instance runtime inputs and generated
+context, candidate custody, delivered context/instance runtime inputs and generated
 credential metadata are checked within the authority transaction. An input change
 since private preparation refuses adoption. Password values are never added to
 the successor runtime record and no secret or version is rotated.

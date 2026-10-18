@@ -269,11 +269,23 @@ class TestingPublicationTests(unittest.TestCase):
             self.publish()
         self.assertEqual(self.current(), self.before)
 
-    def test_runtime_insert_refuses_before_any_adoption(self) -> None:
+    def test_undelivered_global_change_does_not_block_publication(self) -> None:
         self.prepare()
         self.store.write_runtime_environment_record(
             RuntimeEnvironmentRecord(
                 scope="global", env={"ODOO_WORKERS": "4"}, updated_at=self.now.isoformat()
+            )
+        )
+        self.assertEqual(self.publish().state, "applied")
+
+    def test_runtime_insert_refuses_before_any_adoption(self) -> None:
+        self.prepare()
+        self.store.write_runtime_environment_record(
+            RuntimeEnvironmentRecord(
+                scope="context",
+                context=self.candidate.context,
+                env={"ODOO_WORKERS": "4"},
+                updated_at=self.now.isoformat(),
             )
         )
         with self.assertRaises(ValueError):
@@ -283,7 +295,10 @@ class TestingPublicationTests(unittest.TestCase):
     def test_new_plan_cannot_bind_settings_that_changed_since_private_preparation(self) -> None:
         self.store.write_runtime_environment_record(
             RuntimeEnvironmentRecord(
-                scope="global", env={"ODOO_WORKERS": "4"}, updated_at=self.now.isoformat()
+                scope="context",
+                context=self.candidate.context,
+                env={"ODOO_WORKERS": "4"},
+                updated_at=self.now.isoformat(),
             )
         )
         self.plan = plan_testing_publication(

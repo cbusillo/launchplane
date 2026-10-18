@@ -178,7 +178,7 @@ class TestingPublicationPlan(FrozenRecord):
         ):
             raise ValueError("Serving restore generation must retain its exact copy witness.")
         if (
-            not self.runtime_read_set.include_global
+            self.runtime_read_set.include_global
             or self.runtime_read_set.contexts != (candidate.context,)
             or self.runtime_read_set.instances != ((candidate.context, "testing"),)
             or (
