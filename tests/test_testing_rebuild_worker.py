@@ -184,6 +184,11 @@ class NativeTestingWorkerTests(unittest.TestCase):
         )
         self.enterContext(
             patch.object(
+                DokployTestingRouteTransport, "settle_execution", side_effect=self.settle_execution
+            )
+        )
+        self.enterContext(
+            patch.object(
                 service,
                 "candidate_private_readiness",
                 side_effect=lambda **_: self.prepared.model_copy(
@@ -235,7 +240,18 @@ class NativeTestingWorkerTests(unittest.TestCase):
             "raw": deepcopy(self.raw),
             "owned_file": json.dumps(self.owned) if self.owned is not None else None,
             "old_endpoints": tuple(endpoints),
+            "execution_custody": {"mount_source": "/fixture/dynamic", "filesystem": "1:1"},
         }
+
+    def settle_execution(self, execution: Any, key: str, *, dispatch_guard: Any) -> str:
+        dispatch_guard(lambda: None)
+        if self.owned is not None:
+            backend = self.owned["http"]["services"][self.fixture.route.route_id]["loadBalancer"][
+                "servers"
+            ][0]["url"]
+            if backend == execution.backend:
+                return "applied"
+        return "unknown"
 
     def switch(
         self,
@@ -245,6 +261,8 @@ class NativeTestingWorkerTests(unittest.TestCase):
         expected_backend: str,
         dispatch_guard: Any,
         desired_runtime_identity: RuntimeIdentity | None = None,
+        execution: Any = None,
+        execution_key: str = "",
     ) -> None:
         def publish() -> None:
             if backend == plan.new_backend:
@@ -1335,6 +1353,8 @@ class NativeTestingWorkerTests(unittest.TestCase):
             expected_backend: str,
             dispatch_guard: Any,
             desired_runtime_identity: RuntimeIdentity | None = None,
+            execution: Any = None,
+            execution_key: str = "",
         ) -> None:
             def send() -> None:
                 pending.append(
@@ -1373,10 +1393,130 @@ class NativeTestingWorkerTests(unittest.TestCase):
             self.execute()
         self.assertEqual(self.effects, [])
         self.assertFalse(self.retained["stopped"])
+
         self.assertEqual(len(pending), 1)
         pending.pop()()
         self.fail_public = True
         self.assertEqual(self.execute().deploy_status, "fail")
+        self.assertEqual(self.effects, ["switch-new", "switch-old"])
+        self.assertEqual(self.current(), self.fixture.before)
+        self.assertFalse(self.retained["stopped"])
+
+    def test_sealed_non_applied_writer_finishes_without_candidate_readiness(self) -> None:
+        from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
+
+        def delayed(*args: Any, dispatch_guard: Any, **kwargs: Any) -> None:
+            def send() -> None:
+                raise NativeSourceUnavailable("fixture lost original writer response")
+
+            dispatch_guard(send)
+
+        with (
+            patch.object(DokployTestingRouteTransport, "publish", side_effect=delayed),
+            self.assertRaises(service.NativeTestingRebuildPending),
+        ):
+            self.execute()
+        with (
+            patch.object(DokployTestingRouteTransport, "settle_execution", return_value="excluded"),
+            patch.object(
+                DokployTestingRouteTransport,
+                "publish",
+                side_effect=AssertionError("A sealed original cannot dispatch again"),
+            ),
+            patch.object(
+                service.NativeTestingRebuildExecution,
+                "readiness",
+                side_effect=AssertionError("Exclusion is independent of candidate readiness"),
+            ),
+        ):
+            result = self.execute()
+        self.assertEqual(result.error_code, "candidate_route_not_applied")
+        self.assertEqual(self.current(), self.fixture.before)
+        self.assertEqual(self.effects, [])
+        self.assertFalse(self.retained["stopped"])
+
+    def test_legacy_writer_never_gets_a_guessed_execution_exclusion(self) -> None:
+        from control_plane.contracts.testing_rebuild import REBUILD_SCOPE, REBUILD_ROUTE
+        from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
+
+        def delayed(*args: Any, dispatch_guard: Any, **kwargs: Any) -> None:
+            def send() -> None:
+                raise NativeSourceUnavailable("fixture lost legacy writer response")
+
+            dispatch_guard(send)
+
+        with patch.object(DokployTestingRouteTransport, "publish", side_effect=delayed):
+            with self.assertRaises(service.NativeTestingRebuildPending):
+                self.execute()
+        phase = "route:" + self.fixture.candidate.namespace
+        prior = self.store.read_idempotency_record(
+            scope=REBUILD_SCOPE,
+            route_path=REBUILD_ROUTE + ":effect",
+            idempotency_key=self.operation.operation_id + ":" + phase,
+        )
+        assert prior is not None
+        legacy = prior.model_copy(update={"provider_effect_phase": phase})
+        self.store._write_row(self.store._idempotency_row(legacy))
+        read_intent = self.store.read_original_mutation_intent
+        with (
+            patch.object(
+                self.store,
+                "read_original_mutation_intent",
+                side_effect=lambda record: (
+                    {} if record.record_id == legacy.record_id else read_intent(record)
+                ),
+            ),
+            patch.object(
+                DokployTestingRouteTransport,
+                "settle_execution",
+                side_effect=AssertionError("Legacy custody is not guessed"),
+            ),
+            patch.object(
+                DokployTestingRouteTransport,
+                "publish",
+                side_effect=AssertionError("An unknown legacy dispatch is not repeated"),
+            ),
+            self.assertRaises(service.NativeTestingRebuildPending),
+        ):
+            self.execute()
+        self.assertEqual(self.effects, [])
+        self.assertEqual(self.current(), self.fixture.before)
+
+    def test_excluded_inverse_attempt_uses_a_new_key_after_proven_exclusion(self) -> None:
+        from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
+
+        self.fail_public = True
+        keys: list[str] = []
+
+        def interrupted(
+            plan: Any, backend: str, *, dispatch_guard: Any, execution_key: str, **kwargs: Any
+        ) -> None:
+            if backend == plan.old_backend:
+                keys.append(execution_key)
+                if len(keys) == 1:
+
+                    def send() -> None:
+                        raise NativeSourceUnavailable("fixture lost inverse response")
+
+                    dispatch_guard(send)
+            self.switch(
+                plan, backend, dispatch_guard=dispatch_guard, execution_key=execution_key, **kwargs
+            )
+
+        def settle(execution: Any, key: str, *, dispatch_guard: Any) -> str:
+            if execution.backend == self.fixture.route.old_backend:
+                self.assertEqual(key, keys[-1])
+                dispatch_guard(lambda: None)
+                return "excluded"
+            return self.settle_execution(execution, key, dispatch_guard=dispatch_guard)
+
+        with patch.object(DokployTestingRouteTransport, "publish", side_effect=interrupted):
+            with self.assertRaises(service.NativeTestingRebuildPending):
+                self.execute()
+            with patch.object(DokployTestingRouteTransport, "settle_execution", side_effect=settle):
+                self.assertEqual(self.execute().deploy_status, "fail")
+        self.assertEqual(len(keys), 2)
+        self.assertNotEqual(keys[0], keys[1])
         self.assertEqual(self.effects, ["switch-new", "switch-old"])
         self.assertEqual(self.current(), self.fixture.before)
         self.assertFalse(self.retained["stopped"])

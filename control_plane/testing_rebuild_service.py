@@ -65,6 +65,10 @@ from control_plane.dokploy.testing_route_transport import (
     DokployTestingRouteTransport,
     TestingRouteWriteNotStarted,
 )
+from control_plane.dokploy.testing_route_execution import (
+    ROUTE_RECEIPT_PHASE,
+    TestingRouteExecutionIntent,
+)
 from control_plane.lane_usage import evaluate_lane_usage
 from control_plane.odoo_testing_usage import read_odoo_testing_usage
 from control_plane.provider_operations import (
@@ -701,30 +705,19 @@ class NativeTestingRebuildExecution:
                 self.adapter.authorize("testing_rebuild_observe")
                 if existing_publication is None:
                     raise NativeTestingRebuildPending("The original route receipt is unavailable.")
-                frame = self.transport.read()
-                try:
-                    backend = observe_testing_route(
-                        existing_publication.plan.route,
-                        frame["raw"],
-                        json.loads(frame["owned_file"])
-                        if frame["owned_file"] is not None
-                        else None,
-                    )
-                except ValueError as error:
-                    raise NativeTestingRebuildPending(
-                        "Continue observing the original dispatched route."
-                    ) from error
-                if backend != historical.plan.new.private_url:
-                    raise NativeTestingRebuildPending(
-                        "The original route writer has not selected its successor."
-                    )
                 self.route = existing_publication.plan.route
-                self.switch(
-                    historical.plan,
-                    historical.plan.old,
-                    historical.plan.new,
-                    reconcile_only=True,
-                )
+                try:
+                    self.switch(
+                        historical.plan,
+                        historical.plan.old,
+                        historical.plan.new,
+                        reconcile_only=True,
+                    )
+                except TestingRebuildRouteFailure:
+                    if not self.route_exclusion(historical.plan):
+                        raise NativeTestingRebuildPending(
+                            "The original route writer is not proven excluded."
+                        ) from None
         if existing_publication is None:
             self.guard()
             if allocation is None:
@@ -997,18 +990,64 @@ class NativeTestingRebuildExecution:
         *,
         reconcile_only: bool,
     ) -> None:
-        self.run_effect(
-            "route:" + desired.copy_id,
-            lambda: self.route_backend() == desired.private_url,
-            lambda dispatch: self.transport.publish(
+        phase = "route:" + desired.copy_id
+        prior = self.store.read_idempotency_record(
+            scope=REBUILD_SCOPE,
+            route_path=REBUILD_ROUTE + ":effect",
+            idempotency_key=self.operation.operation_id + ":" + phase,
+        )
+        original = self.store.read_original_mutation_intent(prior) if prior is not None else {}
+        execution = (
+            TestingRouteExecutionIntent.model_validate(original["route_execution"])
+            if "route_execution" in original
+            else self.transport.execution_intent(
+                self.route, desired.private_url, operation_id=self.operation.operation_id
+            )
+            if prior is None
+            else None
+        )
+        if execution is not None and (
+            execution.operation_id,
+            execution.server_id,
+            execution.route_id,
+            execution.route_digest,
+            execution.backend,
+        ) != (
+            self.operation.operation_id,
+            self.intent.server_id,
+            self.route.route_id,
+            self.route.digest,
+            desired.private_url,
+        ):
+            raise ValueError("The original route execution intent changed.")
+
+        def perform(dispatch: Callable[[Callable[[], None]], None]) -> None:
+            if execution is None:
+                raise NativeTestingRebuildPending("A legacy route writer remains observation-only.")
+            current = self.store.read_idempotency_record(
+                scope=REBUILD_SCOPE,
+                route_path=REBUILD_ROUTE + ":effect",
+                idempotency_key=self.operation.operation_id + ":" + phase,
+            )
+            if current is None or current.state != "running":
+                raise NativeTestingRebuildPending("The original route execution lease changed.")
+            self.transport.publish(
                 self.route,
                 desired.private_url,
                 expected_backend=previous.private_url,
                 dispatch_guard=dispatch,
                 desired_runtime_identity=desired.runtime_identity,
-            ),
+                execution=execution,
+                execution_key=execution.key(attempt=current.attempt),
+            )
+
+        self.run_effect(
+            phase,
+            lambda: self.route_backend() == desired.private_url,
+            perform,
             reconcile_only=reconcile_only,
             recovery=desired == plan.old,
+            route_execution=execution,
         )
 
     def route_backend(self) -> str:
@@ -1207,6 +1246,7 @@ class NativeTestingRebuildExecution:
         reconcile_only: bool = False,
         exclude_undispatched: bool = False,
         recovery: bool = False,
+        route_execution: TestingRouteExecutionIntent | None = None,
     ) -> DurableProviderOperationResult:
         parent = self
         forward_route = phase == "route:" + self.plan.new.copy_id
@@ -1227,6 +1267,36 @@ class NativeTestingRebuildExecution:
             ) -> ProviderObservation:
                 if exclude_undispatched:
                     return ProviderObservation("unknown" if provider_effect_phase else "absent")
+                if (
+                    route_execution is not None
+                    and provider_effect_phase == ROUTE_RECEIPT_PHASE + phase
+                ):
+                    current = parent.store.read_idempotency_record(
+                        scope=REBUILD_SCOPE,
+                        route_path=REBUILD_ROUTE + ":effect",
+                        idempotency_key=parent.operation.operation_id + ":" + phase,
+                    )
+                    if current is None:
+                        return ProviderObservation("unknown")
+
+                    def settle(send: Callable[[], None]) -> None:
+                        parent.guard(recovery=True)
+                        parent.lease.checkpoint_effect("settle:" + phase)
+                        send()
+
+                    outcome = parent.transport.settle_execution(
+                        route_execution,
+                        route_execution.key(attempt=current.attempt),
+                        dispatch_guard=settle,
+                    )
+                    if outcome == "excluded":
+                        if forward_route:
+                            return ProviderObservation(
+                                "present", 200, {"route_write_not_started": True}
+                            )
+                        return ProviderObservation("absent", retry_safe=True)
+                    if outcome != "applied":
+                        return ProviderObservation("unknown")
                 if present():
                     return ProviderObservation("present", 200)
                 if inverse_route and provider_effect_phase == _ROUTE_WRITE_EXCLUDED_PHASE:
@@ -1251,7 +1321,9 @@ class NativeTestingRebuildExecution:
                     parent.guard(recovery=recovery)
                     lease.assert_current()
                     parent.lease.checkpoint_effect(phase)
-                    lease.checkpoint_effect(phase)
+                    lease.checkpoint_effect(
+                        ROUTE_RECEIPT_PHASE + phase if route_execution is not None else phase
+                    )
                     send()
 
                 try:
@@ -1289,15 +1361,16 @@ class NativeTestingRebuildExecution:
             lease_owner=self.lease.evidence_reservation().lease_owner,
             response_trace_id=self.operation.operation_id,
             adapter=Effect(),
+            original_intent={"route_execution": route_execution.model_dump(mode="json")}
+            if route_execution is not None
+            else None,
             # The child fence, including a missing reservation before any send,
             # proves whether this original effect may dispatch.
             allow_mutation=not (
                 reconcile_only
                 and prior is not None
                 and prior.provider_effect_started_at
-                and not (
-                    inverse_route and prior.provider_effect_phase == _ROUTE_WRITE_EXCLUDED_PHASE
-                )
+                and not inverse_route
             ),
         )
         if result.status not in {"completed", "adopted", "replayed"}:

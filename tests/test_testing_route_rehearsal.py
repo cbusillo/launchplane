@@ -23,6 +23,11 @@ from control_plane.dokploy.testing_route_transport import (
     ATOMIC_TESTING_ROUTE_WRITER,
     TRAEFIK_DYNAMIC_DIRECTORY,
 )
+from control_plane.dokploy.testing_route_execution import (
+    TestingRouteExecutionCustody,
+    TestingRouteExecutionIntent,
+)
+from control_plane.contracts.canonical_json import canonical_json_sha256
 
 
 def docker(*arguments: str, content: bytes | None = None) -> str:
@@ -131,6 +136,40 @@ class TestingRouteRehearsalTests(unittest.TestCase):
                     "--entrypoints.web.address=:80",
                 )
                 containers.append(proxy)
+                custody = TestingRouteExecutionCustody(
+                    mount_source=str(root),
+                    filesystem=docker(
+                        "exec", proxy, "stat", "-c", "%d:%i", TRAEFIK_DYNAMIC_DIRECTORY
+                    ),
+                )
+
+                def writer_arguments(
+                    backend: str, operation: str, expected: str, mode: str = "publish"
+                ) -> list[str]:
+                    execution = TestingRouteExecutionIntent(
+                        operation_id=operation,
+                        server_id=proxy,
+                        route_id=plan.route_id,
+                        route_digest=plan.digest,
+                        backend=backend,
+                        document_sha256=canonical_json_sha256(route_document(plan, backend)),
+                        custody=custody,
+                    )
+                    return [
+                        "sh",
+                        "-c",
+                        ATOMIC_TESTING_ROUTE_WRITER,
+                        "_",
+                        TRAEFIK_DYNAMIC_DIRECTORY,
+                        route_file.name,
+                        expected,
+                        execution.document_sha256,
+                        execution.key(attempt=1),
+                        custody.filesystem,
+                        canonical_json_sha256(custody.model_dump(mode="json")),
+                        mode,
+                    ]
+
                 initial = json.dumps(
                     route_document(plan, old_url), sort_keys=True, separators=(",", ":")
                 ).encode()
@@ -138,14 +177,7 @@ class TestingRouteRehearsalTests(unittest.TestCase):
                     "exec",
                     "-i",
                     proxy,
-                    "sh",
-                    "-c",
-                    ATOMIC_TESTING_ROUTE_WRITER,
-                    "_",
-                    TRAEFIK_DYNAMIC_DIRECTORY,
-                    route_file.name,
-                    "absent",
-                    hashlib.sha256(initial).hexdigest(),
+                    *writer_arguments(old_url, prefix + "-initial", "absent"),
                     content=initial,
                 )
                 docker("network", "connect", network, proxy)
@@ -189,24 +221,90 @@ class TestingRouteRehearsalTests(unittest.TestCase):
 
                 reader = threading.Thread(target=probe)
                 reader.start()
-                for backend in (old_url, new_url, old_url):
+                for index, backend in enumerate((old_url, new_url, old_url)):
                     desired = json.dumps(
                         route_document(plan, backend), sort_keys=True, separators=(",", ":")
                     ).encode()
-                    docker(
-                        "exec",
-                        "-i",
-                        proxy,
-                        "sh",
-                        "-c",
-                        ATOMIC_TESTING_ROUTE_WRITER,
-                        "_",
-                        TRAEFIK_DYNAMIC_DIRECTORY,
-                        route_file.name,
+                    arguments = writer_arguments(
+                        backend,
+                        prefix + "-" + str(index),
                         hashlib.sha256(route_file.read_bytes()).hexdigest(),
-                        hashlib.sha256(desired).hexdigest(),
-                        content=desired,
                     )
+                    if backend != new_url:
+                        docker("exec", "-i", proxy, *arguments, content=desired)
+                    else:
+                        # Disconnect the real Docker exec client while the
+                        # original managed writer can still rename its file.
+                        binary = root / ".writer-bin"
+                        binary.mkdir()
+                        entered, release = root / "entered", root / "release"
+                        gate = binary / "mv"
+                        gate.write_text(
+                            "#!/bin/sh\nfor destination do :; done\n"
+                            'if test "$destination" = "$ROUTE_FILE"; then\n'
+                            ' printf entered > "$GATE_ENTERED"\n'
+                            ' while test ! -e "$GATE_RELEASE"; do sleep .02; done\n'
+                            'fi\nexec /bin/mv "$@"\n'
+                        )
+                        gate.chmod(0o700)
+                        process = subprocess.Popen(
+                            [
+                                "docker",
+                                "exec",
+                                "-i",
+                                "-e",
+                                "PATH="
+                                + TRAEFIK_DYNAMIC_DIRECTORY
+                                + "/.writer-bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                                "-e",
+                                "ROUTE_FILE=" + TRAEFIK_DYNAMIC_DIRECTORY + "/" + route_file.name,
+                                "-e",
+                                "GATE_ENTERED=" + TRAEFIK_DYNAMIC_DIRECTORY + "/entered",
+                                "-e",
+                                "GATE_RELEASE=" + TRAEFIK_DYNAMIC_DIRECTORY + "/release",
+                                proxy,
+                                *arguments,
+                            ],
+                            stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                        )
+                        try:
+                            assert process.stdin is not None
+                            process.stdin.write(desired)
+                            process.stdin.close()
+                            process.stdin = None
+                            deadline = time.monotonic() + 10
+                            while not entered.exists():
+                                if process.poll() is not None or time.monotonic() >= deadline:
+                                    self.fail(
+                                        "The isolated Docker writer did not reach its rename gate"
+                                    )
+                                stop.wait(0.01)
+                            process.kill()
+                            process.communicate(timeout=5)
+                            self.assertEqual(
+                                docker("exec", "-i", proxy, *arguments[:-1], "settle", content=b""),
+                                "busy",
+                            )
+                            self.assertEqual(observed(), old_url)
+                            release.touch()
+                            deadline = time.monotonic() + 10
+                            while True:
+                                outcome = docker(
+                                    "exec", "-i", proxy, *arguments[:-1], "settle", content=b""
+                                )
+                                if outcome != "busy":
+                                    self.assertEqual(outcome, "applied")
+                                    break
+                                if time.monotonic() >= deadline:
+                                    self.fail("The original isolated writer did not finish")
+                                stop.wait(0.01)
+                        finally:
+                            release.touch()
+                            if process.poll() is None:
+                                process.kill()
+                            process.communicate(timeout=5)
                     wait_for(backend)
                     expected = "old" if backend == old_url else "new"
                     deadline = time.monotonic() + 5

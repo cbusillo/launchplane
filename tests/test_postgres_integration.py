@@ -13843,6 +13843,12 @@ class RealPostgresTestingRebuildResumeTests(unittest.TestCase):
 
 
 class RealPostgresNativeTestingWorkerTests(unittest.TestCase):
+    def test_sealed_non_applied_route_has_a_finite_result(self) -> None:
+        self.run_worker_case("test_sealed_non_applied_writer_finishes_without_candidate_readiness")
+
+    def test_inverse_retry_excludes_its_original_execution_key(self) -> None:
+        self.run_worker_case("test_excluded_inverse_attempt_uses_a_new_key_after_proven_exclusion")
+
     def test_profile_edit_during_cutover_preserves_original_publication(self) -> None:
         self.run_worker_case(
             "test_unrelated_profile_edit_after_cutover_does_not_strand_publication"

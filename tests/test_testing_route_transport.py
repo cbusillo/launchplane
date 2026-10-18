@@ -63,7 +63,12 @@ class TestingRouteTransportTests(unittest.TestCase):
                 "State": {"Status": "running"},
                 "Config": {"Labels": None},
                 "Mounts": [
-                    {"Destination": transport.TRAEFIK_DYNAMIC_DIRECTORY, "Type": "bind", "RW": True}
+                    {
+                        "Destination": transport.TRAEFIK_DYNAMIC_DIRECTORY,
+                        "Source": "/fixture/dynamic",
+                        "Type": "bind",
+                        "RW": True,
+                    }
                 ],
                 "NetworkSettings": {"Networks": {"dokploy-network": {"IPAddress": "172.20.0.2"}}},
             },
@@ -124,6 +129,13 @@ class TestingRouteTransportTests(unittest.TestCase):
         self.script(
             "sync", "import os,sys;fd=os.open(sys.argv[-1],os.O_RDONLY);os.fsync(fd);os.close(fd)"
         )
+        self.script(
+            "stat", "import os,sys;s=os.stat(sys.argv[-1]);print(str(s.st_dev)+':'+str(s.st_ino))"
+        )
+        self.script(
+            "flock",
+            "import fcntl,sys\ntry: fcntl.flock(int(sys.argv[-1]),fcntl.LOCK_EX|fcntl.LOCK_NB)\nexcept BlockingIOError: sys.exit(1)",
+        )
         self.effect_count = 0
         self.apply_immediately = True
         self.deny = False
@@ -132,6 +144,7 @@ class TestingRouteTransportTests(unittest.TestCase):
         )
         self.before_publish: Any = None
         self.writer_timeout = False
+        self.lose_writer_reply = False
         self.original_run = subprocess.run
         self.enterContext(patch.object(transport, "_read_remote", side_effect=self.remote))
         self.client = transport.DokployTestingRouteTransport(
@@ -171,10 +184,13 @@ class TestingRouteTransportTests(unittest.TestCase):
         elif command[1:4] == ["exec", "proxy", "cat"]:
             result = self.static.encode()
         elif command[1:3] == ["exec", "proxy"] and command[3:5] == ["sh", "-c"]:
-            actual = command[3:]
-            actual[-2] = str(self.root)
+            actual = [
+                str(self.root) if argument == transport.TRAEFIK_DYNAMIC_DIRECTORY else argument
+                for argument in command[3:]
+            ]
+            environment = {**os.environ, "PATH": str(self.bin) + os.pathsep + os.environ["PATH"]}
             return self.original_run(
-                actual, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False
+                actual, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, env=environment
             )
         elif command[1:4] == ["exec", "-i", "proxy"]:
             self.effect_count += 1
@@ -184,8 +200,10 @@ class TestingRouteTransportTests(unittest.TestCase):
                 return subprocess.CompletedProcess(
                     command, 1, stdout=b"", stderr=self.denial_message
                 )
-            actual = command[4:]
-            actual[-4] = str(self.root)
+            actual = [
+                str(self.root) if argument == transport.TRAEFIK_DYNAMIC_DIRECTORY else argument
+                for argument in command[4:]
+            ]
             environment = {**os.environ, "PATH": str(self.bin) + os.pathsep + os.environ["PATH"]}
             completed = self.original_run(
                 actual,
@@ -195,8 +213,10 @@ class TestingRouteTransportTests(unittest.TestCase):
                 check=False,
                 env=environment,
             )
-            if completed.returncode == 0 and self.apply_immediately:
+            if completed.returncode == 0 and self.apply_immediately and self.route_file.exists():
                 self.apply_document()
+            if self.lose_writer_reply:
+                raise subprocess.TimeoutExpired(command, 1)
             return completed
         else:
             self.fail("Unexpected managed-server command")
@@ -250,6 +270,9 @@ class TestingRouteTransportTests(unittest.TestCase):
             guard(dispatch)
 
     def publish(self, backend: str, expected: str) -> None:
+        execution = self.client.execution_intent(
+            self.plan, backend, operation_id="fixture:" + expected
+        )
         self.client.publish(
             self.plan,
             backend,
@@ -258,7 +281,77 @@ class TestingRouteTransportTests(unittest.TestCase):
             desired_runtime_identity=self.identity
             if backend == self.plan.old_backend
             else self.new_identity,
+            execution=execution,
+            execution_key=execution.key(attempt=1),
         )
+
+    def test_settlement_excludes_a_delayed_original_writer(self) -> None:
+        execution = self.client.execution_intent(
+            self.plan, self.plan.new_backend, operation_id="fixture-rebuild"
+        )
+        key = execution.key(attempt=1)
+        outcome = self.client.settle_execution(execution, key, dispatch_guard=self.guard)
+        self.assertEqual(outcome, "excluded")
+        with self.assertRaises(transport.TestingRouteWriteNotStarted):
+            self.client.publish(
+                self.plan,
+                self.plan.new_backend,
+                expected_backend=self.plan.old_backend,
+                desired_runtime_identity=self.new_identity,
+                dispatch_guard=self.guard,
+                execution=execution,
+                execution_key=key,
+            )
+        self.assertFalse(self.route_file.exists())
+        self.assertEqual(self.client.read()["raw"], self.raw)
+
+    def test_lost_finished_reply_has_a_durable_original_outcome(self) -> None:
+        execution = self.client.execution_intent(
+            self.plan, self.plan.new_backend, operation_id="fixture-rebuild"
+        )
+        key = execution.key(attempt=1)
+        self.lose_writer_reply = True
+        with self.assertRaises(NativeSourceUnavailable):
+            self.client.publish(
+                self.plan,
+                self.plan.new_backend,
+                expected_backend=self.plan.old_backend,
+                desired_runtime_identity=self.new_identity,
+                dispatch_guard=self.guard,
+                execution=execution,
+                execution_key=key,
+            )
+        self.lose_writer_reply = False
+        before = self.route_file.read_bytes()
+        self.assertEqual(
+            self.client.settle_execution(execution, key, dispatch_guard=self.guard), "applied"
+        )
+        self.assertEqual(self.route_file.read_bytes(), before)
+
+    def test_changed_mount_cannot_seal_the_original_writer(self) -> None:
+        execution = self.client.execution_intent(
+            self.plan, self.plan.new_backend, operation_id="fixture"
+        )
+        self.containers["proxy"]["Mounts"][0]["Source"] = "/fixture/another-mount"
+        with self.assertRaises(NativeSourceUnavailable) as caught:
+            self.client.settle_execution(
+                execution, execution.key(attempt=1), dispatch_guard=self.guard
+            )
+        self.assertNotIsInstance(caught.exception, transport.TestingRouteWriteNotStarted)
+        self.assertEqual(self.effect_count, 0)
+        self.assertFalse(self.route_file.exists())
+
+    def test_settlement_denial_is_not_exclusion_or_an_alternate_writer(self) -> None:
+        execution = self.client.execution_intent(
+            self.plan, self.plan.new_backend, operation_id="fixture"
+        )
+        self.deny = True
+        with self.assertRaises(NativeSourceAuthorizationDenied):
+            self.client.settle_execution(
+                execution, execution.key(attempt=1), dispatch_guard=self.guard
+            )
+        self.assertEqual(self.effect_count, 1)
+        self.assertFalse(self.route_file.exists())
 
     def test_initial_read_discovers_actual_host_entrypoints_without_assuming_names(self) -> None:
         self.client.payload["entrypoints"] = ()
@@ -399,6 +492,9 @@ class TestingRouteTransportTests(unittest.TestCase):
         self.assertEqual(self.effect_count, 0)
 
     def test_runtime_lane_must_match_before_provider_reads(self) -> None:
+        execution = self.client.execution_intent(
+            self.plan, self.plan.new_backend, operation_id="fixture"
+        )
         with (
             patch.object(self.client, "read", side_effect=AssertionError("Provider read started")),
             self.assertRaises(ValueError),
@@ -409,6 +505,8 @@ class TestingRouteTransportTests(unittest.TestCase):
                 expected_backend=self.plan.old_backend,
                 dispatch_guard=self.guard,
                 desired_runtime_identity=self.new_identity.model_copy(update={"context": "other"}),
+                execution=execution,
+                execution_key=execution.key(attempt=1),
             )
         self.assertEqual(self.effect_count, 0)
 
@@ -474,6 +572,9 @@ class TestingRouteTransportTests(unittest.TestCase):
 
     def test_cross_lane_plan_refuses_before_provider_reads(self) -> None:
         different = self.plan.model_copy(update={"host": "other.invalid"})
+        execution = self.client.execution_intent(
+            self.plan, self.plan.old_backend, operation_id="fixture"
+        )
         with patch.object(self.client, "read") as read, self.assertRaises(ValueError):
             self.client.publish(
                 different,
@@ -481,6 +582,8 @@ class TestingRouteTransportTests(unittest.TestCase):
                 expected_backend=different.old_backend,
                 dispatch_guard=self.guard,
                 desired_runtime_identity=self.identity,
+                execution=execution,
+                execution_key=execution.key(attempt=1),
             )
         read.assert_not_called()
         self.assertEqual(self.effect_count, 0)
