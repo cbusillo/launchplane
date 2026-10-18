@@ -178,7 +178,7 @@ def main(spec):
         if container_name and container_name not in aliases:
             aliases.append(container_name)
         for alias in aliases:
-            if alias.startswith('lp-testing-') or alias.startswith(old_project+'-'):
+            if alias==container_name or alias.startswith('lp-testing-') or alias.startswith(old_project+'-'):
                 if any(item['Id']!=old[0]['Id'] and alias in (item.get('NetworkSettings',{}).get('Networks',{}).get('dokploy-network',{}).get('Aliases') or []) for item in containers):
                     raise RuntimeError('Retained testing alias is shared')
                 endpoints.append('http://'+alias+':'+port)
