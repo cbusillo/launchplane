@@ -237,7 +237,13 @@ class NativeTestingWorkerTests(unittest.TestCase):
         }
 
     def switch(
-        self, plan: Any, backend: str, *, expected_backend: str, dispatch_guard: Any
+        self,
+        plan: Any,
+        backend: str,
+        *,
+        expected_backend: str,
+        dispatch_guard: Any,
+        desired_runtime_identity: RuntimeIdentity | None = None,
     ) -> None:
         def publish() -> None:
             if backend == plan.new_backend:
@@ -1007,6 +1013,95 @@ class NativeTestingWorkerTests(unittest.TestCase):
             self.assertEqual(self.execute().deploy_status, "fail")
         self.assertEqual(self.effects, [])
 
+    def test_route_writer_excluded_before_dispatch_fails_with_old_copy_serving(self) -> None:
+        from control_plane.dokploy.testing_route_transport import TestingRouteWriteNotStarted
+
+        def excluded(*args: Any, dispatch_guard: Any, **kwargs: Any) -> None:
+            def send() -> None:
+                raise TestingRouteWriteNotStarted("fixture route precondition failed")
+
+            dispatch_guard(send)
+
+        with patch.object(DokployTestingRouteTransport, "publish", side_effect=excluded) as writer:
+            result = self.execute()
+            self.assertEqual(result.error_code, "candidate_route_not_applied")
+            self.assertEqual(self.execute(), result)
+            self.assertEqual(writer.call_count, 1)
+        self.assertEqual(self.effects, [])
+        self.assertEqual(self.current(), self.fixture.before)
+        self.assertFalse(self.retained["stopped"])
+
+    def test_completed_route_exclusion_resumes_without_private_readiness(self) -> None:
+        from control_plane.dokploy.testing_route_transport import TestingRouteWriteNotStarted
+        from control_plane.testing_rebuild_storage import RecordTestingRebuildStore
+
+        save = RecordTestingRebuildStore.save
+
+        def interrupted(store: Any, record: Any) -> None:
+            if record.step == "failed":
+                raise TimeoutError("fixture ended after original writer exclusion")
+            save(store, record)
+
+        def excluded(*args: Any, dispatch_guard: Any, **kwargs: Any) -> None:
+            def send() -> None:
+                raise TestingRouteWriteNotStarted("fixture route precondition failed")
+
+            dispatch_guard(send)
+
+        with (
+            patch.object(DokployTestingRouteTransport, "publish", side_effect=excluded),
+            patch.object(RecordTestingRebuildStore, "save", interrupted),
+            self.assertRaises(TimeoutError),
+        ):
+            self.execute()
+        with (
+            patch.object(
+                service.NativeTestingRebuildExecution,
+                "readiness",
+                side_effect=AssertionError(
+                    "A completed route exclusion does not depend on candidate health"
+                ),
+            ),
+            patch.object(
+                DokployTestingRouteTransport,
+                "publish",
+                side_effect=AssertionError(
+                    "A completed route exclusion never starts another forward writer"
+                ),
+            ),
+        ):
+            self.assertEqual(self.execute().error_code, "candidate_route_not_applied")
+        self.assertEqual(self.effects, [])
+        self.assertEqual(self.current(), self.fixture.before)
+
+    def test_inverse_prewrite_failure_retries_only_its_original_excluded_writer(self) -> None:
+        from control_plane.dokploy.testing_route_transport import TestingRouteWriteNotStarted
+
+        self.fail_public = True
+        inverse_attempts = 0
+
+        def publish(plan: Any, backend: str, *, dispatch_guard: Any, **kwargs: Any) -> None:
+            nonlocal inverse_attempts
+            if backend == plan.old_backend:
+                inverse_attempts += 1
+                if inverse_attempts == 1:
+
+                    def send() -> None:
+                        raise TestingRouteWriteNotStarted("fixture old alias unavailable")
+
+                    dispatch_guard(send)
+            self.switch(plan, backend, dispatch_guard=dispatch_guard, **kwargs)
+
+        with patch.object(DokployTestingRouteTransport, "publish", side_effect=publish):
+            with self.assertRaises(service.NativeTestingRebuildPending):
+                self.execute()
+            self.assertEqual(self.effects, ["switch-new"])
+            self.assertEqual(self.execute().deploy_status, "fail")
+        self.assertEqual(inverse_attempts, 2)
+        self.assertEqual(self.effects, ["switch-new", "switch-old"])
+        self.assertEqual(self.current(), self.fixture.before)
+        self.assertFalse(self.retained["stopped"])
+
     def test_late_route_writer_cannot_be_overridden_while_its_original_outcome_is_unknown(
         self,
     ) -> None:
@@ -1014,7 +1109,14 @@ class NativeTestingWorkerTests(unittest.TestCase):
 
         pending: list[Any] = []
 
-        def delayed(plan: Any, backend: str, *, expected_backend: str, dispatch_guard: Any) -> None:
+        def delayed(
+            plan: Any,
+            backend: str,
+            *,
+            expected_backend: str,
+            dispatch_guard: Any,
+            desired_runtime_identity: RuntimeIdentity | None = None,
+        ) -> None:
             def send() -> None:
                 pending.append(
                     lambda: self.switch(
@@ -1022,6 +1124,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
                         backend,
                         expected_backend=expected_backend,
                         dispatch_guard=lambda write: write(),
+                        desired_runtime_identity=desired_runtime_identity,
                     )
                 )
                 raise NativeSourceUnavailable("fixture proxy writer has not returned")

@@ -137,7 +137,12 @@ class TestingRebuildRecord(FrozenRecord):
     publication_started: bool = False
     rollback_started: bool = False
     retirement_recovery: TestingCopyReadiness | None = None
-    error: Literal["", "candidate_public_health_failed", "candidate_preparation_failed"] = ""
+    error: Literal[
+        "",
+        "candidate_public_health_failed",
+        "candidate_preparation_failed",
+        "candidate_route_not_applied",
+    ] = ""
     preparation_failure_evidence: str = Field(default="", exclude_if=lambda value: not value)
 
     @model_validator(mode="after")

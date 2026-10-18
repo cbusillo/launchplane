@@ -56,7 +56,10 @@ from control_plane.dokploy.testing_route import (
     observe_testing_route,
     testing_route_id,
 )
-from control_plane.dokploy.testing_route_transport import DokployTestingRouteTransport
+from control_plane.dokploy.testing_route_transport import (
+    DokployTestingRouteTransport,
+    TestingRouteWriteNotStarted,
+)
 from control_plane.lane_usage import evaluate_lane_usage
 from control_plane.odoo_testing_usage import read_odoo_testing_usage
 from control_plane.provider_operations import (
@@ -101,12 +104,16 @@ from control_plane.workflows.generic_web_deploy_provider import generic_web_prov
 from control_plane.workflows.testing_rebuild import (
     TestingRebuildPreparationFailure,
     TestingRebuildObservationUnavailable,
+    TestingRebuildRouteFailure,
     execute_testing_rebuild,
 )
 
 
 class NativeTestingRebuildPending(ValueError):
     """The original effects need another observation, never an alternate dispatch."""
+
+
+_ROUTE_WRITE_EXCLUDED_PHASE = "route_write_not_started"
 
 
 class NativeTestingRebuildIntent(FrozenRecord):
@@ -371,6 +378,22 @@ class NativeTestingRebuildExecution:
         )
         return original is not None and bool(original.provider_effect_started_at)
 
+    def route_exclusion(self, plan: TestingRebuildPlan) -> bool:
+        phase = "route:" + plan.new.copy_id
+        original = self.store.read_idempotency_record(
+            scope=REBUILD_SCOPE,
+            route_path=REBUILD_ROUTE + ":effect",
+            idempotency_key=self.operation.operation_id + ":" + phase,
+        )
+        return (
+            original is not None
+            and original.state == "completed"
+            and original.response_payload.get("route_write_not_started") is True
+            and original.request_fingerprint
+            == canonical_json_sha256({"intent": self.intent.digest, "phase": phase})
+            and original.provider_target_key == self.adapter.target_key() + ":" + phase
+        )
+
     def guard(self, plan: TestingRebuildPlan | None = None, *, recovery: bool = False) -> None:
         self.check_lock()
         self.lease.assert_current()
@@ -595,7 +618,11 @@ class NativeTestingRebuildExecution:
                 + ":route:"
                 + historical.plan.new.copy_id,
             )
-            if dispatched is not None and dispatched.provider_effect_started_at:
+            if (
+                dispatched is not None
+                and dispatched.provider_effect_started_at
+                and not self.route_exclusion(historical.plan)
+            ):
                 # A failed candidate/guard must not end this operation while its
                 # original proxy writer could still move traffic later. Observe
                 # that dispatch before any preparation/readiness continuation.
@@ -852,6 +879,7 @@ class NativeTestingRebuildExecution:
                 desired.private_url,
                 expected_backend=previous.private_url,
                 dispatch_guard=dispatch,
+                desired_runtime_identity=desired.runtime_identity,
             ),
             reconcile_only=reconcile_only,
             recovery=desired == plan.old,
@@ -1002,6 +1030,8 @@ class NativeTestingRebuildExecution:
         recovery: bool = False,
     ) -> DurableProviderOperationResult:
         parent = self
+        forward_route = phase == "route:" + self.plan.new.copy_id
+        inverse_route = phase == "route:" + self.plan.old.copy_id
 
         class Effect:
             def target_key(self) -> str:
@@ -1020,6 +1050,8 @@ class NativeTestingRebuildExecution:
                     return ProviderObservation("unknown" if provider_effect_phase else "absent")
                 if present():
                     return ProviderObservation("present", 200)
+                if inverse_route and provider_effect_phase == _ROUTE_WRITE_EXCLUDED_PHASE:
+                    return ProviderObservation("absent", retry_safe=True)
                 return ProviderObservation("unknown" if provider_effect_phase else "absent")
 
             def apply(
@@ -1042,7 +1074,18 @@ class NativeTestingRebuildExecution:
                     lease.checkpoint_effect(phase)
                     send()
 
-                execute(dispatch)
+                try:
+                    execute(dispatch)
+                except TestingRouteWriteNotStarted:
+                    if forward_route:
+                        return ProviderMutationOutcome(
+                            200, {"route_write_not_started": True}, provider_effect_performed=False
+                        )
+                    if inverse_route:
+                        lease.checkpoint_effect(_ROUTE_WRITE_EXCLUDED_PHASE)
+                    raise NativeTestingRebuildPending(
+                        "The original route writer returned before writing."
+                    ) from None
                 if not present():
                     raise NativeTestingRebuildPending("The original effect has not converged.")
                 return ProviderMutationOutcome(200)
@@ -1069,11 +1112,18 @@ class NativeTestingRebuildExecution:
             # The child fence, including a missing reservation before any send,
             # proves whether this original effect may dispatch.
             allow_mutation=not (
-                reconcile_only and prior is not None and prior.provider_effect_started_at
+                reconcile_only
+                and prior is not None
+                and prior.provider_effect_started_at
+                and not (
+                    inverse_route and prior.provider_effect_phase == _ROUTE_WRITE_EXCLUDED_PHASE
+                )
             ),
         )
         if result.status not in {"completed", "adopted", "replayed"}:
             raise NativeTestingRebuildPending("The original rebuild effect requires observation.")
+        if forward_route and result.response_payload.get("route_write_not_started") is True:
+            raise TestingRebuildRouteFailure("The original forward route writer was excluded.")
         if not exclude_undispatched and (
             result.response_payload.get("not_dispatched") is True or not present()
         ):

@@ -895,6 +895,14 @@ Route writes and retirement have separate original-effect fences within the
 lane operation. A lost reply is observed before continuation; an old or absent
 outcome does not permit a blind duplicate. A crashed queue worker resumes
 observation with the same operation and keys. Explicit provider permission
+failures are distinct from a fixed program's `route_write_not_started` receipt.
+That receipt completes the original forward child fence without a route effect;
+after verifying the old route, the rebuild reports failure and retains its copy.
+An interrupted worker reads that receipt without rechecking candidate readiness
+or starting another forward writer. For an inverse, the receipt proves only that
+the same original writer may be retried under its existing lease and guards.
+A lost frame or any failure after invoking the atomic writer proves no such
+exclusion and remains observation-only. Explicit provider permission
 failures remain authorization failures and are not retried as pending work.
 If effects have already begun, a denial holds the operation in
 `reconciliation_required`, preserving its denial code and lane exclusion without

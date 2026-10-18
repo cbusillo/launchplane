@@ -49,6 +49,10 @@ class TestingRebuildProvider(Protocol):
         ...
 
     def readiness(self, plan: TestingRebuildPlan) -> TestingCopyReadiness: ...
+    def route_exclusion(self, plan: TestingRebuildPlan) -> bool:
+        """The original forward writer returned before any write and cannot run later."""
+        ...
+
     def switch(
         self,
         plan: TestingRebuildPlan,
@@ -128,6 +132,10 @@ class TestingRebuildPreparationFailure(ValueError):
 
 class TestingRebuildHealthFailure(ValueError):
     """A fresh, verified stable-address probe failed or served the wrong copy."""
+
+
+class TestingRebuildRouteFailure(ValueError):
+    """The original forward route effect is durably proven not to have written."""
 
 
 def _serving(
@@ -254,6 +262,14 @@ def execute_testing_rebuild(
             observation = provider.current_route(plan)
             if observation.slot_id == plan.old.copy_id:
                 _route(observation, plan, plan.old)
+                if record.step == "switching" and provider.route_exclusion(plan):
+                    save(
+                        step="failed",
+                        error="candidate_route_not_applied",
+                        route=observation,
+                        ended_at=clock(),
+                    )
+                    return record
                 readiness = provider.readiness(plan)
                 if (readiness.copy_id, readiness.host) != (plan.new.copy_id, plan.host):
                     raise ValueError("Readiness belongs to another copy or address.")
@@ -266,7 +282,23 @@ def execute_testing_rebuild(
                 resuming = record.step == "switching"
                 save(step="switching", readiness=readiness)
                 provider.guard(plan)
-                provider.switch(plan, plan.old, plan.new, reconcile_only=resuming)
+                try:
+                    provider.switch(plan, plan.old, plan.new, reconcile_only=resuming)
+                except TestingRebuildRouteFailure:
+                    if not provider.route_exclusion(plan):
+                        raise TestingRebuildObservationUnavailable(
+                            "The original route writer is not proven excluded."
+                        ) from None
+                    observation = provider.current_route(plan)
+                    _route(observation, plan, plan.old)
+                    provider.guard(plan, recovery=True)
+                    save(
+                        step="failed",
+                        error="candidate_route_not_applied",
+                        route=observation,
+                        ended_at=clock(),
+                    )
+                    return record
                 observation = provider.current_route(plan)
             elif record.step != "switching":
                 raise ValueError("Traffic moved before the persisted switch intent.")

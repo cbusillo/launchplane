@@ -98,6 +98,9 @@ class TestingProvider:
         if self.deny_retirement and self.published == plan.new:
             raise PermissionError("fixture authorization_denied")
 
+    def route_exclusion(self, plan: TestingRebuildPlan) -> bool:
+        return False
+
     def current_route(self, plan: TestingRebuildPlan) -> TestingRouteObservation:
         if self.serving == plan.new:
             self.new_public_probes += 1
