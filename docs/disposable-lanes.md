@@ -870,15 +870,34 @@ Every boundary rechecks current authorization, exclusive execution and
 provider leases, protected-copy reports, physical target aliases and resource
 isolation. Forward admission also checks staff holds, profile/serving authority
 and actual login/session use immediately before the route effect is checkpointed.
+Profile binding covers this lane's driver, address, port, health path, image
+repository and exclusive context. Unrelated product labels, timestamps or other
+lanes do not invalidate the admitted copy. Its original complete profile remains
+the immutable private-input provenance; publication compares the current runtime
+binding and uses the current locked profile for its authority transaction.
 That original cutover admission is not re-qualified against downtime after the
 rebuild itself restores health or changes the monitor identity. A new forward
 effect still respects a current hold or changed authority. Observation and an
 inverse of the original route can proceed while preserving those changed
-records; publication's compare/write refuses to overwrite them. Such a refusal
+records. DB-only publication records an already observed healthy cutover under a
+new staff hold, carrying that hold forward; retirement still refuses it. Serving
+comparison excludes only that current hold and its target observation timestamp.
+Other authority drift refuses publication. Such a refusal
 after effects began remains pending with its original intent and fences rather
 than becoming a terminal failure. Storage qualification
 runs before application execution. A resumed populated candidate uses its
 original custody and private proof instead of requiring empty storage again.
+The outer dispatch marker is written before an actual candidate or route/stop
+effect, rather than before initial read-only admission checks. A refused initial
+check with no effect can end without locking the lane indefinitely. Unexpected
+post-dispatch errors, including lost execution locks and malformed observations,
+remain pending on the original keys. Real authorization denials stay denied.
+
+Required recovery work remains in #4016 (explicit authorized resumption of the
+same denied operation) and #4017 (managed-host outcome evidence for an interrupted
+writer). The native source PR remains held from ready until these continuations
+are integrated and reviewed. Neither clearing a queue/browser record nor replaying
+an unknown writer is a supported substitute; #3963 is incomplete.
 Candidate reservations are rechecked before cutover, and unresolved predecessor
 deployments refuse further effects. Whole-project retirement requires only the
 owned Odoo services in that project, not an unrelated application sharing its
