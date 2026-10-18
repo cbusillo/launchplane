@@ -804,6 +804,49 @@ The parent integration still wires the controller/provider lifecycle, preserves
 the private backend alias during later ordinary deploys, and qualifies live CM.
 No production mutation or new authorization grant is part of this stage.
 
+## Native testing worker integration
+
+The existing durable target-replacement action accepts testing-only
+`replace-and-cutover` requests with an explicit `empty`, `production_restore`
+or `upstream_restore` source and an immutable artifact/source pair. The native
+worker joins candidate allocation, private application/copy preparation,
+stable-address routing, atomic publication and retained-copy retirement. It
+uses the same action authorization and queue; it adds no grant or alternate
+provider identity. The shared service record store is required.
+
+An original intent retains the serving metadata, observed runtime, actual
+private backend, server and container/data custody before candidate writes.
+Every boundary rechecks the current authorization, exclusive execution and
+provider leases, staff hold, actual login/session use, protected-copy reports,
+physical target aliases and resource/credential isolation. Storage qualification
+runs before application execution. A resumed populated candidate uses its
+original custody and private proof instead of requiring empty storage again.
+
+Route writes and retirement have separate original-effect fences within the
+lane operation. A lost reply is observed before continuation; an old or absent
+outcome does not permit a blind duplicate. A crashed queue worker resumes
+observation with the same operation and keys. Explicit provider permission
+failures remain authorization failures and are not retried as pending work.
+Only after fresh public health and identity at the unchanged address and atomic
+canonical publication does retirement disable the predecessor's automatic
+deploys and stop its recorded web process. Its database, volumes and custody
+remain. Other retained copies may share the lane's generated passwords only
+when the lane's publication chain and physical reservations prove their custody;
+shared storage is always refused.
+
+Ordinary deploys of a published native copy preserve its private backend alias,
+local database coordinates and recorded restore witness. Credential selection
+excludes production/shared bindings before reading values. Existing local
+credential versions are retained; installing changed local versions requires a
+fresh private copy through the same rebuild action.
+
+This is staged integration under [#3987](https://github.com/cbusillo/launchplane/issues/3987),
+not live qualification. Signed-in and supported agent controls, recovery from a
+fully stopped initial legacy predecessor, a complete second-rebuild/next-deploy
+rehearsal and CM testing proof remain under #3963. The legacy local apply command
+is not a live-service fallback. No CM or production mutation is proved by these
+source tests.
+
 ## Service collection
 
 `collect` on the observation API resolves existing service sources itself:

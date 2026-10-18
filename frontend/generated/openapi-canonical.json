@@ -68738,7 +68738,8 @@
                         "enum": [
                           "existing",
                           "empty",
-                          "upstream_restore"
+                          "upstream_restore",
+                          "production_restore"
                         ],
                         "title": "Data Source Mode",
                         "type": "string"
@@ -68964,7 +68965,8 @@
                         "enum": [
                           "existing",
                           "empty",
-                          "upstream_restore"
+                          "upstream_restore",
+                          "production_restore"
                         ],
                         "title": "Data Source Mode",
                         "type": "string"

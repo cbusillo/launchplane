@@ -13307,7 +13307,24 @@ class PostgresRecordStore(HumanSessionStore):
                     payload=row.payload,
                 )
                 affected_operation_ids.append(record.operation_id)
-                if record.phase in safe_phases and record.attempt < max_attempts:
+                if record.is_native_testing_rebuild:
+                    # Its component intents and original provider fences remain
+                    # authoritative after process death. Requeue observation,
+                    # without releasing a fence or repeating an unknown effect.
+                    recovered_record = record.model_copy(
+                        update={
+                            "status": "pending",
+                            "phase": "created",
+                            "updated_at": now,
+                            "lease_owner": "",
+                            "lease_expires_at": "",
+                            "heartbeat_at": "",
+                            "finished_at": "",
+                            "error_code": "testing_rebuild_observation_pending",
+                            "error_message": "Continue observing the original native testing rebuild.",
+                        }
+                    )
+                elif record.phase in safe_phases and record.attempt < max_attempts:
                     recovered_record = record.model_copy(
                         update={
                             "status": "pending",
