@@ -3,6 +3,7 @@
 from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, cast
 from urllib.parse import urlsplit
@@ -41,10 +42,32 @@ from control_plane.workflows.generic_web_deploy_provider import (
     dokploy_generic_web_provider_target_key,
     generic_web_provider_target_key,
 )
-from control_plane.workflows.ship import utc_now_timestamp
 
 ROUTE = TESTING_PRIVATE_INGRESS_ROUTE
 _PREFIX = TESTING_PRIVATE_INGRESS_AUDIT_PREFIX
+
+
+def latest_testing_private_ingress_receipt(
+    store: PostgresRecordStore, *, product: str, context: str, host_id: int
+) -> IngressRouteAuditRecord | None:
+    return max(
+        (
+            audit
+            for audit in store.list_ingress_route_audit_records(
+                product=product, context_name=context
+            )
+            if audit.record_id.startswith(_PREFIX)
+            and audit.product == product
+            and audit.context == context
+            and audit.provider == "npmplus"
+            and audit.mode == "apply"
+            and not audit.dry_run
+            and audit.status == "applied"
+            and audit.provider_host_id == host_id
+        ),
+        key=lambda audit: datetime.fromisoformat(audit.recorded_at.replace("Z", "+00:00")),
+        default=None,
+    )
 
 
 class TestingPrivateIngressRequest(BaseModel):
@@ -298,13 +321,16 @@ class TestingPrivateIngressAdapter:
         recovery_key: str = "",
     ) -> bool:
         """Only a previous successful receipt can authorize disabling a route."""
+        latest = latest_testing_private_ingress_receipt(
+            self.store, product=self.product, context=self.request.context, host_id=candidate.id
+        )
         for audit in self.store.list_ingress_route_audit_records(
             product=self.product, context_name=self.request.context
         ):
             if (
                 audit.record_id.startswith(_PREFIX)
                 and (
-                    audit.status == "applied"
+                    (audit.status == "applied" and audit == latest)
                     or (
                         audit.status == "pending"
                         and audit.record_id == _PREFIX + self.request.reviewed_plan_sha256
@@ -489,7 +515,8 @@ class TestingPrivateIngressAdapter:
                 trace_id=self.trace_id,
                 idempotency_key=provider_key,
                 reason=self.request.reason,
-                recorded_at=utc_now_timestamp(),
+                # Toggles in the same second still have an ordered authority.
+                recorded_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             )
         )
 

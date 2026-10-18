@@ -55,7 +55,12 @@ exclusive application and lane ownership, current provider placement and exact
 application domain, an applied private-route receipt, and fresh NPMplus readback.
 The enabled route must still have its reviewed access list, current wildcard
 certificate and unchanged configuration, with no overlapping edge aliases or
-pending private-route effects. Missing or changed evidence fails the probe.
+held private-route provider operations. Historical pending receipts from a
+completed replan do not hold a new route's probe. Only the latest applied receipt
+for the current provider host supplies authority, so a later disable cannot be
+overridden by replaying an older enabled receipt. Receipt timestamps preserve
+subsecond ordering for rapid toggles. Deleted historical hosts are not queried
+as current candidates. Missing or changed current evidence fails the probe.
 
 The health request connects to the configured NPMplus API origin's machine on
 HTTPS port 443. That origin must resolve exclusively to the existing permitted
@@ -165,10 +170,9 @@ The HTTP surface is projected into the agent/admin contract. Installed caller
 support must include this operation before operational use; do not call a raw
 provider API or use an arbitrary local CLI as a substitute. After source delivery,
 qualify the actual route through its access list from the service and intended
-clients, including a remote tailnet peer and public denial. Existing private HTTP
-probes still require RFC1918-only DNS answers; a wildcard resolving to the public
-edge needs a supported probe continuation before monitoring can pass. Do not
-change DNS or weaken that check as a workaround.
+clients, including a remote tailnet peer and public denial. For public wildcard
+DNS use the health-only verified-edge continuation above. Do not change DNS,
+use a public probe or weaken the generic private-address check as a workaround.
 
 ## Endpoint and outbound boundary
 
@@ -177,8 +181,8 @@ covered by an existing wildcard certificate. Other lane instances retain the exi
 record rule; their credential-bearing consumers do not gain new DNS authorities.
 Registration validates URL syntax;
 it does not resolve DNS or claim reachability. Existing non-public literal records remain readable, including loopback and
-tailnet addresses; record readback alone does not permit a connection. At every
-check, every product's private HTTP client resolves the host again and accepts
+tailnet addresses; record readback alone does not permit a connection. The generic
+private HTTP client resolves the host at every request and accepts
 only a nonempty answer set entirely within RFC1918 (`10/8`, `172.16/12`,
 `192.168/16`) or RFC6598 shared address space (`100.64.0.0/10`, used by tailnets).
 Answers mixing those allowed ranges are accepted; an answer set containing any

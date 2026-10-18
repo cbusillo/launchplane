@@ -3,12 +3,12 @@
 import os
 from pathlib import Path
 from typing import cast
+from urllib.parse import urlsplit
 
 import click
 from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
-from control_plane.contracts.ingress_route_audit_record import TESTING_PRIVATE_INGRESS_AUDIT_PREFIX
 from control_plane.contracts.private_health_endpoint_record import (
     private_health_endpoint_record_sha256,
 )
@@ -21,6 +21,7 @@ from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_private_ingress import (
     TestingPrivateIngressAdapter,
     TestingPrivateIngressRequest,
+    latest_testing_private_ingress_receipt,
 )
 from control_plane.workflows.ingress_provider import (
     NPMPLUS_BASE_URL_ENV_KEY,
@@ -52,68 +53,60 @@ def fetch_testing_private_health(
         ):
             raise ValueError("Testing health endpoint changed.")
         client = build_npmplus_ingress_client_from_env()
-        receipts = tuple(
-            receipt
-            for receipt in store.list_ingress_route_audit_records(
-                product=product, context_name=context
-            )
-            if receipt.record_id.startswith(TESTING_PRIVATE_INGRESS_AUDIT_PREFIX)
-            and receipt.product == product
-            and receipt.context == context
+        hostname = urlsplit(url).hostname
+        hosts = tuple(host for host in client.list_proxy_hosts() if hostname in host.domain_names)
+        if len(hosts) != 1:
+            raise ValueError("No unique current testing edge route.")
+        host = client.get_proxy_host(hosts[0].id, public_only=True)
+        receipt = latest_testing_private_ingress_receipt(
+            store, product=product, context=context, host_id=host.id
         )
-        if any(receipt.status == "pending" for receipt in receipts):
-            raise ValueError("Testing edge has unresolved effects.")
-        for receipt in receipts:
-            if (
-                receipt.status != "applied"
-                or receipt.mode != "apply"
-                or receipt.dry_run
-                or receipt.provider != "npmplus"
-                or receipt.tls_owner != "provider"
-                or receipt.provider_host_id is None
-            ):
-                continue
-            host = client.get_proxy_host(receipt.provider_host_id, public_only=True)
-            if (
-                not host.enabled
-                or host.access_list_id < 1
-                or not isinstance(host.certificate_id, int)
-                or host.certificate_id < 1
-            ):
-                continue
-            adapter = TestingPrivateIngressAdapter(
-                root,
-                store,
-                product,
-                TestingPrivateIngressRequest(
-                    context=context,
-                    endpoint_key=endpoint_key,
-                    edge_endpoint_key=receipt.edge_endpoint_key,
-                    access_list_id=host.access_list_id,
-                    certificate_id=host.certificate_id,
-                    reason="Verify testing health route without provider effects.",
-                ),
-                "testing-health-probe",
-                client,
-            )
-            # Reuse the route operation's full current ownership, placement,
-            # certificate, access-list, alias and application-domain checks.
-            snapshot, desired, current = adapter._snapshot()
-            if (
-                current is None
-                or current.id != receipt.provider_host_id
-                or not snapshot["domain_present"]
-                or receipt.requested_domains != desired.domain_names
-                or receipt.provider_route_sha256 != canonical_json_sha256(snapshot["existing"])
-                or receipt.testing_authority_sha256
-                != adapter._receipt_authority_sha256(cast(dict[str, object], snapshot["authority"]))
-            ):
-                continue
-            # Registration and readback do not prove transport. Only this real
-            # GET, with ordinary TLS verification, can produce an observation.
-            break
-        else:
+        if (
+            receipt is None
+            or receipt.tls_owner != "provider"
+            or not host.enabled
+            or host.access_list_id < 1
+            or not isinstance(host.certificate_id, int)
+            or host.certificate_id < 1
+        ):
             raise ValueError("No current private testing edge receipt.")
+        adapter = TestingPrivateIngressAdapter(
+            root,
+            store,
+            product,
+            TestingPrivateIngressRequest(
+                context=context,
+                endpoint_key=endpoint_key,
+                edge_endpoint_key=receipt.edge_endpoint_key,
+                access_list_id=host.access_list_id,
+                certificate_id=host.certificate_id,
+                reason="Verify testing health route without provider effects.",
+            ),
+            "testing-health-probe",
+            client,
+        )
+
+        def unresolved_effects() -> bool:
+            return any(
+                reservation.provider_target_key == adapter.target_key()
+                for reservation in store.list_held_provider_target_reservations()
+            )
+
+        if unresolved_effects():
+            raise ValueError("Testing edge has unresolved effects.")
+        # Reuse the full current ownership, placement, certificate, access-list,
+        # alias and application-domain checks, using only the current host.
+        snapshot, desired, current = adapter._snapshot()
+        if (
+            current is None
+            or current.id != receipt.provider_host_id
+            or not snapshot["domain_present"]
+            or receipt.requested_domains != desired.domain_names
+            or receipt.provider_route_sha256 != canonical_json_sha256(snapshot["existing"])
+            or receipt.testing_authority_sha256
+            != adapter._receipt_authority_sha256(cast(dict[str, object], snapshot["authority"]))
+        ):
+            raise ValueError("Private testing edge receipt changed.")
     except (
         ValueError,
         FileNotFoundError,
@@ -133,8 +126,12 @@ def fetch_testing_private_health(
     try:
         if (
             adapter._snapshot()[0] != snapshot
-            or store.read_ingress_route_audit_record(receipt.record_id) != receipt
+            or latest_testing_private_ingress_receipt(
+                store, product=product, context=context, host_id=host.id
+            )
+            != receipt
             or store.read_private_health_endpoint_record(endpoint_key) != endpoint
+            or unresolved_effects()
         ):
             raise ValueError("Testing health authority changed during the probe.")
     except (

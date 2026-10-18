@@ -6,6 +6,11 @@ from unittest.mock import patch
 from control_plane.provider_operations import run_durable_provider_operation
 from control_plane.testing_private_ingress import ROUTE
 from control_plane.contracts.ingress_route_audit_record import TESTING_PRIVATE_INGRESS_AUDIT_PREFIX
+from control_plane.contracts.private_health_endpoint_record import (
+    private_health_endpoint_record_sha256,
+)
+from control_plane.outbound_http import PublicHttpResponse
+from control_plane.testing_private_health import fetch_testing_private_health
 from control_plane.testing_event_deploy_recovery import testing_event_execution_lock_name
 from control_plane.workflows.generic_web_deploy_provider import (
     dokploy_generic_web_provider_target_key,
@@ -157,6 +162,35 @@ class RealPostgresTestingPrivateIngressRecoveryTests(private_ingress_tests.Priva
             "completed",
         )
         self.assertEqual(self.domains[0]["port"], corrected.runtime_port)
+        # The completed original-key replan leaves historical pending audit
+        # evidence. It must not hold health after the fresh route completes.
+        self.assertTrue(
+            any(
+                audit.status == "pending" for audit in self.store.list_ingress_route_audit_records()
+            )
+        )
+        with (
+            patch(
+                "control_plane.testing_private_health.build_npmplus_ingress_client_from_env",
+                return_value=self.client,
+            ),
+            patch(
+                "control_plane.testing_private_health.request_private_edge_health",
+                return_value=PublicHttpResponse(200, self.endpoint.url, 0, (), b"healthy"),
+            ),
+        ):
+            response = fetch_testing_private_health(
+                root=self.root,
+                store=self.store,
+                product=self.profile.product,
+                context=self.context,
+                instance="testing",
+                endpoint_key=self.endpoint.endpoint_key,
+                endpoint_sha256=private_health_endpoint_record_sha256(self.endpoint),
+                url=self.endpoint.url,
+                timeout_seconds=3,
+            )
+        self.assertEqual(response.status_code, 200)
 
     def test_same_key_after_clean_rejection_resolves_stale_pending_receipt(self) -> None:
         digest = self.adapter().plan()["plan_sha256"]

@@ -1,6 +1,7 @@
 """Real records and provider readback qualify the health-only edge path."""
 
 from dataclasses import replace
+from datetime import datetime, timedelta
 import json
 from typing import Any, cast
 from unittest.mock import patch
@@ -10,6 +11,9 @@ from control_plane.contracts.private_health_endpoint_record import (
 )
 from control_plane.outbound_http import PublicHttpDestinationError, PublicHttpResponse
 from control_plane.testing_private_health import fetch_testing_private_health
+from control_plane.contracts.ingress_route_audit_record import TESTING_PRIVATE_INGRESS_AUDIT_PREFIX
+from control_plane.workflows.ingress_provider import NPMPLUS_BASE_URL_ENV_KEY
+import click
 from tests.test_testing_private_ingress import PrivateIngressFixture
 from tests.test_outbound_http import _resolver_for
 
@@ -30,7 +34,7 @@ class TestingPrivateHealthTests(PrivateIngressFixture):
             )
         )
         self.enterContext(
-            patch.dict("os.environ", {"LAUNCHPLANE_NPMPLUS_BASE_URL": "http://10.77.0.9:81"})
+            patch.dict("os.environ", {NPMPLUS_BASE_URL_ENV_KEY: "http://10.77.0.9:81"})
         )
 
     def fetch(self, **changes: Any) -> PublicHttpResponse:
@@ -57,6 +61,82 @@ class TestingPrivateHealthTests(PrivateIngressFixture):
 
     def test_registration_alone_does_not_probe(self) -> None:
         self.assert_refused()
+
+    def test_historical_pending_receipt_does_not_block_fresh_completed_route(self) -> None:
+        self.create()
+        receipt = self.store.list_ingress_route_audit_records()[0]
+        self.store.write_ingress_route_audit_record(
+            receipt.model_copy(
+                update={
+                    "record_id": TESTING_PRIVATE_INGRESS_AUDIT_PREFIX + "historical-plan",
+                    "status": "pending",
+                    "provider_host_id": None,
+                    "recorded_at": (
+                        datetime.fromisoformat(receipt.recorded_at) - timedelta(seconds=1)
+                    ).isoformat(),
+                }
+            )
+        )
+        self.assertEqual(self.fetch().status_code, 200)
+
+    def test_held_provider_operation_refuses_even_with_an_applied_receipt(self) -> None:
+        self.create()
+        self.store.reserve_mutation(
+            scope="fixture",
+            route_path="/fixture",
+            idempotency_key="active-key",
+            request_fingerprint="fixture",
+            lease_owner="fixture",
+            reconciliation_key="fixture",
+            provider_target_key=self.adapter().target_key(),
+        )
+        self.assert_refused()
+
+    def test_hand_reenabled_route_cannot_reuse_historical_enabled_receipt(self) -> None:
+        self.create()
+        receipt = self.store.list_ingress_route_audit_records()[0]
+        # Existing second-precision receipts must not sort ahead of newer
+        # subsecond receipts merely because 'Z' sorts after '.'.
+        self.store.write_ingress_route_audit_record(
+            receipt.model_copy(
+                update={
+                    "recorded_at": receipt.recorded_at[:19] + "Z",
+                }
+            )
+        )
+        digest = self.adapter(operation="disable").plan()["plan_sha256"]
+        self.adapter(operation="disable", reviewed_plan_sha256=digest).apply(
+            "disable-key", self.lease
+        )
+        self.client.enable_proxy_host(self.client.proxy_hosts[0].id)
+        self.assert_refused()
+        with self.assertRaises(ValueError):
+            self.adapter(operation="disable").plan()
+
+    def test_deleted_historical_host_does_not_poison_current_route(self) -> None:
+        self.create()
+        receipt = self.store.list_ingress_route_audit_records()[0]
+        missing_host_id = receipt.provider_host_id + 1 if receipt.provider_host_id else 2
+        self.store.write_ingress_route_audit_record(
+            receipt.model_copy(
+                update={
+                    "record_id": TESTING_PRIVATE_INGRESS_AUDIT_PREFIX + "stale-host",
+                    "provider_host_id": missing_host_id,
+                    "recorded_at": (
+                        datetime.fromisoformat(receipt.recorded_at) + timedelta(seconds=1)
+                    ).isoformat(),
+                }
+            )
+        )
+        read = self.client.get_proxy_host
+
+        def get_host(host_id: int, *, public_only: bool = False) -> Any:
+            if host_id == missing_host_id:
+                raise click.ClickException("Historical host was deleted")
+            return read(host_id, public_only=public_only)
+
+        with patch.object(self.client, "get_proxy_host", side_effect=get_host):
+            self.assertEqual(self.fetch().status_code, 200)
 
     def test_fresh_protected_route_allows_only_own_health(self) -> None:
         self.create()
