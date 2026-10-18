@@ -412,30 +412,16 @@ class NativeTestingRebuildExecution:
             target_id=self.intent.before.target_id,
             instance="testing",
             usage=usage.usage,
+            require_unused=False,
         )
-        retained = retained_copy_operation(
+        retained_copy_operation(
             host=self.host,
             token=self.token,
             server_id=self.intent.server_id,
             payload=self.retained_payload("read"),
         )
-        retiring_original = False
-        if retained["web_stopped"] and plan is not None:
-            checkpoint = self.adapter.checkpoints.load(plan)
-            stop = self.store.read_idempotency_record(
-                scope=REBUILD_SCOPE,
-                route_path=REBUILD_ROUTE + ":effect",
-                idempotency_key=self.operation.operation_id + ":retire-old",
-            )
-            retiring_original = (
-                checkpoint.retirement_started
-                and checkpoint.step == "retiring"
-                and stop is not None
-                and stop.provider_effect_phase == "retire-old"
-                and stop.provider_target_key == self.adapter.target_key() + ":retire-old"
-            )
-        if decision.protected and not retiring_original:
-            raise ValueError("The retained testing copy's occupancy is protected or unverified.")
+        if decision.protected:
+            raise ValueError("The retained testing copy is in use.")
         current = read_snapshot(
             self.store, product=self.operation.product, context=self.operation.context
         )
@@ -968,7 +954,7 @@ class NativeTestingRebuildExecution:
                 self, provider_operation_key: str, lease: ProviderOperationLease
             ) -> ProviderMutationOutcome:
                 if exclude_undispatched:
-                    parent.guard(parent.plan)
+                    parent.guard()
                     lease.assert_current()
                     return ProviderMutationOutcome(
                         200,

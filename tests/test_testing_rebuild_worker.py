@@ -570,6 +570,14 @@ class NativeTestingWorkerTests(unittest.TestCase):
             self.assertEqual(self.execute().deploy_status, "pass")
         self.assertEqual(self.effects, ["switch-new", "disable-old-auto-deploy", "stop-old"])
 
+    def test_unknown_usage_does_not_require_a_down_lane_to_rebuild(self) -> None:
+        with patch.object(
+            service, "read_odoo_testing_usage", return_value=OdooTestingUsage("unknown")
+        ):
+            self.assertEqual(self.execute().deploy_status, "pass")
+        self.assertEqual(self.current().target_id.target_id, self.fixture.candidate.compose_id)
+        self.assertTrue(self.retained["stopped"])
+
     def test_hold_or_positive_use_refuses_before_any_candidate_or_route_effect(self) -> None:
         from control_plane.contracts.dokploy_target_record import DokployTargetStaffTestingHold
 

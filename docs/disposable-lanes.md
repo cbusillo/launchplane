@@ -51,6 +51,9 @@ payloads, scoped by product, context and operation key. The envelope is complete
 the actual rebuild stage. It is not an execution lease or a replacement for a
 durable provider fence. The adapter must hold the existing lane/worker lease and
 recheck authorization, holds/use, custody and production isolation before effects.
+The native rebuild protects a current staff hold or positive use. UNKNOWN usage
+alone does not require downtime or a declaration of non-use; it does not supply
+any missing custody, resource-isolation or credential evidence.
 Provider calls reconcile their original dispatch keys before any replay. A
 foreign route, changed plan or inaccessible authority refuses continuation.
 Permission and transport exceptions propagate without a fallback or automatic
