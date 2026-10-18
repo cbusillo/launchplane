@@ -110,6 +110,14 @@ class NativeTestingRebuildPending(ValueError):
     """The original effects need another observation, never an alternate dispatch."""
 
 
+class TestingRebuildRefused(ValueError):
+    """A fixed operator-facing prerequisite, without provider or secret text."""
+
+    def __init__(self, code: str, message: str) -> None:
+        self.code = code
+        super().__init__(message)
+
+
 class NativeTestingRebuildIntent(FrozenRecord):
     operation_id: str
     profile: LaunchplaneProductProfileRecord
@@ -258,6 +266,51 @@ def capture_rebuild_intent(
     )
 
 
+def check_testing_rebuild_protection(
+    root: Path,
+    store: PostgresRecordStore,
+    operation: OdooStableTargetReplacementOperationRecord,
+    intent: NativeTestingRebuildIntent,
+) -> None:
+    target = store.read_dokploy_target_record(
+        context_name=operation.context, instance_name="testing"
+    )
+    if target.policies.staff_testing_hold is not None:
+        raise TestingRebuildRefused(
+            "testing_staff_hold", "This testing lane is held for staff testing."
+        )
+    safety = store.read_disposable_lane_safety(operation.product, operation.context, "testing")
+    if safety is not None:
+        if safety.usage == "in_use":
+            raise TestingRebuildRefused("testing_in_use", "Someone is using this testing lane.")
+        if safety.data == "only_copy":
+            raise TestingRebuildRefused(
+                "testing_needed_copy", "Testing holds the only needed copy of data."
+            )
+        if safety.production_resources in {"shared", "separation_ready"}:
+            raise TestingRebuildRefused(
+                "testing_production_resources_shared",
+                "Testing must be separated from its shared production resources before rebuilding.",
+            )
+    usage = read_odoo_testing_usage(
+        target=intent.before.target,
+        target_id=intent.before.target_id,
+        control_plane_root=root,
+        database_url=store.database_url,
+    )
+    decision = evaluate_lane_usage(
+        store,
+        profile=intent.profile,
+        target=target,
+        target_id=intent.before.target_id,
+        instance="testing",
+        usage=usage.usage,
+        require_unused=False,
+    )
+    if decision.protected:
+        raise TestingRebuildRefused("testing_in_use", "Someone is using this testing lane.")
+
+
 class NativeTestingRebuildAdapter:
     def __init__(
         self,
@@ -358,11 +411,6 @@ class NativeTestingRebuildExecution:
         self.adapter.authorize("testing_rebuild_checkpoint")
         if self.store.read_product_profile_record(self.operation.product) != self.intent.profile:
             raise ValueError("The original testing profile changed.")
-        target = self.store.read_dokploy_target_record(
-            context_name=self.operation.context, instance_name="testing"
-        )
-        if target.policies.staff_testing_hold is not None:
-            raise ValueError("Staff testing holds this lane.")
         self.old_provider()
         current_target = self.store.read_dokploy_target_id_record(
             context_name=self.operation.context, instance_name="testing"
@@ -382,46 +430,19 @@ class NativeTestingRebuildExecution:
         ):
             raise ValueError("A rebuild copy aliases another serving lane.")
 
-        safety = self.store.read_disposable_lane_safety(
-            self.operation.product, self.operation.context, "testing"
-        )
-        if safety is not None and (
-            safety.usage == "in_use"
-            or safety.data == "only_copy"
-            or safety.production_resources in {"shared", "separation_ready"}
-        ):
-            raise ValueError(
-                "The lane has a recorded protected use, copy or shared production resource."
-            )
+        check_testing_rebuild_protection(self.root, self.store, self.operation, self.intent)
         if any(
             item.target_id == self.intent.old.target_id
             and (item.context, item.instance) != (self.operation.context, "testing")
             for item in self.store.list_dokploy_target_id_records()
         ):
             raise ValueError("The retained target aliases another lane.")
-        usage = read_odoo_testing_usage(
-            target=self.intent.before.target,
-            target_id=self.intent.before.target_id,
-            control_plane_root=self.root,
-            database_url=self.store.database_url,
-        )
-        decision = evaluate_lane_usage(
-            self.store,
-            profile=self.intent.profile,
-            target=target,
-            target_id=self.intent.before.target_id,
-            instance="testing",
-            usage=usage.usage,
-            require_unused=False,
-        )
         retained_copy_operation(
             host=self.host,
             token=self.token,
             server_id=self.intent.server_id,
             payload=self.retained_payload("read"),
         )
-        if decision.protected:
-            raise ValueError("The retained testing copy is in use.")
         current = read_snapshot(
             self.store, product=self.operation.product, context=self.operation.context
         )

@@ -130,6 +130,44 @@ def neutralized_candidate_overrides(
     )
 
 
+def candidate_credential_authority(
+    store: PostgresRecordStore, context: str
+) -> tuple[frozenset[str], str]:
+    """Read binding/version provenance only; never decrypt or rotate a password."""
+    omitted = testing_credential_omissions(store, context, None)
+    require_testing_credential_safety(store, context, omitted)
+    delivered = site_delivered_secret_bindings_from_store(
+        record_store=store, context_name=context, instance_name="testing"
+    )
+    credentials: list[dict[str, object]] = []
+    for key in sorted(FRESH_TESTING_LOCAL_CREDENTIAL_KEYS):
+        binding = delivered.get(key)
+        if (
+            binding is None
+            or binding.value_source != "generated"
+            or binding.declared_secret_class != "testing"
+        ):
+            raise ValueError(
+                "Candidate requires the existing service-generated testing-local credentials."
+            )
+        record = store.read_secret_record(binding.secret_id)
+        version = store.read_secret_version(record.current_version_id)
+        if (record.context, record.instance, record.scope) != (
+            context,
+            "testing",
+            "context_instance",
+        ) or version.secret_id != record.secret_id:
+            raise ValueError("Candidate local credential provenance is inconsistent.")
+        credentials.append(
+            {
+                "binding": binding.model_dump(mode="json"),
+                "record": record.model_dump(mode="json"),
+                "version": {"version_id": version.version_id, "secret_id": version.secret_id},
+            }
+        )
+    return omitted, canonical_json_sha256(credentials)
+
+
 def candidate_runtime_inputs(
     *,
     root: Path,
@@ -161,38 +199,7 @@ def candidate_runtime_inputs(
         artifact, expected_repository=profile.image.repository
     ) or missing_required_odoo_modules_from_artifact(artifact):
         raise ValueError("Candidate requires its product's admitted Odoo artifact/modules.")
-    omitted = testing_credential_omissions(store, allocation.context, None)
-    require_testing_credential_safety(store, allocation.context, omitted)
-    delivered = site_delivered_secret_bindings_from_store(
-        record_store=store, context_name=allocation.context, instance_name="testing"
-    )
-    credentials: list[dict[str, object]] = []
-    for key in sorted(FRESH_TESTING_LOCAL_CREDENTIAL_KEYS):
-        binding = delivered.get(key)
-        if (
-            binding is None
-            or binding.value_source != "generated"
-            or binding.declared_secret_class != "testing"
-        ):
-            raise ValueError(
-                "Candidate requires the existing service-generated testing-local credentials."
-            )
-        record = store.read_secret_record(binding.secret_id)
-        version = store.read_secret_version(record.current_version_id)
-        if (record.context, record.instance, record.scope) != (
-            allocation.context,
-            "testing",
-            "context_instance",
-        ) or version.secret_id != record.secret_id:
-            raise ValueError("Candidate local credential provenance is inconsistent.")
-        credentials.append(
-            {
-                "binding": binding.model_dump(mode="json"),
-                "record": record.model_dump(mode="json"),
-                "version": {"version_id": version.version_id, "secret_id": version.secret_id},
-            }
-        )
-    credential_binding = canonical_json_sha256(credentials)
+    omitted, credential_binding = candidate_credential_authority(store, allocation.context)
     runtime = resolve_site_runtime_environment(
         control_plane_root=root,
         database_url=store.database_url,

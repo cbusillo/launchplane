@@ -863,11 +863,43 @@ credential versions are retained; installing changed local versions requires a
 fresh private copy through the same rebuild action.
 
 This is staged integration under [#3987](https://github.com/cbusillo/launchplane/issues/3987),
-not live qualification. Signed-in and supported agent controls, recovery from a
+not live qualification. Supported agent activation, recovery from a
 fully stopped initial legacy predecessor, a live host second-rebuild/next-deploy
 rehearsal and CM testing proof remain under #3963. The legacy local apply command
 is not a live-service fallback. No CM or production mutation is proved by these
 source tests.
+
+### Signed-in testing rebuild and native preflight
+
+The testing Actions page replaces the unavailable generic replacement cards with
+a typed administrator control for fresh empty,
+sanitized production and configured upstream copies. It shows the unchanged
+address and selects the latest verified product build through the existing
+testing build selector. `GET /v1/products/{product}/testing-rebuild/inputs`
+reads that selection, actual retained-copy/route admission, current use/hold and
+generated credential provenance. It does not record an artifact, reserve a copy,
+create a lease or dispatch a mutation. Its `candidate_verification: pending`
+does not prove a new copy or completed restore. The worker still checks the
+source, generated values, independent resources, health and identity before
+cutover. The machine target-replacement plan route supports the same native
+read without a provider write.
+
+`POST /v1/products/{product}/testing-rebuild` takes the inspected build/source
+pair, a concrete reason and the original request key. Existing administrator
+cookie/CSRF and current policy checks precede admission. The server re-verifies
+the selected current build, records its existing immutable artifact contract,
+captures existing durable administrator authority and enqueues the same native
+replacement operation. It accepts no destination instance, target, credential or
+arbitrary replacement payload. New native machine admissions also require a
+reason; already admitted operations remain readable and recoverable.
+
+The browser persists the original payload/key and accepted operation ID. A
+reload watches a known operation with GET; a lost enqueue reply requires an
+explicit recovery of that same request. A denied request is retained and never
+automatically resubmitted. Typed operation views expose status and phase without
+provider payloads, authorization records or requester text. The source feature
+requires normal train delivery and service activation; its tests and mocked
+browser journey do not establish CM health or rebuild timing.
 The worker regression executes a second application's configure/deploy/initialize
 stages and same-address adoption, then the ordinary replacement and post-deploy
 workflows for a newer artifact. It verifies retained route, storage, generated

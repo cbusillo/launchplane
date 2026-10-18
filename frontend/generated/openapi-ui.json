@@ -4111,6 +4111,171 @@
         "summary": "Read one public ingress incident with linked evidence"
       }
     },
+    "/v1/products/{product}/testing-rebuild/inputs": {
+      "get": {
+        "operationId": "inspect_testing_rebuild",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "data_source_mode",
+            "required": false,
+            "schema": {
+              "default": "empty",
+              "enum": [
+                "empty",
+                "production_restore",
+                "upstream_restore"
+              ],
+              "title": "Data Source Mode",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TestingRebuildPreflight"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Inspect"
+      }
+    },
+    "/v1/products/{product}/testing-rebuild/operations/{operation_id}": {
+      "get": {
+        "operationId": "read_testing_rebuild",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Operation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TestingRebuildResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read Operation"
+      }
+    },
     "/v1/release-review": {
       "get": {
         "operationId": "read_release_review",
@@ -8489,6 +8654,97 @@
           }
         },
         "summary": "Dispatch the reviewed product promotion workflow"
+      }
+    },
+    "/v1/products/{product}/testing-rebuild": {
+      "post": {
+        "operationId": "submit_testing_rebuild",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "maxLength": 256,
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TestingRebuildSubmit"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TestingRebuildResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Submit"
       }
     },
     "/v1/release-review/decisions": {
@@ -39312,6 +39568,173 @@
           "target_updated_at"
         ],
         "title": "TestingHoldRehearsal",
+        "type": "object"
+      },
+      "TestingRebuildOperationView": {
+        "additionalProperties": false,
+        "properties": {
+          "instance": {
+            "const": "testing",
+            "default": "testing",
+            "title": "Instance",
+            "type": "string"
+          },
+          "operation_id": {
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "phase": {
+            "title": "Phase",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "instance",
+          "operation_id",
+          "phase",
+          "product",
+          "status",
+          "updated_at"
+        ],
+        "title": "TestingRebuildOperationView",
+        "type": "object"
+      },
+      "TestingRebuildPreflight": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_id": {
+            "title": "Artifact Id",
+            "type": "string"
+          },
+          "base_url": {
+            "title": "Base Url",
+            "type": "string"
+          },
+          "candidate_verification": {
+            "const": "pending",
+            "default": "pending",
+            "title": "Candidate Verification",
+            "type": "string"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "data_source_mode": {
+            "enum": [
+              "empty",
+              "production_restore",
+              "upstream_restore"
+            ],
+            "title": "Data Source Mode",
+            "type": "string"
+          },
+          "instance": {
+            "const": "testing",
+            "default": "testing",
+            "title": "Instance",
+            "type": "string"
+          },
+          "observed_at": {
+            "title": "Observed At",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "source_git_ref": {
+            "title": "Source Git Ref",
+            "type": "string"
+          },
+          "status": {
+            "const": "pass",
+            "default": "pass",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "artifact_id",
+          "base_url",
+          "candidate_verification",
+          "context",
+          "data_source_mode",
+          "instance",
+          "observed_at",
+          "product",
+          "source_git_ref",
+          "status"
+        ],
+        "title": "TestingRebuildPreflight",
+        "type": "object"
+      },
+      "TestingRebuildResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "operation": {
+            "$ref": "#/components/schemas/TestingRebuildOperationView"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation",
+          "trace_id"
+        ],
+        "title": "TestingRebuildResponse",
+        "type": "object"
+      },
+      "TestingRebuildSubmit": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_id": {
+            "minLength": 1,
+            "title": "Artifact Id",
+            "type": "string"
+          },
+          "data_source_mode": {
+            "enum": [
+              "empty",
+              "production_restore",
+              "upstream_restore"
+            ],
+            "title": "Data Source Mode",
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "source_git_ref": {
+            "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+            "title": "Source Git Ref",
+            "type": "string"
+          }
+        },
+        "required": [
+          "data_source_mode",
+          "artifact_id",
+          "source_git_ref",
+          "reason"
+        ],
+        "title": "TestingRebuildSubmit",
         "type": "object"
       },
       "UrgentReleaseReviewEnvelope": {

@@ -1,0 +1,288 @@
+"""The administrator adapter admits the common native operation without provider writes."""
+
+import unittest
+from dataclasses import replace
+from functools import partial
+from email.message import Message
+from urllib.error import HTTPError
+from unittest.mock import patch
+
+from httpx2 import Response
+
+from control_plane.build_provenance import VerifiedBuildArtifact
+from control_plane.contracts.artifact_identity import ArtifactSourceBuild
+from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.http_routes import testing_rebuild as routes
+from control_plane import testing_rebuild_preflight as preflight
+from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
+from tests import test_testing_rebuild_worker as worker_tests
+from tests import test_odoo_prod_promotion_operation as administrator_tests
+from tests.http_app_test_support import (
+    _browser_mutation_headers,
+    _github_human_identity,
+    _github_oauth_config,
+    _RejectingVerifier,
+)
+from tests.support.http import request
+
+
+class TestingRebuildHttpTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.fixture = worker_tests.NativeTestingWorkerTests()
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        self.store = self.fixture.store
+        self.product = self.fixture.operation.product
+        self.policy = administrator_tests._ADMINISTRATOR_POLICY
+        self.store.seed_authz_policy_if_absent(administrator_tests._policy_record(self.policy))
+        self.sessions = HumanSessionManager(
+            config=_github_oauth_config(), session_store=InMemoryHumanSessionStore()
+        )
+        self.session = self.sessions.issue(_github_human_identity())
+        self.app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=self.policy,
+            record_store_factory=lambda: self.store,
+            human_session_manager=self.sessions,
+            control_plane_root_path=self.fixture.root,
+        )
+        artifact = self.fixture.fixture.fixture.artifact
+        self.manifest = artifact.model_copy(
+            update={
+                "artifact_id": "ui-current-build",
+                "source_commit": "c" * 40,
+                "source_build": ArtifactSourceBuild(
+                    repository=self.fixture.intent.profile.repository,
+                    repository_id="12345",
+                    workflow_path=".github/workflows/build.yml",
+                    event="push",
+                    purpose="release",
+                    run_id=55,
+                    run_attempt=1,
+                    github_artifact_id=66,
+                    manifest_artifact_id="producer-build",
+                ),
+            }
+        )
+        self.latest = self.enterContext(
+            patch.object(
+                routes,
+                "latest_verified_testing_build",
+                return_value=VerifiedBuildArtifact(manifest=self.manifest),
+            )
+        )
+        self.enterContext(
+            patch.object(preflight, "capture_rebuild_intent", return_value=self.fixture.intent)
+        )
+        self.url = f"/v1/products/{self.product}/testing-rebuild"
+        self.payload: dict[str, object] = {
+            "data_source_mode": "empty",
+            "artifact_id": self.manifest.artifact_id,
+            "source_git_ref": self.manifest.source_commit,
+            "reason": "Rebuild disposable testing",
+        }
+
+    async def call(
+        self,
+        method: str,
+        payload: dict[str, object] | None = None,
+        *,
+        key: str = "button-one",
+        path: str = "",
+        csrf: bool = True,
+    ) -> Response:
+        headers = _browser_mutation_headers(self.sessions, self.session)
+        headers["Idempotency-Key"] = key
+        if not csrf:
+            headers.pop("X-CSRF-Token", None)
+        return await request(self.app, method, path or self.url, headers=headers, payload=payload)
+
+    async def test_read_only_preflight_does_not_admit_artifact_or_candidate(self) -> None:
+        before = self.store.list_odoo_stable_target_replacement_operation_records()
+        response = await self.call("GET", path=self.url + "/inputs")
+        self.assertEqual(response.status_code, 200, response.json())
+        self.assertEqual(response.json()["base_url"], "https://" + self.fixture.fixture.route.host)
+        self.assertEqual(response.json()["artifact_id"], self.manifest.artifact_id)
+        self.assertEqual(response.json()["candidate_verification"], "pending")
+        self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), before)
+        with self.assertRaises(FileNotFoundError):
+            self.store.read_artifact_manifest(self.manifest.artifact_id)
+        self.assertEqual(self.fixture.effects, [])
+
+    async def test_one_submit_replay_and_poll_keep_original_build_and_reason(self) -> None:
+        accepted = await self.call("POST", self.payload)
+        self.assertEqual(accepted.status_code, 200, accepted.json())
+        operation = accepted.json()["operation"]
+        saved = self.store.read_odoo_stable_target_replacement_operation_record(
+            operation["operation_id"]
+        )
+        self.assertTrue(saved.is_native_testing_rebuild)
+        self.assertEqual(saved.request.artifact_id, self.manifest.artifact_id)
+        self.assertEqual(saved.request.reason, self.payload["reason"])
+        self.assertIsNotNone(saved.authorization)
+        self.latest.side_effect = AssertionError("A replay must not choose another build")
+        replay = await self.call("POST", self.payload)
+        self.assertEqual(replay.status_code, 200, replay.json())
+        self.assertEqual(replay.json()["operation"], operation)
+        polled = await self.call("GET", path=self.url + "/operations/" + operation["operation_id"])
+        self.assertEqual(polled.status_code, 200, polled.json())
+        self.assertEqual(polled.json()["operation"], operation)
+        self.assertNotIn("request", polled.json()["operation"])
+        self.assertEqual(self.fixture.effects, [])
+
+    async def test_missing_csrf_and_non_testing_input_cannot_queue(self) -> None:
+        before = self.store.list_odoo_stable_target_replacement_operation_records()
+        missing = await self.call("POST", self.payload, csrf=False)
+        self.assertEqual(missing.status_code, 403, missing.json())
+        for extra in ({"instance": "prod"}, {"target_id": "foreign"}, {"reason": "  "}):
+            result = await self.call("POST", {**self.payload, **extra})
+            self.assertEqual(result.status_code, 400, result.json())
+        self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), before)
+        self.assertEqual(self.fixture.effects, [])
+
+    async def test_changed_build_refuses_without_admitting_old_or_new_manifest(self) -> None:
+        self.latest.return_value = VerifiedBuildArtifact(
+            manifest=self.manifest.model_copy(update={"source_commit": "d" * 40})
+        )
+        response = await self.call("POST", self.payload)
+        self.assertEqual(response.status_code, 409, response.json())
+        with self.assertRaises(FileNotFoundError):
+            self.store.read_artifact_manifest(self.manifest.artifact_id)
+        self.assertEqual(self.fixture.effects, [])
+
+    async def test_another_signed_in_person_cannot_inspect_or_submit(self) -> None:
+        self.session = self.sessions.issue(replace(_github_human_identity(), github_id=124))
+        for method, path, payload in (
+            ("GET", self.url + "/inputs", None),
+            ("POST", self.url, self.payload),
+        ):
+            result = await self.call(method, payload, path=path)
+            self.assertEqual(result.status_code, 403, result.json())
+        self.latest.assert_not_called()
+        self.assertEqual(self.fixture.effects, [])
+
+    async def test_known_use_blocks_both_preflight_and_submission(self) -> None:
+        from control_plane import testing_rebuild_service as service
+        from control_plane.odoo_testing_usage import OdooTestingUsage
+
+        with patch.object(
+            service, "read_odoo_testing_usage", return_value=OdooTestingUsage("in_use")
+        ):
+            inspected = await self.call("GET", path=self.url + "/inputs")
+            submitted = await self.call("POST", self.payload)
+        self.assertEqual(inspected.status_code, 409, inspected.json())
+        self.assertEqual(submitted.status_code, 409, submitted.json())
+        with self.assertRaises(FileNotFoundError):
+            self.store.read_artifact_manifest(self.manifest.artifact_id)
+        self.assertEqual(self.fixture.effects, [])
+
+    async def test_provider_read_denial_keeps_trace_and_does_not_enqueue(self) -> None:
+        from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
+
+        self.latest.side_effect = NativeSourceAuthorizationDenied("Fixture provider refusal")
+        response = await self.call("POST", self.payload)
+        self.assertEqual(response.status_code, 403, response.json())
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+        self.assertTrue(response.json()["trace_id"])
+        with self.assertRaises(FileNotFoundError):
+            self.store.read_artifact_manifest(self.manifest.artifact_id)
+        self.assertEqual(self.fixture.effects, [])
+
+    async def test_generated_credential_provenance_is_checked_without_rotating_values(self) -> None:
+        binding = next(
+            item
+            for item in self.store.list_secret_bindings(
+                context_name=self.fixture.operation.context, instance_name="testing"
+            )
+            if item.value_source == "generated"
+        )
+        before = self.store.read_secret_record(binding.secret_id)
+        self.store.write_secret_binding(binding.model_copy(update={"value_source": "supplied"}))
+        response = await self.call("GET", path=self.url + "/inputs")
+        self.assertEqual(response.status_code, 409, response.json())
+        self.assertEqual(self.store.read_secret_record(binding.secret_id), before)
+        self.assertEqual(self.fixture.effects, [])
+
+    async def test_upstream_preflight_refuses_missing_source_configuration(self) -> None:
+        path = self.url + "/inputs?data_source_mode=upstream_restore"
+        configured = await self.call("GET", path=path)
+        self.assertEqual(configured.status_code, 200, configured.json())
+        record = next(
+            item
+            for item in self.store.list_runtime_environment_records(
+                context_name=self.fixture.operation.context, instance_name="testing"
+            )
+            if item.scope == "instance" and item.instance == "testing"
+        )
+        self.store.write_runtime_environment_record(
+            record.model_copy(
+                update={
+                    "env": {
+                        key: value
+                        for key, value in record.env.items()
+                        if key != "ODOO_UPSTREAM_HOST"
+                    }
+                }
+            )
+        )
+        refused = await self.call("GET", path=path)
+        self.assertEqual(refused.status_code, 409, refused.json())
+        self.assertEqual(self.fixture.effects, [])
+
+    def test_current_build_reader_stops_at_denial_without_selecting_another_build(self) -> None:
+        from control_plane import product_reconcile
+        from control_plane.build_provenance import BuildProvenanceError
+        from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
+        from unittest.mock import Mock
+
+        calls: list[str] = []
+
+        def denied(path: str) -> object:
+            calls.append(path)
+            raise BuildProvenanceError(
+                "Fixture read refused", code="github_read_failed"
+            ) from HTTPError("https://provider.invalid/read", 403, "Forbidden", Message(), None)
+
+        reader = product_reconcile._TestingRebuildBuildReads(Mock(get_json=denied))
+        with self.assertRaises(NativeSourceAuthorizationDenied):
+            # This is the selector's invalid-build fallback behavior. A genuine
+            # denial must escape it before a read of another candidate.
+            try:
+                reader.get_json("current")
+            except BuildProvenanceError:
+                reader.get_json("older")
+        self.assertEqual(calls, ["current"])
+
+    async def test_new_machine_admission_requires_reason_but_original_receipt_still_replays(
+        self,
+    ) -> None:
+        from control_plane.odoo_target_replacement_apply_http import (
+            OdooTargetReplacementApplyEnvelope,
+            enqueue_odoo_target_replacement_apply_operation,
+        )
+
+        accepted = await self.call("POST", self.payload)
+        self.assertEqual(accepted.status_code, 200, accepted.json())
+        saved = self.store.read_odoo_stable_target_replacement_operation_record(
+            accepted.json()["operation"]["operation_id"]
+        )
+        assert saved.authorization is not None
+        no_reason = OdooTargetReplacementApplyEnvelope(
+            product=saved.product, replacement=saved.request.model_copy(update={"reason": ""})
+        )
+        enqueue = partial(
+            enqueue_odoo_target_replacement_apply_operation,
+            record_store=self.store,
+            request=no_reason,
+            context=saved.context,
+            idempotency_scope=saved.idempotency_scope,
+            request_fingerprint=saved.request_fingerprint,
+            created_at=saved.created_at,
+            authorization=saved.authorization,
+        )
+        # Read an already admitted receipt before checking new-operation prerequisites.
+        _, replayed = enqueue(idempotency_key=saved.idempotency_key)
+        self.assertEqual(replayed["operation_id"], saved.operation_id)
+        with self.assertRaises(ValueError):
+            enqueue(idempotency_key="new-machine-request")
+        self.assertEqual(self.fixture.effects, [])

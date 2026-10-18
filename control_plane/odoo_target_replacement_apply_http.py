@@ -159,6 +159,9 @@ def enqueue_odoo_target_replacement_apply_operation(
             existing_operation
         )
 
+    if request.replacement.strategy == "replace-and-cutover" and not request.replacement.reason:
+        raise ValueError("A testing rebuild requires a concrete reason.")
+
     require_unchanged_production_artifact(
         record_store=record_store,
         product=request.replacement.product,
@@ -235,6 +238,7 @@ def _validate_target_replacement_apply_artifact_authority(
     operation_store: OdooTargetReplacementApplyOperationStore,
     replacement_request: OdooStableTargetReplacementApplyRequest,
     context: str,
+    verified_manifest: ArtifactIdentityManifest | None = None,
 ) -> None:
     try:
         inventory = operation_store.read_environment_inventory(
@@ -263,10 +267,15 @@ def _validate_target_replacement_apply_artifact_authority(
         raise ValueError(
             "Odoo target replacement apply requires exact artifact and source evidence."
         )
-    try:
-        manifest = operation_store.read_artifact_manifest(artifact_id)
-    except FileNotFoundError as error:
-        raise ValueError("Odoo target replacement artifact manifest was not found.") from error
+    if verified_manifest is not None:
+        manifest = verified_manifest
+        if manifest.artifact_id != artifact_id:
+            raise ValueError("The verified artifact differs from the selected build.")
+    else:
+        try:
+            manifest = operation_store.read_artifact_manifest(artifact_id)
+        except FileNotFoundError as error:
+            raise ValueError("Odoo target replacement artifact manifest was not found.") from error
     profile = operation_store.read_product_profile_record(replacement_request.product)
     if not artifact_manifest_matches_image_repository(
         manifest,
