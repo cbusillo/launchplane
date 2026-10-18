@@ -44,17 +44,22 @@ if (options.get('db_host') != 'database'
 import psycopg2
 from passlib.context import CryptContext
 context = CryptContext(schemes=['pbkdf2_sha512'])
-connection = psycopg2.connect(
-    host='database', port=options.get('db_port') or '5432',
-    dbname=options['db_name'], user=options['db_user'], password=options['db_password'],
-    connect_timeout=5,
-    options='-c default_transaction_read_only=on -c statement_timeout=10000',
-)
+try:
+    connection = psycopg2.connect(
+        host='database', port=options.get('db_port') or '5432',
+        dbname=options['db_name'], user=options['db_user'], password=options['db_password'],
+        connect_timeout=5,
+        options='-c default_transaction_read_only=on -c statement_timeout=10000',
+    )
+except psycopg2.Error:
+    # Local candidate credentials are not the provider's read authority. Keep
+    # driver stderr from masquerading as a host/provider authorization refusal.
+    raise RuntimeError('Candidate local database verification failed') from None
 try:
     with connection.cursor() as cursor:
         cursor.execute('SET TRANSACTION READ ONLY')
         cursor.execute('SELECT password FROM res_users WHERE login = %s AND active',
-                       (os.environ['ODOO_ADMIN_LOGIN'],))
+                       (os.environ.get('ODOO_ADMIN_LOGIN', '').strip() or 'admin',))
         rows = cursor.fetchall()
         if (len(rows) != 1 or not rows[0][0]
                 or not context.verify(os.environ['ODOO_ADMIN_PASSWORD'], rows[0][0])):
@@ -64,13 +69,9 @@ finally:
         connection.rollback()
     finally:
         connection.close()
-stored = options['admin_passwd']
-password = os.environ['ODOO_MASTER_PASSWORD']
-if stored.startswith('$'):
-    valid = context.verify(password, stored)
-else:
-    valid = hmac.compare_digest(password, stored)
-if not valid:
+# Supported startup renders the master value directly. This checks rendering
+# consistency; it is not an interactive authentication or an admission digest.
+if not hmac.compare_digest(os.environ['ODOO_MASTER_PASSWORD'], options['admin_passwd']):
     raise RuntimeError('Candidate local master credential differs')
 print('candidate_credentials_verified=true')
 """
