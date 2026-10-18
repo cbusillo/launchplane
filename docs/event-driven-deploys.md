@@ -346,8 +346,16 @@ needs no workflow to report previews or testing deploys.
   preview feedback notification policy.
 - **No churn:** a reconcile whose comment would be the same as the one it last
   delivered posts nothing, so the half-hourly sweep doesn't rewrite comments.
-  A "queued" testing comment becomes "runs this change" at the next reconcile
-  after the deploy finishes, at the latest the next sweep.
+  An event-driven testing replacement on Launchplane's reconcile grant and
+  product reconcile scope atomically requests its next reconcile when the
+  worker commits a passed, failed or cancelled operation. A "queued" comment
+  therefore advances on the next worker pass
+  rather than waiting for the half-hourly sweep. The reconcile still verifies
+  the build and running release, honors staff holds and unknown provider
+  outcomes, and preserves the failed-attempt budget. Nonterminal checkpoints
+  and refused lease writes do not request a reconcile. If the request cannot
+  be saved, the completion transaction rolls back and existing lease recovery
+  governs the operation; it cannot leave a terminal result without its wake.
 
 - **Client review:** when the PR carries the product Client's review label and
   the preview is ready, the comment mentions the Client with the link to record
