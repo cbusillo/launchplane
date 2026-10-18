@@ -29,6 +29,10 @@ from control_plane.testing_candidate_probe import CANDIDATE_HOST_PROBE, CANDIDAT
 from control_plane.testing_candidate_runtime import TestingCandidateRuntimeInputs
 
 
+class CandidateObservationUnavailable(ValueError):
+    """The original candidate effect or its private health needs observation."""
+
+
 def candidate_private_readiness(
     *,
     host: str,
@@ -86,7 +90,7 @@ def candidate_private_readiness(
         timeout_seconds=120,
     )
     if frames != [{"type": "complete", "private_readiness_verified": True}]:
-        raise ValueError("Candidate private readiness is unverified.")
+        raise CandidateObservationUnavailable("Candidate private readiness is unverified.")
     return TestingCandidatePrepared(
         plan_sha256=plan.digest,
         runtime_identity=plan.runtime_identity,
@@ -279,12 +283,19 @@ def prepare_candidate_application(
             )
         matching = [item for item in deployments if item.get("title") == title]
         if len(matching) != 1 or len(deployments) != 1:
-            raise ValueError(
+            raise CandidateObservationUnavailable(
                 "Candidate original deployment is absent or ambiguous; do not redispatch."
             )
         deployment_id = api.deployment_key(matching[0])
         if not deployment_id:
-            raise ValueError("Candidate deployment identity is unavailable.")
+            raise CandidateObservationUnavailable("Candidate deployment identity is unavailable.")
+        if api.deployment_status(matching[0]) in api._DEPLOYMENT_FAILURE_STATUSES:
+            raise api.DokployDeploymentFailed(
+                deployment_id=deployment_id,
+                deployment_status=api.deployment_status(matching[0]),
+                message_prefix="Candidate original build failed",
+                deployment=matching[0],
+            )
         api.wait_for_target_deployment(
             host=host,
             token=token,
@@ -298,12 +309,24 @@ def prepare_candidate_application(
     app = record.application
     assert app is not None
     if app.phase == "deployed":
-        save(phase="restoring")
+        save(phase="restoring", restore_workflow_started=False)
+    app = record.application
+    assert app is not None
+    if (
+        app.phase == "restoring"
+        and app.restore_workflow_started is False
+        and not app.restore_schedule_id
+    ):
 
         def before_mutation(phase: str) -> None:
             checkpoint()
             if phase in {"post_deploy_target_update", "post_deploy_deploy_trigger"}:
                 raise ValueError("Candidate runtime inputs must be complete before deployment.")
+            if (
+                record.application is not None
+                and record.application.restore_workflow_started is not True
+            ):
+                save(restore_workflow_started=True)
             if phase == post_deploy.ODOO_POST_DEPLOY_SCHEDULE_TRIGGER:
                 target_payload = payload()
                 schedule_type, lookup_id, _, _ = post_deploy._resolve_dokploy_schedule_runtime(
@@ -390,7 +413,9 @@ def candidate_restore_terminal(
     """Prove exactly one original restore finished; an absent request stays unknown."""
     app = record.application
     if app is None or not app.restore_schedule_id:
-        raise ValueError("Candidate restore has no original schedule dispatch receipt.")
+        raise CandidateObservationUnavailable(
+            "Candidate restore has no original schedule dispatch receipt."
+        )
     payload = api.dokploy_request(
         host=host,
         token=token,
@@ -399,24 +424,50 @@ def candidate_restore_terminal(
     )
     history = api.parse_deployment_history(payload)
     if history.state == "unknown":
-        raise ValueError("Candidate restore history is unavailable.")
+        raise CandidateObservationUnavailable("Candidate restore history is unavailable.")
     deployments = api.extract_deployments(payload)
     keys = [api.deployment_key(item) for item in deployments]
     if not all(keys) or len(set(keys)) != len(keys):
-        raise ValueError("Candidate restore history is ambiguous.")
+        raise CandidateObservationUnavailable("Candidate restore history is ambiguous.")
     new = [
         item
         for item in deployments
         if api.deployment_key(item) not in app.restore_previous_deployments
     ]
     if len(new) != 1:
-        raise ValueError("Candidate original restore is absent or ambiguous.")
+        raise CandidateObservationUnavailable("Candidate original restore is absent or ambiguous.")
     status = api.deployment_status(new[0])
     if status not in api._DEPLOYMENT_SUCCESS_STATUSES | api._DEPLOYMENT_FAILURE_STATUSES:
-        raise ValueError("Candidate restore is still running or unknown.")
+        raise CandidateObservationUnavailable("Candidate restore is still running or unknown.")
     if require_success and status not in api._DEPLOYMENT_SUCCESS_STATUSES:
         raise ValueError("Candidate restore failed; keep the old copy serving.")
     return app.restore_schedule_id + ":" + api.deployment_key(new[0]) + ":" + status
+
+
+def candidate_build_terminal(*, host: str, token: str, record: TestingCandidateAllocation) -> str:
+    app = record.application
+    if app is None or app.restore_schedule_id or app.phase != "deploying":
+        raise ValueError("Build abandonment requires the original pre-restore deployment intent.")
+    deployments = api.list_deployments_for_target(
+        host=host,
+        token=token,
+        target_type="compose",
+        target_id=record.compose_id,
+        require_complete=True,
+    )
+    if (
+        len(deployments) != 1
+        or deployments[0].get("title") != "Launchplane testing candidate " + app.plan.digest
+    ):
+        raise CandidateObservationUnavailable(
+            "Original candidate build history is absent or ambiguous."
+        )
+    key, status = api.deployment_key(deployments[0]), api.deployment_status(deployments[0])
+    if not key or status not in api._DEPLOYMENT_SUCCESS_STATUSES | api._DEPLOYMENT_FAILURE_STATUSES:
+        raise CandidateObservationUnavailable(
+            "The original candidate build is still running or unknown."
+        )
+    return key + ":" + status
 
 
 def abandon_candidate_application(
@@ -448,10 +499,14 @@ def abandon_candidate_application(
         host=host, token=token, compose_id=record.compose_id
     ):
         raise ValueError("A publicly routed candidate cannot be abandoned as private.")
-    if app.phase not in {"restoring", "prepared"}:
+    if app.phase not in {"deploying", "restoring", "prepared"}:
         raise ValueError("Observe the original candidate effects before abandonment.")
-    evidence = candidate_restore_terminal(
-        host=host, token=token, record=record, require_success=False
+    evidence = (
+        candidate_build_terminal(host=host, token=token, record=record)
+        if app.phase == "deploying"
+        else candidate_restore_terminal(
+            host=host, token=token, record=record, require_success=False
+        )
     )
     # No new deployment may have started after the admitted candidate build.
     deployments = api.list_deployments_for_target(
@@ -463,7 +518,8 @@ def abandon_candidate_application(
     )
     if (
         len(deployments) != 1
-        or api.deployment_key(deployments[0]) != app.deployment_id
+        or (app.deployment_id and api.deployment_key(deployments[0]) != app.deployment_id)
+        or deployments[0].get("title") != "Launchplane testing candidate " + app.plan.digest
         or api.deployment_status(deployments[0])
         not in api._DEPLOYMENT_SUCCESS_STATUSES | api._DEPLOYMENT_FAILURE_STATUSES
     ):
