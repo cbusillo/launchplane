@@ -57,6 +57,13 @@ class _Opener:
             "expires_on": "2027-01-01 00:00:00",
             "meta": {"dns_provider_credentials": "fixture-secret"},
         }
+        self.access_list_payload = {
+            "id": 1,
+            "name": "Private testing",
+            "satisfy_any": False,
+            "pass_auth": False,
+            "items": [{"username": "fixture", "password": "fixture-secret"}],
+        }
 
     def open(self, request: Request, timeout: int | float) -> _Response:
         body_bytes = cast(bytes | None, request.data)
@@ -81,6 +88,8 @@ class _Opener:
             return _Response(self.other_hosts_payload)
         if method == "GET" and path == f"/api/nginx/certificates/{self.certificate_payload['id']}":
             return _Response(self.certificate_payload)
+        if method == "GET" and path == "/api/nginx/access-lists/1":
+            return _Response(self.access_list_payload)
         if method == "PUT" and path == "/api/nginx/proxy-hosts/78":
             assert isinstance(payload, dict)
             return _Response({"id": 78, **payload})
@@ -265,6 +274,16 @@ class NpmplusProxyHostPayloadTests(unittest.TestCase):
 
 
 class NpmplusClientTests(unittest.TestCase):
+    def test_access_list_read_checks_identity_and_discards_authentication_entries(self) -> None:
+        opener = _Opener()
+        client = NpmplusClient(credentials=_credentials(), opener=opener)
+        access_list = client.get_access_list(1)
+        self.assertEqual(access_list.id, opener.access_list_payload["id"])
+        self.assertNotIn("fixture-secret", access_list.model_dump_json())
+        opener.access_list_payload["id"] = 2
+        with self.assertRaises(click.ClickException):
+            client.get_access_list(1)
+
     def test_disabled_creation_refuses_before_exposing_a_temporarily_enabled_host(self) -> None:
         opener = _Opener()
         client = NpmplusClient(credentials=_credentials(), opener=opener)
@@ -302,6 +321,23 @@ class NpmplusClientTests(unittest.TestCase):
                 for method, path, _ in opener.requests
             )
         )
+
+    def test_disabled_public_read_keeps_hidden_configuration_checks(self) -> None:
+        opener = _Opener()
+        client = NpmplusClient(credentials=_credentials(), opener=opener)
+        opener.host_details.update(enabled=False, npmplus_nginx_online=False)
+        self.assertFalse(client.get_proxy_host(78, public_only=True).enabled)
+        for field, value in (
+            ("npmplus_mtls_certificate_id", 12),
+            ("npmplus_location_config", "return 403;"),
+            ("npmplus_auth_request_upstream", "http://other-auth"),
+        ):
+            with self.subTest(field=field):
+                original = opener.host_details[field]
+                opener.host_details[field] = value
+                with self.assertRaises(click.ClickException):
+                    client.get_proxy_host(78, public_only=True)
+                opener.host_details[field] = original
 
     def test_removed_protocol_settings_refuse_before_transport(self) -> None:
         opener = _Opener()

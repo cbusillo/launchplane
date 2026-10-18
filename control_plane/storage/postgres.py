@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from urllib.parse import urlsplit
+
 from control_plane.contracts.merge_train_stall import MergeTrainStallRecord
 from control_plane.contracts.odoo_upgrade_rehearsal import OdooUpgradeRehearsalRecord
 from control_plane.contracts.testing_rebuild import TestingRebuildRecord
@@ -6087,9 +6089,23 @@ class PostgresRecordStore(HumanSessionStore):
         """Checkpoint owned effects before the atomic config/success-receipt commit."""
 
         def guard(session: Any) -> None:
-            requested_hosts = set(bundle.dokploy_targets[0].public_hosts) | {
-                effect.host for effect in pending_effects
-            }
+            requested_hosts = (
+                set(bundle.dokploy_targets[0].public_hosts)
+                | set(bundle.dokploy_targets[0].domains)
+                | {effect.host for effect in pending_effects}
+            )
+            for row in session.scalars(select(LaunchplanePrivateHealthEndpointRow)).all():
+                endpoint = PrivateHealthEndpointRecord.model_validate(row.payload)
+                if (
+                    endpoint.status == "active"
+                    and (endpoint.context, endpoint.instance)
+                    != (expected_target.context, expected_target.instance)
+                    and (urlsplit(endpoint.url).hostname or "").rstrip(".").lower()
+                    in requested_hosts
+                ):
+                    raise DokployTargetRecordChanged(
+                        "A host is already owned by another lane's private endpoint."
+                    )
             for row in session.scalars(select(LaunchplaneDokployTargetRow)).all():
                 if (row.context, row.instance) != (
                     expected_target.context,
@@ -11782,7 +11798,7 @@ class PostgresRecordStore(HumanSessionStore):
         """Atomically archive the completed copy, select a fresh database and queue its restore.
 
         Provider reads precede the short locked commit; no production write.
-        A held/unknown lane gets a receipt only.
+        A protected or independently unqualified lane gets a receipt only.
         The previous generation stays in the immutable slot receipt for recovery.
         """
         from control_plane.odoo_testing_drill import (
@@ -11797,6 +11813,7 @@ class PostgresRecordStore(HumanSessionStore):
             require_drill_use_unprotected,
         )
         from control_plane.odoo_testing_restore import generation_binding
+        from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 
         observed_revision = drill_admission_revision(self, product, context)
         existing = self.read_idempotency_record(
@@ -11808,9 +11825,11 @@ class PostgresRecordStore(HumanSessionStore):
         ):
             return
         candidate = None
-        collection_error: ValueError | RuntimeError | None = None
+        collection_error: ValueError | RuntimeError | NativeSourceAuthorizationDenied | None = None
         try:
             candidate = prepare_drill(self, product, context, key, now)
+        except NativeSourceAuthorizationDenied as error:
+            collection_error = error
         except (ValueError, FileNotFoundError, RuntimeError) as error:
             collection_error = (
                 error
@@ -11885,6 +11904,10 @@ class PostgresRecordStore(HumanSessionStore):
                     ):
                         raise DrillSkipped("successful_login_check_expired")
                 prepared = candidate
+            except NativeSourceAuthorizationDenied:
+                # Persist the refusal against this admission revision so the
+                # scheduler cannot repeat the denied read on every poll.
+                payload.update(status="fail", step="authorization_denied")
             except DrillSkipped as error:
                 payload.update(status="skipped", step=str(error))
             except DrillPrerequisite as error:

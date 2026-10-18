@@ -95,10 +95,9 @@ class InitialTestingGenerationHttpTests(unittest.IsolatedAsyncioTestCase):
             409,
         )
 
-    async def test_use_unknown_production_wrong_lane_and_client_remain_refused(self) -> None:
-        for usage in (OdooTestingUsage(), OdooTestingUsage("in_use", True, True, "complete")):
-            self.usage.return_value = usage
-            self.assertEqual((await self.post()).status_code, 409)
+    async def test_positive_use_production_wrong_lane_and_client_remain_refused(self) -> None:
+        self.usage.return_value = OdooTestingUsage("in_use", True, True, "complete")
+        self.assertEqual((await self.post()).status_code, 409)
         self.usage.return_value = OdooTestingUsage("unused", False, False, "complete")
         for changes in (
             {"instance": "prod"},
@@ -139,13 +138,15 @@ class InitialTestingGenerationHttpTests(unittest.IsolatedAsyncioTestCase):
             held,
         )
 
-    async def test_stopped_runtime_qualifies_not_found_repair_without_asserting_unused(
+    async def test_stopped_runtime_qualifies_positive_use_not_found_repair(
         self,
     ) -> None:
         from datetime import datetime, timezone
         from tests.support.down_lanes import record_lane_health
 
-        self.usage.return_value = OdooTestingUsage(reason_code="serving_container_stopped")
+        self.usage.return_value = OdooTestingUsage(
+            "in_use", True, True, "serving_container_stopped"
+        )
         self.assertEqual((await self.post()).status_code, 409)
         record_lane_health(
             self.store,
@@ -154,14 +155,14 @@ class InitialTestingGenerationHttpTests(unittest.IsolatedAsyncioTestCase):
             datetime.now(timezone.utc),
             status=404,
         )
-        # The old failed plan's binding changed when monitoring was configured.
+        # A subsequent plan must capture the changed monitoring configuration.
         response = await self.post(key="stopped-runtime")
         self.assertEqual(response.status_code, 202, response.text)
-        self.assertEqual(self.usage.return_value.usage, "unknown")
-        self.assertIsNone(self.usage.return_value.recent_signins)
-        self.assertIsNone(self.usage.return_value.authenticated_sessions)
-        self.usage.return_value = OdooTestingUsage(reason_code="service_ambiguous_or_stopped")
-        self.assertEqual((await self.post(key="stopped-runtime")).status_code, 409)
+        self.assertEqual(self.usage.return_value.usage, "in_use")
+        self.usage.return_value = OdooTestingUsage(
+            "in_use", True, True, "service_ambiguous_or_stopped"
+        )
+        self.assertEqual((await self.post(key="ambiguous-runtime")).status_code, 409)
 
     async def test_missing_copy_prerequisite_refuses_before_allocation_effects(self) -> None:
         from control_plane.testing_replacement_bootstrap import BootstrapPrerequisiteCode

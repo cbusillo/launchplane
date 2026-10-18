@@ -10938,6 +10938,7 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
         from tests.test_odoo_testing_drill import TestingDrillTests
 
         for scenario in (
+            "test_unknown_occupancy_does_not_require_downtime_or_a_non_use_declaration",
             "test_locked_successor_adapter_consumes_the_service_downtime_rule",
             "test_current_staff_hold_always_blocks_down_lane",
             "test_private_serving_or_unresolved_endpoint_protects_a_publicly_down_lane",
@@ -12518,6 +12519,22 @@ class RealPostgresOdooTestingDrillTests(unittest.TestCase):
         self.addCleanup(self.scenario.doCleanups)
         self.scenario.seed(self.enterContext(_head_postgres_database()))
 
+    def test_unknown_use_admission_and_generation_bound_checkpoint_on_postgres(self) -> None:
+        from tests.test_odoo_testing_drill import TestingDrillTests
+
+        fixture = TestingDrillTests()
+        self.addCleanup(fixture.doCleanups)
+        fixture.seed(self.enterContext(_head_postgres_database()))
+        fixture.test_unknown_usage_queues_without_downtime_and_stays_unknown_at_activation()
+
+    def test_denial_receipt_prevents_unchanged_retry_on_postgres(self) -> None:
+        from tests.test_odoo_testing_drill import TestingDrillTests
+
+        fixture = TestingDrillTests()
+        self.addCleanup(fixture.doCleanups)
+        fixture.seed(self.enterContext(_head_postgres_database()))
+        fixture.test_scheduler_records_denial_without_retrying_unchanged_admission()
+
     def test_drill_login_history_query_on_real_postgres(self) -> None:
         from datetime import timedelta
         import re
@@ -12614,7 +12631,11 @@ class RealPostgresOdooTestingDrillTests(unittest.TestCase):
             with engine.begin() as connection:
                 connection.exec_driver_sql("DROP TABLE res_users_log")
             status, output = host.run_program()
-            self.assertNotEqual(status, 0)
+            self.assertEqual(status, 0, output)
+            self.assertEqual(
+                json.loads(output.strip().removeprefix("fixture:")),
+                {"type": "complete", "resources_qualified": True},
+            )
 
     def test_replicas_admit_one_fresh_database_and_restore(self) -> None:
         from concurrent.futures import ThreadPoolExecutor

@@ -600,8 +600,76 @@ its own blocked PR. Dry-run reports the intent without applying it.
 For service batches, a PR carrying `blocked_label` is excluded from subsequent
 queue selection,
 including label-free dependency updates, so the next controller pass can select
-other eligible work. Remove the block label after resolving the failure to admit
-that PR again. Applied-block PR feedback explains the failure and how to rejoin.
+other eligible work. Applied-block PR feedback explains the failure and how to rejoin.
+
+For a service-recorded isolated candidate failure, push the fix on a different
+head, wait for green current-head checks, and post the weighed review with
+`gh-pr.py comment --reviewed-head FULL_SHA`. Between candidates, the controller
+can clear its old block and report `recover_candidate_block`. Then run the
+ordinary checked `gh-pr.py ready`; recovery does not enqueue, admit or merge.
+Do not remove the failed-candidate label by hand to route the PR. Other queue
+blocks and admin holds retain their existing release path and never acquire
+automatic recovery from an unrelated candidate failure.
+
+The controller persists its source-head-bound block decision before applying
+the label, including the previous label event ID. It then confirms the applied
+label event ID. A successful POST is also saved as a positive write receipt
+before observing event/detail reads. If both reads lag, that receipt retains
+the causal proof without holding the repository's lease; ordinary queue work
+continues, and later recovery still requires exactly one current label event.
+A lost label reply reconciles only through its exact saved native lease;
+ordinary discovery never adopts an abandoned or uncertain pending intent.
+Recovery requires exactly one subsequent label event by
+the recorded writer App. Its identity comes from the existing token-source App
+ID, independently of the enqueue allowlist; reserved Bot-login metadata resolves
+that ID even when GitHub omits `performed_via_github_app` from label events.
+The confirmed numeric writer ID is saved with the event, so later App/key
+rotation needs no read of the old App's metadata.
+The [Get an app API](https://docs.github.com/en/rest/apps/apps#get-an-app) requires
+no additional token permission. A removal or reapplication is a
+new hold, including within the same timestamp. Feedback delivery is not proof
+of the effect and need not succeed first. Legacy controller outcome receipts,
+including workflow and deferred deliveries, can supply the old failed record;
+the exact closed, unmerged generated batch PR supplies GitHub-side chronology.
+No comparison depends on agreement between the service clock and GitHub's clock.
+A generic or unattributable hold remains held rather than acquiring invented
+provenance. Recovery binds repository, base, policy key and the original blocked
+label. Changes to enqueue, token-source or admission settings do not strand the
+old label; current checks and review authority are read again, and the subsequent
+ready/admission path enforces the full current policy.
+
+The same blocked head never qualifies, including after a green rerun. Recovery
+also refuses pending, failing or unreadable current-head evidence, conflicting
+or unknown mergeability, stale/missing/unweighed review, a renewed review request,
+drafts, a different base, forks and unresolved required review conversations.
+Review request/receipt parsing follows the catalog's producer contract, including
+creation ordering and edited receipts. Receipts and renewed requests accept
+the allowed PR author and writers authorized by the existing Ready-handoff
+policy; recovery grants no new role or identity. Client preview acceptance is requested
+from PR notes by the preview reconciler, independently of a ready handoff; a
+Client-review PR waits for that current-head check before recovery. An old
+waiting handoff is not a new model-review request.
+
+Confirmation makes at most two consistency observations per pass. A saved
+successful write produces managed waiting feedback while the event is pending
+or the label still looks absent; later passes do not repeat POST, and unrelated
+queue work proceeds. An uncertain write retains its exact native checkpoint.
+For that state, inspect the saved controller result and provider label/event
+evidence, repair the underlying provider problem, and use the existing
+`POST /v1/work-graph/merge-train/controller/run-once` reconciliation entrypoint
+with the same repository/base selector and existing authorization. Its mutating
+pass re-observes the saved effect without reissuing the label write. Time alone
+never proves whether an uncertain write happened, and this recovery path adds
+no force-clear or remove-label shortcut. A confirmed absence retires only an
+uncertain attempt; an unrelated hold is never adopted. Resumed block feedback
+retains the original failed-check details from its saved checkpoint.
+
+The controller rechecks the head and label history before leased removal.
+Unavailable proof preserves the hold while unrelated queue work proceeds;
+rate limits and authorization failures retain their normal handling. A lost
+removal reply is observed under the saved native lease checkpoint and emits
+waiting feedback without another DELETE. Dry-run recovery includes the ordinary
+queue preview as well as its proposed recovery step.
 
 Within-major dependency updates admitted through the required-label exception use
 current-head check and mergeability evidence for holds, rather than acquiring a
@@ -622,9 +690,13 @@ rerunning its checks. Landing admission checks only the plan's members. A new
 head or a moved base releases the hold; a new head still waits until the active
 candidate finishes under the admission rule below. The hold posts no PR feedback.
 Every existing block label remains a hold,
-including labels applied by earlier controller versions: no actor or historical
-record is used to guess that a generic hold may be cleared. Those PRs retain the
-supported remove-label path. The single-transition worker and retained bound-job
+including labels applied by earlier controller versions without the failed-candidate
+and label-event proof above. Legacy automatic recovery covers exact closed,
+unmerged protected batch PRs; pre-change squash/rebase, reused-head and individual
+landing blocks may lack that chronology. Those unproven legacy and generic holds
+retain the existing authorized maintainer remove-label path. Automatic
+failed-candidate recovery never uses that administrative path. A generic hold is never guessed
+to be a recoverable candidate block. The single-transition worker and retained bound-job
 controller compatibility path are unchanged.
 
 Landing admission allows transient unknown mergeability only for exact PR/head
@@ -2140,6 +2212,69 @@ overwritten by a concurrent replay. PostgreSQL uses the same held session for
 feedback reads and writes, so delivery does not require a second pooled connection.
 The lock affects comment delivery only, and does not replace merge authority or
 the controller lease.
+
+Both native controller and standalone batch landings persist pending completed
+feedback before candidate cleanup or returning to the caller. The existing
+terminal-feedback recovery drains it even during an otherwise idle worker pass;
+repeated cleanup does not queue the same landing again. Queueing performs no
+provider calls under the controller lease. For a merged PR on the default branch,
+completed feedback reconciles planning metadata for its native closing references. For a managed
+issue authored by an identity already trusted by the repository's enqueue
+policy, it requires completed closure, a reviewed clear wait, and closed native
+blockers and sub-issues. It preserves open finish lines and reporter-owned
+issues. It never closes or reopens an issue. The repository's
+`.github/github.json` planning labels and configured Project select the metadata;
+otherwise the planning protocol's standard labels apply. Unrelated labels and
+the issue body remain intact. Its saved comment carries a hidden
+`launchplane-planning-reconciliation` receipt with the landing SHA and issue
+readbacks. The persisted record schema stays compatible with older workers
+during rolling deployment and rollback. A receipt is evidence, never authority;
+each retry uses the current policy's trusted identities.
+
+Completed feedback also covers closed stack children and release-branch trains.
+Those preserve their existing completion comment with an explicit
+`not_applicable`, `ok: false` receipt: no issue discovery or metadata mutation
+applies, and the receipt is not planning-completion proof. The provider must
+return a real merged flag, matching feedback/PR base and a known default branch;
+missing or mismatched identity evidence remains a global hold. A null merge
+timestamp is normal for an unmerged stack child and is not parsed on this path.
+
+A held, reporter-owned or not-yet-closed source does not prevent other eligible
+sources in the same PR from being reconciled. The held source stays unchanged,
+and its diagnostic keeps the overall planning receipt incomplete. Provider
+metadata-write failures still stop that delivery through existing retry/denial
+handling.
+Issue-specific Project membership gaps are preflight holds, so they also preserve
+only that issue. Unresolvable Project configuration, permissions, mutations and
+readback failures stop delivery. Saved receipts retain successful source readbacks
+even when a later source's provider operation fails; that source is marked
+interrupted. Once every source has been visited and only terminal source holds
+remain, the landed PR comment is published with a visible incomplete-planning
+note and a failed, nonretryable receipt. This preserves landing feedback without
+claiming all source metadata is complete. Pending projection and global/provider
+failures still withhold the comment.
+
+Provider failures use terminal feedback's existing retry and quota backoff.
+Explicit transient GraphQL errors, including HTTP-200 rate-limit responses, use
+that same retry path; authorization denial takes precedence. Unknown GraphQL
+failures need review. GitHub's delayed keyword-closure projection waits only within
+15 minutes of the verified PR merge time. This includes an issue reopened before
+a later merge whose new closure has not projected yet. Any still-open source
+after that window requires owning review and stays unchanged. A merge timestamp
+slightly ahead of the worker clock waits within the same bounded grace, before
+any issue IO. Missing, invalid, inconsistent or further-future timestamps need
+owning review. A real wait, incomplete prerequisite, cross-repository closing link,
+untrusted author, malformed evidence or readback mismatch leaves a failed
+receipt for owning-agent review. This failure does not undo the landing. Queueing
+does no GitHub IO, but metadata delivery adds requests to the serial scheduler;
+latency can delay later targets and shared App quota can affect other repositories.
+Permission failures remain failures, without
+a credential or identity fallback. Configured Projects require the existing
+token's Projects capability; no new grant is requested by this path.
+An owning agent can review these cases and use the catalog's supported
+`gh-plan.py reconcile-landing --pr N --apply` for retrospective repair.
+Historical feedback records without a planning receipt are not proof that
+planning was reconciled.
 
 ## Original review recovery
 

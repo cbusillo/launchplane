@@ -6,7 +6,7 @@ from typing import Literal, Mapping
 from control_plane.contracts.odoo_walkthrough import WALKTHROUGH_ACTION, WALKTHROUGH_PLAN_ACTION
 
 
-ActionEffect = Literal["read", "plan", "write"]
+ActionEffect = Literal["read", "plan", "projection_sync", "write"]
 AGENT_READ_ROLE_ACTION = "agent.read"
 ODOO_CONNECTION_ISOLATION_ACTIONS = MappingProxyType(
     {
@@ -115,6 +115,8 @@ ACTION_DECLARATIONS: Mapping[str, ActionDeclaration] = MappingProxyType(
         "ingress_canary_route.apply": ActionDeclaration("write"),
         "ingress_canary_route.read": ActionDeclaration("read"),
         "ingress_route.apply": ActionDeclaration("write"),
+        # Exact-instance existing-provider no-op only; never the general apply path.
+        "ingress_route.audit": ActionDeclaration("projection_sync"),
         "ingress_route.plan": ActionDeclaration("plan"),
         "inventory.read": ActionDeclaration("read"),
         "launchplane_service.read": ActionDeclaration("read"),
@@ -285,3 +287,7 @@ def action_effect(action: str) -> ActionEffect | None:
 
 def agent_read_role_covers(action: str) -> bool:
     return action_effect(action) in {"read", "plan"}
+
+
+def director_agent_standing_covers(action: str) -> bool:
+    return agent_read_role_covers(action) or action_effect(action) == "projection_sync"

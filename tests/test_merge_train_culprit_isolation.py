@@ -180,6 +180,12 @@ class _TrainSimulation:
             self.store.write_merge_train_batch_candidate_record(failed_record)
             records_before_recovery = self.store.list_merge_train_batch_candidate_records()
             client = Mock()
+            client.candidate_block_label_events.return_value = []
+            client.candidate_block_application.return_value = {"status": "applied", "event_id": 1}
+            lease = Mock()
+            lease.record.updated_at = failed.updated_at
+            lease.record.step_payload = {}
+            lease.record.ordinary_job_binding = None
             client.read_merge_train_snapshot.return_value = self.snapshot
             client.observe_batch_candidate_checks.return_value = failed
             client.read_candidate_check_failures.return_value = failure
@@ -207,7 +213,7 @@ class _TrainSimulation:
                     recorded_at="2026-10-10T12:01:00Z",
                     trace_id="isolation",
                     mutate=mutate,
-                    lease=Mock(),
+                    lease=lease,
                 )
             assert result is not None
             if not mutate:

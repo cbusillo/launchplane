@@ -214,6 +214,10 @@ def _container_identity(container: dict[str, Any], container_name: str) -> tuple
 
 
 def _feedback_event(*, controller_action: str, result: dict[str, Any]) -> str:
+    if result.get("reason_code") == "candidate_block_confirmation_pending":
+        return "waiting"
+    if controller_action == "recover_candidate_block":
+        return "waiting" if _as_dict(result.get("details")).get("block_removed") is True else "skip"
     if result.get("reason_code") == "base_checks_not_green":
         return (
             "waiting"
@@ -257,6 +261,30 @@ def _feedback_message(
     controller_record_id: str,
     phase: str,
 ) -> str:
+    if result.get("reason_code") == "candidate_block_confirmation_pending":
+        if result.get("controller_reconciliation_status") != "required":
+            return (
+                _isolated_failure_message(result)
+                + "\n\nLaunchplane saved the successful block write and is waiting for "
+                "GitHub's event proof; it will not repeat the label write."
+            )
+        return (
+            "Launchplane is waiting for GitHub to confirm its saved failed-candidate "
+            "label effect. The native recovery checkpoint remains held; the controller "
+            "will observe it again without repeating the label write."
+        )
+    if controller_action == "recover_candidate_block":
+        if _as_dict(result.get("details")).get("removal_observation"):
+            return (
+                "Launchplane observed that the failed-candidate block is absent while "
+                "reconciling its saved recovery attempt. Recheck the current head and "
+                "post a fresh checked gh-pr.py ready handoff to rejoin the train."
+            )
+        return (
+            "Launchplane cleared its failed-candidate block after verifying a different "
+            "current head, green checks and a weighed review. Post a fresh checked "
+            "gh-pr.py ready handoff to rejoin the train."
+        )
     if event == "completed":
         batch_pr = _as_dict(result.get("landing_plan")).get("candidate_pull_request_number")
         if type(batch_pr) is int and batch_pr > 0:
@@ -348,7 +376,9 @@ def _isolated_failure_message(result: dict[str, Any]) -> str:
         "Launchplane held this pull request out of the train: its merge-train batch "
         "failed, and it failed the candidate checks again when tested without the other "
         f"queued pull requests.{named} The other pull requests continue without it. Fix "
-        "the failure and remove the block label to rejoin the queue."
+        "the failure on a new head, obtain green checks and post the weighed review. "
+        "Launchplane verifies its recorded block and clears it; then run gh-pr.py ready "
+        "to rejoin the queue."
     )
 
 
@@ -441,6 +471,9 @@ def _held_out_messages(
 def _pull_request_numbers(
     result: dict[str, Any], *, controller_action: str, phase: str
 ) -> list[int]:
+    if controller_action == "recover_candidate_block":
+        number = _as_dict(result.get("details")).get("pull_request_number")
+        return [number] if type(number) is int and number > 0 else []
     selected_actions = {"wait_for_checks", "block", "update_branch"}
     if controller_action in selected_actions and "candidate" not in result:
         selected = _as_dict(_as_dict(result.get("dry_run_result")).get("selected_pr"))

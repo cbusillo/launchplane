@@ -239,14 +239,24 @@ class DirectorHoldRehearsalTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(lifted.json()["result"]["reconcile_requested"])
         self.assertIsNone(_read_hold(self.store))
 
-    async def test_new_protection_and_unknown_facts_block_lift_even_with_write_grant(self) -> None:
+    async def test_unknown_usage_alone_allows_rehearsal_hold_and_lift(self) -> None:
+        record_safety(self.store, _PRODUCT, _CONTEXT, "testing", usage="unknown")
+        await self.set_hold()
+        lifted = await self.reviewed(hold=False, key="unknown-lift")
+        self.assertEqual(lifted.status_code, 202, lifted.text)
+        self.assertTrue(lifted.json()["result"]["reconcile_requested"])
+        self.assertIsNone(_read_hold(self.store))
+        evidence = self.store.read_disposable_lane_safety(_PRODUCT, _CONTEXT, "testing")
+        assert evidence is not None
+        self.assertEqual(evidence.usage, "unknown")
+
+    async def test_new_protection_and_unsafe_facts_block_lift_even_with_write_grant(self) -> None:
         await self.set_hold()
         original = self.store.read_disposable_lane_safety(_PRODUCT, _CONTEXT, "testing")
         assert original is not None
         self.app = self.make_app(explicit_grant=True)
         for changes in (
             {"usage": "in_use"},
-            {"usage": "unknown"},
             {"data": "only_copy"},
             {"data": "unknown"},
             {"production_resources": "shared"},
@@ -382,7 +392,7 @@ class DirectorHoldRehearsalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.list_product_reconcile_requests(), ())
 
     async def test_unqualified_set_cannot_fabricate_rehearsal_provenance(self) -> None:
-        record_safety(self.store, _PRODUCT, _CONTEXT, "testing", usage="unknown")
+        record_safety(self.store, _PRODUCT, _CONTEXT, "testing", data="only_copy")
         for explicit_grant in (False, True):
             with self.subTest(explicit_grant=explicit_grant):
                 self.app = self.make_app(explicit_grant=explicit_grant)
@@ -392,7 +402,7 @@ class DirectorHoldRehearsalTests(unittest.IsolatedAsyncioTestCase):
                     _payload(
                         mode="apply", reviewed_plan_sha256=plan.json()["result"]["plan_sha256"]
                     ),
-                    f"unknown-set-{explicit_grant}",
+                    f"needed-copy-set-{explicit_grant}",
                 )
                 self.assertEqual(denied.status_code, 409, denied.text)
         forged = await self.post(_payload() | {"rehearsal": {"binding_sha256": "a" * 64}})

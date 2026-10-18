@@ -96,12 +96,11 @@ def disposable_collection_coverage() -> dict[str, str]:
     }
 
 
-def collect_down_testing_resource_facts(
+def collect_testing_resource_facts(
     store: object, *, product: str, context: str, now: datetime
 ) -> dict[str, str] | None:
     """Reinspect a service-created resettable copy without requiring login history."""
     from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
-    from control_plane.lane_usage import lane_usage_protected
     from control_plane.odoo_testing_restore import (
         read_current_testing_generation,
         generation_binding,
@@ -116,17 +115,13 @@ def collect_down_testing_resource_facts(
         lane = next(
             lane for lane in profile.lanes if (lane.context, lane.instance) == (context, "testing")
         )
+        target = store.read_dokploy_target_record(context_name=context, instance_name="testing")
+        hold = target.policies.staff_testing_hold
         if (
             profile.driver_id != "odoo"
             or lane.odoo_data_policy.data_authority != "resettable"
-            or lane_usage_protected(
-                store,
-                product=product,
-                context=context,
-                instance="testing",
-                usage="unknown",
-                now=now,
-            )
+            or hold is not None
+            and hold.purpose == "staff_testing"
         ):
             return None
         generation = read_current_testing_generation(

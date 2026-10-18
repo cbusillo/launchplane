@@ -23,6 +23,7 @@ container_id="$(docker create --init --shm-size=1g \
   --mount "type=bind,source=$node_executable,target=/usr/local/bin/node,readonly" \
   --workdir /work \
   --env CI=true --env HOME=/tmp/browser-home \
+  --env BROWSER_SMOKE_SHARD \
   --env PATH=/usr/local/bin:/usr/bin:/bin \
   --env "BROWSER_SMOKE_HOST_NETNS=$host_network_namespace" \
   "$BROWSER_SMOKE_IMAGE" bash -euc '

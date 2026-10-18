@@ -138,6 +138,12 @@ class TestingRebuildRecord(FrozenRecord):
 
     @model_validator(mode="after")
     def validate_checkpoint(self) -> Self:
+        if (
+            self.step in {"rolling_back", "failed"}
+            and self.retirement_started
+            and self.retirement_recovery is None
+        ):
+            raise ValueError("Rollback after a stop intent requires its undispatched-stop proof.")
         if self.retirement_recovery is not None and (
             not self.retirement_started
             or (
