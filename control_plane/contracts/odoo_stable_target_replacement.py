@@ -121,6 +121,7 @@ class OdooStableTargetReplacementRequest(BaseModel):
     artifact_id: str = ""
     source_git_ref: str = ""
     expected_current_artifact_id: str = ""
+    reason: str = Field(default="", max_length=1000)
 
     @model_validator(mode="after")
     def _validate_request(self) -> "OdooStableTargetReplacementRequest":
@@ -130,6 +131,7 @@ class OdooStableTargetReplacementRequest(BaseModel):
         self.artifact_id = self.artifact_id.strip()
         self.source_git_ref = self.source_git_ref.strip()
         self.expected_current_artifact_id = self.expected_current_artifact_id.strip()
+        self.reason = self.reason.strip()
 
         if not self.product:
             raise ValueError("Odoo stable target replacement requires product.")

@@ -51101,6 +51101,169 @@
         "title": "TestingPublicIngressRequest",
         "type": "object"
       },
+      "TestingRebuildOperationView": {
+        "additionalProperties": false,
+        "properties": {
+          "instance": {
+            "const": "testing",
+            "default": "testing",
+            "title": "Instance",
+            "type": "string"
+          },
+          "operation_id": {
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "phase": {
+            "title": "Phase",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation_id",
+          "product",
+          "status",
+          "phase",
+          "updated_at"
+        ],
+        "title": "TestingRebuildOperationView",
+        "type": "object"
+      },
+      "TestingRebuildPreflight": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_id": {
+            "title": "Artifact Id",
+            "type": "string"
+          },
+          "base_url": {
+            "title": "Base Url",
+            "type": "string"
+          },
+          "candidate_verification": {
+            "const": "pending",
+            "default": "pending",
+            "title": "Candidate Verification",
+            "type": "string"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "data_source_mode": {
+            "enum": [
+              "empty",
+              "production_restore",
+              "upstream_restore"
+            ],
+            "title": "Data Source Mode",
+            "type": "string"
+          },
+          "instance": {
+            "const": "testing",
+            "default": "testing",
+            "title": "Instance",
+            "type": "string"
+          },
+          "observed_at": {
+            "title": "Observed At",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "source_git_ref": {
+            "title": "Source Git Ref",
+            "type": "string"
+          },
+          "status": {
+            "const": "pass",
+            "default": "pass",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "context",
+          "base_url",
+          "artifact_id",
+          "source_git_ref",
+          "data_source_mode",
+          "observed_at"
+        ],
+        "title": "TestingRebuildPreflight",
+        "type": "object"
+      },
+      "TestingRebuildResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "operation": {
+            "$ref": "#/components/schemas/TestingRebuildOperationView"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "operation"
+        ],
+        "title": "TestingRebuildResponse",
+        "type": "object"
+      },
+      "TestingRebuildSubmit": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_id": {
+            "minLength": 1,
+            "title": "Artifact Id",
+            "type": "string"
+          },
+          "data_source_mode": {
+            "enum": [
+              "empty",
+              "production_restore",
+              "upstream_restore"
+            ],
+            "title": "Data Source Mode",
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "source_git_ref": {
+            "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+            "title": "Source Git Ref",
+            "type": "string"
+          }
+        },
+        "required": [
+          "data_source_mode",
+          "artifact_id",
+          "source_git_ref",
+          "reason"
+        ],
+        "title": "TestingRebuildSubmit",
+        "type": "object"
+      },
       "TestingReplacementBootstrapRequest": {
         "additionalProperties": false,
         "properties": {
@@ -68855,6 +69018,12 @@
                         "title": "Product",
                         "type": "string"
                       },
+                      "reason": {
+                        "default": "",
+                        "maxLength": 1000,
+                        "title": "Reason",
+                        "type": "string"
+                      },
                       "schema_version": {
                         "default": 1,
                         "minimum": 1,
@@ -69063,6 +69232,12 @@
                       },
                       "product": {
                         "title": "Product",
+                        "type": "string"
+                      },
+                      "reason": {
+                        "default": "",
+                        "maxLength": 1000,
+                        "title": "Reason",
                         "type": "string"
                       },
                       "schema_version": {
@@ -93897,6 +94072,354 @@
         "summary": "Publish one independent testing hostname at its existing public edge"
       }
     },
+    "/v1/products/{product}/testing-rebuild": {
+      "post": {
+        "operationId": "submit_testing_rebuild",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "maxLength": 256,
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TestingRebuildSubmit"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TestingRebuildResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Submit"
+      }
+    },
+    "/v1/products/{product}/testing-rebuild/inputs": {
+      "get": {
+        "operationId": "inspect_testing_rebuild",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "data_source_mode",
+            "required": false,
+            "schema": {
+              "default": "empty",
+              "enum": [
+                "empty",
+                "production_restore",
+                "upstream_restore"
+              ],
+              "title": "Data Source Mode",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TestingRebuildPreflight"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Inspect"
+      }
+    },
+    "/v1/products/{product}/testing-rebuild/lookup": {
+      "post": {
+        "description": "Read the original request after a denied recovery; never admit or retry it.",
+        "operationId": "lookup_testing_rebuild",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 256,
+              "minLength": 1,
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TestingRebuildSubmit"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TestingRebuildResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Lookup Original"
+      }
+    },
+    "/v1/products/{product}/testing-rebuild/operations/{operation_id}": {
+      "get": {
+        "operationId": "read_testing_rebuild",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Operation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TestingRebuildResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read Operation"
+      }
+    },
     "/v1/products/{product}/testing-replacement-bootstrap": {
       "post": {
         "operationId": "prepare_fresh_testing_bootstrap",
@@ -100545,6 +101068,8 @@
     "/v1/products/{product}/environments/{environment}/promotion/workflow-deliveries/{delivery_id}": "read_product_promotion_workflow_delivery",
     "/v1/products/{product}/environments/{environment}/public-ingress/incidents": "list_product_environment_public_ingress_incidents",
     "/v1/products/{product}/environments/{environment}/public-ingress/incidents/{incident_id}": "read_product_environment_public_ingress_incident",
+    "/v1/products/{product}/testing-rebuild/inputs": "inspect_testing_rebuild",
+    "/v1/products/{product}/testing-rebuild/operations/{operation_id}": "read_testing_rebuild",
     "/v1/release-review": "read_release_review",
     "/v1/repo-product-mapping": "read_repo_product_mapping",
     "/v1/service/github-delivery": "read_service_github_delivery_controls",
@@ -100583,6 +101108,8 @@
     "/v1/products/{product}/environments/{environment}/config/apply": "apply_product_environment_config",
     "/v1/products/{product}/environments/{environment}/promotion/dry-run": "dry_run_product_promotion",
     "/v1/products/{product}/environments/{environment}/promotion/workflow-dispatch": "dispatch_product_promotion_workflow",
+    "/v1/products/{product}/testing-rebuild": "submit_testing_rebuild",
+    "/v1/products/{product}/testing-rebuild/lookup": "lookup_testing_rebuild",
     "/v1/release-review/decisions": "write_release_review_decision",
     "/v1/release-review/urgent-openings": "open_urgent_release_review",
     "/v1/service/delivery/apply-receipt": "read_service_delivery_apply_receipt",

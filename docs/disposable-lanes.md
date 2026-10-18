@@ -968,11 +968,65 @@ credential versions are retained; installing changed local versions requires a
 fresh private copy through the same rebuild action.
 
 This is staged integration under [#3987](https://github.com/cbusillo/launchplane/issues/3987),
-not live qualification. Signed-in and supported agent controls, recovery from a
+not live qualification. Supported agent activation, recovery from a
 fully stopped initial legacy predecessor, a live host second-rebuild/next-deploy
 rehearsal and CM testing proof remain under #3963. The legacy local apply command
 is not a live-service fallback. No CM or production mutation is proved by these
 source tests.
+
+### Signed-in testing rebuild and native preflight
+
+The testing Actions page replaces the unavailable generic replacement cards with
+a typed administrator control for fresh empty,
+sanitized production and configured upstream copies. It shows the unchanged
+address and selected short commit. Selection uses the ordinary testing planner's
+current-release inputs and forward-build guard; an unavailable current manifest
+cannot silently move testing to its ancestor. The audit reason is prefilled and may be edited; a ready
+lane can be rebuilt with the primary button without entering build IDs or text.
+`GET /v1/products/{product}/testing-rebuild/inputs`
+reads that selection, actual retained-copy/route admission, current use/hold and
+generated credential provenance. It does not record an artifact, reserve a copy,
+create a lease or dispatch a mutation. Its `candidate_verification: pending`
+does not prove a new copy or completed restore. The worker still checks the
+source, generated values, independent resources, health and identity before
+cutover. The machine target-replacement plan route supports the same native
+read without a provider write.
+
+`POST /v1/products/{product}/testing-rebuild` takes the inspected build/source
+pair, a concrete reason and the original request key. Existing administrator
+cookie/CSRF and current policy checks precede admission. The server re-verifies
+the selected current build, records its existing immutable artifact contract,
+captures existing durable administrator authority and enqueues the same native
+replacement operation. It accepts no destination instance, target, credential or
+arbitrary replacement payload. New native machine admissions also require a
+reason; already admitted operations remain readable and recoverable.
+
+The browser persists the original payload/key and accepted operation ID. A
+reload watches a known operation with GET; a lost enqueue reply requires an
+explicit recovery of that same request. A denied request is retained and never
+automatically resubmitted. Typed operation views expose status and phase without
+provider payloads, authorization records or requester text. The browser
+distinguishes a confirmed first-submit denial from an unavailable watch or denied
+recovery of an earlier uncertain dispatch. The latter retain the original request
+and operation. After a denied recovery, `POST /testing-rebuild/lookup` on the same
+product prefix only reads the original key and exact intent; it cannot enqueue,
+reselect a build or call a provider. Like the existing browser POSTs, lookup
+requires the signed-in administrator's current Origin/CSRF evidence; the browser
+client supplies it through the same supported session path. A new attempt is
+marked dispatched by that client's existing callback after session lookup;
+failures proven before POST dispatch return to inspection. Absence is not proof
+that an earlier request cannot still arrive, so lookup retains the uncertain
+request. Authoritative settlement of an unobserved request is tracked in #4014
+before full activation; clearing browser state alone cannot exclude it. Known operation IDs
+resume with GET after sign-in. A confirmed first-submit denial can be discarded
+locally to refresh inspection, without another submit. Provider 401/403 preflight
+refusals carry a denial trace. Other known pre-admission failures use a fixed
+not-ready response; an uncertain create/commit reply remains uncertain. GitHub
+rate limits and expired artifact-storage URLs stop build selection as unavailable,
+without trying an older candidate or misreporting an identity denial.
+The source feature
+requires normal train delivery and service activation; its tests and mocked
+browser journey do not establish CM health or rebuild timing.
 The worker regression executes a second application's configure/deploy/initialize
 stages and same-address adoption, then the ordinary replacement and post-deploy
 workflows for a newer artifact. It verifies retained route, storage, generated

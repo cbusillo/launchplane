@@ -19,6 +19,7 @@ import type { BrowserActionKind } from "./browser-operation";
 import type { DevFixtureMode } from "./dev-fixture-loader";
 import { OdooReleasePanel } from "./OdooReleasePanel";
 import { ServiceRestartPanel } from "./ServiceRestartPanel";
+import { TestingRebuildPanel } from "./TestingRebuildPanel";
 import { HealthMonitoringPanel } from "./HealthMonitoringPanel";
 import { BackupWorkerCredentialsPanel } from "./BackupWorkerCredentialsPanel";
 import { ProductionBackupAuthorityPanel } from "./ProductionBackupAuthorityPanel";
@@ -54,7 +55,9 @@ export function EnvironmentActionsView({
   promotionResource: ResourceState<ProductPromotionStatus>;
   refreshToken: number;
 }) {
+  const testingRebuild = detail.environment === "testing" && !!detail.driver_extensions.odoo;
   const actions = detail.available_actions
+    .filter(action => !testingRebuild || !["target_replacement_plan", "target_replacement_apply"].includes(action.action_id))
     .map((action) => browserActionPresentation(detail.driver_id, action))
     .sort(compareBrowserActionPresentations);
   const serverEnabled = actions.filter(({ action }) => action.enabled).length;
@@ -65,6 +68,9 @@ export function EnvironmentActionsView({
 
   return (
     <section className="environment-actions-view">
+      {testingRebuild ? <TestingRebuildPanel
+        key={`rebuild:${detail.product}:${detail.context}`} detail={detail} fixtureMode={!!fixtureMode} onRefresh={onRefresh}
+      /> : null}
       {detail.environment === "prod" ? <ProductionBackupAuthorityPanel
         key={`backup:${detail.product}:${detail.context}:${detail.environment}`}
         detail={detail} fixtureMode={!!fixtureMode} onRefresh={onRefresh}

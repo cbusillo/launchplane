@@ -122,6 +122,14 @@ class NativeTestingRebuildPending(ValueError):
     """The original effects need another observation, never an alternate dispatch."""
 
 
+class TestingRebuildRefused(ValueError):
+    """A fixed operator-facing prerequisite, without provider or secret text."""
+
+    def __init__(self, code: str, message: str) -> None:
+        self.code = code
+        super().__init__(message)
+
+
 _ROUTE_WRITE_EXCLUDED_PHASE = "route_write_not_started"
 
 
@@ -285,6 +293,50 @@ def capture_rebuild_intent(
         old_auto_deploy=old_auto_deploy,
         recorded_template=template,
     )
+
+
+def check_testing_rebuild_protection(
+    root: Path,
+    store: PostgresRecordStore,
+    operation: OdooStableTargetReplacementOperationRecord,
+    intent: NativeTestingRebuildIntent,
+) -> None:
+    target = store.read_dokploy_target_record(
+        context_name=operation.context, instance_name="testing"
+    )
+    if target.policies.staff_testing_hold is not None:
+        raise TestingRebuildRefused(
+            "testing_staff_hold", "This testing lane is held for staff testing."
+        )
+    safety = store.read_disposable_lane_safety(operation.product, operation.context, "testing")
+    if safety is not None:
+        if safety.data == "only_copy":
+            raise TestingRebuildRefused(
+                "testing_needed_copy", "Testing holds the only needed copy of data."
+            )
+        if safety.production_resources in {"shared", "separation_ready"}:
+            raise TestingRebuildRefused(
+                "testing_production_resources_shared",
+                "Testing must be separated from its shared production resources before rebuilding.",
+            )
+    usage = read_odoo_testing_usage(
+        target=intent.before.target,
+        target_id=intent.before.target_id,
+        control_plane_root=root,
+        database_url=store.database_url,
+    )
+    reported_usage = "in_use" if safety is not None and safety.usage == "in_use" else usage.usage
+    decision = evaluate_lane_usage(
+        store,
+        profile=intent.profile,
+        target=target,
+        target_id=intent.before.target_id,
+        instance="testing",
+        usage=reported_usage,
+        require_unused=reported_usage != "unknown",
+    )
+    if decision.protected:
+        raise TestingRebuildRefused("testing_in_use", "Someone is using this testing lane.")
 
 
 class NativeTestingRebuildAdapter:

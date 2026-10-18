@@ -143,6 +143,8 @@ def write_canonical_openapi(output_path: Path) -> Path:
 
 
 UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
+    "/v1/products/{product}/testing-rebuild/inputs": "inspect_testing_rebuild",
+    "/v1/products/{product}/testing-rebuild/operations/{operation_id}": "read_testing_rebuild",
     "/v1/production-backup-authority": "read_production_backup_authority",
     "/v1/production-backup-authority/proposals": "list_backup_policy_proposals",
     "/v1/production-backup-authority/preflight": "qualify_production_backup_preflight",
@@ -207,6 +209,8 @@ UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
 
 
 UI_OPENAPI_WRITE_OPERATIONS: dict[str, str] = {
+    "/v1/products/{product}/testing-rebuild": "submit_testing_rebuild",
+    "/v1/products/{product}/testing-rebuild/lookup": "lookup_testing_rebuild",
     "/v1/product-retirement": "execute_product_retirement",
     "/v1/production-backup-authority/proposals/{operation_id}/decision": "decide_backup_policy_proposal",
     "/v1/production-backup-authority/apply": "apply_production_backup_authority",
