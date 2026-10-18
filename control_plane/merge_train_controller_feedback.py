@@ -214,6 +214,8 @@ def _container_identity(container: dict[str, Any], container_name: str) -> tuple
 
 
 def _feedback_event(*, controller_action: str, result: dict[str, Any]) -> str:
+    if result.get("reason_code") == "candidate_block_confirmation_pending":
+        return "waiting"
     if controller_action == "recover_candidate_block":
         return "waiting" if _as_dict(result.get("details")).get("block_removed") is True else "skip"
     if result.get("reason_code") == "base_checks_not_green":
@@ -259,7 +261,19 @@ def _feedback_message(
     controller_record_id: str,
     phase: str,
 ) -> str:
+    if result.get("reason_code") == "candidate_block_confirmation_pending":
+        return (
+            "Launchplane is waiting for GitHub to confirm its saved failed-candidate "
+            "label effect. The native recovery checkpoint remains held; the controller "
+            "will observe it again without repeating the label write."
+        )
     if controller_action == "recover_candidate_block":
+        if _as_dict(result.get("details")).get("removal_observation"):
+            return (
+                "Launchplane observed that the failed-candidate block is absent while "
+                "reconciling its saved recovery attempt. Recheck the current head and "
+                "post a fresh checked gh-pr.py ready handoff to rejoin the train."
+            )
         return (
             "Launchplane cleared its failed-candidate block after verifying a different "
             "current head, green checks and a weighed review. Post a fresh checked "

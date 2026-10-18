@@ -2453,6 +2453,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         feedback: "MergeTrainPrFeedbackRecord | None",
         policy: MergeTrainRepositoryPolicy,
         expected_head_sha: str,
+        legacy_writer_app_id: int | None,
         mutate: bool,
         before_remove: Callable[[], None],
     ) -> bool:
@@ -2464,6 +2465,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             feedback=feedback,
             policy=policy,
             expected_head_sha=expected_head_sha,
+            legacy_writer_app_id=legacy_writer_app_id,
             mutate=mutate,
             before_remove=before_remove,
         )
@@ -5601,6 +5603,7 @@ def _github_request_route_template(path: str) -> str:
     route = path.split("?", 1)[0].split("#", 1)[0]
     templates = (
         "/graphql",
+        "/apps/{app_slug}",
         "/repos/{owner}/{repo}/pulls",
         "/repos/{owner}/{repo}/pulls/{number}",
         "/repos/{owner}/{repo}/pulls/{number}/merge",

@@ -4,7 +4,8 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 import logging
-from typing import TYPE_CHECKING, Protocol, cast
+from time import sleep
+from typing import TYPE_CHECKING, Literal, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -847,6 +848,8 @@ def _resume_merge_train_controller_state(
                 repository_policy=repository_policy,
                 lease=lease,
             )
+            if confirmed == "pending":
+                return _pending_candidate_block_result(intent_record)
             if confirmed is not None:
                 return {
                     "repository": request.repository,
@@ -886,7 +889,14 @@ def _resume_merge_train_controller_state(
             if repository_policy.blocked_label.casefold() not in {
                 label.casefold() for label in pr.labels
             }:
-                return dict(saved)
+                details = saved.get("details")
+                return {
+                    **saved,
+                    "details": {
+                        **(details if isinstance(details, dict) else {}),
+                        "removal_observation": "absent_after_uncertain_attempt",
+                    },
+                }
         # A still-present label must requalify through the ordinary proof and
         # fresh-head path; an uncertain removal is never blindly replayed.
         return None
@@ -4579,7 +4589,6 @@ def _advance_from_live_snapshot(
         recovery = recover_candidate_block(
             snapshot=snapshot,
             policy=repository_policy,
-            policy_sha256=policy_sha256,
             store=candidate_store,
             client=github_client,
             mutate=request.mutate,
@@ -6053,6 +6062,20 @@ def _plan_failed_candidate_replacement(
     return result
 
 
+def _pending_candidate_block_result(record: MergeTrainBatchCandidateRecord) -> dict[str, object]:
+    return {
+        "repository": record.candidate.repository,
+        "base_branch": record.candidate.base_branch,
+        "mode": "block",
+        "controller_action": "block",
+        "reason_code": "candidate_block_confirmation_pending",
+        "controller_reconciliation_status": "required",
+        "reconciliation_detail": "retryable:candidate_block_confirmation_pending",
+        "merge_train_batch_candidate_record_id": record.record_id,
+        "candidate": record.candidate.model_dump(mode="json"),
+    }
+
+
 def _confirm_candidate_block(
     *,
     record: MergeTrainBatchCandidateRecord,
@@ -6060,22 +6083,34 @@ def _confirm_candidate_block(
     github_client: GitHubMergeTrainClient,
     repository_policy: MergeTrainRepositoryPolicy,
     lease: MergeTrainControllerLeaseContext,
-) -> MergeTrainBatchCandidateRecord | None:
+) -> MergeTrainBatchCandidateRecord | Literal["pending"] | None:
     if record.block_intent is None:
         return None
     observed = github_client.candidate_block_application(candidate=record, policy=repository_policy)
+    if observed.get("status") in {"absent", "pending"}:
+        # Bound consistency observations per pass. Persistent uncertainty is a
+        # visible, saved native hold rather than an exception or a replayed POST.
+        sleep(0.25)
+        observed = github_client.candidate_block_application(
+            candidate=record, policy=repository_policy
+        )
     if observed.get("status") in {"absent", "other_hold"}:
         return None
     event_id = observed.get("event_id")
     if observed.get("status") != "applied" or type(event_id) is not int:
-        raise MergeTrainGitHubError("Candidate block label effect is not yet observable")
+        return "pending"
     if record.block_intent.applied_label_event_id is not None:
         return record if event_id == record.block_intent.applied_label_event_id else None
     confirmed = build_merge_train_batch_candidate_record(
         candidate=record.candidate,
         source="service:controller:candidate-block-applied",
         updated_at=lease.record.updated_at,
-        block_intent=record.block_intent.model_copy(update={"applied_label_event_id": event_id}),
+        block_intent=record.block_intent.model_copy(
+            update={
+                "applied_label_event_id": event_id,
+                "applied_label_actor_id": observed.get("actor_id"),
+            }
+        ),
     ).model_copy(update={"status": "superseded"})
     candidate_store.write_merge_train_batch_candidate_record(confirmed)
     lease.checkpoint(
@@ -6171,6 +6206,11 @@ def _block_failed_candidate_culprit(
                 label=block_dry_run.blocked_label,
                 prior_label_event_id=prior,
                 source_failed_record_id=active_candidate_record.record_id,
+                writer_app_id=(
+                    repository_policy.github_token.github_app.app_id
+                    if repository_policy.github_token.github_app is not None
+                    else None
+                ),
             ),
         ).model_copy(update={"status": "superseded"})
         candidate_store.write_merge_train_batch_candidate_record(intent)
@@ -6194,6 +6234,8 @@ def _block_failed_candidate_culprit(
             repository_policy=repository_policy,
             lease=lease,
         )
+        if confirmed == "pending":
+            return _pending_candidate_block_result(intent)
         if confirmed is None:
             result.pop("merge_train_batch_candidate_record_id", None)
             result["reason_code"] = "candidate_block_changed"

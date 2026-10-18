@@ -6,12 +6,14 @@ from collections.abc import Callable
 from typing import Protocol, cast
 
 from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidateRecord
-from control_plane.contracts.merge_train_policy import MergeTrainRepositoryPolicy
+from control_plane.contracts.merge_train_policy import (
+    MergeTrainPolicyRecord,
+    MergeTrainRepositoryPolicy,
+)
 from control_plane.contracts.merge_train_pr_feedback_record import MergeTrainPrFeedbackRecord
 from control_plane.merge_train import MergeTrainDryRunSnapshot
 from control_plane.merge_train_batch_candidate import MergeTrainBatchCandidateRecordStore
 from control_plane.merge_train_pr_feedback import MergeTrainPrFeedbackRecordStore
-from control_plane.merge_train_policy_binding import merge_train_policy_bindings_match
 
 
 class CandidateBlockRecoveryClient(Protocol):
@@ -22,6 +24,7 @@ class CandidateBlockRecoveryClient(Protocol):
         feedback: MergeTrainPrFeedbackRecord | None,
         policy: MergeTrainRepositoryPolicy,
         expected_head_sha: str,
+        legacy_writer_app_id: int | None,
         mutate: bool,
         before_remove: Callable[[], None],
     ) -> bool: ...
@@ -31,7 +34,6 @@ def recover_candidate_block(
     *,
     snapshot: MergeTrainDryRunSnapshot,
     policy: MergeTrainRepositoryPolicy,
-    policy_sha256: str,
     store: MergeTrainBatchCandidateRecordStore,
     client: CandidateBlockRecoveryClient,
     mutate: bool,
@@ -61,16 +63,11 @@ def recover_candidate_block(
         and record.event == "blocked"
         and record.controller_action == "block"
         and record.policy_key == policy.policy_key
-        and merge_train_policy_bindings_match(
-            record_store=store,
-            policy_key=policy.policy_key,
-            recorded_sha256=record.policy_sha256,
-            current_sha256=policy_sha256,
-        )
     }
     candidates = store.list_merge_train_batch_candidate_records(
         repository=snapshot.repository, base_branch=snapshot.base_branch, status="superseded"
     )
+    recorded_policies: tuple[MergeTrainPolicyRecord, ...] | None = None
     # Prefer the explicit decision over legacy reconstruction, regardless of
     # service clock ordering or feedback delivery chronology.
     for candidate in sorted(
@@ -92,12 +89,6 @@ def recover_candidate_block(
             or failed.repository != snapshot.repository
             or failed.base_branch != snapshot.base_branch
             or failed.policy_key != policy.policy_key
-            or not merge_train_policy_bindings_match(
-                record_store=store,
-                policy_key=policy.policy_key,
-                recorded_sha256=failed.policy_sha256,
-                current_sha256=policy_sha256,
-            )
             or len(failed.entries) != 1
         ):
             continue
@@ -109,6 +100,34 @@ def recover_candidate_block(
         current = blocked[entry.pull_request_number]
         if current.head_sha == entry.head_sha:
             continue
+        legacy_writer_app_id = None
+        if candidate.block_intent is None:
+            # A legacy failure did not save its label name or writer App. Read
+            # that source policy once per pass, without reusing its admission
+            # authority. Only target/label provenance is needed to release a
+            # hold; the fresh Ready path still enforces today's full policy.
+            if recorded_policies is None:
+                reader = getattr(store, "list_merge_train_policy_records", None)
+                recorded_policies = (
+                    tuple(MergeTrainPolicyRecord.model_validate(row) for row in reader())
+                    if callable(reader)
+                    else ()
+                )
+            targets = [
+                target
+                for row in recorded_policies
+                if row.policy_sha256 == failed.policy_sha256
+                for target in row.policy.policies
+                if target.policy_key == policy.policy_key
+            ]
+            if not targets or any(
+                target.blocked_label.casefold() != policy.blocked_label.casefold()
+                or target.github_token != targets[0].github_token
+                for target in targets
+            ):
+                continue
+            source_app = targets[0].github_token.github_app
+            legacy_writer_app_id = source_app.app_id if source_app is not None else None
         result: dict[str, object] = {
             "repository": snapshot.repository,
             "base_branch": snapshot.base_branch,
@@ -136,6 +155,7 @@ def recover_candidate_block(
             feedback=feedback,
             policy=policy,
             expected_head_sha=current.head_sha,
+            legacy_writer_app_id=legacy_writer_app_id,
             mutate=mutate,
             before_remove=lambda: before_remove(result),
         ):

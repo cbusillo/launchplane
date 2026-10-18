@@ -42,14 +42,43 @@ def _pages(client: GitHubMergeTrainClient, path: str) -> list[dict[str, object]]
     raise ValueError("Candidate block recovery evidence exceeds its page bound.")
 
 
-def _actor_id(item: dict[str, object], field: str) -> int | None:
+def _actor_id(item: dict[str, object], field: str, *, allow_on_behalf: bool = False) -> int | None:
     actor = item.get(field)
     if not isinstance(actor, dict) or (
-        item.get("performed_via_github_app") and actor.get("type") != "Bot"
+        not allow_on_behalf and item.get("performed_via_github_app") and actor.get("type") != "Bot"
     ):
         return None
     value = actor.get("id")
     return value if type(value) is int and value > 0 else None
+
+
+def _block_writer_matches(
+    client: GitHubMergeTrainClient,
+    event: dict[str, object],
+    *,
+    app_id: int | None,
+    policy: MergeTrainRepositoryPolicy,
+    confirmed_actor_id: int | None = None,
+) -> bool:
+    if confirmed_actor_id is not None:
+        return _actor_id(event, "actor") == confirmed_actor_id
+    if app_id is None:
+        return _actor_id(event, "actor") in policy.enqueue.trusted_automation_github_user_ids
+    actor = event.get("actor")
+    if (
+        not isinstance(actor, dict)
+        or actor.get("type") != "Bot"
+        or _actor_id(event, "actor") is None
+    ):
+        return False
+    login = str(actor.get("login") or "")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*\[bot\]", login):
+        return False
+    # Issue label events can omit performed_via_github_app even for the App's
+    # own Bot. Resolve that Bot's reserved slug to its provider App ID. This
+    # metadata read needs no additional permission or credential source.
+    app = client.transport.request(method="GET", path=f"/apps/{quote(login[:-5], safe='')}")
+    return isinstance(app, dict) and type(app.get("id")) is int and app["id"] == app_id
 
 
 def block_label_events(
@@ -87,9 +116,19 @@ def candidate_block_application(
     if (
         len(changes) == 1
         and changes[0].get("event") == "labeled"
-        and _actor_id(changes[0], "actor") in policy.enqueue.trusted_automation_github_user_ids
+        and _block_writer_matches(
+            client,
+            changes[0],
+            app_id=intent.writer_app_id,
+            policy=policy,
+            confirmed_actor_id=intent.applied_label_actor_id,
+        )
     ):
-        return {"status": "applied", "event_id": changes[0]["id"]}
+        return {
+            "status": "applied",
+            "event_id": changes[0]["id"],
+            "actor_id": _actor_id(changes[0], "actor"),
+        }
     if changes:
         return {"status": "other_hold"}
     detail = client._pull_request_detail(repository=policy.repository, pull_request_number=number)
@@ -111,7 +150,7 @@ def _review_weighed(
     comments: list[dict[str, object]],
     *,
     head: str,
-    actor_allowed: Callable[[dict[str, object]], bool],
+    actor_allowed: Callable[[dict[str, object], bool], bool],
 ) -> bool:
     latest: tuple[datetime, int, bool] | None = None
     for comment in comments:
@@ -126,7 +165,7 @@ def _review_weighed(
         )
         if not (receipt or request) or (receipt and receipt[1] != head):
             continue
-        if not actor_allowed(comment):
+        if not actor_allowed(comment, bool(receipt)):
             continue
         comment_id = comment.get("id")
         if type(comment_id) is not int:
@@ -146,6 +185,7 @@ def recover_candidate_block(
     feedback: MergeTrainPrFeedbackRecord | None,
     policy: MergeTrainRepositoryPolicy,
     expected_head_sha: str,
+    legacy_writer_app_id: int | None,
     mutate: bool,
     before_remove: Callable[[], None],
 ) -> bool:
@@ -161,9 +201,12 @@ def recover_candidate_block(
     label = policy.blocked_label
 
     def review_actor_allowed(
-        comment: dict[str, object], author_id: int | None, reader: GitHubMergeTrainSnapshotReader
+        comment: dict[str, object],
+        receipt: bool,
+        author_id: int | None,
+        reader: GitHubMergeTrainSnapshotReader,
     ) -> bool:
-        actor_id = _actor_id(comment, "user")
+        actor_id = _actor_id(comment, "user", allow_on_behalf=not receipt)
         if actor_id is None:
             return False
         if actor_id == author_id or actor_id in policy.enqueue.trusted_automation_github_user_ids:
@@ -215,7 +258,21 @@ def recover_candidate_block(
             return None
         return (
             event
-            if _actor_id(event, "actor") in policy.enqueue.trusted_automation_github_user_ids
+            if _block_writer_matches(
+                client,
+                event,
+                app_id=(
+                    candidate.block_intent.writer_app_id
+                    if candidate.block_intent
+                    else legacy_writer_app_id
+                ),
+                policy=policy,
+                confirmed_actor_id=(
+                    candidate.block_intent.applied_label_actor_id
+                    if candidate.block_intent
+                    else None
+                ),
+            )
             else None
         )
 
@@ -241,17 +298,19 @@ def recover_candidate_block(
             and _review_weighed(
                 _pages(client, f"{prefix}/issues/{number}/comments"),
                 head=pr.head_sha,
-                actor_allowed=lambda comment: review_actor_allowed(comment, pr.actor_id, reader),
+                actor_allowed=lambda comment, receipt: review_actor_allowed(
+                    comment, receipt, pr.actor_id, reader
+                ),
             )
         )
 
     try:
-        if not qualified() or (event := label_event()) is None:
+        if (event := label_event()) is None or not qualified():
             return False
         if not mutate:
             return True
         before_remove()
-        if not qualified() or label_event() != event:
+        if label_event() != event or not qualified():
             return False
     except MergeTrainGitHubError as error:
         if error.rate_limited or error.status_code in {401, 403}:
