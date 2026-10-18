@@ -29,13 +29,14 @@ test("the same journey in separate projects retains its per-project spec identit
   const inventory = report([]);
   inventory.suites = [...desktop.suites, ...narrow.suites];
   assert.equal(checkBrowserShardCoverage(inventory, [desktop, narrow]).tests, 2);
-  assert.throws(() => checkBrowserShardCoverage(inventory, [desktop]));
+  const missingProject = structuredClone(desktop);
+  missingProject.config.shard.total = 1;
+  assert.throws(() => checkBrowserShardCoverage(inventory, [missingProject]));
 });
 
 test("a missing test cannot be replaced by another copy of a passing test", () => {
   const inventory = report(["first", "second"]);
   assert.throws(() => checkBrowserShardCoverage(inventory, [report(["first"], 1), report(["first"], 2)]));
-  assert.throws(() => checkBrowserShardCoverage(inventory, [report(["first"], 1)]));
   assert.throws(() => checkBrowserShardCoverage(inventory, [report(["first"], 1, 1)]));
 });
 
@@ -52,6 +53,7 @@ test("test errors, expected failures and invalid shard identities fail closed", 
   const inventory = report(["first"]);
   const shard = report(["first"], 1, 1);
   assert.throws(() => checkBrowserShardCoverage(inventory, [report(["first"], 2, 1)]));
+  assert.throws(() => checkBrowserShardCoverage(inventory, [report(["first"], 1)]));
   shard.errors.push({ message: "worker teardown failed" });
   assert.throws(() => checkBrowserShardCoverage(inventory, [shard]));
   shard.errors = [];
