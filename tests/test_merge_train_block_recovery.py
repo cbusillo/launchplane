@@ -5,6 +5,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from urllib.parse import quote
 from typing import Any
 from unittest.mock import Mock
 
@@ -94,6 +95,7 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
             "created_at": "2026-10-18T00:02:00Z",
             "updated_at": "2026-10-18T00:02:00Z",
         }
+        self.events: list[dict[str, Any]] | None = None
         self.mutations: list[str] = []
         self.transport = Mock()
         self.transport.request.side_effect = self.request
@@ -109,7 +111,7 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
             self.current = self.current.model_copy(update={"labels": ()})
             return None
         if "/events?" in path:
-            return [self.label_event]
+            return self.events if self.events is not None else [self.label_event]
         if path.endswith("/issues/comments/100"):
             return self.block_comment
         if "/comments?" in path:
@@ -146,7 +148,9 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
         result = self.advance(mutate=True)
         self.assertEqual(result["controller_action"], "recover_candidate_block")
         self.assertEqual(len(self.mutations), 1)
-        self.assertTrue(self.mutations[0].endswith("/labels/merge-blocked"))
+        self.assertTrue(
+            self.mutations[0].endswith(f"/labels/{quote(self.target.blocked_label, safe='')}")
+        )
         self.assertNotIn(self.target.enqueue_label, self.current.labels)
         self.assertEqual(self.store.list_merge_train_batch_candidate_records(status="active"), ())
         self.lease.checkpoint.assert_called()
@@ -240,6 +244,15 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
                 )
                 self.assertEqual(self.mutations, [])
                 self.current, self.label_event = current, event
+
+    def test_same_timestamp_remove_and_reapply_is_a_new_hold(self) -> None:
+        self.events = [
+            self.label_event,
+            {**self.label_event, "id": 51, "event": "unlabeled"},
+            {**self.label_event, "id": 52},
+        ]
+        self.advance(mutate=True)
+        self.assertEqual(self.mutations, [])
 
     def test_provider_denial_is_not_retried(self) -> None:
         from control_plane.merge_train_github import MergeTrainGitHubError

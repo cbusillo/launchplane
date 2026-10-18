@@ -608,7 +608,8 @@ head, wait for green current-head checks, and post the weighed review with
 can clear its old block after verifying the singleton failed candidate and its
 delivered scheduler feedback against the current block-label event. The labeler
 must be the trusted automation actor that delivered the recorded feedback; a
-later reapplication, a manual label, missing provenance or changed policy keeps
+later reapplication (including within the same timestamp), an intervening label
+removal, a manual label, missing provenance or changed policy keeps
 the hold. No agent removes that label by hand. The controller reports
 `recover_candidate_block`, records the failed record and both source heads,
 and updates its PR feedback. Run the ordinary checked `gh-pr.py ready` after

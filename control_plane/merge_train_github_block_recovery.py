@@ -97,6 +97,7 @@ def recover_candidate_block(
 
     def label_event() -> dict[str, object] | None:
         latest = None
+        changes_since_failure = 0
         for event in _pages(client, f"{prefix}/issues/{number}/events"):
             named = event.get("label")
             if (
@@ -104,11 +105,19 @@ def recover_candidate_block(
                 or str(named.get("name") or "").casefold() != label.casefold()
             ):
                 continue
+            if event.get("event") not in {"labeled", "unlabeled"}:
+                continue
+            if handoff_timestamp(str(event.get("created_at") or "")) >= handoff_timestamp(
+                candidate.updated_at
+            ):
+                changes_since_failure += 1
             if event.get("event") == "unlabeled":
                 latest = None
-            elif event.get("event") == "labeled":
+            else:
                 latest = event
-        return latest
+        # GitHub timestamps have second precision. A removal/reapplication can
+        # share the original stamp; its separate event must preserve the new hold.
+        return latest if changes_since_failure == 1 else None
 
     def qualified() -> bool:
         pr = client.read_pull_request_snapshot(repository=repository, pull_request_number=number)
