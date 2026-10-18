@@ -226,13 +226,15 @@ class TestingRebuildHttpTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         before = self.store.list_odoo_stable_target_replacement_operation_records()
-        absent = await self.call("POST", self.payload, path=self.url + "/lookup", csrf=False)
+        missing_csrf = await self.call("POST", self.payload, path=self.url + "/lookup", csrf=False)
+        self.assertEqual(missing_csrf.status_code, 403, missing_csrf.text)
+        absent = await self.call("POST", self.payload, path=self.url + "/lookup")
         self.assertEqual(absent.status_code, 404, absent.text)
         self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), before)
         accepted = await self.call("POST", self.payload)
         self.assertEqual(accepted.status_code, 200, accepted.text)
         self.latest.side_effect = AssertionError("Lookup cannot reselect, prepare or enqueue")
-        looked_up = await self.call("POST", self.payload, path=self.url + "/lookup", csrf=False)
+        looked_up = await self.call("POST", self.payload, path=self.url + "/lookup")
         self.assertEqual(looked_up.status_code, 200, looked_up.text)
         self.assertEqual(looked_up.json()["operation"], accepted.json()["operation"])
         changed = await self.call(

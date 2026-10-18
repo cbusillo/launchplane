@@ -17,11 +17,12 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "watch-denied
     };
     const writes: { key: string; body: Record<string, unknown> }[] = [];
     const selectedCommit = "c".repeat(40);
+    const csrfToken = "fixture-csrf";
     let polled = false;
     let reads = 0;
     let lookups = 0;
     await page.route("**/v1/**", route => route.fulfill({ status: 503, json: { error: { code: "fixture_unavailable", message: "Other evidence is unavailable in this isolated journey." } } }));
-    await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", trace_id: "session", csrf_token: "fixture-csrf", identity: { ...fixtures.identity, role: "admin" } } }));
+    await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", trace_id: "session", csrf_token: csrfToken, identity: { ...fixtures.identity, role: "admin" } } }));
     await page.route("**/v1/products", route => route.fulfill({ json: { status: "ok", trace_id: "products", products: fixtures.products } }));
     await page.route("**/v1/products/atlas-commerce/environments/testing", route => route.fulfill({ json: { status: "ok", trace_id: "lane", environment } }));
     await page.route("**/v1/products/atlas-commerce/testing-rebuild/inputs?*", route => outcome === "preflight-unavailable"
@@ -33,7 +34,7 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "watch-denied
     } }));
     const receipt = (status: string) => ({ trace_id: "rebuild-trace", operation: { product: environment.product, instance: "testing", operation_id: "native-original", status, phase: status === "pass" ? "completed" : "running", updated_at: new Date().toISOString() } });
     await page.route("**/v1/products/atlas-commerce/testing-rebuild", async route => {
-      expect(route.request().headers()["x-csrf-token"]).toBe("fixture-csrf");
+      expect(route.request().headers()["x-csrf-token"]).toBe(csrfToken);
       writes.push({ key: route.request().headers()["idempotency-key"], body: route.request().postDataJSON() });
       if (["lost-reply", "recovery-denied"].includes(outcome) && writes.length === 1) return route.abort();
       if (outcome === "denied" || outcome === "recovery-denied") return route.fulfill({ status: 403, json: { trace_id: "denied-trace", error: { code: "authorization_denied", message: "This request is denied." } } });
@@ -42,6 +43,7 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "watch-denied
     });
     await page.route("**/v1/products/atlas-commerce/testing-rebuild/lookup", route => {
       lookups++;
+      expect(route.request().headers()["x-csrf-token"]).toBe(csrfToken);
       expect({ key: route.request().headers()["idempotency-key"], body: route.request().postDataJSON() }).toEqual(writes[0]);
       return route.fulfill({ json: receipt("pending") });
     });

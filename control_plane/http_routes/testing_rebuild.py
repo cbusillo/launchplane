@@ -349,7 +349,7 @@ def register_testing_rebuild_routes(
     def lookup_original(
         product: Annotated[str, Path(min_length=1)],
         payload: TestingRebuildSubmit,
-        identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(dependencies.mutation_identity)],
         record_store: Annotated[object, Depends(common.get_record_store)],
         idempotency_key: Annotated[
             str, Header(alias="Idempotency-Key", min_length=1, max_length=256)
