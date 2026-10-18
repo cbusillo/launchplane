@@ -10,6 +10,11 @@ from control_plane.dokploy import api
 from control_plane.dokploy.source import DokployTargetDefinition
 from control_plane.integration_readback import INTEGRATION_READBACK_PASSED_PATH
 
+TESTING_CONNECTION_CSP = (
+    "default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
+    "style-src 'self' 'unsafe-inline'; connect-src 'self'; form-action 'self'; frame-src 'self'"
+)
+
 DOKPLOY_COMPOSE_METADATA_LABELS = frozenset(
     {
         "dokploy.organization.id",
@@ -87,7 +92,7 @@ def _render_odoo_web_traefik_labels(
             middleware = route_name + "-copy-connections"
             lines.extend(
                 [
-                    f"      - \"traefik.http.middlewares.{middleware}.headers.contentsecuritypolicy=default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self'; form-action 'self'; frame-src 'self'\"",
+                    f'      - "traefik.http.middlewares.{middleware}.headers.contentsecuritypolicy={TESTING_CONNECTION_CSP}"',
                     f'      - "traefik.http.routers.{route_name}-websecure.middlewares={middleware}"',
                 ]
             )

@@ -40,26 +40,46 @@ class TraefikRouteTarget(FrozenRecord):
 
 
 def route_payload(target: TraefikRouteTarget, backend: str) -> dict[str, Any]:
+    return http_route_payload(
+        route_id=target.route_id,
+        host=target.host,
+        entrypoints=target.entrypoints,
+        backend=backend,
+        tls=target.tls,
+        certificate_resolver=target.certificate_resolver,
+        middlewares=target.middlewares,
+    )
+
+
+def http_route_payload(
+    *,
+    route_id: str,
+    host: str,
+    entrypoints: tuple[str, ...],
+    backend: str,
+    tls: bool,
+    certificate_resolver: str = "",
+    middlewares: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    """Provider-native route content, independent of a local watched mount."""
     parts = urlsplit(backend)
     if parts.scheme not in {"http", "https"} or not parts.hostname or parts.username:
         raise ValueError("backend requires an explicit HTTP endpoint")
     if parts.path not in {"", "/"} or parts.query or parts.fragment:
         raise ValueError("backend must be an origin")
     router: dict[str, Any] = {
-        "rule": f"Host(`{target.host}`)",
-        "service": target.route_id,
-        "entryPoints": target.entrypoints,
-        "middlewares": target.middlewares,
+        "rule": f"Host(`{host}`)",
+        "service": route_id,
+        "entryPoints": entrypoints,
+        "middlewares": middlewares,
     }
-    if target.tls:
-        router["tls"] = (
-            {"certResolver": target.certificate_resolver} if target.certificate_resolver else {}
-        )
+    if tls:
+        router["tls"] = {"certResolver": certificate_resolver} if certificate_resolver else {}
     return {
         "http": {
-            "routers": {target.route_id: router},
+            "routers": {route_id: router},
             "services": {
-                target.route_id: {
+                route_id: {
                     "loadBalancer": {
                         "passHostHeader": True,
                         "servers": [{"url": backend}],
