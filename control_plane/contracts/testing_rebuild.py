@@ -11,6 +11,9 @@ from control_plane.contracts.prepared_public_site import FrozenRecord
 from control_plane.contracts.promotion_record import HealthcheckEvidence
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 
+REBUILD_SCOPE = "launchplane:testing-native-rebuild:v1"
+REBUILD_ROUTE = "worker:testing-native-rebuild"
+
 
 class TestingCopy(FrozenRecord):
     copy_id: str = Field(min_length=1)

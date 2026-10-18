@@ -850,9 +850,17 @@ provider identity. The shared service record store is required.
 
 An original intent retains the serving metadata, observed runtime, actual
 private backend, server and container/data custody before candidate writes.
-Every boundary rechecks the current authorization, exclusive execution and
-provider leases, staff hold, actual login/session use, protected-copy reports,
-physical target aliases and resource/credential isolation. Storage qualification
+Every boundary rechecks current authorization, exclusive execution and
+provider leases, protected-copy reports, physical target aliases and resource
+isolation. Forward admission also checks staff holds, profile/serving authority
+and actual login/session use immediately before the route effect is checkpointed.
+That original cutover admission is not re-qualified against downtime after the
+rebuild itself restores health or changes the monitor identity. A new forward
+effect still respects a current hold or changed authority. Observation and an
+inverse of the original route can proceed while preserving those changed
+records; publication's compare/write refuses to overwrite them. Such a refusal
+after effects began remains pending with its original intent and fences rather
+than becoming a terminal failure. Storage qualification
 runs before application execution. A resumed populated candidate uses its
 original custody and private proof instead of requiring empty storage again.
 Candidate reservations are rechecked before cutover, and unresolved predecessor
@@ -872,6 +880,12 @@ lane operation. A lost reply is observed before continuation; an old or absent
 outcome does not permit a blind duplicate. A crashed queue worker resumes
 observation with the same operation and keys. Explicit provider permission
 failures remain authorization failures and are not retried as pending work.
+If effects have already begun, a denial holds the operation in
+`reconciliation_required`, preserving its denial code and lane exclusion without
+automatic worker replay. Generic cancellation cannot release a native rebuild
+with an outer dispatched effect or a child effect receipt. An unstarted request
+can still be cancelled; otherwise the original worker's observation/recovery
+path owns completion, not a caller assertion that the provider looks idle.
 Only after fresh public health and identity at the unchanged address and atomic
 canonical publication does retirement disable the predecessor's automatic
 deploys and call the existing [Compose stop API](https://docs.dokploy.com/docs/api/compose).

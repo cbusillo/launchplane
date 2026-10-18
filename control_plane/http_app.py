@@ -10282,6 +10282,20 @@ def create_launchplane_fastapi_app(
         current_operation = read_operation(operation_id.strip())
         if current_operation.status == "cancelled":
             return current_operation
+        if (
+            read_method_name == "read_odoo_stable_target_replacement_operation_record"
+            and current_operation.is_native_testing_rebuild
+        ):
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="testing_rebuild_observation_required",
+                message=(
+                    "The original testing rebuild has provider effects to observe. "
+                    "Keep its request and operation ID; the existing worker resumes "
+                    "its original cutover or recovery instead of releasing the lane."
+                ),
+            )
         raise _launchplane_http_error(
             status_code=409,
             trace_id=trace_id,

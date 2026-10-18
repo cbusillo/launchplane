@@ -35,8 +35,12 @@ class TestingRebuildProvider(Protocol):
     """
 
     def exclusive(self, plan: TestingRebuildPlan) -> AbstractContextManager[None]: ...
-    def guard(self, plan: TestingRebuildPlan) -> None:
-        """Recheck authorization, lease, holds/use, custody and production isolation."""
+    def guard(self, plan: TestingRebuildPlan, *, recovery: bool = False) -> None:
+        """Recheck authority/custody; recovery can observe or undo an existing effect.
+
+        New forward effects still need the ordinary holds/use admission check.
+        Recovery never grants authority or permits a different target or intent.
+        """
         ...
 
     def current_route(self, plan: TestingRebuildPlan) -> TestingRouteObservation: ...
@@ -183,6 +187,7 @@ def execute_testing_rebuild(
     plan = TestingRebuildPlan.model_validate(plan.model_dump())
     # Terminal records are historical receipts. A later rebuild or incident
     # cannot change their outcome; HTTP authentication still belongs to caller.
+    prior = None
     try:
         prior = store.load(plan)
     except FileNotFoundError:
@@ -193,7 +198,9 @@ def execute_testing_rebuild(
         if prior.step in {"complete", "failed"}:
             return prior
     with provider.exclusive(plan):
-        provider.guard(plan)
+        provider.guard(
+            plan, recovery=prior is not None and prior.step not in {"preparing", "prepared"}
+        )
         try:
             record = store.load(plan)
         except FileNotFoundError:
@@ -243,7 +250,7 @@ def execute_testing_rebuild(
             raise ValueError("The rebuild has no matching independent-copy receipt.")
 
         if record.step in {"prepared", "switching"}:
-            provider.guard(plan)
+            provider.guard(plan, recovery=record.step == "switching")
             observation = provider.current_route(plan)
             if observation.slot_id == plan.old.copy_id:
                 _route(observation, plan, plan.old)
@@ -272,7 +279,7 @@ def execute_testing_rebuild(
                 save(step="publishing", route=observation)
 
         if record.step == "publishing":
-            provider.guard(plan)
+            provider.guard(plan, recovery=True)
             observation = provider.current_route(plan)
             _route(observation, plan, plan.new)
             try:
@@ -280,12 +287,13 @@ def execute_testing_rebuild(
             except TestingRebuildHealthFailure:
                 save(step="rolling_back", error="candidate_public_health_failed", route=observation)
             else:
+                provider.guard(plan)
                 save(publication_started=True)
                 provider.publish(plan, plan.new, forward_started=True)
                 save(step="retiring", route=observation)
 
         if record.step == "retiring":
-            provider.guard(plan)
+            provider.guard(plan, recovery=True)
             observation = provider.current_route(plan)
             _route(observation, plan, plan.new)
             # The provider's original terminal exclusion is durable even if
@@ -321,7 +329,7 @@ def execute_testing_rebuild(
                 )
 
         if record.step == "rolling_back":
-            provider.guard(plan)
+            provider.guard(plan, recovery=True)
             observation = provider.current_route(plan)
             if observation.slot_id == plan.new.copy_id:
                 _route(observation, plan, plan.new)
@@ -330,7 +338,7 @@ def execute_testing_rebuild(
                 provider.switch(plan, plan.new, plan.old, reconcile_only=resuming)
                 observation = provider.current_route(plan)
             _serving(observation, plan, plan.old, clock())
-            provider.guard(plan)
+            provider.guard(plan, recovery=True)
             provider.publish(plan, plan.old, forward_started=record.publication_started)
             save(step="failed", route=observation, ended_at=clock())
             return record

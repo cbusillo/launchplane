@@ -33,6 +33,8 @@ from control_plane.contracts.testing_publication import (
     TestingServingSnapshot,
 )
 from control_plane.contracts.testing_rebuild import (
+    REBUILD_SCOPE,
+    REBUILD_ROUTE,
     TestingCopy,
     TestingCopyReadiness,
     TestingCopyReceipt,
@@ -102,9 +104,6 @@ from control_plane.workflows.testing_rebuild import (
     execute_testing_rebuild,
 )
 
-REBUILD_SCOPE = "launchplane:testing-native-rebuild:v1"
-REBUILD_ROUTE = "worker:testing-native-rebuild"
-
 
 class NativeTestingRebuildPending(ValueError):
     """The original effects need another observation, never an alternate dispatch."""
@@ -126,8 +125,13 @@ class NativeTestingRebuildIntent(FrozenRecord):
         return canonical_json_sha256(self.model_dump(mode="json"))
 
 
-def native_testing_rebuild(operation: OdooStableTargetReplacementOperationRecord) -> bool:
-    return operation.is_native_testing_rebuild
+def native_rebuild_effects_started(
+    store: PostgresRecordStore, operation: OdooStableTargetReplacementOperationRecord
+) -> bool:
+    original = store.read_idempotency_record(
+        scope=REBUILD_SCOPE, route_path=REBUILD_ROUTE, idempotency_key=operation.operation_id
+    )
+    return original is not None and bool(original.provider_effect_started_at)
 
 
 def rebuild_source(operation: OdooStableTargetReplacementOperationRecord) -> CandidateSource:
@@ -136,7 +140,7 @@ def rebuild_source(operation: OdooStableTargetReplacementOperationRecord) -> Can
         "production_restore": "production",
         "upstream_restore": "upstream",
     }
-    if not native_testing_rebuild(operation) or operation.request.data_source_mode not in modes:
+    if not operation.is_native_testing_rebuild or operation.request.data_source_mode not in modes:
         raise ValueError("A native rebuild requires its explicit testing source.")
     return modes[operation.request.data_source_mode]
 
@@ -356,16 +360,31 @@ class NativeTestingRebuildExecution:
             if (item.context, item.instance) == (self.operation.context, "testing")
         ).rstrip("/")
 
-    def guard(self, plan: TestingRebuildPlan | None = None) -> None:
+    def cutover_started(self) -> bool:
+        plan = getattr(self, "plan", None)
+        if plan is None:
+            return False
+        original = self.store.read_idempotency_record(
+            scope=REBUILD_SCOPE,
+            route_path=REBUILD_ROUTE + ":effect",
+            idempotency_key=self.operation.operation_id + ":route:" + plan.new.copy_id,
+        )
+        return original is not None and bool(original.provider_effect_started_at)
+
+    def guard(self, plan: TestingRebuildPlan | None = None, *, recovery: bool = False) -> None:
         self.check_lock()
         self.lease.assert_current()
         self.adapter.authorize("testing_rebuild_checkpoint")
-        if self.store.read_product_profile_record(self.operation.product) != self.intent.profile:
+        if (
+            not recovery
+            and self.store.read_product_profile_record(self.operation.product)
+            != self.intent.profile
+        ):
             raise ValueError("The original testing profile changed.")
         target = self.store.read_dokploy_target_record(
             context_name=self.operation.context, instance_name="testing"
         )
-        if target.policies.staff_testing_hold is not None:
+        if not recovery and target.policies.staff_testing_hold is not None:
             raise ValueError("Staff testing holds this lane.")
         self.old_provider()
         current_target = self.store.read_dokploy_target_id_record(
@@ -396,40 +415,36 @@ class NativeTestingRebuildExecution:
             raise ValueError(
                 "The lane has a recorded protected copy or shared production resource."
             )
-        if any(
-            item.target_id == self.intent.old.target_id
-            and (item.context, item.instance) != (self.operation.context, "testing")
-            for item in self.store.list_dokploy_target_id_records()
-        ):
-            raise ValueError("The retained target aliases another lane.")
-        usage = read_odoo_testing_usage(
-            target=self.intent.before.target,
-            target_id=self.intent.before.target_id,
-            control_plane_root=self.root,
-            database_url=self.store.database_url,
-        )
-        reported_usage = (
-            "in_use" if safety is not None and safety.usage == "in_use" else usage.usage
-        )
-        decision = evaluate_lane_usage(
-            self.store,
-            profile=self.intent.profile,
-            target=target,
-            target_id=self.intent.before.target_id,
-            instance="testing",
-            usage=reported_usage,
-            # Unknown use alone cannot stop disposable work. A historical
-            # positive report still uses the verified-down repair override.
-            require_unused=reported_usage != "unknown",
-        )
+        if not recovery and not self.cutover_started():
+            usage = read_odoo_testing_usage(
+                target=self.intent.before.target,
+                target_id=self.intent.before.target_id,
+                control_plane_root=self.root,
+                database_url=self.store.database_url,
+            )
+            reported_usage = (
+                "in_use" if safety is not None and safety.usage == "in_use" else usage.usage
+            )
+            decision = evaluate_lane_usage(
+                self.store,
+                profile=self.intent.profile,
+                target=target,
+                target_id=self.intent.before.target_id,
+                instance="testing",
+                usage=reported_usage,
+                require_unused=reported_usage != "unknown",
+            )
+            if decision.protected:
+                raise ValueError("The retained testing copy is in use.")
+        # The original route effect checkpoints the final admission check.
+        # Completing that same cutover must not re-qualify historical use after
+        # its own health/identity publication invalidates the old down evidence.
         retained_copy_operation(
             host=self.host,
             token=self.token,
             server_id=self.intent.server_id,
             payload=self.retained_payload("read"),
         )
-        if decision.protected:
-            raise ValueError("The retained testing copy is in use.")
         current = read_snapshot(
             self.store, product=self.operation.product, context=self.operation.context
         )
@@ -439,7 +454,7 @@ class NativeTestingRebuildExecution:
             if publication is not None and publication.state == "applied"
             else self.intent.before
         )
-        if current != expected:
+        if not recovery and current != expected:
             raise ValueError("Testing serving authority changed outside the original rebuild.")
         if not post_deploy.compose_data_workflow_is_quiescent(
             host=self.host,
@@ -553,6 +568,7 @@ class NativeTestingRebuildExecution:
             else:
                 if historical.plan != historical_plan:
                     raise ValueError("The original rebuild plan changed.")
+                self.plan = historical_plan
                 if historical.step in {"complete", "failed"}:
                     self.allocation, self.plan = allocation, historical_plan
                     return historical
@@ -670,7 +686,7 @@ class NativeTestingRebuildExecution:
                 raise ValueError("The original publication candidate custody changed.")
             assert allocation is not None and allocation.application is not None
             app_plan = allocation.application.plan
-            if existing_publication.state == "planned":
+            if existing_publication.state == "planned" and not self.cutover_started():
                 self.inputs = candidate_runtime_inputs(
                     root=self.root,
                     store=self.store,
@@ -838,6 +854,7 @@ class NativeTestingRebuildExecution:
                 dispatch_guard=dispatch,
             ),
             reconcile_only=reconcile_only,
+            recovery=desired == plan.old,
         )
 
     def route_backend(self) -> str:
@@ -852,7 +869,7 @@ class NativeTestingRebuildExecution:
         self, plan: TestingRebuildPlan, desired: TestingCopy, *, forward_started: bool
     ) -> None:
         assert self.publication is not None and isinstance(self.lease, ProviderEvidenceLease)
-        self.guard()
+        self.guard(recovery=desired == plan.old)
         observation = self.current_route(plan) if desired == plan.new else None
         publish(
             self.store,
@@ -962,10 +979,15 @@ class NativeTestingRebuildExecution:
                     lambda: self.old_provider().get("autoDeploy") is False,
                     lambda dispatch: None,
                     reconcile_only=True,
+                    recovery=True,
                 )
             elif prior is None or prior.state != "completed":
                 self.run_effect(
-                    phase, lambda: False, lambda dispatch: None, exclude_undispatched=True
+                    phase,
+                    lambda: False,
+                    lambda dispatch: None,
+                    exclude_undispatched=True,
+                    recovery=True,
                 )
         return self.retirement_exclusion(plan)
 
@@ -977,6 +999,7 @@ class NativeTestingRebuildExecution:
         *,
         reconcile_only: bool = False,
         exclude_undispatched: bool = False,
+        recovery: bool = False,
     ) -> DurableProviderOperationResult:
         parent = self
 
@@ -1003,7 +1026,7 @@ class NativeTestingRebuildExecution:
                 self, provider_operation_key: str, lease: ProviderOperationLease
             ) -> ProviderMutationOutcome:
                 if exclude_undispatched:
-                    parent.guard()
+                    parent.guard(recovery=recovery)
                     lease.assert_current()
                     return ProviderMutationOutcome(
                         200,
@@ -1014,7 +1037,7 @@ class NativeTestingRebuildExecution:
                     return ProviderMutationOutcome(200, provider_effect_performed=False)
 
                 def dispatch(send: Callable[[], None]) -> None:
-                    parent.guard()
+                    parent.guard(recovery=recovery)
                     lease.assert_current()
                     lease.checkpoint_effect(phase)
                     send()
@@ -1158,6 +1181,12 @@ def execute_native_testing_rebuild(
         if error.retryable:
             raise NativeTestingRebuildPending(
                 "The original provider outcome needs observation."
+            ) from error
+        raise
+    except ValueError as error:
+        if native_rebuild_effects_started(store, operation):
+            raise NativeTestingRebuildPending(
+                "The original rebuild effects remain fenced; continue their observation."
             ) from error
         raise
 
