@@ -39,11 +39,15 @@ from control_plane.testing_private_ingress import (
     TestingPrivateIngressRequest,
 )
 from control_plane.testing_event_deploy_recovery import testing_event_execution_lock_name
+from control_plane.route_binding_reconcile import (
+    RouteBindingReconcileRequest,
+    plan_route_binding_reconcile,
+)
 from control_plane.workflows.generic_web_deploy_provider import (
     dokploy_generic_web_provider_target_key,
 )
 from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
-from tests.support.auth import scoped_agent_transport
+from tests.support.auth import scoped_agent_transport, identity, StubVerifier
 from tests.support.http import request
 from tests.support.ingress import _FakeNpmplusIngressClient, _npmplus_proxy_host
 from tests.support.profiles import _generic_site_profile_payload
@@ -91,12 +95,14 @@ class EdgeClient(_FakeNpmplusIngressClient):
 
 
 class PrivateIngressFixture(unittest.IsolatedAsyncioTestCase):
+    database_url: str = ""
+
     def setUp(self) -> None:
         temporary = TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.store = PostgresRecordStore(
-            database_url=f"sqlite+pysqlite:///{self.root / 'state.db'}"
+            database_url=self.database_url or f"sqlite+pysqlite:///{self.root / 'state.db'}"
         )
         self.store.ensure_schema()
         self.addCleanup(self.store.close)
@@ -246,6 +252,109 @@ class PrivateIngressFixture(unittest.IsolatedAsyncioTestCase):
 
 
 class PrivateTestingIngressTests(PrivateIngressFixture):
+    def test_original_key_recovers_when_domain_create_did_not_land(self) -> None:
+        digest = self.adapter().plan()["plan_sha256"]
+        adapter = self.adapter(reviewed_plan_sha256=digest)
+        provider_call = self.dokploy_request
+
+        def reject_domain(**kwargs: Any) -> Any:
+            if kwargs["path"] == "/api/domain.create":
+                raise ValueError("Synthetic domain rejection")
+            return provider_call(**kwargs)
+
+        with patch(
+            "control_plane.testing_private_ingress.api.dokploy_request", side_effect=reject_domain
+        ):
+            with self.assertRaises(ProviderMutationUnknownError):
+                adapter.apply("original-key", self.lease)
+        self.assertEqual(self.domains, [])
+        self.assertEqual(self.client.proxy_hosts, [])
+        observation = adapter.observe(
+            "original-key", "create_private_testing_application_domain", "key"
+        )
+        self.assertEqual(observation.outcome, "absent")
+        self.assertTrue(observation.retry_safe)
+        adapter.apply("original-key", self.lease)
+        self.assertTrue(adapter.readback()["applied"])
+
+    async def test_generic_private_noop_cannot_authorize_managed_route_binding(self) -> None:
+        self.create()
+        verified = identity()
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "schema_version": 2,
+                "github_actions": [
+                    {
+                        "repository": verified.repository,
+                        "workflow_refs": [verified.workflow_ref],
+                        "event_names": [verified.event_name],
+                        "products": [self.profile.product],
+                        "contexts": [self.context],
+                        "instances": ["testing"],
+                        "actions": ["ingress_route.apply"],
+                    }
+                ],
+            }
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=StubVerifier(verified),
+            authz_policy=policy,
+            record_store_factory=lambda: self.store,
+            npmplus_ingress_client_factory=lambda: self.client,
+        )
+        actual = self.client.proxy_hosts[0]
+        original = self.store.list_ingress_route_audit_records(
+            product=self.profile.product, context_name=self.context
+        )[0]
+        recorded_at = (
+            datetime.fromisoformat(original.recorded_at) + timedelta(seconds=1)
+        ).isoformat()
+        calls = list(self.client.calls)
+        with patch("control_plane.http_app.utc_now_timestamp", return_value=recorded_at):
+            response = await request(
+                app,
+                "POST",
+                "/v1/drivers/ingress/route-apply",
+                headers={"Authorization": "Bearer valid-token", "Idempotency-Key": "private-noop"},
+                payload={
+                    "product": self.profile.product,
+                    "context": self.context,
+                    "instance": "testing",
+                    "ingress": {
+                        "mode": "apply",
+                        "expected_host_id": actual.id,
+                        "require_exact_expected_host_domains": True,
+                        "allow_create": False,
+                        "route": {
+                            **actual.model_dump(mode="json", exclude={"id", "meta"}),
+                            "forward_host": "",
+                            "edge_endpoint_key": self.edge.endpoint_key,
+                        },
+                        "reason": "Record exact existing route without provider mutation.",
+                    },
+                },
+            )
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(response.json()["result"]["status"], "unchanged")
+        self.assertTrue(all(call == "list" for call in self.client.calls[len(calls) :]))
+        audits = self.store.list_ingress_route_audit_records(
+            product=self.profile.product, context_name=self.context
+        )
+        self.assertEqual(len(audits), 2)
+        plan = plan_route_binding_reconcile(
+            record_store=self.store,
+            request=RouteBindingReconcileRequest(
+                product=self.profile.product,
+                context=self.context,
+                instance="testing",
+                evaluated_at=recorded_at,
+            ),
+        )
+        self.assertEqual(plan.status, "blocked")
+        self.assertEqual(
+            plan.findings[0].code, "private_testing_endpoint_not_route_binding_evidence"
+        )
+
     def test_create_and_disable_only_the_owned_hostname(self) -> None:
         original_profile = self.store.read_product_profile_record(self.profile.product)
         self.create()

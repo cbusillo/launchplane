@@ -256,25 +256,33 @@ class TestingPrivateIngressAdapter:
             }
         )
 
+    def _pending_receipt(self, provider_key: str) -> IngressRouteAuditRecord | None:
+        if not provider_key:
+            return None
+        try:
+            audit = self.store.read_ingress_route_audit_record(
+                _PREFIX + self.request.reviewed_plan_sha256
+            )
+        except FileNotFoundError:
+            return None
+        if (
+            audit.product == self.product
+            and audit.context == self.request.context
+            and audit.status == "pending"
+            and audit.idempotency_key == provider_key
+        ):
+            return audit
+        return None
+
     def _pending_matches(
         self,
         provider_key: str,
         desired: NpmplusProxyHostPayload,
         authority: dict[str, object],
     ) -> bool:
-        if not provider_key:
-            return False
-        try:
-            audit = self.store.read_ingress_route_audit_record(
-                _PREFIX + self.request.reviewed_plan_sha256
-            )
-        except FileNotFoundError:
-            return False
+        audit = self._pending_receipt(provider_key)
         return (
-            audit.product == self.product
-            and audit.context == self.request.context
-            and audit.status == "pending"
-            and audit.idempotency_key == provider_key
+            audit is not None
             and audit.requested_domains == desired.domain_names
             and audit.edge_endpoint_key == self.request.edge_endpoint_key
             and audit.testing_authority_sha256 == self._receipt_authority_sha256(authority)
@@ -489,6 +497,7 @@ class TestingPrivateIngressAdapter:
         # An uncertain edge operation retains its own reservation, without
         # holding ordinary deployments forever. Only active application-domain
         # mutation shares the testing event executor lock with deployments.
+        prior_pending = self._pending_receipt(provider_operation_key) is not None
         with ExitStack() as stack:
             locked_target_key = ""
             check: Callable[[], None] | None = None
@@ -506,6 +515,10 @@ class TestingPrivateIngressAdapter:
                     if check is None:
                         raise ValueError("The testing executor is busy.")
             except (ValueError, FileNotFoundError, RuntimeError, OSError, SQLAlchemyError) as error:
+                if prior_pending:
+                    raise ProviderMutationUnknownError(
+                        "Keep the original private hostname reservation while retrying."
+                    ) from error
                 raise ProviderMutationRejectedError(
                     ValueError("The testing executor could not be acquired before effects.")
                 ) from error
@@ -520,7 +533,7 @@ class TestingPrivateIngressAdapter:
                     if dokploy_generic_web_provider_target_key(current) != locked_target_key:
                         raise ValueError("The locked testing application changed.")
 
-            return self._apply(provider_operation_key, lease, check_execution)
+            return self._apply(provider_operation_key, lease, check_execution, prior_pending)
 
     def _write_application_claim(
         self, effect: Callable[[Callable[[str, str, int], None]], None]
@@ -556,13 +569,13 @@ class TestingPrivateIngressAdapter:
         provider_operation_key: str,
         lease: ProviderOperationLease,
         check_execution: Callable[[], None],
+        prior_pending: bool,
     ) -> ProviderMutationOutcome:
         started = False
         try:
             snapshot, desired, existing = self._snapshot(provider_operation_key)
-            resuming_missing_edge = (
+            resuming_missing_effects = (
                 self.request.operation == "create"
-                and snapshot["domain_present"]
                 and existing is None
                 and self._pending_matches(
                     provider_operation_key, desired, cast(dict[str, object], snapshot["authority"])
@@ -570,7 +583,7 @@ class TestingPrivateIngressAdapter:
             )
             if (
                 canonical_json_sha256(snapshot) != self.request.reviewed_plan_sha256
-                and not resuming_missing_edge
+                and not resuming_missing_effects
             ):
                 raise ValueError("The reviewed private hostname plan changed.")
             actual_hosts: list[NpmplusProxyHost] = []
@@ -634,7 +647,7 @@ class TestingPrivateIngressAdapter:
             SQLAlchemyError,
             click.ClickException,
         ) as error:
-            if started:
+            if started or prior_pending:
                 raise ProviderMutationUnknownError(
                     "Retain the original private hostname key."
                 ) from None
@@ -666,16 +679,15 @@ class TestingPrivateIngressAdapter:
                 if (
                     self.request.operation == "create"
                     and existing is None
-                    and snapshot["domain_present"]
                     and self._pending_matches(
                         provider_operation_key,
                         desired,
                         cast(dict[str, object], snapshot["authority"]),
                     )
                 ):
-                    # Independent readback proves the application domain exists
-                    # and the edge route does not. Resume only this original
-                    # request's still-matching missing edge under a renewed lease.
+                    # Independent readback proves no edge exists, and the
+                    # application domain is either absent or exactly ours.
+                    # Resume only this original request's missing effects.
                     return ProviderObservation("absent", retry_safe=True)
                 if (
                     existing is None

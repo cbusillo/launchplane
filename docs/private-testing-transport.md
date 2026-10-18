@@ -60,13 +60,18 @@ be null or empty, as in other domain readers.
 
 For a partial create, retry the original apply request, reviewed plan and
 Idempotency-Key. The service first observes both providers. If the matching
-application domain exists and independent readback proves the edge route is
-absent, the existing durable runner reacquires the original reservation and
-creates only the missing edge. If both exact effects exist, it adopts their
+application domain is either absent or exactly matches the request, and
+independent readback proves the edge route is absent, the existing durable
+runner reacquires the original reservation and creates only the missing effects.
+This also recovers a rejected or lost domain-create request when neither effect
+landed. If both exact effects exist, it adopts their
 receipt without provider writes. Different keys cannot take over. Unavailable,
 foreign or materially changed evidence remains `reconcile_required` on the
 private route, without holding the application's deployment reservation. Do not
-clear a genuine unknown or repeat it with a new key.
+clear a genuine unknown or repeat it with a new key. A busy executor, missing
+provider record or changed authority during a retry retains the prior pending
+operation's hold even before that retry reaches its first new checkpoint. A
+fresh operation with no pending receipt still rejects pre-effect failures.
 Disable uses a fresh reviewed plan and the same lane's exact receipt-owned route,
 retaining its original endpoint and edge keys. It only toggles that route even
 after the old application or edge record disappears, and leaves the application
@@ -83,7 +88,9 @@ hostname and domain claim. First-testing setup remains limited to empty targets;
 disabling the edge alone does not make an activated target empty or authorize
 its replacement.
 Private ingress receipts cannot supply managed route-binding evidence, whether
-selected automatically or passed explicitly. Recording the domain does not
+selected automatically or passed explicitly. An active testing private-endpoint
+hostname cannot authorize a managed route binding through any receipt, including
+an ordinary audit from a generic scoped no-op. Recording the domain does not
 declare a public website. Older ship/promotion URL inference can derive HTTPS
 health URLs from target domains; that inference is not private reachability
 proof. Private probe support and access-list qualification remain prerequisites

@@ -9,6 +9,7 @@ from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.edge_endpoint_record import EdgeEndpointRecord
+from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
 from control_plane.contracts.ingress_route_audit_record import (
     IngressRouteAuditOperation,
     IngressRouteAuditRecord,
@@ -254,6 +255,9 @@ class _RouteBindingReconcileFakeStore:
         self.edge_endpoints = edge_endpoints
         self.ingress_audits = ingress_audits
         self.route_binding = route_binding
+
+    def list_private_health_endpoint_records(self) -> tuple[PrivateHealthEndpointRecord, ...]:
+        return ()
 
     def read_provider_target_record(
         self, *, context_name: str, instance_name: str
