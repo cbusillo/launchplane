@@ -11919,7 +11919,7 @@ class PostgresRecordStore(HumanSessionStore):
         """Atomically archive the completed copy, select a fresh database and queue its restore.
 
         Provider reads precede the short locked commit; no production write.
-        A held/unknown lane gets a receipt only.
+        A protected or independently unqualified lane gets a receipt only.
         The previous generation stays in the immutable slot receipt for recovery.
         """
         from control_plane.odoo_testing_drill import (
@@ -11934,6 +11934,7 @@ class PostgresRecordStore(HumanSessionStore):
             require_drill_use_unprotected,
         )
         from control_plane.odoo_testing_restore import generation_binding
+        from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 
         observed_revision = drill_admission_revision(self, product, context)
         existing = self.read_idempotency_record(
@@ -11945,9 +11946,11 @@ class PostgresRecordStore(HumanSessionStore):
         ):
             return
         candidate = None
-        collection_error: ValueError | RuntimeError | None = None
+        collection_error: ValueError | RuntimeError | NativeSourceAuthorizationDenied | None = None
         try:
             candidate = prepare_drill(self, product, context, key, now)
+        except NativeSourceAuthorizationDenied as error:
+            collection_error = error
         except (ValueError, FileNotFoundError, RuntimeError) as error:
             collection_error = (
                 error
@@ -12022,6 +12025,10 @@ class PostgresRecordStore(HumanSessionStore):
                     ):
                         raise DrillSkipped("successful_login_check_expired")
                 prepared = candidate
+            except NativeSourceAuthorizationDenied:
+                # Persist the refusal against this admission revision so the
+                # scheduler cannot repeat the denied read on every poll.
+                payload.update(status="fail", step="authorization_denied")
             except DrillSkipped as error:
                 payload.update(status="skipped", step=str(error))
             except DrillPrerequisite as error:

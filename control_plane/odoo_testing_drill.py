@@ -32,6 +32,7 @@ from control_plane.disposable_lanes import (
     disposable_lane_binding_sha256,
     disposable_lane_configuration,
 )
+from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 from control_plane.launchplane_reconcile_authorization import (
     build_launchplane_reconcile_authorization,
 )
@@ -236,22 +237,12 @@ def collect_drill_admission(
         target_id = store.read_dokploy_target_id_record(
             context_name=generation.context, instance_name="testing"
         )
-        downtime = evaluate_lane_usage(
-            store,
-            profile=profile,
-            target=target,
-            target_id=target_id,
-            instance="testing",
-            usage="unknown",
-            now=moment,
-        )
         used = read_drill_recent_signins(
             store,
             generation,
             now,
             history_generation=history_generation,
             history_database=history_database,
-            **({"usage_required": False} if downtime.reason == "verified_down" else {}),
         )
         decision = evaluate_lane_usage(
             store,
@@ -264,6 +255,8 @@ def collect_drill_admission(
         )
     except DrillCopyAlreadyServing as error:
         raise DrillSkipped("new_testing_copy_already_serving") from error
+    except NativeSourceAuthorizationDenied:
+        raise
     except Exception as error:
         raise DrillSkipped("successful_login_check_unreadable") from error
     if decision.protected:
@@ -291,7 +284,7 @@ def collect_drill_admission(
         observed_by="service:odoo-testing-drill",
         observer_kind="director_agent",
         binding_sha256=binding,
-        usage="unknown" if decision.reason == "verified_down" else "unused",
+        usage="unknown" if used is None or decision.reason == "verified_down" else "unused",
         data="reproducible",
         production_resources="isolated",
         usage_evidence=(
@@ -440,13 +433,7 @@ def require_drill_checkpoint(
     if (
         (admitted.product, admitted.context, admitted.instance)
         != (operation.product, operation.context, "testing")
-        or (
-            admitted.usage != "unused"
-            and not (
-                admitted.usage == "unknown"
-                and admitted.usage_evidence.startswith(VERIFIED_DOWN_USAGE_EVIDENCE_PREFIX)
-            )
-        )
+        or admitted.usage not in {"unused", "unknown"}
         or admitted.data != "reproducible"
         or admitted.production_resources != "isolated"
         or receipt.response_payload.get("activation_attempt") != operation.attempt

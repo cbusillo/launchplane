@@ -703,12 +703,19 @@ import tempfile
 import uuid
 
 
+class TestingProviderDenied(Exception):
+    pass
+
+
 def command(arguments, *, stdin=None, stdout=None):
     result = subprocess.run(arguments, input=stdin, stdout=stdout or subprocess.PIPE,
         stderr=subprocess.PIPE, check=False)
     if result.returncode:
-        if any(word in result.stderr.lower() for word in (b'permission denied',b'password authentication failed',b'unauthorized')):
-            raise PermissionError('The testing runtime refused this identity')
+        if arguments[0]=='docker' and any(word in result.stderr.lower() for word in (
+                b'permission denied while trying to connect to the docker ',
+                b'authorization denied by plugin', b'error response from daemon: unauthorized',
+                b'error response from daemon: access denied')):
+            raise TestingProviderDenied('The testing runtime refused this identity')
         raise RuntimeError("Fresh testing copy command did not pass")
     return result.stdout or b""
 
@@ -897,7 +904,8 @@ def restore_main():
                 print(prefix+json.dumps({'type':'complete','resources_qualified':True}),flush=True)
                 return
             if present != '1':
-                raise RuntimeError('Testing login history is unavailable')
+                print(prefix+json.dumps({'type':'complete','resources_qualified':True}),flush=True)
+                return
             # Odoo records successful logins in res_users_log.create_date with
             # create_uid naming the account. Read all accounts without logging
             # identities or creating an Odoo session (which would add a login).
@@ -907,11 +915,19 @@ def restore_main():
             if moment.tzinfo is None:
                 raise RuntimeError('Testing usage cutoff requires UTC authority')
             cutoff=moment.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M:%S.%f')
-            used=docker('exec','-i',containers['database'][0],'sh','-c',
-                'psql -X -q -t -A -v ON_ERROR_STOP=1 -v usage_since="$2" -U "$POSTGRES_USER" -d "$1"',
-                '_',database,cutoff,stdin=b"BEGIN READ ONLY; SET LOCAL statement_timeout = '10s'; SELECT EXISTS (SELECT 1 FROM res_users_log WHERE create_date >= :'usage_since'::timestamp); ROLLBACK;\n").decode().strip()
+            try:
+                used=docker('exec','-i',containers['database'][0],'sh','-c',
+                    'psql -X -q -t -A -v ON_ERROR_STOP=1 -v usage_since="$2" -U "$POSTGRES_USER" -d "$1"',
+                    '_',database,cutoff,stdin=b"BEGIN READ ONLY; SET LOCAL statement_timeout = '10s'; SELECT EXISTS (SELECT 1 FROM res_users_log WHERE create_date >= :'usage_since'::timestamp); ROLLBACK;\n").decode().strip()
+            except RuntimeError:
+                # Physical/copy qualification already succeeded. A failed
+                # history read is UNKNOWN use, not missing resource proof.
+                # TestingProviderDenied escapes to the denied frame.
+                print(prefix+json.dumps({'type':'complete','resources_qualified':True}),flush=True)
+                return
             if used not in {'t','f'}:
-                raise RuntimeError('Testing login history is unreadable')
+                print(prefix+json.dumps({'type':'complete','resources_qualified':True}),flush=True)
+                return
             print(prefix+json.dumps({'type':'complete','recent_signins':used=='t'}),flush=True)
             return
         capture=spec.get('native_capture')
@@ -1064,9 +1080,9 @@ __LP_STORAGE_MAINTENANCE_LIBRARY__
 
 try:
     main()
-except PermissionError:
+except TestingProviderDenied:
     if len(sys.argv)>2:
-        print(sys.argv[2]+json.dumps({'type':'failed'}),flush=True)
+        print(sys.argv[2]+json.dumps({'type':'denied'}),flush=True)
         sys.exit(1)
     print('odoo_restore_completed=false')
     print('testing_copy_sanitized=false')

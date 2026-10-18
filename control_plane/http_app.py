@@ -821,7 +821,7 @@ from control_plane.contracts.disposable_lane import (
 )
 from control_plane.disposable_lane_collection import (
     collect_disposable_lane_facts,
-    collect_down_testing_resource_facts,
+    collect_testing_resource_facts,
     disposable_collection_coverage,
 )
 from control_plane.odoo_testing_usage import read_odoo_testing_usage, OdooTestingUsage
@@ -12354,6 +12354,7 @@ def create_launchplane_fastapi_app(
             token=token,
             recorded_at=utc_now_timestamp(),
             response_trace_id=trace_id,
+            planning_author_ids=repository_policy.enqueue.trusted_automation_github_user_ids,
         )
         result: dict[str, object] = {"feedback": feedback_record.model_dump(mode="json")}
         if feedback_record.delivery_status == "failed":
@@ -24061,7 +24062,7 @@ def create_launchplane_fastapi_app(
                 ):
                     try:
                         resource_facts = await run_in_threadpool(
-                            collect_down_testing_resource_facts,
+                            collect_testing_resource_facts,
                             store,
                             product=profile.product,
                             context=observation.context,

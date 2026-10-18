@@ -188,13 +188,13 @@ def evaluate_lane_usage(
     now: datetime | None = None,
     runtime_stopped: bool = False,
 ) -> LaneUsageDecision:
-    """A hold always wins. Only verified non-production downtime overrides usage.
+    """A hold always wins; unknown occupancy alone does not protect a disposable lane.
 
     runtime_stopped is supplied only by a current fixed Odoo host probe, never
     by a stored usage observation or a caller's declaration of non-use.
-    Callers that protect only positive use retain that contract through
-    require_unused=False. Repair callers can use that mode for UNKNOWN while
-    retaining verified-down qualification for positive reports.
+    Verified non-production downtime can qualify automated positive use for
+    repair. Retirement, isolation and preview refresh keep their positive-use
+    protection through require_unused=False. UNKNOWN is never relabeled unused.
     Data custody, resource separation, execution and release gates are separate.
     """
     if (
@@ -225,7 +225,7 @@ def evaluate_lane_usage(
                 "Non-production repair monitor evidence unavailable",
                 extra={"product": profile.product, "context": target.context, "instance": instance},
             )
-            return LaneUsageDecision(True, "monitor_evidence_unavailable")
+            return LaneUsageDecision(usage != "unknown", "monitor_evidence_unavailable")
         if records:
             ordered = sorted(records, key=lambda record: _timestamp(record.observed_at))
             decision = LaneUsageDecision(
@@ -245,7 +245,9 @@ def evaluate_lane_usage(
                 },
             )
             return decision
-    return LaneUsageDecision(usage == "in_use" or require_unused, "usage_protected")
+    if usage == "unknown" and instance != "prod":
+        return LaneUsageDecision(False, "usage_unknown")
+    return LaneUsageDecision(True, "usage_protected")
 
 
 def lane_usage_protected(

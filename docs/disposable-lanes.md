@@ -89,10 +89,15 @@ candidate custody before this component is activated as a rebuild control.
 
 `control_plane/lane_usage.py` owns the usage decision for disposable repair.
 A current staff-testing hold always protects the lane. Without a hold,
-automated UNKNOWN or positive usage (including recent login/session reports)
-cannot block repair of a verified-down non-production lane. The usage observation stays UNKNOWN; this
-is repair eligibility, not an assertion that nobody ever used the copy.
-Serving or unverified lanes retain their existing usage protections.
+UNKNOWN occupancy alone does not require downtime or a declaration of non-use
+for a disposable non-production lane. It remains UNKNOWN, never `unused`.
+Positive usage, including recent login/session reports, protects a serving or
+unverified lane. Q380's existing verified-down rule can qualify those automated
+positive reports for repair. This is repair eligibility, not an assertion that
+nobody ever used the copy. Initial generation, native rebuild and shared
+disposable admission all use this rule; an invalid lifetime non-use witness
+is never treated more strictly than UNKNOWN or turned into a requirement for
+negative evidence.
 Production admission and release gates are unchanged.
 
 Verified down means every effective application HTTP check has failed in each
@@ -110,7 +115,7 @@ unmonitored states remain unverified. No probe or live action is initiated by
 this decision. The guard logs the durable monitor record IDs and interval;
 the drill also preserves those references in its private admission receipt.
 
-For initial Odoo generation preparation and its resource/bootstrap rechecks,
+For positive-use qualification during initial Odoo generation preparation and its resource/bootstrap rechecks,
 HTTP 404 also qualifies when the same call's fixed host probe independently
 verifies the exact testing web container is stopped. Complete container
 inventories before and after must agree on identity, running state, start time,
@@ -132,7 +137,8 @@ replacement target setup, held-operation supersession and rehearsal admission.
 The Odoo daily drill uses the same usage decision before queueing and worker
 activation. Its down-lane read still runs the original container, storage,
 network, credential and copy-witness inspections, including protection of an
-already-opened replacement copy; it skips login-history collection.
+already-opened replacement copy. It attempts login-history collection; an
+unavailable history stays UNKNOWN after the independent resource checks pass.
 UNKNOWN is preserved in that scoped receipt, which remains usable only by
 the same continuously leased attempt. Its captured usage revision covers the
 unchanged historical observation if monitoring expires or recovers during the
@@ -146,8 +152,9 @@ checks without requiring a negative usage read.
 Connection-isolation and environment-staging guards also use the shared usage
 decision. Acknowledged activation/interlock lifting keeps its original explicit
 hold and known-use checks; it has no UNKNOWN usage requirement. Preview operations
-use the common guard, but previews without stable-lane monitor authority remain
-unverified and retain their existing admission paths.
+use the common guard. Without stable-lane monitor authority, UNKNOWN preview
+usage may proceed with fresh reproducible-data and isolated-resource evidence;
+positive use still protects the preview.
 Existing preview refresh, never-live retirement and non-destructive isolation
 paths continue to protect known use without demanding a universal negative
 occupancy observation. This change adds no UNKNOWN restriction to those paths.
@@ -182,7 +189,7 @@ usage (`unused`/`in_use`/`unknown`), data custody
 reference and a timezone-aware observation/expiry window of at most fifteen
 minutes. A changed binding, expired observation, positive
 staff-testing hold or any required unknown custody/isolation fact refuses the new
-permission. UNKNOWN usage alone has the verified-down repair exception above.
+permission. UNKNOWN usage alone does not require downtime.
 A target ID also bound to another lane refuses it independently of the observation.
 The existing Odoo preview-refresh exception below uses direct resource inspection
 and protected-use reports instead of positive occupancy/custody observations.
@@ -213,6 +220,11 @@ and session reads can produce `unused`. The separate
 [never-served rule](#never-served-testing-generations) can also qualify non-use
 from complete durable generation records; staff holds protect both paths.
 Other drivers and previews retain their existing collection behavior.
+Resource collection inspects eligible resettable Odoo testing copies on both
+healthy and down lanes when no staff-testing hold is active. A successful
+inspection can supply reproducible-data and isolated-resource facts independently
+of UNKNOWN usage. An unavailable inspection clears inherited resource facts;
+it cannot qualify them from the earlier observation.
 
 Collection returns the first failed checkpoint as an allowlisted code, never
 exception text, command lines, session identifiers, account names or topology.
@@ -641,6 +653,83 @@ An older image cannot continue the new resource route. After activation, retain
 the qualifying image and forward-fix rather than erasing custody or restoring
 an old database to clear the fence.
 
+## Stable testing traffic between disposable copies
+
+The native testing route adapter gives the lane one stable dynamic route identity.
+It binds the existing HTTPS hostname to a unique, physically verified private
+DNS alias for the predecessor, never a reusable container IP,
+and the prepared candidate backend. A first migration from Docker-owned routing
+publishes a lane-owned file at strictly higher numeric priority, initially still
+serving the predecessor. The adapter verifies every applicable router and its
+actual backend; it does not treat a duplicate or tied router as proven authority.
+HTTP and HTTPS entrypoints remain distinct when the predecessor uses both.
+Subsequent rebuilds require the recorded owned template and reuse the same route.
+
+The managed testing connection policy is rendered from the same source as Odoo
+Compose routes. It lives in the owned file and survives retirement of its former
+Docker producer. This enforces the existing browser connection-isolation rule
+on the owned testing response, including a legacy predecessor rendered without
+generation headers. It can therefore block external connections that the old
+render allowed; that is the testing isolation policy, not transparent header
+preservation. A router that only redirects to HTTPS keeps its redirect middleware
+without adding a response CSP. Unknown/broad host rules, unsupported middleware, changed
+predecessor configuration and unexpected services refuse admission. The host-rule
+check evaluates boolean ownership conservatively; a foreign Host clause joined
+with OR cannot hide another matching path, and Go regex syntax is not evaluated
+using Python regex semantics.
+
+The fixed managed-server program discovers the running Dokploy Traefik process,
+its watched writable directory mount and private applied API. It reads only the
+lane-qualified dynamic filename. Publication rechecks the static configuration,
+provider state, current file digest and retained physical web identity, then uses
+the existing proxy container to write a temporary file and atomically rename it.
+Immediately before that writer, a forward publication also requires exactly one
+running web process owning the candidate alias across every proxy network,
+including Docker DNSNames, network aliases and attached container names compared
+without case distinctions. The candidate must share a proxy network, bind the
+requested Odoo port, and match its expected project and admitted lane/runtime
+identity. A shared, missing, stopped or rebound
+alias refuses without touching the route. Inverse identity comparison excludes
+only the observation's deployment timestamp, as the runtime identity contract does.
+No application receives a provider credential or host mount. No global Traefik
+configuration, shared file, process or other product route is updated. The caller
+must hold and renew the original authorized lane/provider operation throughout,
+including immediately before dispatch. A real provider denial propagates through
+the existing transport; there is no second writer or identity fallback.
+
+An absent reply does not prove the proxy writer stopped. The caller retains the
+original durable dispatch fence and continues observing it; an old file alone
+cannot exclude a still-running writer or authorize an inverse decision.
+A fixed publish program that exits before invoking the atomic writer returns an
+explicit `route_write_not_started` receipt. The caller can close that original
+child effect as excluded after verifying the old route. Once the writer may have
+started, a timeout or generic failed frame remains unknown; killing its Docker
+client does not prove that the daemon's exec has stopped. Permission denials
+remain denials and never become permission to retry. A denial after writer
+invocation leaves its effect unknown: an authorization plugin can refuse the
+response after execution. Only the explicit not-started receipt excludes it.
+A written
+but partly/unapplied group stays pending without another dispatch. Public health
+and exact runtime identity remain the controller's separate proof before serving
+publication or old-copy retirement. The old physical copy must still be qualified
+before switch-back; an already stopped predecessor does not prevent observing the
+current candidate, but cannot authorize an inverse switch.
+
+The supported host capability requires Dokploy's directory-mounted dynamic file
+provider, its private applied API and the existing managed terminal/Docker
+transport. Missing capability remains unqualified; no host configuration or access
+grant is invented to make it pass. Source delivery alone does not activate this
+adapter, establish canonical publication or prove CM. Those stages remain #3963.
+Maintenance and rollback use the same recorded route identity, original effect
+and admitted backends; retain the owned template/receipts and old-copy custody.
+Do not remove a route or a data volume to clear uncertainty.
+
+The isolated Traefik rehearsal executes the actual Linux atomic writer and checks
+continuous public old/new/switch-back responses while retaining the old copy. It
+cleans up its own containers/networks. Initial Docker migration, stale provider
+state, partial application, foreign routing and denial paths also have fixture
+behavior tests. These are distinct from managed-host and live CM qualification.
+
 ## Testing candidate storage before adoption
 
 The rebuild candidate allocator keeps custody in
@@ -745,78 +834,6 @@ Maintenance uses the original candidate operation and its stored receipts.
 Rollback retains candidate application intent, storage and physical reservations;
 it does not clear fences or adopt a candidate as the serving lane. No schema
 migration is added beyond the candidate custody table.
-## Stable testing traffic between disposable copies
-
-The native testing route adapter gives the lane one stable dynamic route identity.
-It binds the existing HTTPS hostname to a unique, physically verified private
-DNS alias for the predecessor, never a reusable container IP,
-and the prepared candidate backend. A first migration from Docker-owned routing
-publishes a lane-owned file at strictly higher numeric priority, initially still
-serving the predecessor. The adapter verifies every applicable router and its
-actual backend; it does not treat a duplicate or tied router as proven authority.
-HTTP and HTTPS entrypoints remain distinct when the predecessor uses both.
-Subsequent rebuilds require the recorded owned template and reuse the same route.
-
-The managed testing connection policy is rendered from the same source as Odoo
-Compose routes. It lives in the owned file and survives retirement of its former
-Docker producer. This enforces the existing browser connection-isolation rule
-on the owned testing response, including a legacy predecessor rendered without
-generation headers. It can therefore block external connections that the old
-render allowed; that is the testing isolation policy, not transparent header
-preservation. A router that only redirects to HTTPS keeps its redirect middleware
-without adding a response CSP. Unknown/broad host rules, unsupported middleware, changed
-predecessor configuration and unexpected services refuse admission. The host-rule
-check evaluates boolean ownership conservatively; a foreign Host clause joined
-with OR cannot hide another matching path, and Go regex syntax is not evaluated
-using Python regex semantics.
-
-The fixed managed-server program discovers the running Dokploy Traefik process,
-its watched writable directory mount and private applied API. It reads only the
-lane-qualified dynamic filename. Publication rechecks the static configuration,
-provider state, current file digest and retained physical web identity, then uses
-the existing proxy container to write a temporary file and atomically rename it.
-Immediately before that writer, a forward publication also requires exactly one
-running web process owning the candidate alias on managed ingress, its expected
-project and its admitted runtime identity. A shared, missing, stopped or rebound
-alias refuses without touching the route. Inverse identity comparison excludes
-only the observation's deployment timestamp, as the runtime identity contract does.
-No application receives a provider credential or host mount. No global Traefik
-configuration, shared file, process or other product route is updated. The caller
-must hold and renew the original authorized lane/provider operation throughout,
-including immediately before dispatch. A real provider denial propagates through
-the existing transport; there is no second writer or identity fallback.
-
-An absent reply does not prove the proxy writer stopped. The caller retains the
-original durable dispatch fence and continues observing it; an old file alone
-cannot exclude a still-running writer or authorize an inverse decision.
-A fixed publish program that exits before invoking the atomic writer returns an
-explicit `route_write_not_started` receipt. The caller can close that original
-child effect as excluded after verifying the old route. Once the writer may have
-started, a timeout or generic failed frame remains unknown; killing its Docker
-client does not prove that the daemon's exec has stopped. Permission denials
-remain denials and never become permission to retry.
-A written
-but partly/unapplied group stays pending without another dispatch. Public health
-and exact runtime identity remain the controller's separate proof before serving
-publication or old-copy retirement. The old physical copy must still be qualified
-before switch-back; an already stopped predecessor does not prevent observing the
-current candidate, but cannot authorize an inverse switch.
-
-The supported host capability requires Dokploy's directory-mounted dynamic file
-provider, its private applied API and the existing managed terminal/Docker
-transport. Missing capability remains unqualified; no host configuration or access
-grant is invented to make it pass. Source delivery alone does not activate this
-adapter, establish canonical publication or prove CM. Those stages remain #3963.
-Maintenance and rollback use the same recorded route identity, original effect
-and admitted backends; retain the owned template/receipts and old-copy custody.
-Do not remove a route or a data volume to clear uncertainty.
-
-The isolated Traefik rehearsal executes the actual Linux atomic writer and checks
-continuous public old/new/switch-back responses while retaining the old copy. It
-cleans up its own containers/networks. Initial Docker migration, stale provider
-state, partial application, foreign routing and denial paths also have fixture
-behavior tests. These are distinct from managed-host and live CM qualification.
-
 ## Atomic serving publication for a rebuilt testing copy
 
 The native publication stage stores the exact predecessor and prepared successor
@@ -1792,9 +1809,22 @@ does not expire in the middle of that continuously leased restore. A reclaimed
 attempt requires fresh admission. It reads login history from the original served database and its committed
 copy witness, including when web is stopped or the new copy is incomplete;
 copied production login rows in the new database cannot stand in for testing use.
-An unavailable original login database normally skips rather than assuming
-non-use. The verified-down repair rule above can instead qualify usage while
-preserving UNKNOWN; the independent resource/copy inspection must still pass.
+An unavailable original login database or failed history query leaves occupancy
+UNKNOWN after the independent resource/copy inspection succeeds. It never
+becomes non-use. The service writes the scoped activation receipt under its
+activation lock, and continuation checks its worker attempt and current generation
+binding. The existing verified-down rule still qualifies historical
+positive use; new positive use and a current hold retain their checks. A provider
+authorization denial remains a denial and escapes admission without another read
+or identity. The scheduler records `authorization_denied` against the original
+admission revision, with no queued operation, so an unchanged poll cannot repeat
+that denied read. A failed physical/copy inspection supplies no resource proof.
+The fixed host program reports actual Docker-daemon authority refusals as denied
+in its inspection modes; this does not describe storage maintenance's per-copy
+deferral handling. A command failing inside the container, including a local file
+permission or database-password failure, remains a non-denial: a failed operation,
+or UNKNOWN occupancy for the login-history read after resource checks pass. It
+does not claim that the provider denied its identity.
 This also applies when Launchplane's own stop or stalled operation caused the
 downtime: excluding that cause would recreate a repair deadlock. The original
 database is retained and the already-opened new-copy gate below still protects
