@@ -821,7 +821,7 @@ from control_plane.contracts.disposable_lane import (
 )
 from control_plane.disposable_lane_collection import (
     collect_disposable_lane_facts,
-    collect_down_testing_resource_facts,
+    collect_testing_resource_facts,
     disposable_collection_coverage,
 )
 from control_plane.odoo_testing_usage import read_odoo_testing_usage, OdooTestingUsage
@@ -24048,7 +24048,7 @@ def create_launchplane_fastapi_app(
                 ):
                     try:
                         resource_facts = await run_in_threadpool(
-                            collect_down_testing_resource_facts,
+                            collect_testing_resource_facts,
                             store,
                             product=profile.product,
                             context=observation.context,

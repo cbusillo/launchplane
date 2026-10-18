@@ -187,6 +187,22 @@ class DownLaneCollectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(repaired.status_code, 202, repaired.text)
         self.assertTrue(driver.called)
 
+    async def test_collect_qualifies_resources_on_healthy_lane_without_inventing_non_use(
+        self,
+    ) -> None:
+        record_lane_health(
+            self.store, self.product, self.context, datetime.now(timezone.utc), status=200
+        )
+        response = await self.collect()
+        self.assertEqual(response.status_code, 202, response.text)
+        safety = self.store.read_disposable_lane_safety(self.product, self.context, "testing")
+        assert safety is not None
+        self.assertEqual(
+            (safety.usage, safety.data, safety.production_resources),
+            ("unknown", "reproducible", "isolated"),
+        )
+        self.assertTrue(self.transport.called)
+
     async def collect(self) -> Any:
         inspected = await self.observe()
         self.assertEqual(inspected.status_code, 202, inspected.text)

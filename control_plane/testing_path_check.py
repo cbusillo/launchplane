@@ -25,7 +25,6 @@ from control_plane.odoo_testing_resources import OdooTestingResources
 from control_plane.testing_initial_generation import (
     require_initial_usage,
     require_testing_generation_usage,
-    TestingGenerationUsageUnverified,
 )
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_replacement_bootstrap import (
@@ -82,8 +81,6 @@ def read_testing_prerequisites(
         except TestingBootstrapPrerequisiteError as error:
             state, code = "unknown" if error.unavailable else "blocked", error.code
             description = str(error)  # Fixed code-owned text, never the underlying exception.
-        except TestingGenerationUsageUnverified:
-            state = "unknown"
         except ValueError:
             state = "blocked"
         except Exception:  # noqa: BLE001 - private provider/storage text never leaves this read.

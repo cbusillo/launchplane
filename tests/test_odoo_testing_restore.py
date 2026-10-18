@@ -553,7 +553,7 @@ class FreshTestingHostProgramTests(unittest.TestCase):
                     )
                 )
 
-    def test_drill_usage_without_database_is_unreadable(self) -> None:
+    def test_drill_without_login_database_preserves_unknown_use_and_resource_proof(self) -> None:
         from datetime import datetime, timezone
 
         self.spec.update(
@@ -562,7 +562,103 @@ class FreshTestingHostProgramTests(unittest.TestCase):
             usage_since=datetime.now(timezone.utc).isoformat(),
         )
         status, output = self.run_program()
+        self.assertEqual(status, 0, output)
+        frames = [
+            json.loads(line.removeprefix("fixture:"))
+            for line in output.splitlines()
+            if line.startswith("fixture:")
+        ]
+        from control_plane.odoo_testing_drill_usage import parse_drill_usage_result
+
+        self.assertIsNone(parse_drill_usage_result(frames))
+
+    def test_login_query_failure_is_unknown_but_permission_refusal_is_denied(self) -> None:
+        from datetime import datetime, timezone
+
+        self.spec.update(
+            inspection_only=True,
+            usage_only=True,
+            usage_since=datetime.now(timezone.utc).isoformat(),
+        )
+        self.existing_database = True
+        command = self.command
+        for denied, message in (
+            (False, b"missing login table"),
+            (False, b'psql: FATAL: password authentication failed for user "odoo"'),
+            (False, b"ERROR: permission denied for table res_users_log"),
+            (False, b"container request unauthorized"),
+            (True, b"permission denied while trying to connect to the Docker daemon socket"),
+            (
+                True,
+                b"permission denied while trying to connect to the docker API at unix:///socket",
+            ),
+        ):
+            with self.subTest(message=message):
+
+                def database_read(arguments: list[str], **kwargs: Any) -> Any:
+                    query = kwargs.get("input") or b""
+                    if b"ir_config_parameter" in query:
+                        return subprocess.CompletedProcess(
+                            arguments,
+                            0,
+                            stdout=self.spec["copy_binding_sha256"].encode(),
+                            stderr=b"",
+                        )
+                    if b"res_users_log" in query:
+                        return subprocess.CompletedProcess(
+                            arguments,
+                            1,
+                            stdout=b"",
+                            stderr=message,
+                        )
+                    return command(arguments, **kwargs)
+
+                with patch.object(self, "command", side_effect=database_read):
+                    status, output = self.run_program()
+                frames = [
+                    json.loads(line.removeprefix("fixture:"))
+                    for line in output.splitlines()
+                    if line.startswith("fixture:")
+                ]
+                if denied:
+                    self.assertNotEqual(status, 0)
+                    self.assertEqual(frames, [{"type": "denied"}])
+                else:
+                    self.assertEqual(status, 0, output)
+                    self.assertEqual(frames, [{"type": "complete", "resources_qualified": True}])
+
+    def test_container_file_permission_error_is_failed_not_provider_denied(self) -> None:
+        self.spec.update(inspection_only=True, verification_only=True)
+        with patch.object(
+            self,
+            "command",
+            return_value=subprocess.CompletedProcess(
+                ["docker", "inspect"],
+                1,
+                stdout=b"",
+                stderr=b"Python: [Errno 13] Permission denied: '/data/filestore'",
+            ),
+        ):
+            status, output = self.run_program()
         self.assertNotEqual(status, 0)
+        frames = [
+            json.loads(line.removeprefix("fixture:"))
+            for line in output.splitlines()
+            if line.startswith("fixture:")
+        ]
+        self.assertEqual(frames, [{"type": "failed"}])
+
+    def test_host_lock_permission_error_is_failed_not_provider_denied(self) -> None:
+        self.spec.update(inspection_only=True, verification_only=True)
+        with patch("os.open", side_effect=PermissionError("Fixture host lock inaccessible")):
+            status, output = self.run_program()
+        self.assertNotEqual(status, 0)
+        frames = [
+            json.loads(line.removeprefix("fixture:"))
+            for line in output.splitlines()
+            if line.startswith("fixture:")
+        ]
+        self.assertEqual(frames, [{"type": "failed"}])
 
     def test_down_lane_resource_qualification_does_not_need_login_database(self) -> None:
         from control_plane.odoo_testing_drill_usage import parse_drill_usage_result
@@ -575,7 +671,7 @@ class FreshTestingHostProgramTests(unittest.TestCase):
             for line in output.splitlines()
             if line.startswith("fixture:")
         ]
-        self.assertIsNone(parse_drill_usage_result(frames, usage_required=False))
+        self.assertIsNone(parse_drill_usage_result(frames))
         self.assertFalse(
             any(call[:2] in (["docker", "stop"], ["docker", "start"]) for call in self.calls)
         )
