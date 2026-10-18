@@ -205,7 +205,7 @@ class ApplicationStateVolumeAdapter:
         ):
             raise ValueError("Reviewed testing target or provider changed; storage plan is stale.")
 
-    def _live(self, application_id: str, environment_id: str) -> api.JsonObject:
+    def _live(self, application_id: str, environment_id: str, app_name: str) -> api.JsonObject:
         from control_plane.dokploy_target_setup_http import fetch_dokploy_target_payload_for_setup
 
         host, token = source.read_dokploy_config(control_plane_root=self.root)
@@ -224,7 +224,7 @@ class ApplicationStateVolumeAdapter:
                 "applicationId": application_id,
                 "environmentId": environment_id,
                 "serverId": self.request.server_id,
-                "appName": self.intent["app_name"],
+                "appName": app_name,
             }.items()
         ):
             raise ValueError("New application identity or placement differs from the plan.")
@@ -265,7 +265,7 @@ class ApplicationStateVolumeAdapter:
 
         data = json.loads(phase)
         application_id, environment_id = data["application"], data["environment"]
-        live = self._live(application_id, environment_id)
+        live = self._live(application_id, environment_id, data["app_name"])
         if not self._mount_matches(live):
             raise ValueError(
                 "Original volume effect is incomplete or changed; never repeat creation."
@@ -386,7 +386,7 @@ class ApplicationStateVolumeAdapter:
         # Readback is observational: record adoption is reserved for runner recovery.
         try:
             data = json.loads(row.provider_effect_phase)
-            live = self._live(data["application"], data["environment"])
+            live = self._live(data["application"], data["environment"], data["app_name"])
             matches = self._mount_matches(live)
         except (ValueError, KeyError):
             matches = False
@@ -435,8 +435,22 @@ class ApplicationStateVolumeAdapter:
                 )
             created[key] = value
             if path == APPLICATION_CREATE_PATH:
+                app_name = response.get("appName")
+                # Dokploy appends a generated suffix to the requested base name.
+                # Retain its exact returned identity before dispatching the mount.
+                if not isinstance(app_name, str) or not (
+                    app_name == self.intent["app_name"]
+                    or (
+                        app_name.startswith(self.intent["app_name"] + "-")
+                        and re.fullmatch(r"[A-Za-z0-9._-]+", app_name)
+                    )
+                ):
+                    raise ValueError(
+                        "Provider application name does not belong to this allocation."
+                    )
+                created["app_name"] = app_name
                 self.checkpoint()
-                live = self._live(value, created["environment"])
+                live = self._live(value, created["environment"], app_name)
                 if live.get("mounts") != []:
                     raise ValueError("A new application must have positively empty mounts.")
                 execution_check()
@@ -454,7 +468,7 @@ class ApplicationStateVolumeAdapter:
                         "serviceId": value,
                     },
                 )
-                if not self._mount_matches(self._live(value, created["environment"])):
+                if not self._mount_matches(self._live(value, created["environment"], app_name)):
                     raise ValueError("Independent state-volume readback differs.")
                 execution_check()
                 self.checkpoint()

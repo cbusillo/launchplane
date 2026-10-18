@@ -35,6 +35,7 @@ class ApplicationStateVolumeTests(_DirectorTestingSetupFixture):
         if path == APPLICATION_CREATE_PATH:
             self.live = {
                 **payload,
+                "appName": payload["appName"] + "-fixture",
                 "applicationId": "created-application",
                 "serverId": self.payload["server_id"],
                 "mounts": deepcopy(self.preexisting_mounts),
@@ -54,7 +55,10 @@ class ApplicationStateVolumeTests(_DirectorTestingSetupFixture):
         return {
             PROJECT_CREATE_PATH: {"projectId": "created-project"},
             ENVIRONMENT_CREATE_PATH: {"environmentId": "created-environment"},
-            APPLICATION_CREATE_PATH: {"applicationId": "created-application"},
+            APPLICATION_CREATE_PATH: {
+                "applicationId": "created-application",
+                "appName": str(self.live.get("appName", "")),
+            },
             MOUNT_CREATE: {"mountId": "created-mount"},
         }[path]
 
