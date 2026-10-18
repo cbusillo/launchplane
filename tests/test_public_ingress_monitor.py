@@ -8,6 +8,7 @@ import unittest
 from typing import Callable, Literal, cast
 from unittest.mock import patch
 from urllib.request import Request
+from urllib.parse import urlsplit
 
 from click.testing import CliRunner
 
@@ -91,6 +92,7 @@ from control_plane.workflows.generic_web_deploy_provider import (
     build_generic_web_provider_target_key,
 )
 from tests.support.stores import _sqlite_database_url
+from tests.test_outbound_http import _FakeConnection, _FakeResponse, _resolver_for
 
 
 def _public_health_monitoring(
@@ -1605,6 +1607,64 @@ class PublicIngressMonitorTests(unittest.TestCase):
         self.assertEqual(result.fail_count, 1)
         self.assertEqual(store.records[0].failure_code, "private_url")
         self.assertIn("private address", store.records[0].targets[0].summary)
+
+    def test_stored_tailnet_endpoint_runs_real_private_client_and_checks_identity(self) -> None:
+        identity = _identity()
+        lane = ProductLaneProfile(
+            instance="prod",
+            context="example-site",
+            health_monitoring=ProductLaneHealthMonitoringPolicy(
+                monitoring_intent="private",
+                checks=(
+                    ProductLaneHealthCheck(
+                        name="private-runtime",
+                        kind="private_http",
+                        private_endpoint_key="example-site-prod-runtime",
+                        require_runtime_identity=True,
+                    ),
+                ),
+            ),
+        )
+        store = _Store((_profile(lane=lane),))
+        store.lane_summaries[(lane.context, lane.instance)] = _lane_summary(identity)
+        _add_private_endpoint(store, url="http://100.100.20.3:8787/health")
+        original = store.private_health_endpoints["example-site-prod-runtime"]
+        loaded = PrivateHealthEndpointRecord.model_validate_json(original.model_dump_json())
+        store.private_health_endpoints[loaded.endpoint_key] = loaded
+        authority = urlsplit(loaded.url)
+        for reported_identity in (identity.model_dump(mode="json"), {}):
+            with self.subTest(reported_identity=reported_identity):
+                connection = _FakeConnection(
+                    _FakeResponse(
+                        status=200,
+                        headers=(("Content-Type", "application/json"),),
+                        body=json.dumps({"runtime_identity": reported_identity}).encode(),
+                    )
+                )
+                with (
+                    patch(
+                        "control_plane.outbound_http._system_address_resolver",
+                        _resolver_for("100.100.20.3"),
+                    ),
+                    patch(
+                        "control_plane.outbound_http._private_http_connection",
+                        return_value=connection,
+                    ) as connect,
+                ):
+                    result = run_public_ingress_monitor_once(
+                        record_store=store, checked_at="2026-05-29T12:06:00Z", notify=False
+                    )
+                self.assertEqual(result.pass_count, 1 if reported_identity else 0)
+                self.assertEqual(result.fail_count, 0 if reported_identity else 1)
+                connect.assert_called()
+                for call in connect.call_args_list:
+                    destination = call.args[0]
+                    self.assertEqual(destination.url, loaded.url)
+                    self.assertEqual(
+                        destination.addresses[0].socket_address,
+                        (authority.hostname, authority.port),
+                    )
+                self.assertEqual(store.private_health_endpoints[loaded.endpoint_key], original)
 
     def test_private_http_check_requests_private_health_endpoint_url(self) -> None:
         lane = ProductLaneProfile(

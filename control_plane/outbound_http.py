@@ -184,6 +184,11 @@ def is_rfc1918_address(address: IPv4Address | IPv6Address) -> bool:
 _RFC1918_NETWORKS = tuple(
     IPv4Network(value) for value in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
 )
+_RFC6598_NETWORK = IPv4Network("100.64.0.0/10")
+
+
+def _is_private_http_address(address: IPv4Address | IPv6Address) -> bool:
+    return is_rfc1918_address(address) or address in _RFC6598_NETWORK
 
 
 def private_url_error(url: str) -> Literal["invalid_url", "public_url", ""]:
@@ -197,7 +202,7 @@ def private_url_error(url: str) -> Literal["invalid_url", "public_url", ""]:
     except ValueError:
         return ""
     # Retain readability of existing non-public literal records. The actual
-    # connection policy below is stricter and requires RFC1918 answers.
+    # connection policy below requires RFC1918 or RFC6598 answers.
     return "public_url" if _is_public_address(address) else ""
 
 
@@ -264,7 +269,9 @@ def _resolve_http_destination(
                 "dns_failure",
                 "Public HTTP destination resolved to an invalid IP address.",
             ) from error
-        if not (is_rfc1918_address(resolved_ip) if private else _is_public_address(resolved_ip)):
+        if not (
+            _is_private_http_address(resolved_ip) if private else _is_public_address(resolved_ip)
+        ):
             raise PublicHttpDestinationError(
                 "private_url",
                 "HTTP destination DNS answers include an address outside the allowed network scope.",

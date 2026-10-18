@@ -215,8 +215,8 @@ class PrivateTestingTrustTests(unittest.TestCase):
         )
         self.assertEqual(legacy.instance, "prod")
 
-    def test_legacy_literal_records_stay_readable_but_non_rfc1918_probes_refuse(self) -> None:
-        for address in ("127.0.0.1", "100.64.0.1", "[fc00::1]", "169.254.169.254"):
+    def test_legacy_literal_records_stay_readable_but_out_of_scope_probes_refuse(self) -> None:
+        for address in ("127.0.0.1", "[fc00::1]", "169.254.169.254"):
             with self.subTest(address=address):
                 endpoint = self.endpoint.model_copy(update={"url": f"https://{address}/health"})
                 loaded = PrivateHealthEndpointRecord.model_validate_json(endpoint.model_dump_json())
