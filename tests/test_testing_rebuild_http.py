@@ -286,3 +286,60 @@ class TestingRebuildHttpTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             enqueue(idempotency_key="new-machine-request")
         self.assertEqual(self.fixture.effects, [])
+
+    async def test_queue_race_reports_the_same_key_conflict_as_the_initial_lookup(self) -> None:
+        accepted = await self.call("POST", self.payload)
+        self.assertEqual(accepted.status_code, 200, accepted.json())
+        saved = self.store.read_odoo_stable_target_replacement_operation_record(
+            accepted.json()["operation"]["operation_id"]
+        )
+        self.store.write_odoo_stable_target_replacement_operation_record(
+            saved.model_copy(
+                update={
+                    "status": "fail",
+                    "phase": "failed",
+                    "finished_at": saved.created_at,
+                    "error_message": "The fixture worker failed before provider effects.",
+                }
+            )
+        )
+        different = {**self.payload, "reason": "A different rebuild intent"}
+        initial = await self.call("POST", different)
+        self.assertEqual(initial.status_code, 409, initial.json())
+        # Another request can commit between the handler's lookup and queue CAS.
+        # Keep the real queue's second lookup and immutable request check.
+        with patch.object(
+            routes,
+            "find_odoo_target_replacement_apply_operation_by_idempotency_key",
+            return_value=None,
+        ):
+            raced = await self.call("POST", different)
+        self.assertEqual(raced.status_code, initial.status_code, raced.json())
+        self.assertEqual(raced.json()["error"]["code"], initial.json()["error"]["code"])
+        self.assertEqual(self.fixture.effects, [])
+
+    async def test_receipt_projects_the_saved_operation_without_extra_helper_fields(self) -> None:
+        from control_plane.odoo_target_replacement_apply_http import (
+            enqueue_odoo_target_replacement_apply_operation as enqueue,
+        )
+
+        def without_full_payload(**kwargs: object) -> tuple[dict[str, object], dict[str, object]]:
+            from typing import Any, cast
+
+            records, payload = enqueue(**cast(Any, kwargs))
+            return records, {**payload, "provider_detail": "not a browser operation field"}
+
+        with patch.object(
+            routes,
+            "enqueue_odoo_target_replacement_apply_operation",
+            side_effect=without_full_payload,
+        ):
+            response = await self.call("POST", self.payload)
+        self.assertEqual(response.status_code, 200, response.json())
+        operation = response.json()["operation"]
+        saved = self.store.read_odoo_stable_target_replacement_operation_record(
+            operation["operation_id"]
+        )
+        self.assertEqual(operation["status"], saved.status)
+        self.assertNotIn("provider_detail", operation)
+        self.assertEqual(self.fixture.effects, [])

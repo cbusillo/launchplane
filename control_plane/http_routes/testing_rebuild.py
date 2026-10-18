@@ -26,6 +26,10 @@ from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDepend
 from control_plane.odoo_target_replacement_apply_http import (
     ODOO_TARGET_REPLACEMENT_APPLY_ROUTE,
     OdooTargetReplacementApplyEnvelope,
+    OdooTargetReplacementApplyIdempotencyKeyReusedError,
+    OdooTargetReplacementApplyCurrentArtifactChangedError,
+    OdooTargetReplacementApplyLaneBusyError,
+    OdooTargetReplacementApplyOperationActiveError,
     enqueue_odoo_target_replacement_apply_operation,
     find_odoo_target_replacement_apply_operation_by_idempotency_key,
 )
@@ -262,22 +266,6 @@ def register_testing_rebuild_routes(
                 verified_manifest=verified.manifest,
             )
             record_verified_build_artifact(record_store=store, verified=verified)
-            _, accepted = enqueue_odoo_target_replacement_apply_operation(
-                record_store=store,
-                request=OdooTargetReplacementApplyEnvelope(product=product, replacement=request),
-                context=lane.context,
-                idempotency_key=idempotency_key.strip(),
-                idempotency_scope=scope,
-                request_fingerprint=fingerprint,
-                created_at=now,
-                authorization=authorization,
-            )
-            return response(
-                OdooStableTargetReplacementOperationRecord.model_validate(
-                    {key: value for key, value in accepted.items() if key != "poll_url"}
-                ),
-                trace_id,
-            )
         except TestingRebuildRefused as error:
             raise common.http_error(
                 status_code=409, trace_id=trace_id, code=error.code, message=str(error)
@@ -296,6 +284,40 @@ def register_testing_rebuild_routes(
                 code="testing_rebuild_not_ready",
                 message="Testing rebuild was not admitted. Refresh the lane evidence before another request.",
             ) from error
+
+        try:
+            records, _ = enqueue_odoo_target_replacement_apply_operation(
+                record_store=store,
+                request=OdooTargetReplacementApplyEnvelope(product=product, replacement=request),
+                context=lane.context,
+                idempotency_key=idempotency_key.strip(),
+                idempotency_scope=scope,
+                request_fingerprint=fingerprint,
+                created_at=now,
+                authorization=authorization,
+            )
+        except OdooTargetReplacementApplyIdempotencyKeyReusedError as error:
+            raise common.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="idempotency_key_reused",
+                message="This request key already identifies another operation.",
+            ) from error
+        except (
+            OdooTargetReplacementApplyCurrentArtifactChangedError,
+            OdooTargetReplacementApplyLaneBusyError,
+            OdooTargetReplacementApplyOperationActiveError,
+        ) as error:
+            raise common.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="testing_rebuild_not_ready",
+                message="Testing changed or another operation holds the lane. Inspect again.",
+            ) from error
+        operation_id = str(records["odoo_stable_target_replacement_operation_id"])
+        return response(
+            store.read_odoo_stable_target_replacement_operation_record(operation_id), trace_id
+        )
 
     def read_operation(
         product: Annotated[str, Path(min_length=1)],
