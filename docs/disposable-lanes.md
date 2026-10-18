@@ -19,7 +19,8 @@ unverified lane. Q380's existing verified-down rule can qualify those automated
 positive reports for repair. This is repair eligibility, not an assertion that
 nobody ever used the copy. Initial generation, native rebuild and shared
 disposable admission all use this rule; an invalid lifetime non-use witness
-also becomes UNKNOWN rather than a new requirement for negative evidence.
+is never treated more strictly than UNKNOWN or turned into a requirement for
+negative evidence.
 Production admission and release gates are unchanged.
 
 Verified down means every effective application HTTP check has failed in each

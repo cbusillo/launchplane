@@ -582,8 +582,18 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         )
         self.existing_database = True
         command = self.command
-        for denied in (False, True):
-            with self.subTest(denied=denied):
+        for denied, message in (
+            (False, b"missing login table"),
+            (False, b'psql: FATAL: password authentication failed for user "odoo"'),
+            (False, b"ERROR: permission denied for table res_users_log"),
+            (False, b"container request unauthorized"),
+            (True, b"permission denied while trying to connect to the Docker daemon socket"),
+            (
+                True,
+                b"permission denied while trying to connect to the docker API at unix:///socket",
+            ),
+        ):
+            with self.subTest(message=message):
 
                 def database_read(arguments: list[str], **kwargs: Any) -> Any:
                     query = kwargs.get("input") or b""
@@ -599,9 +609,7 @@ class FreshTestingHostProgramTests(unittest.TestCase):
                             arguments,
                             1,
                             stdout=b"",
-                            stderr=b"permission denied while trying to connect to the Docker daemon socket"
-                            if denied
-                            else b"missing login table",
+                            stderr=message,
                         )
                     return command(arguments, **kwargs)
 
@@ -631,6 +639,18 @@ class FreshTestingHostProgramTests(unittest.TestCase):
                 stderr=b"Python: [Errno 13] Permission denied: '/data/filestore'",
             ),
         ):
+            status, output = self.run_program()
+        self.assertNotEqual(status, 0)
+        frames = [
+            json.loads(line.removeprefix("fixture:"))
+            for line in output.splitlines()
+            if line.startswith("fixture:")
+        ]
+        self.assertEqual(frames, [{"type": "failed"}])
+
+    def test_host_lock_permission_error_is_failed_not_provider_denied(self) -> None:
+        self.spec.update(inspection_only=True, verification_only=True)
+        with patch("os.open", side_effect=PermissionError("Fixture host lock inaccessible")):
             status, output = self.run_program()
         self.assertNotEqual(status, 0)
         frames = [
