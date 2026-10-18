@@ -39,6 +39,7 @@ dist/
 node_modules
 control_plane/ui_static/
 frontend/src/generated/openapi.ts/
+frontend/src/generated/.openapi-*/
 
 # Local env and secrets
 .env

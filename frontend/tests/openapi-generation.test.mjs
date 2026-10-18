@@ -9,7 +9,7 @@ import test from "node:test";
 const run = promisify(execFile);
 const generator = new URL("../scripts/generate-openapi-types.mjs", import.meta.url);
 
-test("client regeneration replaces obsolete exports with the current schema", async () => {
+test("client regeneration preserves concurrent readers and replaces obsolete output", async () => {
   const scratch = await mkdtemp(path.join(os.tmpdir(), "launchplane-client-test-"));
   try {
     const input = path.join(scratch, "schema.json");
@@ -37,6 +37,28 @@ test("client regeneration replaces obsolete exports with the current schema", as
     assert.ok(!exports.includes("PreviousResponse"), "obsolete exports must be removed");
     const types = await readFile(path.join(output, "types.gen.ts"), "utf8");
     assert.ok(!types.includes("PreviousResponse"), "obsolete definitions must be removed");
+
+    const obsoleteFile = path.join(output, "obsolete.ts");
+    await writeFile(obsoleteFile, "export type Obsolete = never;\n");
+    let complete = false;
+    const regenerating = Promise.all([
+      run(process.execPath, [generator.pathname, "--input", input, "--output", output]),
+      run(process.execPath, [generator.pathname, "--input", input, "--output", output]),
+    ])
+      .finally(() => { complete = true; });
+    let readError;
+    while (!complete) {
+      try {
+        assert.equal(await readFile(path.join(output, "index.ts"), "utf8"), exports);
+        assert.equal(await readFile(path.join(output, "types.gen.ts"), "utf8"), types);
+      } catch (error) {
+        readError = error;
+        break;
+      }
+    }
+    await regenerating;
+    if (readError) throw readError;
+    await assert.rejects(readFile(obsoleteFile), { code: "ENOENT" });
   } finally {
     await rm(scratch, { recursive: true, force: true });
   }
