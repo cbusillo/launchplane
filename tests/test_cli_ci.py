@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import subprocess
 import sys
 import unittest
@@ -23,7 +24,9 @@ class ColdStartupTests(unittest.TestCase):
                 sys.executable,
                 "-I",
                 "-c",
+                "import sys; sys.path.insert(0, sys.argv[1]); "
                 "from control_plane.cli import main; main(['--help'])",
+                str(Path(__file__).resolve().parents[1]),
             ],
             capture_output=True,
             text=True,

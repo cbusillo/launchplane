@@ -361,7 +361,11 @@ class TestingRebuildResumeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.held.status, "reconciliation_required")
         self.assertEqual(self.held.error_code, denial.code)
         self.assertEqual(self.held.authorization, claimed.authorization)
+        self.assertEqual(self.held.phase, claimed.phase)
+        self.assertFalse(self.held.finished_at)
         self.assertFalse(self.held.lease_owner)
+        self.assertFalse(self.held.lease_expires_at)
+        self.assertFalse(self.held.heartbeat_at)
         self.payload = {
             "expected_updated_at": self.held.updated_at,
             "expected_attempt": self.held.attempt,
