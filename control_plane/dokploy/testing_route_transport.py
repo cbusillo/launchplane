@@ -16,7 +16,7 @@ import yaml
 from control_plane.contracts.runtime_identity import RuntimeIdentity, parse_runtime_identity_payload
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.dokploy.compose import TESTING_CONNECTION_CSP
-from control_plane.dokploy.native_copy_stream import _read_remote
+from control_plane.dokploy.native_copy_stream import _read_remote, NativeSourceUnavailable
 from control_plane.dokploy.route_rules import host_rule_may_match
 from control_plane.dokploy.testing_route import (
     TestingLaneRoute,
@@ -27,6 +27,11 @@ from control_plane.dokploy.testing_route import (
 
 TRAEFIK_DYNAMIC_DIRECTORY = "/etc/dokploy/traefik/dynamic"
 TRAEFIK_STATIC_CONFIGURATION = "/etc/traefik/traefik.yml"
+
+
+class TestingRouteWriteNotStarted(NativeSourceUnavailable):
+    """The fixed program returned before invoking its only route writer."""
+
 
 # Run by the already managed proxy container, with the same provider identity.
 # The file name is service-derived; callers cannot provide a path or command.
@@ -77,6 +82,7 @@ def testing_route_host_program() -> str:
     return (
         "import base64,hashlib,ipaddress,json,re,subprocess,sys\nfrom typing import Any\n"
         "from urllib.request import ProxyHandler,build_opener\n"
+        "from urllib.parse import urlsplit\n"
         + inspect.getsource(host_rule_may_match)
         + "\n"
         + inspect.getsource(redirects_to_https)
@@ -126,7 +132,10 @@ def selected_raw(raw, host, points):
             middlewares[qualified]={key:middleware[key] for key in ('headers','redirectScheme','status') if key in middleware}
     return {'routers':selected,'services':services,'middlewares':middlewares}
 
+WRITE_STARTED=False
+
 def main(spec):
+    global WRITE_STARTED
     if not re.fullmatch(r'lp-testing-route-[a-f0-9]{32}',spec['route_id']) or not re.fullmatch(r'[a-zA-Z0-9.-]+',spec['host']):
         raise RuntimeError('Testing route identity is invalid')
     identifiers=docker('ps','-aq').decode().splitlines()
@@ -185,6 +194,24 @@ def main(spec):
     if spec['mode']=='publish':
         if spec['retained_backend'] not in endpoints or not isinstance(old_identity,dict) or spec['expected_old_identity_sha256']!=hashlib.sha256(json.dumps(old_identity,sort_keys=True,separators=(',',':')).encode()).hexdigest():
             raise RuntimeError('The retained physical testing copy changed')
+        desired=urlsplit(spec['desired_backend'])
+        if spec['desired_backend']!=spec['retained_backend']:
+            matching=[item for item in containers if desired.hostname in (item.get('NetworkSettings',{}).get('Networks',{}).get('dokploy-network',{}).get('Aliases') or []) or item.get('Name','').lstrip('/')==desired.hostname]
+            if len(matching)!=1:
+                raise RuntimeError('The candidate testing alias is absent or shared')
+            candidate=matching[0]
+            labels=candidate.get('Config',{}).get('Labels') or {}
+            if candidate.get('State',{}).get('Status')!='running' or labels.get('com.docker.compose.project')!=desired.hostname or labels.get('com.docker.compose.service')!='web':
+                raise RuntimeError('The candidate testing alias changed ownership')
+            environment=dict(item.split('=',1) for item in candidate.get('Config',{}).get('Env',[]) if '=' in item)
+            identity=json.loads(environment.get('LAUNCHPLANE_RUNTIME_IDENTITY_JSON','null'))
+            if not isinstance(identity,dict) or environment.get('PLATFORM_INSTANCE')!='testing':
+                raise RuntimeError('The candidate testing runtime is unavailable')
+            identity.pop('deployed_at',None)
+            if hashlib.sha256(json.dumps(identity,sort_keys=True,separators=(',',':')).encode()).hexdigest()!=spec['expected_desired_identity_sha256']:
+                raise RuntimeError('The candidate testing runtime changed')
+        elif spec['expected_desired_identity_sha256']!=hashlib.sha256(json.dumps({key:value for key,value in old_identity.items() if key!='deployed_at'},sort_keys=True,separators=(',',':')).encode()).hexdigest():
+            raise RuntimeError('The inverse does not identify its original retained runtime')
         document=spec['document']
         http=document.get('http',{})
         if set(document)!={'http'} or set(http)-{'routers','services','middlewares'} or set(http.get('services',{}))!={spec['route_id']}:
@@ -200,12 +227,14 @@ def main(spec):
             raise RuntimeError('Testing route authority changed before publication')
         document=json.dumps(spec['document'],sort_keys=True,separators=(',',':')).encode()
         # One provider path, with no alternate identity or host-file fallback.
+        WRITE_STARTED=True
         docker('exec','-i',proxy['Id'],'sh','-c',WRITER,'_',DIRECTORY,name,digest,hashlib.sha256(document).hexdigest(),stdin=document)
     elif spec['mode']!='read':
         raise RuntimeError('Unsupported testing route operation')
     return {'type':'complete','static_configuration':static,'raw':raw,'owned_file':observed,'file_sha256':digest,'old_endpoints':endpoints,'proxy_id':proxy['Id'],'old_identity':old_identity}
 
 if __name__=='__main__':
+    payload={}
     try:
         payload=json.loads(base64.b64decode(sys.argv[1],validate=True))
         print(sys.argv[2]+json.dumps(main(payload)),flush=True)
@@ -213,7 +242,8 @@ if __name__=='__main__':
         print(sys.argv[2]+json.dumps({'type':'denied'}),flush=True)
         sys.exit(1)
     except Exception:
-        print(sys.argv[2]+json.dumps({'type':'failed'}),flush=True)
+        kind='route_write_not_started' if payload.get('mode')=='publish' and not WRITE_STARTED else 'failed'
+        print(sys.argv[2]+json.dumps({'type':kind}),flush=True)
         sys.exit(1)
 """
     )
@@ -252,13 +282,21 @@ class DokployTestingRouteTransport:
         dispatch_guard: Callable[[Callable[[], None]], None] | None = None,
     ) -> dict[str, Any]:
         frames: list[dict[str, object]] = []
+
+        def receive(frame: dict[str, object]) -> None:
+            if frame.get("type") == "route_write_not_started":
+                if payload.get("mode") != "publish":
+                    raise ValueError("A route writer receipt cannot qualify an observation.")
+                raise TestingRouteWriteNotStarted("The original route writer was not started.")
+            frames.append(frame)
+
         _read_remote(
             host=self.host,
             token=self.token,
             server_id=self.server_id,
             program=testing_route_host_program(),
             payload={**self.payload, **payload},
-            receive=frames.append,
+            receive=receive,
             timeout_seconds=120,
             dispatch_guard=dispatch_guard,
         )
@@ -289,6 +327,7 @@ class DokployTestingRouteTransport:
         *,
         expected_backend: str,
         dispatch_guard: Callable[[Callable[[], None]], None],
+        desired_runtime_identity: RuntimeIdentity,
     ) -> None:
         if (plan.route_id, plan.host) != (
             self.payload["route_id"],
@@ -318,6 +357,9 @@ class DokployTestingRouteTransport:
                 "desired_backend": backend,
                 "allowed_backends": [plan.old_backend, plan.new_backend],
                 "expected_old_identity_sha256": canonical_json_sha256(frame["old_identity"]),
+                "expected_desired_identity_sha256": canonical_json_sha256(
+                    desired_runtime_identity.model_dump(mode="json", exclude={"deployed_at"})
+                ),
                 "expected_file_sha256": frame["file_sha256"],
                 "expected_static_sha256": hashlib.sha256(
                     frame["static_configuration"].encode()
