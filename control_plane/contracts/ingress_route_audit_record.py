@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 IngressRouteAuditMode = Literal["dry-run", "apply"]
 IngressRouteAuditStatus = Literal["pending", "planned", "applied", "unchanged"]
 IngressRouteTlsOwner = Literal["launchplane", "provider", "external", "none", "unknown"]
+TESTING_PRIVATE_INGRESS_AUDIT_PREFIX = "testing-private-ingress-"
 
 
 class IngressRouteAuditOperation(BaseModel):

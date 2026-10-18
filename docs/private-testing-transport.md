@@ -24,7 +24,10 @@ require `reviewed_plan_sha256`; apply retains its original Idempotency-Key.
 The service derives the one hostname from that lane's active HTTPS `/health`
 endpoint and the application/port from its product and target records. It checks
 exclusive lane and application ownership, actual server placement against the
-edge record, and the existing wildcard certificate's coverage and expiry. It
+edge record, the existing wildcard certificate's coverage and expiry, and a
+read of the named existing access list before effects. The access-list read
+does not expand authentication entries; the plan digest covers its non-secret
+metadata. It
 creates the application's HTTP hostname and its own edge route; it does not
 rewrite existing application domains or an unrelated edge route. A successful
 receipt owns later disablement. The active private endpoint is the hostname's
@@ -48,9 +51,22 @@ provider-operation fence, saves its pending receipt before effects, then records
 independent provider readback. Active application-hostname creation also holds
 the testing event executor lock, excluding a concurrent event deployment. A lost
 final response can be adopted from the same key only when both effects and the
-pending receipt match. Partial or unavailable evidence remains
-`reconcile_required` on the private route, without holding the application's
-deployment reservation; never repeat the private operation with another key.
+pending receipt match. That receipt binds stable lane/application/endpoint/edge,
+runtime port, certificate and access-list identity/policy plus the exact desired
+route. Certificate renewal and descriptive metadata updates do not change that
+identity; current ownership, placement, certificate validity and access-list
+existence are still checked again. Dokploy's absent nullable domain fields may
+be null or empty, as in other domain readers.
+
+For a partial create, retry the original apply request, reviewed plan and
+Idempotency-Key. The service first observes both providers. If the matching
+application domain exists and independent readback proves the edge route is
+absent, the existing durable runner reacquires the original reservation and
+creates only the missing edge. If both exact effects exist, it adopts their
+receipt without provider writes. Different keys cannot take over. Unavailable,
+foreign or materially changed evidence remains `reconcile_required` on the
+private route, without holding the application's deployment reservation. Do not
+clear a genuine unknown or repeat it with a new key.
 Disable uses a fresh reviewed plan and the same lane's exact receipt-owned route,
 retaining its original endpoint and edge keys. It only toggles that route even
 after the old application or edge record disappears, and leaves the application
@@ -58,6 +74,21 @@ hostname and bot state in place. Disabled routes need no loaded-nginx flag, but
 retain the same hidden-config checks; enabled routes must be loaded.
 Neither operation deploys a workload
 or proves TLS, WSS, remote tailnet access or healthy runtime identity.
+
+Disable and verify the edge route **before** retiring its private endpoint or
+product, removing the lane declaration, or assigning the context elsewhere.
+Disable requires that current lane authority even when the old application and
+edge records have disappeared. It intentionally retains the application's
+hostname and domain claim. First-testing setup remains limited to empty targets;
+disabling the edge alone does not make an activated target empty or authorize
+its replacement.
+Private ingress receipts cannot supply managed route-binding evidence, whether
+selected automatically or passed explicitly. Recording the domain does not
+declare a public website. Older ship/promotion URL inference can derive HTTPS
+health URLs from target domains; that inference is not private reachability
+proof. Private probe support and access-list qualification remain prerequisites
+for this lane (#3989 and #3777), rather than a reason to run a public probe or
+change its access list.
 
 The HTTP surface is projected into the agent/admin contract. Installed caller
 support must include this operation before operational use; do not call a raw

@@ -25,6 +25,17 @@ NpmplusAuthRequest = Literal[
 ]
 
 
+class NpmplusAccessList(BaseModel):
+    """Non-secret list metadata, without expanding authentication entries."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: int = Field(gt=0)
+    name: str = Field(min_length=1)
+    satisfy_any: bool
+    pass_auth: bool
+
+
 class NpmplusLocationPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -316,6 +327,15 @@ class NpmplusClient:
         if certificate.id != certificate_id:
             raise click.ClickException("NPMplus certificate identity changed.")
         return certificate
+
+    def get_access_list(self, access_list_id: int) -> NpmplusAccessList:
+        payload = self._request(method="GET", path=f"/api/nginx/access-lists/{access_list_id}")
+        if not isinstance(payload, dict):
+            raise click.ClickException("NPMplus access-list read returned an invalid payload.")
+        access_list = NpmplusAccessList.model_validate(payload)
+        if access_list.id != access_list_id:
+            raise click.ClickException("NPMplus access-list identity does not match the request.")
+        return access_list
 
     def create_proxy_host(self, payload: NpmplusProxyHostPayload) -> NpmplusProxyHost:
         if not payload.enabled:

@@ -9,7 +9,10 @@ from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.edge_endpoint_record import EdgeEndpointRecord
-from control_plane.contracts.ingress_route_audit_record import IngressRouteAuditRecord
+from control_plane.contracts.ingress_route_audit_record import (
+    IngressRouteAuditRecord,
+    TESTING_PRIVATE_INGRESS_AUDIT_PREFIX,
+)
 from control_plane.contracts.route_binding_record import (
     EnvironmentRouteBindingRecord,
     RouteBindingDomain,
@@ -344,6 +347,18 @@ def build_route_binding_candidate(
     if audit_record is None:
         return _blocked_plan(
             findings=findings,
+            current_record=current_record,
+            current_record_sha256=current_record_sha256,
+        )
+    if audit_record.record_id.startswith(TESTING_PRIVATE_INGRESS_AUDIT_PREFIX):
+        return _blocked_plan(
+            findings=(
+                *findings,
+                RouteBindingReconcileFinding(
+                    code="private_testing_ingress_not_route_binding_evidence",
+                    detail="A private testing ingress receipt does not authorize a managed route binding.",
+                ),
+            ),
             current_record=current_record,
             current_record_sha256=current_record_sha256,
         )

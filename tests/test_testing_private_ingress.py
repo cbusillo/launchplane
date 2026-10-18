@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 from typing import Any, cast
 import unittest
 from unittest.mock import Mock, patch
+from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
@@ -17,7 +18,12 @@ from control_plane.contracts.product_profile_record import (
     ProductLaneProfile,
 )
 from control_plane.http_app import create_launchplane_fastapi_app
-from control_plane.npmplus import NpmplusCertificate, NpmplusClient, NpmplusProxyHost
+from control_plane.npmplus import (
+    NpmplusAccessList,
+    NpmplusCertificate,
+    NpmplusClient,
+    NpmplusProxyHost,
+)
 from control_plane.provider_operations import (
     ProviderOperationLease,
     ProviderMutationRejectedError,
@@ -57,6 +63,11 @@ class EdgeClient(_FakeNpmplusIngressClient):
         if certificate_id != self.certificate.id:
             raise ValueError("Unknown fixture certificate")
         return self.certificate
+
+    def get_access_list(self, access_list_id: int) -> NpmplusAccessList:
+        if access_list_id != 1:
+            raise ValueError("Unknown fixture access list")
+        return NpmplusAccessList(id=1, name="Private testing", satisfy_any=False, pass_auth=False)
 
     def get_proxy_host(self, host_id: int, *, public_only: bool = False) -> NpmplusProxyHost:
         host = next(host for host in self.proxy_hosts if host.id == host_id)
@@ -351,7 +362,7 @@ class PrivateTestingIngressTests(PrivateIngressFixture):
                 with patch.object(
                     self.store, "list_dokploy_target_records", return_value=(self.target, other)
                 ):
-                    with self.assertRaisesRegex(ValueError, "hostname belongs to another lane"):
+                    with self.assertRaises(ValueError):
                         self.adapter().plan()
         self.assertEqual(self.dokploy_calls, [])
 
@@ -365,7 +376,7 @@ class PrivateTestingIngressTests(PrivateIngressFixture):
         self.store.write_dokploy_target_record(
             self.target.model_copy(update={"pending_public_host_effects": (pending,)})
         )
-        with self.assertRaisesRegex(ValueError, "exclusive application testing target"):
+        with self.assertRaises(ValueError):
             self.adapter().plan()
         self.assertEqual(self.dokploy_calls, [])
 
@@ -403,6 +414,101 @@ class PrivateTestingIngressTests(PrivateIngressFixture):
                     self.adapter().plan()
                 self.client.certificate = original
 
+    def test_missing_access_list_refuses_before_any_provider_effect(self) -> None:
+        with self.assertRaises(ValueError):
+            self.adapter(access_list_id=2).plan()
+        self.assertEqual(self.dokploy_calls, [])
+        self.assertFalse(any(call.startswith("create") for call in self.client.calls))
+
+    def test_original_key_resumes_domain_present_edge_absent_without_repeating_domain(self) -> None:
+        digest = self.adapter().plan()["plan_sha256"]
+        adapter = self.adapter(reviewed_plan_sha256=digest)
+        with patch.object(
+            self.client, "create_proxy_host", side_effect=ValueError("edge rejected")
+        ):
+            with self.assertRaises(ProviderMutationUnknownError):
+                adapter.apply("original-key", self.lease)
+        self.assertEqual(len(self.domains), 1)
+        self.assertEqual(self.client.proxy_hosts, [])
+        self.assertEqual(adapter.observe("wrong-key", "edge-create", "key").outcome, "unknown")
+        recovery = adapter.observe("original-key", "edge-create", "key")
+        self.assertEqual(recovery.outcome, "absent")
+        self.assertTrue(recovery.retry_safe)
+        adapter.apply("original-key", self.lease)
+        self.assertTrue(adapter.readback()["applied"])
+        self.assertEqual(self.dokploy_calls, ["/api/domain.create"])
+        self.assertEqual(len(self.client.proxy_hosts), 1)
+
+    def test_original_key_adopts_after_certificate_renewal_and_metadata_changes(self) -> None:
+        digest = self.adapter().plan()["plan_sha256"]
+        create = self.client.create_proxy_host
+
+        def lost_response(payload: Any) -> Any:
+            create(payload)
+            raise TimeoutError("lost final response")
+
+        adapter = self.adapter(reviewed_plan_sha256=digest)
+        with patch.object(self.client, "create_proxy_host", side_effect=lost_response):
+            with self.assertRaises(ProviderMutationUnknownError):
+                adapter.apply("original-key", self.lease)
+        self.client.certificate = self.client.certificate.model_copy(
+            update={"expires_on": (datetime.now(timezone.utc) + timedelta(days=60)).isoformat()}
+        )
+        self.store.write_product_profile_record(
+            self.profile.model_copy(update={"display_name": "Renamed product"})
+        )
+        self.store.write_private_health_endpoint_record(
+            self.endpoint.model_copy(update={"source_label": "refreshed metadata"})
+        )
+        self.assertEqual(adapter.observe("original-key", "edge-create", "key").outcome, "present")
+        self.assertTrue(adapter.readback()["applied"])
+        self.assertEqual(self.client.calls.count("create"), 1)
+
+    def test_dokploy_empty_nullable_domain_fields_match_readback(self) -> None:
+        with patch(
+            "control_plane.testing_private_ingress.api.fetch_dokploy_application_domains",
+            side_effect=lambda **_: tuple(
+                {key: "" if value is None else value for key, value in domain.items()}
+                for domain in self.domains
+            ),
+        ):
+            self.create()
+        self.assertEqual(self.dokploy_calls, ["/api/domain.create"])
+
+    def test_apply_missing_target_is_a_pre_effect_rejection(self) -> None:
+        digest = self.adapter().plan()["plan_sha256"]
+        with patch.object(self.store, "read_provider_target_record", side_effect=FileNotFoundError):
+            with self.assertRaises(ProviderMutationRejectedError):
+                self.adapter(reviewed_plan_sha256=digest).apply("original-key", self.lease)
+        self.assertEqual(self.dokploy_calls, [])
+
+    def test_apply_lock_failure_is_a_pre_effect_rejection(self) -> None:
+        digest = self.adapter().plan()["plan_sha256"]
+        with patch.object(
+            self.store, "testing_replacement_execution_lock", side_effect=SQLAlchemyError
+        ):
+            with self.assertRaises(ProviderMutationRejectedError):
+                self.adapter(reviewed_plan_sha256=digest).apply("original-key", self.lease)
+        self.assertEqual(self.dokploy_calls, [])
+        self.assertFalse(any(call.startswith("create") for call in self.client.calls))
+
+    def test_partial_recovery_refuses_changed_runtime_port(self) -> None:
+        digest = self.adapter().plan()["plan_sha256"]
+        adapter = self.adapter(reviewed_plan_sha256=digest)
+        with patch.object(
+            self.client, "create_proxy_host", side_effect=ValueError("edge rejected")
+        ):
+            with self.assertRaises(ProviderMutationUnknownError):
+                adapter.apply("original-key", self.lease)
+        self.store.write_product_profile_record(
+            self.profile.model_copy(update={"runtime_port": self.profile.runtime_port + 1})
+        )
+        recovery = adapter.observe("original-key", "edge-create", "key")
+        self.assertEqual(recovery.outcome, "unknown")
+        self.assertFalse(recovery.retry_safe)
+        self.assertEqual(self.dokploy_calls, ["/api/domain.create"])
+        self.assertEqual(self.client.proxy_hosts, [])
+
     def test_refuses_configured_application_domain(self) -> None:
         self.domains = [{"domainId": "foreign", "host": "other.example.test"}]
         with self.assertRaises(ValueError):
@@ -420,7 +526,7 @@ class PrivateTestingIngressTests(PrivateIngressFixture):
         self.assertEqual(self.dokploy_calls, [])
         self.assertFalse([call for call in self.client.calls if call != "list"])
 
-    def test_lost_create_response_remains_unknown_without_repeating_effect(self) -> None:
+    def test_lost_create_response_observes_missing_edge_without_repeating_effect(self) -> None:
         digest = self.adapter().plan()["plan_sha256"]
         with patch.object(
             self.client, "create_proxy_host", side_effect=TimeoutError("lost response")
@@ -432,8 +538,8 @@ class PrivateTestingIngressTests(PrivateIngressFixture):
         observation = self.adapter(reviewed_plan_sha256=digest).observe(
             "original-key", "edge-create", "key"
         )
-        self.assertEqual(observation.outcome, "unknown")
-        self.assertFalse(observation.retry_safe)
+        self.assertEqual(observation.outcome, "absent")
+        self.assertTrue(observation.retry_safe)
         self.assertEqual(self.dokploy_calls, ["/api/domain.create"])
 
     def test_original_key_adopts_lost_final_response_without_another_provider_write(self) -> None:

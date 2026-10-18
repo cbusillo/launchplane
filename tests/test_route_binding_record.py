@@ -14,6 +14,7 @@ from control_plane.contracts.ingress_route_audit_record import (
     IngressRouteAuditRecord,
     IngressRouteAuditStatus,
     IngressRouteTlsOwner,
+    TESTING_PRIVATE_INGRESS_AUDIT_PREFIX,
 )
 from control_plane.contracts.route_binding_record import (
     EnvironmentRouteBindingRecord,
@@ -27,6 +28,7 @@ from control_plane.contracts.route_binding_record import (
     route_binding_record_sha256,
 )
 from control_plane.route_binding_reconcile import (
+    build_route_binding_candidate,
     RouteBindingExpectedCurrent,
     RouteBindingReconcileRequest,
     plan_route_binding_reconcile,
@@ -671,6 +673,46 @@ class RouteBindingStorageTests(unittest.TestCase):
 
 
 class RouteBindingEvidenceTests(unittest.TestCase):
+    def test_private_testing_receipt_does_not_authorize_managed_route_binding(self) -> None:
+        target = _dokploy_target_record(instance="testing").model_copy(
+            update={"target_type": "application"}
+        )
+        target_id = _dokploy_target_id_record(instance="testing")
+        audit = _ingress_audit_record()
+        store = _RouteBindingReconcileFakeStore(
+            provider_target=ProviderTargetRecord.from_dokploy_records(
+                target_record=target, target_id_record=target_id
+            ),
+            dokploy_target=target,
+            dokploy_target_id=target_id,
+            edge_endpoints=(_edge_endpoint_record(),),
+            ingress_audits=(audit,),
+        )
+        request = RouteBindingReconcileRequest(
+            product=audit.product,
+            context=target.context,
+            instance=target.instance,
+            evaluated_at="2026-07-12T00:15:00Z",
+        )
+        self.assertEqual(
+            plan_route_binding_reconcile(record_store=store, request=request).status, "ready"
+        )
+        private_audit = audit.model_copy(
+            update={"record_id": TESTING_PRIVATE_INGRESS_AUDIT_PREFIX + "fixture-plan"}
+        )
+        store.ingress_audits = (private_audit,)
+        for plan in (
+            plan_route_binding_reconcile(record_store=store, request=request),
+            build_route_binding_candidate(
+                record_store=store, request=request, audit_record=private_audit
+            ),
+        ):
+            self.assertEqual(plan.status, "blocked")
+            self.assertIsNone(plan.record)
+            self.assertEqual(
+                plan.findings[0].code, "private_testing_ingress_not_route_binding_evidence"
+            )
+
     def test_reconcile_derives_binding_from_unambiguous_launchplane_records(self) -> None:
         plan = plan_route_binding_reconcile(
             record_store=_RouteBindingReconcileFakeStore(

@@ -1,7 +1,7 @@
 """An application testing lane's own hostname at an existing protected edge."""
 
 from collections.abc import Callable
-from contextlib import AbstractContextManager, nullcontext
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast
@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 
 import click
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane.authz_candidate_preparation import (
     is_exclusive_product_lane_context,
@@ -19,6 +20,7 @@ from control_plane.contracts.disposable_lane import TESTING_PRIVATE_INGRESS_ROUT
 from control_plane.contracts.ingress_route_audit_record import (
     IngressRouteAuditOperation,
     IngressRouteAuditRecord,
+    TESTING_PRIVATE_INGRESS_AUDIT_PREFIX,
 )
 from control_plane.dokploy import api, source
 from control_plane.ingress_route_scope import validate_ingress_route_instance_scope
@@ -41,7 +43,7 @@ from control_plane.workflows.generic_web_deploy_provider import (
 from control_plane.workflows.ship import utc_now_timestamp
 
 ROUTE = TESTING_PRIVATE_INGRESS_ROUTE
-_PREFIX = "testing-private-ingress-"
+_PREFIX = TESTING_PRIVATE_INGRESS_AUDIT_PREFIX
 
 
 class TestingPrivateIngressRequest(BaseModel):
@@ -188,6 +190,9 @@ class TestingPrivateIngressAdapter:
             )
         ):
             raise ValueError("Use an existing current wildcard certificate covering this hostname.")
+        access_list = self.client.get_access_list(self.request.access_list_id)
+        if access_list.id != self.request.access_list_id:
+            raise ValueError("The existing access list does not match the request.")
         return {
             "profile": profile.model_dump(mode="json"),
             "endpoint": endpoint.model_dump(mode="json"),
@@ -204,6 +209,7 @@ class TestingPrivateIngressAdapter:
             "runtime_port": profile.runtime_port,
             "server_id": server_id,
             "certificate": certificate.model_dump(mode="json"),
+            "access_list": access_list.model_dump(mode="json"),
         }
 
     def _desired(self, authority: dict[str, object]) -> NpmplusProxyHostPayload:
@@ -230,6 +236,51 @@ class TestingPrivateIngressAdapter:
             enabled=self.request.operation == "create",
         )
 
+    def _receipt_authority_sha256(self, authority: dict[str, object]) -> str:
+        access_list = cast(dict[str, object], authority.get("access_list", {}))
+        return canonical_json_sha256(
+            {
+                "product": self.product,
+                "context": self.request.context,
+                "instance": "testing",
+                "endpoint_key": self.request.endpoint_key,
+                "edge_endpoint_key": self.request.edge_endpoint_key,
+                "hostname": authority["hostname"],
+                "application_id": authority.get("application_id"),
+                "runtime_port": authority.get("runtime_port"),
+                "certificate_id": self.request.certificate_id,
+                "access_list_id": self.request.access_list_id,
+                "access_list_policy": {
+                    key: access_list.get(key) for key in ("satisfy_any", "pass_auth")
+                },
+            }
+        )
+
+    def _pending_matches(
+        self,
+        provider_key: str,
+        desired: NpmplusProxyHostPayload,
+        authority: dict[str, object],
+    ) -> bool:
+        if not provider_key:
+            return False
+        try:
+            audit = self.store.read_ingress_route_audit_record(
+                _PREFIX + self.request.reviewed_plan_sha256
+            )
+        except FileNotFoundError:
+            return False
+        return (
+            audit.product == self.product
+            and audit.context == self.request.context
+            and audit.status == "pending"
+            and audit.idempotency_key == provider_key
+            and audit.requested_domains == desired.domain_names
+            and audit.edge_endpoint_key == self.request.edge_endpoint_key
+            and audit.testing_authority_sha256 == self._receipt_authority_sha256(authority)
+            and audit.provider_route_sha256 == canonical_json_sha256(_host_payload(desired))
+        )
+
     def _owned(
         self,
         candidate: NpmplusProxyHost,
@@ -247,10 +298,8 @@ class TestingPrivateIngressAdapter:
                     audit.status == "applied"
                     or (
                         audit.status == "pending"
-                        and bool(recovery_key)
-                        and audit.idempotency_key == recovery_key
                         and audit.record_id == _PREFIX + self.request.reviewed_plan_sha256
-                        and audit.testing_authority_sha256 == canonical_json_sha256(authority)
+                        and self._pending_matches(recovery_key, desired, authority)
                     )
                 )
                 and audit.provider_host_id
@@ -335,7 +384,10 @@ class TestingPrivateIngressAdapter:
         }
         if len(domains) > 1 or any(
             not domain.get("domainId")
-            or any(domain.get(key) != value for key, value in domain_payload.items())
+            or any(
+                (domain.get(key) not in (None, "") if value is None else domain.get(key) != value)
+                for key, value in domain_payload.items()
+            )
             for domain in domains
         ):
             raise ValueError("The application's hostname authority is foreign or changed.")
@@ -391,7 +443,7 @@ class TestingPrivateIngressAdapter:
                 tls_owner="provider",
                 provider_certificate_ref=str(payload.certificate_id),
                 provider_route_sha256=canonical_json_sha256(_host_payload(payload)),
-                testing_authority_sha256=canonical_json_sha256(authority),
+                testing_authority_sha256=self._receipt_authority_sha256(authority),
                 provider_host_id=actual.id if actual else None,
                 operations=(
                     IngressRouteAuditOperation(
@@ -437,29 +489,35 @@ class TestingPrivateIngressAdapter:
         # An uncertain edge operation retains its own reservation, without
         # holding ordinary deployments forever. Only active application-domain
         # mutation shares the testing event executor lock with deployments.
-        execution_lock: AbstractContextManager[Callable[[], None] | None] = nullcontext(
-            lambda: None
-        )
-        if self.request.operation == "create":
-            provider = self.store.read_provider_target_record(
-                context_name=self.request.context, instance_name="testing"
-            )
-            execution_lock = self.store.testing_replacement_execution_lock(
-                testing_event_execution_lock_name(dokploy_generic_web_provider_target_key(provider))
-            )
-        with execution_lock as check:
-            if check is None:
-                raise ProviderMutationRejectedError(ValueError("The testing executor is busy."))
+        with ExitStack() as stack:
+            locked_target_key = ""
+            check: Callable[[], None] | None = None
+            try:
+                if self.request.operation == "create":
+                    provider = self.store.read_provider_target_record(
+                        context_name=self.request.context, instance_name="testing"
+                    )
+                    locked_target_key = dokploy_generic_web_provider_target_key(provider)
+                    check = stack.enter_context(
+                        self.store.testing_replacement_execution_lock(
+                            testing_event_execution_lock_name(locked_target_key)
+                        )
+                    )
+                    if check is None:
+                        raise ValueError("The testing executor is busy.")
+            except (ValueError, FileNotFoundError, RuntimeError, OSError, SQLAlchemyError) as error:
+                raise ProviderMutationRejectedError(
+                    ValueError("The testing executor could not be acquired before effects.")
+                ) from error
 
             def check_execution() -> None:
-                check()
+                if check is not None:
+                    check()
                 if self.request.operation == "create":
                     current = self.store.read_provider_target_record(
                         context_name=self.request.context, instance_name="testing"
                     )
-                    if dokploy_generic_web_provider_target_key(current) != (
-                        dokploy_generic_web_provider_target_key(provider)
-                    ):
+                    if dokploy_generic_web_provider_target_key(current) != locked_target_key:
                         raise ValueError("The locked testing application changed.")
 
             return self._apply(provider_operation_key, lease, check_execution)
@@ -501,8 +559,19 @@ class TestingPrivateIngressAdapter:
     ) -> ProviderMutationOutcome:
         started = False
         try:
-            snapshot, desired, existing = self._snapshot()
-            if canonical_json_sha256(snapshot) != self.request.reviewed_plan_sha256:
+            snapshot, desired, existing = self._snapshot(provider_operation_key)
+            resuming_missing_edge = (
+                self.request.operation == "create"
+                and snapshot["domain_present"]
+                and existing is None
+                and self._pending_matches(
+                    provider_operation_key, desired, cast(dict[str, object], snapshot["authority"])
+                )
+            )
+            if (
+                canonical_json_sha256(snapshot) != self.request.reviewed_plan_sha256
+                and not resuming_missing_edge
+            ):
                 raise ValueError("The reviewed private hostname plan changed.")
             actual_hosts: list[NpmplusProxyHost] = []
             self._audit(
@@ -562,6 +631,7 @@ class TestingPrivateIngressAdapter:
             FileNotFoundError,
             RuntimeError,
             OSError,
+            SQLAlchemyError,
             click.ClickException,
         ) as error:
             if started:
@@ -589,10 +659,24 @@ class TestingPrivateIngressAdapter:
             except (ValueError, FileNotFoundError):
                 if not provider_effect_phase:
                     return ProviderObservation("absent", retry_safe=True)
-                # Recover a lost final response only from the original pending
-                # receipt and an exact independent match of both provider effects.
-                # Missing or partial effects never trigger another provider write.
+                # Observation never performs provider effects. Exact completed
+                # effects can be adopted; independently proven absence can let
+                # the original request resume only its missing edge.
                 snapshot, desired, existing = self._snapshot(provider_operation_key)
+                if (
+                    self.request.operation == "create"
+                    and existing is None
+                    and snapshot["domain_present"]
+                    and self._pending_matches(
+                        provider_operation_key,
+                        desired,
+                        cast(dict[str, object], snapshot["authority"]),
+                    )
+                ):
+                    # Independent readback proves the application domain exists
+                    # and the edge route does not. Resume only this original
+                    # request's still-matching missing edge under a renewed lease.
+                    return ProviderObservation("absent", retry_safe=True)
                 if (
                     existing is None
                     or not snapshot["domain_present"]
@@ -621,7 +705,14 @@ class TestingPrivateIngressAdapter:
                     result=result,
                 ),
             )
-        except (ValueError, FileNotFoundError, RuntimeError, OSError, click.ClickException):
+        except (
+            ValueError,
+            FileNotFoundError,
+            RuntimeError,
+            OSError,
+            SQLAlchemyError,
+            click.ClickException,
+        ):
             return ProviderObservation(
                 "unknown" if provider_effect_phase else "absent",
                 retry_safe=not provider_effect_phase,
