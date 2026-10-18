@@ -23,6 +23,7 @@ from control_plane.testing_publication import plan_testing_publication
 from tests import test_testing_candidate_application as application_tests
 from tests import test_testing_route as route_tests
 from tests import test_testing_candidate_allocation as allocation_tests
+from tests import test_odoo_testing_restore as restore_tests
 
 
 class TestingPublicationTests(unittest.TestCase):
@@ -268,6 +269,8 @@ class TestingPublicationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.publish()
         self.assertEqual(self.current(), self.before)
+        self.assertEqual(self.publish(inverse=True).state, "reversed")
+        self.assertEqual(self.current(), self.before)
 
     def test_foreign_compatibility_alias_refuses_even_without_a_physical_registry_row(self) -> None:
         self.prepare()
@@ -283,6 +286,18 @@ class TestingPublicationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.publish()
         self.assertEqual(self.current(), self.before)
+
+    def test_foreign_predecessor_alias_refuses_inverse_without_changing_serving(self) -> None:
+        self.prepare()
+        self.publish()
+        serving = self.current()
+        self.store.write_dokploy_target_id_record(
+            self.before.target_id.model_copy(update={"context": "foreign", "instance": "prod"})
+        )
+        with self.assertRaises(ValueError):
+            self.publish(inverse=True)
+        self.assertEqual(self.current(), serving)
+        self.assertEqual(self.prepare().state, "applied")
 
     def test_undelivered_global_change_does_not_block_publication(self) -> None:
         self.prepare()
@@ -306,6 +321,25 @@ class TestingPublicationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.publish()
         self.assertEqual(self.current(), self.before)
+        self.assertEqual(self.publish(inverse=True).state, "reversed")
+        self.assertEqual(self.current(), self.before)
+
+    def test_uncommitted_inverse_preserves_a_later_serving_snapshot(self) -> None:
+        self.prepare()
+        self.store.write_runtime_environment_record(
+            RuntimeEnvironmentRecord(
+                scope="instance",
+                context=self.candidate.context,
+                instance="testing",
+                env={"ODOO_WORKERS": "4"},
+                updated_at=self.now.isoformat(),
+            )
+        )
+        later = self.current()
+        with self.assertRaises(ValueError):
+            self.publish()
+        self.assertEqual(self.publish(inverse=True).state, "reversed")
+        self.assertEqual(self.current(), later)
 
     def test_new_plan_cannot_bind_settings_that_changed_since_private_preparation(self) -> None:
         self.store.write_runtime_environment_record(
@@ -340,13 +374,26 @@ class TestingPublicationTests(unittest.TestCase):
 
     def test_changed_route_or_source_cannot_rebind_original_publication(self) -> None:
         self.prepare()
+        generation = restore_tests.generation()
+        generation = type(generation).model_validate(
+            {
+                **generation.model_dump(),
+                "product": self.candidate.product,
+                "context": self.candidate.context,
+            }
+        )
         with self.assertRaises(ValueError):
             TestingPublicationPlan.model_validate(
                 {
                     **self.plan.model_dump(),
-                    "after": {**self.plan.after.model_dump(), "generation": {"source_mode": "ssh"}},
+                    "after": {**self.plan.after.model_dump(), "generation": generation},
                 }
             )
+        route = type(self.route).model_validate(
+            {**self.route.model_dump(), "new_backend": "http://different-private-copy:8069"}
+        )
+        with self.assertRaises(ValueError):
+            TestingPublicationPlan.model_validate({**self.plan.model_dump(), "route": route})
         changed = self.plan.model_copy(update={"provider_target_key": "foreign"})
         with self.assertRaises(ValueError):
             publication.prepare_publication(self.store, plan=changed, reservation=self.reservation)

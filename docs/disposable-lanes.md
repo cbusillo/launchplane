@@ -830,6 +830,7 @@ Maintenance uses the original candidate operation and its stored receipts.
 Rollback retains candidate application intent, storage and physical reservations;
 it does not clear fences or adopt a candidate as the serving lane. No schema
 migration is added beyond the candidate custody table.
+
 ## Atomic serving publication for a rebuilt testing copy
 
 The native publication stage stores the exact predecessor and prepared successor
@@ -856,9 +857,12 @@ The publication receipt commits with those records. A lost reply is resolved fro
 that original receipt. An inverse waits for an in-flight original transaction,
 then restores the exact preimage only when the current records still match that
 operation's committed successor. Unknown database outcomes stay pending. An
-uncommitted original transaction proves that no adoption occurred. Completed
-publication provenance remains readable by an authorized service caller so a
-later rebuild can qualify its existing owned route template.
+uncommitted original transaction proves that no adoption occurred. An inverse
+of a planned forward updates only its receipt, preserving later runtime or
+credential changes. An inverse that restores serving records checks the retained
+predecessor for foreign compatibility aliases, just as forward adoption checks
+the candidate. Completed publication provenance remains readable by an authorized
+service caller so a later rebuild can qualify its existing owned route template.
 
 Rebuild checkpoints now also compare-and-write under a database lock; a stale
 writer cannot erase a terminal receipt, effect intent or recovery evidence.

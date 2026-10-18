@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from typing import Any
 from urllib.parse import urlsplit
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.idempotency_record import (
@@ -353,11 +353,6 @@ def publish(
             return prior
         if not inverse and prior.state == "reversed":
             raise ValueError("A reversed publication cannot be replayed forward.")
-        _sources(store, session, plan, runtime_after=prior.state == "applied")
-        expected = plan.before if prior.state == "planned" else effective_after(prior)
-        current = _snapshot(store, session, plan.candidate.product, plan.candidate.context)
-        if not _same(current.model_dump(mode="json"), expected.model_dump(mode="json")):
-            raise ValueError("Serving authority changed since the original publication.")
         if inverse and prior.state == "planned":
             # This row lock has waited for any original forward transaction.
             # A committed planned row proves it never adopted serving authority.
@@ -365,6 +360,11 @@ def publish(
             _save(store, session, result)
             session.commit()
             return result
+        _sources(store, session, plan, runtime_after=prior.state == "applied")
+        expected = plan.before if prior.state == "planned" else effective_after(prior)
+        current = _snapshot(store, session, plan.candidate.product, plan.candidate.context)
+        if not _same(current.model_dump(mode="json"), expected.model_dump(mode="json")):
+            raise ValueError("Serving authority changed since the original publication.")
         health = (
             prior.public_health
             if inverse
@@ -382,6 +382,21 @@ def publish(
             }
         )
         replacement = plan.before if inverse else effective_after(result)
+        if (
+            session.scalar(
+                select(db.LaunchplaneDokployTargetIdRow)
+                .where(
+                    db.LaunchplaneDokployTargetIdRow.target_id == replacement.target_id.target_id,
+                    or_(
+                        db.LaunchplaneDokployTargetIdRow.context != plan.candidate.context,
+                        db.LaunchplaneDokployTargetIdRow.instance != "testing",
+                    ),
+                )
+                .limit(1)
+            )
+            is not None
+        ):
+            raise ValueError("Publication target acquired a compatibility lane alias.")
         aliases = _retain_old(store, session, plan)
         if not inverse:
             aliases = ((plan.candidate.namespace, "testing-candidate"),)
@@ -392,15 +407,6 @@ def publish(
                 custody.target_id,
             ) != ("dokploy", "compose", plan.candidate.compose_id):
                 raise ValueError("Candidate physical target reservation changed.")
-            if (
-                session.scalar(
-                    select(db.LaunchplaneDokployTargetIdRow)
-                    .where(db.LaunchplaneDokployTargetIdRow.target_id == plan.candidate.compose_id)
-                    .limit(1)
-                )
-                is not None
-            ):
-                raise ValueError("Candidate identity acquired a compatibility lane alias.")
         _write_serving_snapshot(store, session, plan, current, replacement, aliases)
         if not inverse:
             _write_candidate_deployment(store, session, plan, health)

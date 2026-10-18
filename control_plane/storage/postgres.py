@@ -7699,7 +7699,6 @@ class PostgresRecordStore(HumanSessionStore):
         expected: TestingRebuildRecord | None,
         replacement: LaunchplaneIdempotencyRecord,
     ) -> None:
-        from control_plane.contracts.testing_rebuild import TestingRebuildRecord
         from control_plane.testing_rebuild_storage import (
             REBUILD_CHECKPOINT_ROUTE,
             REBUILD_CHECKPOINT_SCOPE,
