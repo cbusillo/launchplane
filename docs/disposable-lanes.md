@@ -831,6 +831,51 @@ Rollback retains candidate application intent, storage and physical reservations
 it does not clear fences or adopt a candidate as the serving lane. No schema
 migration is added beyond the candidate custody table.
 
+## Atomic serving publication for a rebuilt testing copy
+
+The native publication stage stores the exact predecessor and prepared successor
+metadata before any traffic switch, using existing DB evidence storage. This is
+an internal worker capability, not a caller-supplied target or permission. The
+original provider reservation, current lease holder and expiry, exclusive product
+context, candidate custody, delivered context/instance runtime inputs and generated
+credential metadata are checked within the authority transaction. An input change
+since private preparation refuses adoption. Password values are never added to
+the successor runtime record and no secret or version is rotated. Local database,
+HTTP and disabled-cron coordinates are the same projection used to prepare the
+copy; the HTTP port comes from its managed profile. Canonical adoption cannot
+leave an older database endpoint for a subsequent deploy to select.
+
+After fresh applied routing and verified public health/identity at the unchanged
+origin, one transaction adopts target representations, resource selection,
+neutralized overrides, route provenance, inventory and the deployment receipt.
+A restored copy publishes its real generation witness. An empty rebuild has no
+invented restore generation. Existing ingress/TLS ownership and the profile's
+address remain unchanged. Both physical copies stay reserved; legacy predecessor
+custody is captured before replacing the canonical target. Storage is retained.
+
+The publication receipt commits with those records. A lost reply is resolved from
+that original receipt. An inverse waits for an in-flight original transaction,
+then restores the exact preimage only when the current records still match that
+operation's committed successor. Unknown database outcomes stay pending. An
+uncommitted original transaction proves that no adoption occurred. An inverse
+of a planned forward updates only its receipt, preserving later runtime or
+credential changes. An inverse that restores serving records checks the retained
+predecessor for foreign compatibility aliases, just as forward adoption checks
+the candidate. Completed publication provenance remains readable by an authorized
+service caller so a later rebuild can qualify its existing owned route template.
+
+Rebuild checkpoints now also compare-and-write under a database lock; a stale
+writer cannot erase a terminal receipt, effect intent or recovery evidence.
+Legacy predecessor runtime identity fields are retained as actually observed;
+new candidates require an explicit product and immutable image digest. This
+compatibility does not supply lane ownership or authorize a mutation.
+
+This stage replaces sequential canonical record adoption for the native rebuild.
+It does not activate a service/UI action, stop an old copy or prove CM testing.
+The parent integration still wires the controller/provider lifecycle, preserves
+the private backend alias during later ordinary deploys, and qualifies live CM.
+No production mutation or new authorization grant is part of this stage.
+
 ## Service collection
 
 `collect` on the observation API resolves existing service sources itself:
