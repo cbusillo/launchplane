@@ -4,6 +4,7 @@ from urllib.parse import urlsplit
 
 from control_plane.contracts.merge_train_stall import MergeTrainStallRecord
 from control_plane.contracts.odoo_upgrade_rehearsal import OdooUpgradeRehearsalRecord
+from control_plane.contracts.testing_rebuild import TestingRebuildRecord
 from control_plane.contracts.testing_candidate import TestingCandidateAllocation
 
 from pathlib import Path
@@ -7692,6 +7693,60 @@ class PostgresRecordStore(HumanSessionStore):
                 "Running or reconcile-required reservations must use mutation reservation methods."
             )
         self._write_row(self._idempotency_row(record))
+
+    def compare_and_write_testing_rebuild_checkpoint(
+        self,
+        expected: TestingRebuildRecord | None,
+        replacement: LaunchplaneIdempotencyRecord,
+    ) -> None:
+        from control_plane.testing_rebuild_storage import (
+            REBUILD_CHECKPOINT_ROUTE,
+            REBUILD_CHECKPOINT_SCOPE,
+            require_rebuild_successor,
+        )
+
+        if (
+            replacement.state != "completed"
+            or replacement.scope != REBUILD_CHECKPOINT_SCOPE
+            or replacement.route_path != REBUILD_CHECKPOINT_ROUTE
+        ):
+            raise ValueError("Only testing rebuild evidence may use this checkpoint CAS.")
+        record = TestingRebuildRecord.model_validate(replacement.response_payload)
+        key = canonical_json_sha256(
+            {
+                "product": record.plan.product,
+                "context": record.plan.context,
+                "operation": record.plan.operation_id,
+            }
+        )
+        if (
+            replacement.request_fingerprint != record.plan.digest
+            or replacement.idempotency_key != key
+        ):
+            raise ValueError("Rebuild checkpoint fingerprint or scope differs from its plan.")
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_landing_authority(session, "testing-rebuild:" + replacement.idempotency_key)
+            row = session.scalar(
+                self._idempotency_statement(
+                    scope=replacement.scope,
+                    route_path=replacement.route_path,
+                    idempotency_key=replacement.idempotency_key,
+                    for_update=True,
+                )
+            )
+            current = (
+                TestingRebuildRecord.model_validate(
+                    LaunchplaneIdempotencyRecord.model_validate(row.payload).response_payload
+                )
+                if row is not None
+                else None
+            )
+            if current != expected:
+                raise ValueError("Rebuild checkpoint changed before commit.")
+            require_rebuild_successor(current, record)
+            session.merge(self._idempotency_row(replacement))
+            session.commit()
 
     def write_idempotency_record_once(self, record: LaunchplaneIdempotencyRecord) -> bool:
         """Commit an evidence-only reservation once; never reclaim it after a crash."""
