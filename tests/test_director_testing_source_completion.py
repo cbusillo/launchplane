@@ -104,20 +104,31 @@ class DirectorTestingSourceCompletionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.fixture.calls), 1)
         self.assertEqual(self.store.list_deployment_records(), ())
 
-    async def test_unknown_use_data_or_isolation_never_reaches_provider_write(self) -> None:
+    async def test_unknown_usage_alone_does_not_block_isolated_source_completion(self) -> None:
         record_safety(self.store, "sample", "sample", "testing", usage="unknown")
         dry = await self.post(mode="dry-run")
         self.assertEqual(dry.status_code, 202, dry.text)
         self.assertEqual(self.fixture.calls, [])
+        applied = await self.post()
+        self.assertEqual(applied.status_code, 202, applied.text)
+        self.assertEqual(len(self.fixture.calls), 1)
+        self.assertIs(self.fixture.live["autoDeploy"], False)
+        self.assertEqual(self.store.list_deployment_records(), ())
+        evidence = self.store.read_disposable_lane_safety("sample", "sample", "testing")
+        assert evidence is not None
+        self.assertEqual(evidence.usage, "unknown")
+
+    async def test_positive_use_needed_data_or_shared_isolation_prevents_provider_write(
+        self,
+    ) -> None:
         for changes in (
-            {"usage": "unknown"},
             {"usage": "in_use"},
             {"data": "only_copy"},
             {"production_resources": "shared"},
         ):
             with self.subTest(changes=changes):
                 record_safety(self.store, "sample", "sample", "testing", **changes)
-                response = await self.post()
+                response = await self.post(key=str(changes))
                 self.assertEqual(response.status_code, 409, response.text)
                 self.assertEqual(self.fixture.calls, [])
 

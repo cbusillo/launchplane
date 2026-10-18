@@ -239,7 +239,7 @@ class TestingPathCheckHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(steps[WalkthroughPrerequisite.GENERATION.value]["state"], "blocked")
         self.assertNotIn("private token", response.text)
 
-    async def test_generation_use_reports_the_same_stopped_runtime_repair_eligibility(self) -> None:
+    async def test_generation_use_distinguishes_unknown_usage_from_positive_use(self) -> None:
         from datetime import datetime, timezone
         from tests.support.down_lanes import record_lane_health
 
@@ -251,15 +251,18 @@ class TestingPathCheckHttpTests(unittest.IsolatedAsyncioTestCase):
             datetime.now(timezone.utc),
             status=404,
         )
-        for reason, expected in (
-            ("serving_container_stopped", "clear"),
-            ("service_ambiguous_or_stopped", "unknown"),
-        ):
+        cases: tuple[tuple[Literal["unknown", "in_use"], str, str], ...] = (
+            ("unknown", "serving_container_stopped", "clear"),
+            ("unknown", "service_ambiguous_or_stopped", "clear"),
+            ("in_use", "serving_container_stopped", "clear"),
+            ("in_use", "service_ambiguous_or_stopped", "blocked"),
+        )
+        for usage, reason, expected in cases:
             with (
-                self.subTest(reason=reason),
+                self.subTest(usage=usage, reason=reason),
                 patch(
                     "control_plane.testing_initial_generation.read_odoo_testing_usage",
-                    return_value=OdooTestingUsage(reason_code=reason),
+                    return_value=OdooTestingUsage(usage=usage, reason_code=reason),
                 ),
             ):
                 response = await self.read()
