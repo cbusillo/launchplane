@@ -30,8 +30,8 @@ access to an invalid policy or silently starting with bootstrap authority.
 - People sign in with GitHub and hold the `admin` or `read_only` role. Clients
   hold the narrow `owner` role for their own site's decisions.
 - The [admin](#the-admin) may do anything.
-- Machine writes hold DB policy grants. The Director's authenticated agents
-  use the declared read-and-plan permission described below; other agents
+- Machine writes hold DB policy grants except for proven projection sync. The
+  Director's authenticated agents use the standing permission below; other agents
   retain product-scoped policy rules.
 - Granting access is a stop boundary: an agent asks the Director before creating
   credentials, granting access, or changing who can merge (see
@@ -81,7 +81,7 @@ retired records contribute no active inventory membership. When authorization
 rules are the only remaining active source, the read model reports stale
 authorization membership rather than complete coverage.
 
-## Standing Agent Read And Plan Permission
+## Standing Agent Read, Plan And Proven Projection Permission
 
 The [overall direction](https://github.com/cbusillo/direction/blob/main/DIRECTION.md#stop-boundaries)
 owns who may read and plan. The service authenticates the existing Director
@@ -91,8 +91,10 @@ that marker. Diagnostics bind an exact subject, token label and transport to
 the configured identity; another principal never inherits its authority.
 
 [`action_effects.py`](../control_plane/action_effects.py) owns source declarations
-of `read`, `plan` and `write`. The Director's authenticated agents inherit every
-declared read and inert plan directly, without a DB `agent.read` rule, a product
+of `read`, `plan`, `projection_sync` and `write`. These form three effect tiers:
+read/inert plan, proven projection sync, and other writes. The Director's
+authenticated agents inherit every declared read, inert plan and proven
+projection sync directly, without a DB `agent.read` rule, a product
 catalog or a policy approval. New products need no read-grant update. Unknown
 actions fail closed; policy-schema/target validation and response redaction stay
 in force. Pure dry runs can change only their own evidence. Queuing execution,
@@ -101,6 +103,22 @@ copying secret values retain write or explicit source permissions. The two
 secret-copy source checks explicitly disable read-role inheritance. Existing
 terminal transport restrictions remain; `local_operator` supplies the full
 planning surface, including mixed plan/apply routes.
+
+Projection sync requires executable proof of zero provider writes and no access
+or policy change. Every declared projection action must run its invariant proof
+in `tests/test_projection_sync.py`; an action without that proof stays `write`.
+Currently only `ingress_route.audit` qualifies. It uses the existing ingress
+endpoint with `instance` and `mode=apply`, verifies lane-owned domains, an exact
+existing host, an exclusive product context and an active DB-backed edge endpoint,
+and completes only for an unchanged provider route. The audit reuses the existing
+exact-instance no-op guard: creation, update and enable/disable are forced off
+for every exact-instance apply. It records pending evidence before the provider
+recheck. Drift refuses the request and leaves that pending audit; route-binding
+reconciliation refuses unresolved latest evidence until a newer terminal audit
+confirms the route. Shared-host comparison preserves sibling domains, while records and
+responses contain only the requested lane's domains and redact provider config
+for inherited standing permission. Domain-authority repair and route-binding
+creation or reconciliation remain writes; an audit never performs them.
 
 Other agents retain exact subject/token/product-scoped DB `agent.read` rules
 and their existing context and instance matching. Client agents must be scoped
@@ -119,10 +137,17 @@ identity restrictions remain in force.
 
 Product-config likewise lets the authenticated Director agent plan undeclared
 non-secret settings on a Live product, including testing, production and context
-scope. The plan saves only review evidence. Applying undeclared settings still
-requires admin authority and returns `live_product_requires_operator` for the
-`local_operator` credential, even after a successful matching plan. Scoped agents
-retain their existing grants and Live-product guard.
+scope. The plan saves only review evidence. An owned testing lane is non-live
+even when its product is Live: existing product-config write authority may record
+its plain settings and provider-key retirements, or adopt plain settings from
+that lane's provider environment, after a matching dry run. Adoption reads stay
+inside the service and return only key dispositions. Credential-shaped keys
+remain refused; a request containing one cannot apply or create secret records.
+These operations record configuration without applying it to a provider. Production and
+context-wide undeclared settings still require admin authority and return
+`live_product_requires_operator` for the `local_operator` credential, even after
+a successful matching plan. Exact lane ownership, instance-only secret writes,
+credential safety, and scoped-agent grants remain enforced.
 An instance-scoped provider-key adoption dry run can read that lane's provider
 environment inside the service, including production. It returns key dispositions
 without values, preserves credential refusals, and records no adopted settings.
