@@ -14764,6 +14764,11 @@
             "title": "Status",
             "type": "string"
           },
+          "testing_application_id": {
+            "default": "",
+            "title": "Testing Application Id",
+            "type": "string"
+          },
           "testing_authority_sha256": {
             "default": "",
             "pattern": "^(?:[a-f0-9]{64})?$",

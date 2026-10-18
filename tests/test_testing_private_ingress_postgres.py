@@ -1,10 +1,11 @@
 """Private-ingress recovery through real PostgreSQL reservations and leases."""
 
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
 from control_plane.provider_operations import run_durable_provider_operation
 from control_plane.testing_private_ingress import ROUTE
+from control_plane.contracts.ingress_route_audit_record import TESTING_PRIVATE_INGRESS_AUDIT_PREFIX
 from control_plane.testing_event_deploy_recovery import testing_event_execution_lock_name
 from control_plane.workflows.generic_web_deploy_provider import (
     dokploy_generic_web_provider_target_key,
@@ -14,6 +15,148 @@ from tests.test_postgres_integration import _head_postgres_database
 
 
 class RealPostgresTestingPrivateIngressRecoveryTests(private_ingress_tests.PrivateIngressFixture):
+    def test_corrected_authority_replans_after_proven_absence(self) -> None:
+        digest = self.adapter().plan()["plan_sha256"]
+        adapter = self.adapter(reviewed_plan_sha256=digest)
+        provider_call = self.dokploy_request
+
+        def reject_domain(**kwargs: Any) -> Any:
+            if kwargs["path"] == "/api/domain.create":
+                raise ValueError("Synthetic wrong runtime port")
+            return provider_call(**kwargs)
+
+        with patch(
+            "control_plane.testing_private_ingress.api.dokploy_request", side_effect=reject_domain
+        ):
+            self.assertEqual(self.run_ingress(adapter).status, "reconcile_required")
+        corrected = self.profile.model_copy(update={"runtime_port": self.profile.runtime_port + 1})
+        self.store.write_product_profile_record(corrected)
+        resolved = self.run_ingress(adapter)
+        self.assertEqual(resolved.status, "completed")
+        result = cast(dict[str, object], resolved.response_payload["result"])
+        self.assertFalse(result["applied"])
+        self.assertTrue(result["replan_required"])
+        self.assertTrue(result["previous_effects_absent"])
+        self.assertEqual(self.domains, [])
+        self.assertEqual(self.client.proxy_hosts, [])
+        with patch("control_plane.testing_private_ingress.api.dokploy_request") as dokploy:
+            with patch.object(self.client, "create_proxy_host") as edge:
+                self.assertEqual(self.run_ingress(adapter).status, "replayed")
+                dokploy.assert_not_called()
+                edge.assert_not_called()
+        fresh = self.adapter().plan()["plan_sha256"]
+        self.assertEqual(
+            self.run_ingress(self.adapter(reviewed_plan_sha256=fresh), "corrected-plan").status,
+            "completed",
+        )
+        self.assertEqual(self.domains[0]["port"], corrected.runtime_port)
+
+    def test_same_key_after_clean_rejection_resolves_stale_pending_receipt(self) -> None:
+        digest = self.adapter().plan()["plan_sha256"]
+        adapter = self.adapter(reviewed_plan_sha256=digest)
+        with patch.object(
+            self.store, "write_product_public_hosts_bundle", side_effect=ValueError("guard refused")
+        ):
+            with self.assertRaises(ValueError):
+                self.run_ingress(adapter)
+            self.assertIsNone(
+                self.store.read_idempotency_record(
+                    scope="private-ingress-recovery-fixture",
+                    route_path=ROUTE,
+                    idempotency_key="original-key",
+                )
+            )
+            resolved = self.run_ingress(adapter)
+        self.assertEqual(resolved.status, "completed")
+        result = cast(dict[str, object], resolved.response_payload["result"])
+        self.assertFalse(result["applied"])
+        self.assertTrue(result["replan_required"])
+        self.assertTrue(result["previous_effects_absent"])
+        self.assertEqual(self.domains, [])
+        self.assertEqual(self.client.proxy_hosts, [])
+        self.assertEqual(self.run_ingress(adapter, "fresh-plan").status, "completed")
+
+    def test_absence_uses_original_application_after_binding_replacement(self) -> None:
+        digest = self.adapter().plan()["plan_sha256"]
+        adapter = self.adapter(reviewed_plan_sha256=digest)
+        with patch.object(
+            self.client, "create_proxy_host", side_effect=ValueError("edge rejected")
+        ):
+            self.assertEqual(self.run_ingress(adapter).status, "reconcile_required")
+        replacement = self.target_id.model_copy(update={"target_id": "replacement-app"})
+        self.store.write_dokploy_target_id_record(replacement)
+        self.store.write_provider_target_record(
+            self.provider.model_copy(update={"target_id": replacement.target_id})
+        )
+        self.actual["applicationId"] = replacement.target_id
+
+        def inventory(**kwargs: Any) -> Any:
+            if kwargs["application_id"] == self.target_id.target_id:
+                return tuple(self.domains)
+            return ()
+
+        with patch(
+            "control_plane.testing_private_ingress.api.fetch_dokploy_application_domains",
+            side_effect=inventory,
+        ) as read:
+            self.assertEqual(self.run_ingress(adapter).status, "reconcile_required")
+            self.assertIn(
+                self.target_id.target_id,
+                [call.kwargs["application_id"] for call in read.call_args_list],
+            )
+            self.domains.clear()
+            lock_name = testing_event_execution_lock_name(
+                dokploy_generic_web_provider_target_key(self.provider)
+            )
+            with self.store.testing_replacement_execution_lock(lock_name) as check:
+                self.assertIsNotNone(check)
+                self.assertEqual(self.run_ingress(adapter).status, "reconcile_required")
+                self.assertEqual(self.run_ingress(adapter, "replacement-key").status, "target_busy")
+            resolved = self.run_ingress(adapter)
+            self.assertEqual(resolved.status, "completed")
+            self.assertTrue(
+                cast(dict[str, object], resolved.response_payload["result"])["replan_required"]
+            )
+        self.assertEqual(self.client.proxy_hosts, [])
+
+    def test_uncertain_absence_and_legacy_receipt_keep_original_hold(self) -> None:
+        digest = self.adapter().plan()["plan_sha256"]
+        adapter = self.adapter(reviewed_plan_sha256=digest)
+        provider_call = self.dokploy_request
+
+        def reject_domain(**kwargs: Any) -> Any:
+            if kwargs["path"] == "/api/domain.create":
+                raise ValueError("domain rejected")
+            return provider_call(**kwargs)
+
+        with patch(
+            "control_plane.testing_private_ingress.api.dokploy_request", side_effect=reject_domain
+        ):
+            self.assertEqual(self.run_ingress(adapter).status, "reconcile_required")
+        self.store.write_product_profile_record(
+            self.profile.model_copy(update={"runtime_port": self.profile.runtime_port + 1})
+        )
+        with patch(
+            "control_plane.testing_private_ingress.api.fetch_dokploy_application_domains",
+            side_effect=RuntimeError("read failed"),
+        ):
+            self.assertEqual(self.run_ingress(adapter).status, "reconcile_required")
+        for name in ("*.example.test", "~^bridge", "bridge-testing.example.test"):
+            with self.subTest(name=name):
+                self.client.other_domains = (name,)
+                self.assertEqual(self.run_ingress(adapter).status, "reconcile_required")
+        self.client.other_domains = ()
+        audit = self.store.read_ingress_route_audit_record(
+            TESTING_PRIVATE_INGRESS_AUDIT_PREFIX + str(digest)
+        )
+        self.store.write_ingress_route_audit_record(
+            audit.model_copy(update={"testing_application_id": ""})
+        )
+        self.assertEqual(self.run_ingress(adapter).status, "reconcile_required")
+        self.assertEqual(self.run_ingress(adapter, "different-key").status, "target_busy")
+        self.assertEqual(self.domains, [])
+        self.assertEqual(self.client.proxy_hosts, [])
+
     def setUp(self) -> None:
         self.database_url = self.enterContext(_head_postgres_database())
         super().setUp()

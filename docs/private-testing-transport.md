@@ -69,9 +69,32 @@ receipt without provider writes. Different keys cannot take over. Unavailable,
 foreign or materially changed evidence remains `reconcile_required` on the
 private route, without holding the application's deployment reservation. Do not
 clear a genuine unknown or repeat it with a new key. A busy executor, missing
-provider record or changed authority during a retry retains the prior pending
-operation's hold even before that retry reaches its first new checkpoint. A
-fresh operation with no pending receipt still rejects pre-effect failures.
+provider record or unverified effect retains the prior pending operation's hold
+even before that retry reaches its first new checkpoint. A fresh operation with
+no pending receipt still rejects pre-effect failures.
+
+If authority was corrected permanently, or a clean pre-effect rejection left a
+pending receipt, retry the original key first. Before any new effects, the
+service can complete that key with `applied=false`, `replan_required=true` and
+`previous_effects_absent=true`. This requires fresh independent inventories
+proving the requested hostname absent from both the edge and the receipt-bound
+original application, while fencing that original application's executor. The
+receipt retains its original application ID even after the lane binding changes;
+legacy receipts without that identity cannot establish absence. A busy executor,
+overlapping wildcard/regex or other edge host, existing domain, malformed evidence
+or failed read keeps the hold. The acquired original-key retry repeats the proof
+under its lease before recording the durable result. Same-key replay returns that
+result without provider writes. Only after that result should the caller obtain
+a fresh reviewed plan and new key. This uses the same provider read-after-write
+assumption as missing-effect recovery; an empty inventory does not independently
+prove a timed-out provider request can never land later. A late effect must still
+pass strict ownership and payload checks in any subsequent plan.
+
+If the original domain remains present after permanent authority drift, keep the
+hold. Supported receipt-bound cleanup and private-endpoint retirement/evidence
+invalidation are tracked separately in #4004. No direct provider deletion or
+reservation clearing is a supported recovery path.
+
 Disable uses a fresh reviewed plan and the same lane's exact receipt-owned route,
 retaining its original endpoint and edge keys. It only toggles that route even
 after the old application or edge record disappears, and leaves the application

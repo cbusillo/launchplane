@@ -39,6 +39,7 @@ from control_plane.testing_public_ingress import _certificate_current, _covers, 
 from control_plane.testing_event_deploy_recovery import testing_event_execution_lock_name
 from control_plane.workflows.generic_web_deploy_provider import (
     dokploy_generic_web_provider_target_key,
+    generic_web_provider_target_key,
 )
 from control_plane.workflows.ship import utc_now_timestamp
 
@@ -452,6 +453,7 @@ class TestingPrivateIngressAdapter:
                 provider_certificate_ref=str(payload.certificate_id),
                 provider_route_sha256=canonical_json_sha256(_host_payload(payload)),
                 testing_authority_sha256=self._receipt_authority_sha256(authority),
+                testing_application_id=str(authority.get("application_id", "")),
                 provider_host_id=actual.id if actual else None,
                 operations=(
                     IngressRouteAuditOperation(
@@ -497,7 +499,7 @@ class TestingPrivateIngressAdapter:
         # An uncertain edge operation retains its own reservation, without
         # holding ordinary deployments forever. Only active application-domain
         # mutation shares the testing event executor lock with deployments.
-        prior_pending = self._pending_receipt(provider_operation_key) is not None
+        prior_pending = self._pending_receipt(provider_operation_key)
         with ExitStack() as stack:
             locked_target_key = ""
             check: Callable[[], None] | None = None
@@ -533,7 +535,96 @@ class TestingPrivateIngressAdapter:
                     if dokploy_generic_web_provider_target_key(current) != locked_target_key:
                         raise ValueError("The locked testing application changed.")
 
-            return self._apply(provider_operation_key, lease, check_execution, prior_pending)
+            return self._apply(
+                provider_operation_key, lease, check_execution, prior_pending, locked_target_key
+            )
+
+    def _previous_effects_absent(
+        self,
+        audit: IngressRouteAuditRecord | None,
+        *,
+        locked_target_key: str = "",
+        check_execution: Callable[[], None] | None = None,
+    ) -> bool:
+        """Read the original binding, even when current lane authority has changed.
+
+        An empty inventory uses the same read-after-write assumption as missing-
+        effect recovery. A busy executor, legacy receipt or failed read cannot
+        establish absence. This never authorizes deleting an existing effect.
+        """
+        if (
+            self.request.operation != "create"
+            or audit is None
+            or not audit.testing_application_id
+            or len(audit.requested_domains) != 1
+        ):
+            return False
+        hostname = audit.requested_domains[0]
+        if not hostname or any(character in hostname for character in "*~:/"):
+            return False
+        original_target_key = generic_web_provider_target_key(
+            provider_id="dokploy",
+            context=audit.context,
+            instance="testing",
+            target_type="application",
+            target_id=audit.testing_application_id,
+        )
+        with ExitStack() as stack:
+            if original_target_key != locked_target_key:
+                check_execution = stack.enter_context(
+                    self.store.testing_replacement_execution_lock(
+                        testing_event_execution_lock_name(original_target_key)
+                    )
+                )
+            if check_execution is None:
+                return False
+            check_execution()
+
+            def overlaps(name: str) -> bool:
+                name = name.strip().lower()
+                if not name:
+                    raise ValueError("A provider hostname is unavailable.")
+                return (
+                    name == hostname
+                    or name.startswith("~")
+                    or (name.startswith("*.") and hostname.endswith(name[1:]))
+                )
+
+            if any(
+                overlaps(name)
+                for route in self.client.list_proxy_hosts()
+                for name in route.domain_names
+            ) or any(overlaps(name) for name in self.client.list_other_host_domains()):
+                return False
+            host, token = source.read_dokploy_config(control_plane_root=self.root)
+            domains = api.fetch_dokploy_application_domains(
+                host=host,
+                token=token,
+                application_id=audit.testing_application_id,
+                strict=True,
+            )
+            for domain in domains:
+                name = domain.get("host")
+                if not isinstance(name, str) or overlaps(name):
+                    return False
+            check_execution()
+            return True
+
+    def _replan_outcome(self) -> ProviderMutationOutcome:
+        return ProviderMutationOutcome(
+            response_status_code=202,
+            response_payload=provider_operation_response_payload(
+                trace_id=self.trace_id,
+                records={},
+                result={
+                    **self._result(self.request.reviewed_plan_sha256, applied=False),
+                    "replan_required": True,
+                    "previous_effects_absent": True,
+                },
+            ),
+            durable=True,
+            provider_effect_performed=False,
+        )
 
     def _write_application_claim(
         self, effect: Callable[[Callable[[str, str, int], None]], None]
@@ -569,7 +660,8 @@ class TestingPrivateIngressAdapter:
         provider_operation_key: str,
         lease: ProviderOperationLease,
         check_execution: Callable[[], None],
-        prior_pending: bool,
+        prior_pending: IngressRouteAuditRecord | None,
+        locked_target_key: str,
     ) -> ProviderMutationOutcome:
         started = False
         try:
@@ -647,6 +739,25 @@ class TestingPrivateIngressAdapter:
             SQLAlchemyError,
             click.ClickException,
         ) as error:
+            if not started and prior_pending is not None:
+                try:
+                    lease.assert_current()
+                    if self._previous_effects_absent(
+                        prior_pending,
+                        locked_target_key=locked_target_key,
+                        check_execution=check_execution,
+                    ):
+                        lease.assert_current()
+                        return self._replan_outcome()
+                except (
+                    ValueError,
+                    FileNotFoundError,
+                    RuntimeError,
+                    OSError,
+                    SQLAlchemyError,
+                    click.ClickException,
+                ):
+                    pass
             if started or prior_pending:
                 raise ProviderMutationUnknownError(
                     "Retain the original private hostname key."
@@ -694,6 +805,8 @@ class TestingPrivateIngressAdapter:
                     or not snapshot["domain_present"]
                     or (_host_payload(existing) != _host_payload(desired))
                 ):
+                    if self._previous_effects_absent(self._pending_receipt(provider_operation_key)):
+                        return ProviderObservation("absent", retry_safe=True)
                     return ProviderObservation("unknown")
                 if self.request.operation == "create":
 
@@ -725,6 +838,20 @@ class TestingPrivateIngressAdapter:
             SQLAlchemyError,
             click.ClickException,
         ):
+            try:
+                if self._previous_effects_absent(self._pending_receipt(provider_operation_key)):
+                    # The acquired original-key retry rechecks this evidence
+                    # under its lease before recording a durable replan result.
+                    return ProviderObservation("absent", retry_safe=True)
+            except (
+                ValueError,
+                FileNotFoundError,
+                RuntimeError,
+                OSError,
+                SQLAlchemyError,
+                click.ClickException,
+            ):
+                pass
             return ProviderObservation(
                 "unknown" if provider_effect_phase else "absent",
                 retry_safe=not provider_effect_phase,
