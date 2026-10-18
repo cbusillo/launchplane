@@ -988,8 +988,12 @@ and operation. After a denied recovery, `POST /testing-rebuild/lookup` on the sa
 product prefix only reads the original key and exact intent; it cannot enqueue,
 reselect a build or call a provider. Like the existing browser POSTs, lookup
 requires the signed-in administrator's current Origin/CSRF evidence; the browser
-client supplies it through the same supported session path. Absence is not proof that an earlier request
-cannot still arrive, so lookup retains the uncertain request. Known operation IDs
+client supplies it through the same supported session path. A new attempt is
+marked dispatched by that client's existing callback after session lookup;
+failures proven before POST dispatch return to inspection. Absence is not proof
+that an earlier request cannot still arrive, so lookup retains the uncertain
+request. Authoritative settlement of an unobserved request is tracked in #4014
+before full activation; clearing browser state alone cannot exclude it. Known operation IDs
 resume with GET after sign-in. A confirmed first-submit denial can be discarded
 locally to refresh inspection, without another submit. Provider 401/403 preflight
 refusals carry a denial trace. Other known pre-admission failures use a fixed

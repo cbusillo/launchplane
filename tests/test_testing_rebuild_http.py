@@ -1,5 +1,8 @@
 """The administrator adapter admits the common native operation without provider writes."""
 
+import asyncio
+from threading import Event
+from typing import Any
 import unittest
 from dataclasses import replace
 from functools import partial
@@ -27,7 +30,7 @@ from tests.http_app_test_support import (
     _github_oauth_config,
     _RejectingVerifier,
 )
-from tests.support.http import request
+from tests.support.http import LIFESPAN_HANG_DEADLINE_SECONDS, lifespan_client, request
 
 
 class TestingRebuildHttpTests(unittest.IsolatedAsyncioTestCase):
@@ -242,6 +245,52 @@ class TestingRebuildHttpTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(changed.status_code, 409, changed.text)
         self.assertNotIn(accepted.json()["operation"]["operation_id"], changed.text)
+        self.assertEqual(self.fixture.effects, [])
+
+    async def test_absent_lookup_does_not_exclude_an_original_submission_in_flight(self) -> None:
+        entered = asyncio.Event()
+        release = Event()
+        loop = asyncio.get_running_loop()
+        inspect = preflight.inspect_testing_rebuild
+
+        def held_inspection(**kwargs: Any) -> object:
+            loop.call_soon_threadsafe(entered.set)
+            if not release.wait(LIFESPAN_HANG_DEADLINE_SECONDS):
+                raise AssertionError("The test did not release its original inspection")
+            return inspect(**kwargs)
+
+        def headers() -> dict[str, str]:
+            current = _browser_mutation_headers(self.sessions, self.session)
+            current["Idempotency-Key"] = "original-in-flight"
+            return current
+
+        with patch.object(routes, "inspect_testing_rebuild", side_effect=held_inspection):
+            async with lifespan_client(self.app) as client:
+                original = asyncio.create_task(
+                    request(client, "POST", self.url, headers=headers(), payload=self.payload)
+                )
+                try:
+                    await asyncio.wait_for(entered.wait(), LIFESPAN_HANG_DEADLINE_SECONDS)
+                    absent = await request(
+                        client,
+                        "POST",
+                        self.url + "/lookup",
+                        headers=headers(),
+                        payload=self.payload,
+                    )
+                    self.assertEqual(absent.status_code, 404, absent.text)
+                    self.assertFalse(original.done())
+                finally:
+                    release.set()
+                    accepted = await original
+                self.assertTrue(accepted.is_success, accepted.text)
+                found = await request(
+                    client, "POST", self.url + "/lookup", headers=headers(), payload=self.payload
+                )
+                self.assertEqual(
+                    found.json()["operation"]["operation_id"],
+                    accepted.json()["operation"]["operation_id"],
+                )
         self.assertEqual(self.fixture.effects, [])
 
     async def test_missing_csrf_and_non_testing_input_cannot_queue(self) -> None:

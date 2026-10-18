@@ -1,6 +1,6 @@
 import { expect, test, waitForState } from "./state";
 
-for (const outcome of ["success", "lost-reply", "recovery-denied", "watch-denied", "denied", "stale-build", "preflight-unavailable"] as const) {
+for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-observed", "session-unavailable", "watch-denied", "denied", "stale-build", "preflight-unavailable"] as const) {
   test(`testing rebuild keeps its address and original request after ${outcome} @responsive`, async ({ page }, testInfo) => {
     await page.goto("/ui/products?fixture=empty");
     const fixtures = await page.evaluate(async () => {
@@ -21,8 +21,11 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "watch-denied
     let polled = false;
     let reads = 0;
     let lookups = 0;
+    let sessionUnavailable = false;
     await page.route("**/v1/**", route => route.fulfill({ status: 503, json: { error: { code: "fixture_unavailable", message: "Other evidence is unavailable in this isolated journey." } } }));
-    await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", trace_id: "session", csrf_token: csrfToken, identity: { ...fixtures.identity, role: "admin" } } }));
+    await page.route("**/v1/auth/session", route => sessionUnavailable
+      ? route.fulfill({ status: 503, json: { trace_id: "session-unavailable", error: { code: "session_unavailable", message: "Session lookup unavailable." } } })
+      : route.fulfill({ json: { status: "ok", trace_id: "session", csrf_token: csrfToken, identity: { ...fixtures.identity, role: "admin" } } }));
     await page.route("**/v1/products", route => route.fulfill({ json: { status: "ok", trace_id: "products", products: fixtures.products } }));
     await page.route("**/v1/products/atlas-commerce/environments/testing", route => route.fulfill({ json: { status: "ok", trace_id: "lane", environment } }));
     await page.route("**/v1/products/atlas-commerce/testing-rebuild/inputs?*", route => outcome === "preflight-unavailable"
@@ -36,8 +39,8 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "watch-denied
     await page.route("**/v1/products/atlas-commerce/testing-rebuild", async route => {
       expect(route.request().headers()["x-csrf-token"]).toBe(csrfToken);
       writes.push({ key: route.request().headers()["idempotency-key"], body: route.request().postDataJSON() });
-      if (["lost-reply", "recovery-denied"].includes(outcome) && writes.length === 1) return route.abort();
-      if (outcome === "denied" || outcome === "recovery-denied") return route.fulfill({ status: 403, json: { trace_id: "denied-trace", error: { code: "authorization_denied", message: "This request is denied." } } });
+      if (["lost-reply", "recovery-denied", "lookup-not-observed"].includes(outcome) && writes.length === 1) return route.abort();
+      if (["denied", "recovery-denied", "lookup-not-observed"].includes(outcome)) return route.fulfill({ status: 403, json: { trace_id: "denied-trace", error: { code: "authorization_denied", message: "This request is denied." } } });
       if (outcome === "stale-build") return route.fulfill({ status: 409, json: { trace_id: "stale-trace", error: { code: "testing_rebuild_not_ready", message: "The inspected build changed. Inspect again." } } });
       return route.fulfill({ json: receipt("pending") });
     });
@@ -45,6 +48,7 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "watch-denied
       lookups++;
       expect(route.request().headers()["x-csrf-token"]).toBe(csrfToken);
       expect({ key: route.request().headers()["idempotency-key"], body: route.request().postDataJSON() }).toEqual(writes[0]);
+      if (outcome === "lookup-not-observed" && lookups === 1) return route.fulfill({ status: 404, json: { trace_id: "not-observed", error: { code: "testing_rebuild_not_observed", message: "The original operation is not observed yet." } } });
       return route.fulfill({ json: receipt("pending") });
     });
     await page.route("**/v1/products/atlas-commerce/testing-rebuild/operations/native-original", route => {
@@ -65,7 +69,7 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "watch-denied
     const selectedSource = outcome === "success" ? "empty" : outcome === "stale-build" ? "production_restore" : "upstream_restore";
     if (selectedSource !== "empty") await panel.getByLabel("Start with").selectOption(selectedSource);
     await expect(panel).toContainText(selectedCommit.slice(0, 12));
-    if (["lost-reply", "recovery-denied"].includes(outcome)) {
+    if (["lost-reply", "recovery-denied", "lookup-not-observed"].includes(outcome)) {
       await panel.getByText("Reason (optional edit)", { exact: true }).click();
       await panel.getByLabel("Reason", { exact: true }).fill("Prepare a fresh testing copy.");
     }
@@ -73,8 +77,9 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "watch-denied
     await page.evaluate(() => window.scrollTo(0, 0));
     await page.screenshot({ path: testInfo.outputPath("testing-rebuild-viewport.png") });
     await panel.screenshot({ path: testInfo.outputPath("testing-rebuild-ready.png") });
+    sessionUnavailable = outcome === "session-unavailable";
     await panel.getByRole("button", { name: "Rebuild testing", exact: true }).click();
-    if (["lost-reply", "recovery-denied"].includes(outcome)) {
+    if (["lost-reply", "recovery-denied", "lookup-not-observed"].includes(outcome)) {
       await expect(panel.getByRole("button", { name: "Recover this request" })).toBeEnabled();
       await page.reload();
       await expect(panel.getByRole("button", { name: "Recover this request" })).toBeEnabled();
@@ -82,19 +87,26 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "watch-denied
       await panel.getByRole("button", { name: "Recover this request" }).click();
       await waitForState(() => writes.length).toBe(2);
       expect(writes[1]).toEqual(writes[0]);
-      if (outcome === "recovery-denied") {
+      if (["recovery-denied", "lookup-not-observed"].includes(outcome)) {
         await expect(panel.getByRole("button", { name: "Find the original rebuild" })).toBeEnabled();
         await panel.screenshot({ path: testInfo.outputPath("testing-rebuild-read-only-recovery.png") });
         await page.reload();
         await panel.getByRole("button", { name: "Find the original rebuild" }).click();
         await waitForState(() => lookups).toBe(1);
         expect(writes.length).toBe(2);
+        if (outcome === "lookup-not-observed") {
+          await expect(panel.getByRole("status")).toContainText("Keep this request");
+          await expect(panel.getByRole("button", { name: "Rebuild testing", exact: true })).toHaveCount(0);
+          await panel.getByRole("button", { name: "Find the original rebuild" }).click();
+          await waitForState(() => lookups).toBe(2);
+          expect(writes.length).toBe(2);
+        }
       }
     }
-    if (outcome === "stale-build") {
+    if (outcome === "stale-build" || outcome === "session-unavailable") {
       await expect(panel.getByRole("status")).toContainText("Review the fresh inspection");
       await expect(panel.getByRole("button", { name: "Rebuild testing", exact: true })).toBeEnabled();
-      expect(writes.length).toBe(1);
+      expect(writes.length).toBe(outcome === "session-unavailable" ? 0 : 1);
       expect(polled).toBe(false);
     } else if (outcome === "denied") {
       await expect(panel.getByText("This request was denied and will not be submitted again.", { exact: false })).toBeVisible();

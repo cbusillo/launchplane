@@ -54,20 +54,26 @@ interface TestingRebuildDependencies {
 export async function runTestingRebuild(attempt: TestingRebuildAttempt, dependencies: TestingRebuildDependencies, signal?: AbortSignal): Promise<TestingRebuildResponse> {
   if (attempt.denied) throw new Error("This request was denied. It will not be submitted again.");
   const previouslyDispatched = !!attempt.dispatchStarted;
-  attempt = { ...attempt, dispatchStarted: true };
+  attempt = { ...attempt, dispatchStarted: previouslyDispatched };
   dependencies.persist(attempt);
+  const onDispatch = () => {
+    attempt = { ...attempt, dispatchStarted: true };
+    dependencies.persist(attempt);
+  };
   let response: TestingRebuildResponse;
   try {
     response = attempt.operationId
       ? await dependencies.read(attempt.product, attempt.operationId, signal)
       : attempt.readOnlyRecovery
         ? await dependencies.lookup(attempt.product, attempt.payload, { idempotencyKey: attempt.key, signal })
-        : await dependencies.submit(attempt.product, attempt.payload, { idempotencyKey: attempt.key, signal });
+        : await dependencies.submit(attempt.product, attempt.payload, { idempotencyKey: attempt.key, signal, onDispatch });
   } catch (error) {
     if (error instanceof LaunchplaneApiError && [401, 403].includes(error.statusCode)) {
       dependencies.persist(attempt.operationId || previouslyDispatched
         ? { ...attempt, readOnlyRecovery: true }
         : { ...attempt, denied: true });
+    } else if (!attempt.operationId && !previouslyDispatched && !attempt.dispatchStarted) {
+      dependencies.persist(null);
     } else if (!attempt.operationId && !previouslyDispatched && error instanceof LaunchplaneApiError && error.statusCode === 409
       && ["testing_rebuild_not_ready", "testing_staff_hold", "testing_in_use", "testing_needed_copy",
         "testing_production_resources_shared", "testing_credentials_unverified", "testing_restore_source_unconfigured"].includes(error.code)) {

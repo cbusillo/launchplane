@@ -70,7 +70,7 @@ export function TestingRebuildPanel({ detail, fixtureMode, onRefresh }: {
       if (!controller.signal.aborted) {
         const retained = readTestingRebuildAttempt(detail.product);
         setMessage(error instanceof LaunchplaneApiError && [401, 403].includes(error.statusCode) && retained && !retained.denied
-          ? "Sign in again, then resume watching this rebuild. The original request is retained."
+          ? `Sign in again, then ${retained.operationId ? "resume watching this rebuild" : "find the original rebuild"}. The original request is retained.`
           : `${error instanceof Error ? error.message : "The rebuild outcome is unknown."} ${retained
           ? "Keep this request; do not start another rebuild." : "Review the fresh inspection before rebuilding."}`);
       }

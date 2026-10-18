@@ -36,7 +36,7 @@ test("a lost enqueue reply retains the original payload and key without retrying
   let writes = 0;
   let saved;
   await assert.rejects(runTestingRebuild(original, dependencies({
-    submit: async () => { writes++; throw new Error("reply lost"); }, persist: value => { saved = value; },
+    submit: async (_product, _payload, options) => { options.onDispatch(); writes++; throw new Error("reply lost"); }, persist: value => { saved = value; },
   })));
   assert.equal(writes, 1);
   assert.deepEqual(saved, { ...original, dispatchStarted: true });
@@ -82,6 +82,7 @@ test("lost-reply recovery uses the same key and switches to read-only lookup aft
   const deps = dependencies({
     persist: value => { saved = value; },
     submit: async (product, payload, options) => {
+      options.onDispatch();
       submits++;
       assert.equal(options.idempotencyKey, original.key);
       assert.deepEqual(payload, original.payload);
@@ -112,6 +113,33 @@ test("a refusal during uncertain recovery cannot discard the earlier request", a
   })));
   assert.equal(saved.key, original.key);
   assert.deepEqual(saved.payload, original.payload);
+});
+
+test("a session failure before POST dispatch returns to fresh inspection", async () => {
+  let saved;
+  await assert.rejects(runTestingRebuild(original, dependencies({
+    submit: async () => { throw new Error("Session request failed before dispatch"); },
+    persist: value => { saved = value; },
+  })));
+  assert.equal(saved, null);
+});
+
+test("an absent read-only lookup cannot exclude an original request still in flight", async () => {
+  let saved;
+  let recorded = false;
+  const deps = dependencies({
+    submit: async () => assert.fail("A denied recovery cannot submit"),
+    persist: value => { saved = value; },
+    lookup: async () => {
+      if (!recorded) throw new LaunchplaneApiError("Not observed yet", 404, "trace", "testing_rebuild_not_observed");
+      return receipt("pass");
+    },
+  });
+  await assert.rejects(runTestingRebuild({ ...original, dispatchStarted: true, readOnlyRecovery: true }, deps));
+  assert.equal(saved.key, original.key);
+  assert.equal(saved.readOnlyRecovery, true);
+  recorded = true;
+  assert.equal((await runTestingRebuild(saved, deps)).operation.operation_id, "native-original");
 });
 
 test("another product or operation receipt cannot become the saved handle", async () => {
