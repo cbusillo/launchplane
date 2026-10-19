@@ -158,6 +158,17 @@ usual exact `expected_current_provider_target`, never-deployed evidence,
 isolation-staging hold and deployment lock. It accepts no volume name, host
 path, mount id, existing application id or caller-selected `app_name`.
 
+An empty Compose may retain the provider's GitHub source defaults. Replacement
+checks the complete live source with the existing empty-source validator, both
+when planning storage and at each apply checkpoint. A configured or partial
+repository, credential binding, image or raw Compose source refuses; unavailable
+or mismatched provider evidence also refuses. No stored source normalization is
+needed. Unavailable source reads report `testing_target_source_evidence_unavailable`
+rather than a source-policy refusal. Earlier allocation effects, if any, still
+need the existing partial-setup recovery path. Live reads run outside the global
+authority write transaction; its final checkpoint rechecks the recorded lane
+authority.
+
 Start with `mode: dry-run`. The service saves only planning evidence in the DB
 and returns `state_volume_plan_id`, `plan_sha256`, the exact target intent and
 `state_volume: {name, mount_path}`. The service generates the new volume and

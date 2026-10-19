@@ -166,7 +166,9 @@ class ApplicationStateVolumeAdapter:
 
         validate_volume_request(request)
         if request.mode == "dry-run":
-            require_empty_testing_target_creation(store, request, product=product)
+            require_empty_testing_target_creation(
+                store, request, product=product, control_plane_root_path=root
+            )
             if store.read_product_profile_record(product).driver_id != "generic-web":
                 raise ValueError("Application state storage requires a generic-web product.")
             allocation = uuid4().hex
@@ -247,18 +249,29 @@ class ApplicationStateVolumeAdapter:
             },
         }
 
-    def checkpoint(self) -> None:
+    def checkpoint(self, *, read_provider_source: bool = True) -> None:
         from control_plane.dokploy_target_setup_http import require_empty_testing_target_creation
         from control_plane.application_state_volume_retention import require_state_volume_owner
 
         require_state_volume_owner(self.store, product=self.product, context=self.request.context)
-        require_empty_testing_target_creation(self.store, self.request, product=self.product)
+        require_empty_testing_target_creation(
+            self.store,
+            self.request,
+            product=self.product,
+            control_plane_root_path=self.root,
+            read_provider_source=read_provider_source,
+        )
         host, _token = source.read_dokploy_config(control_plane_root=self.root)
         if (
             host != self.intent["provider_host"]
             or _binding(self.store, self.request.context) != self.intent["binding"]
         ):
             raise ValueError("Reviewed testing target or provider changed; storage plan is stale.")
+
+    def authority_checkpoint(self) -> None:
+        # The live source was checked immediately before entering the guard.
+        # This callback runs under the global authority lock; keep network I/O outside it.
+        self.checkpoint(read_provider_source=False)
 
     def _application_name(self, value: object) -> str:
         if not isinstance(value, str) or not re.fullmatch(
@@ -598,6 +611,7 @@ class ApplicationStateVolumeAdapter:
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
         from control_plane.dokploy_target_setup_http import (
+            TestingTargetSourceEvidenceUnavailable,
             execute_dokploy_target_setup,
             first_testing_replacement_lock_name,
             mutate_dokploy_payload_for_target_setup,
@@ -769,7 +783,7 @@ class ApplicationStateVolumeAdapter:
                     )
                 self.checkpoint()
                 with self.store.provider_evidence_guard(
-                    lease.evidence_reservation, authority_checkpoint=self.checkpoint
+                    lease.evidence_reservation, authority_checkpoint=self.authority_checkpoint
                 ):
                     execute_dokploy_target_setup(
                         control_plane_root_path=self.root,
@@ -798,7 +812,9 @@ class ApplicationStateVolumeAdapter:
             if not started and not phase:
                 raise ProviderMutationRejectedError(
                     error
-                    if isinstance(error, StateVolumeRefusal)
+                    if isinstance(
+                        error, StateVolumeRefusal | TestingTargetSourceEvidenceUnavailable
+                    )
                     else ValueError("Testing storage plan refused before effects.")
                 ) from error
             raise ProviderMutationUnknownError(
