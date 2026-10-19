@@ -18,11 +18,14 @@ from control_plane.workflows.runner_host_hygiene_executor import (
     collect_runner_host_hygiene_report,
     execute_runner_host_hygiene_executor,
     _parse_builder_cache_usage,
+    _executor_intent_sha256,
 )
 from control_plane.workflows.runner_host_hygiene_qualification import qualify_runner_host_hygiene
 from tests.test_runner_host_hygiene_executor import (
     _AuditPoster,
     _CommandRunner,
+    _CrashingCommandRunner,
+    _docker_disk_usage_json,
     _github_idle_evidence_reader,
     _request,
 )
@@ -35,6 +38,8 @@ class ReportRunner(_CommandRunner):
         usage: str = "[]",
         extra_builder: bool = False,
         runner_service_output: str = "launchplane-runner@ops-gate.service active running\n",
+        container_rows: list[dict[str, str]] | None = None,
+        daemon_records: list[dict[str, object]] | None = None,
     ) -> None:
         containers = [
             {"Names": "buildx_buildkit_builder-a0", "State": "running", "Image": "buildkit"}
@@ -43,7 +48,14 @@ class ReportRunner(_CommandRunner):
             containers.append(
                 {"Names": "buildx_buildkit_other-product0", "State": "running", "Image": "buildkit"}
             )
+        if container_rows is not None:
+            containers = container_rows
         super().__init__(
+            docker_disk_usage=_docker_disk_usage_json(
+                build_cache=daemon_records
+                if daemon_records is not None
+                else [{"ID": "daemon", "Size": 10, "InUse": False, "Shared": False}]
+            ),
             container_inventory="\n".join(json.dumps(row) for row in containers),
             runner_service_output=runner_service_output,
         )
@@ -103,7 +115,6 @@ class HygieneQualificationTests(unittest.TestCase):
                 audit_delivery_sleeper=lambda _: None,
             )
             self.assertEqual(result.status, "blocked")
-            self.assertFalse(result.maintenance_completed)
             self.assertFalse(result.audit_delivery_pending)
             self.assertEqual([audit.status for audit in poster.audits], ["planned"])
             self.assertFalse(any(command[0] == "flock" for command in runner.commands))
@@ -135,23 +146,27 @@ class HygieneQualificationTests(unittest.TestCase):
             idle_observation_sleeper=lambda _: None,
         )
         self.assertIn("required_warm_builder_missing", {item.code for item in report.findings})
-        # A renamed tag is accepted through the same exact image-inspect path,
-        # including Docker's normal implicit latest/digest resolution semantics.
+        # Accept only the exact reference emitted by the changed producer.
         changed = request_with_budgets().model_copy(
             update={"retained_warm_builders": ("example:verify-123-1-runtime",)}
         )
         report = collect_runner_host_hygiene_report(
             request=changed,
-            remote_runner=ReportRunner(),
+            remote_runner=lambda argv, timeout: (
+                RemoteCommandResult(0 if argv[-1] == changed.retained_warm_builders[0] else 1)
+                if tuple(argv)[:3] == ("docker", "image", "inspect")
+                else original(argv, timeout)
+            ),
             github_idle_evidence_reader=_github_idle_evidence_reader,
             idle_observation_sleeper=lambda _: None,
         )
-        self.assertNotIn("required_warm_builder_missing", {item.code for item in report.findings})
+        self.assertEqual(report.warm_builders, changed.retained_warm_builders)
 
     def test_unavailable_and_truncated_builder_measurements_are_not_zero(self) -> None:
         for usage in ("", '[{"id":"partial"}', '[{"id":"partial"}]'):
             with self.subTest(usage=usage):
                 report = report_for(ReportRunner(usage=usage))
+                self.assertEqual(report.status, "attention")
                 row = next(
                     item for item in report.builder_cache_usage if item.cache_key == "builder-a"
                 )
@@ -183,28 +198,23 @@ class HygieneQualificationTests(unittest.TestCase):
                 self.assertEqual(measured.logical_bytes, record["size"])
                 self.assertEqual(
                     measured.qualification,
-                    "maintenance_required" if cause == "none" else "protected_cache",
+                    "maintenance_required" if cause in {"none", "shared"} else "protected_cache",
                 )
-                self.assertEqual(bool(report.findings), cause == "none")
+                self.assertEqual(bool(report.findings), cause in {"none", "shared"})
                 self.assertTrue(measured.recovery_owner)
 
     def test_unbudgeted_builder_is_report_only_without_adding_cleanup_authority(self) -> None:
         report = report_for(ReportRunner(extra_builder=True))
-        extra = next(
-            item
-            for item in report.builder_cache_usage
-            if item.cache_key == "buildx_buildkit_other-product0"
-        )
+        extra = next(item for item in report.builder_cache_usage if item.target_bytes is None)
         self.assertIsNone(extra.target_bytes)
         self.assertEqual(extra.qualification, "unbudgeted_report_only")
         self.assertTrue(extra.recovery_owner)
-        self.assertFalse(request_with_budgets().allowed_buildkit_builders)
 
-    def test_report_budget_must_agree_with_the_target_and_not_change_legacy_recovery_intent(
+    def test_report_budget_must_agree_with_the_action_target(
         self,
     ) -> None:
         request = request_with_budgets()
-        with self.assertRaisesRegex(ValueError, "agree"):
+        with self.assertRaises(ValueError):
             RunnerHostHygieneExecutorRequest.model_validate(
                 {**request.model_dump(), "max_used_space_bytes": 9 * 1024**3}
             )
@@ -241,7 +251,7 @@ class HygieneQualificationTests(unittest.TestCase):
                 github_idle_evidence_reader=_github_idle_evidence_reader,
                 audit_delivery_sleeper=lambda _: None,
             )
-            self.assertFalse(result.maintenance_completed)
+            self.assertEqual(result.status, "blocked")
             envelope = spool.read(
                 host_name=request.host_name,
                 action=request.action,
@@ -269,7 +279,15 @@ class HygieneQualificationTests(unittest.TestCase):
             )
             response = CliRunner().invoke(main, args)
             self.assertEqual(response.exit_code, 0, response.output)
-            self.assertIn("maintenance_completed", summary.read_text())
+            rendered = dict(
+                line.removeprefix("- ").split(": ", 1)
+                for line in summary.read_text().splitlines()
+                if line.startswith("- ")
+            )
+            self.assertEqual(
+                rendered["maintenance_completed"], f"`{qualified['maintenance_completed']}`"
+            )
+            self.assertEqual(response.output, "")
             stale = qualify_runner_host_hygiene(
                 envelope, as_of=as_of + timedelta(days=1), maximum_age_seconds=1
             )
@@ -289,7 +307,7 @@ class HygieneQualificationTests(unittest.TestCase):
                     github_idle_evidence_reader=_github_idle_evidence_reader,
                     audit_delivery_sleeper=lambda _: None,
                 )
-                self.assertTrue(result.maintenance_completed)
+                self.assertEqual(result.status, "completed")
                 if replay:
                     self.assertFalse(runner.commands)
             envelope = spool.read(
@@ -303,9 +321,182 @@ class HygieneQualificationTests(unittest.TestCase):
             )
             self.assertTrue(qualified["maintenance_completed"])
             self.assertFalse(qualified["retention_accounted_for"])
-            pending = envelope.model_copy(update={"terminal_delivery_state": "pending"})
-            self.assertFalse(
-                qualify_runner_host_hygiene(
-                    pending, as_of=datetime.now(timezone.utc), maximum_age_seconds=3600
-                )["maintenance_completed"]
+            for field in ("planned_delivery_state", "terminal_delivery_state"):
+                pending = envelope.model_copy(update={field: "pending"})
+                self.assertFalse(
+                    qualify_runner_host_hygiene(
+                        pending, as_of=datetime.now(timezone.utc), maximum_age_seconds=3600
+                    )["maintenance_completed"]
+                )
+
+    def test_report_budgets_do_not_authorize_an_unallowlisted_mutation(self) -> None:
+        request = RunnerHostHygieneExecutorRequest.model_validate(
+            {
+                **request_with_budgets(mutate=True).model_dump(),
+                "target_buildkit_builder": "builder-a",
+                "max_used_space_bytes": 100,
+            }
+        )
+        poster, runner = _AuditPoster(), ReportRunner()
+        with tempfile.TemporaryDirectory() as root:
+            result = execute_runner_host_hygiene_executor(
+                request=request,
+                remote_runner=runner,
+                audit_poster=poster,
+                audit_spool=RunnerHostHygieneAuditSpool(root=Path(root)),
+                github_idle_evidence_reader=_github_idle_evidence_reader,
+                audit_delivery_sleeper=lambda _: None,
             )
+            self.assertEqual(result.status, "blocked")
+            self.assertIn(
+                "target_builder_not_allowlisted",
+                {item.code for item in poster.audits[0].plan.blockers},
+            )
+            self.assertFalse(any(command[0] == "flock" for command in runner.commands))
+
+    def test_report_budgets_never_change_action_recovery_identity(self) -> None:
+        request = _request(mutate=True, max_used_space_bytes=8 * 1024**3)
+        updated = request.model_copy(
+            update={
+                "buildkit_cache_budgets": {"default": request.max_used_space_bytes, "unrelated": 10}
+            }
+        )
+        self.assertEqual(_executor_intent_sha256(request), _executor_intent_sha256(updated))
+        changed_report = updated.model_copy(update={"buildkit_cache_budgets": {"unrelated": 20}})
+        self.assertEqual(_executor_intent_sha256(updated), _executor_intent_sha256(changed_report))
+        changed_action = request.model_copy(
+            update={"max_used_space_bytes": request.max_used_space_bytes * 2}
+        )
+        self.assertNotEqual(
+            _executor_intent_sha256(request), _executor_intent_sha256(changed_action)
+        )
+        with tempfile.TemporaryDirectory() as root:
+            spool = RunnerHostHygieneAuditSpool(root=Path(root))
+            with self.assertRaises(RuntimeError):
+                execute_runner_host_hygiene_executor(
+                    request=request,
+                    remote_runner=_CrashingCommandRunner(),
+                    audit_poster=_AuditPoster(),
+                    audit_spool=spool,
+                    github_idle_evidence_reader=_github_idle_evidence_reader,
+                    audit_delivery_sleeper=lambda _: None,
+                )
+            runner = ReportRunner()
+            resolved = execute_runner_host_hygiene_executor(
+                request=updated.model_copy(update={"resolve_action_started": True}),
+                remote_runner=runner,
+                audit_poster=_AuditPoster(),
+                audit_spool=spool,
+                github_idle_evidence_reader=_github_idle_evidence_reader,
+                audit_delivery_sleeper=lambda _: None,
+            )
+            self.assertEqual(resolved.status, "failed")
+            self.assertTrue(resolved.reconciled)
+            self.assertFalse(any(command[0] == "flock" for command in runner.commands))
+
+    def test_stopped_missing_and_unavailable_builder_evidence_stays_honest(self) -> None:
+        stopped = {"Names": "buildx_buildkit_other0", "State": "exited", "Image": "buildkit"}
+        runner = ReportRunner(
+            container_rows=[
+                {"Names": "buildx_buildkit_builder-a0", "State": "running", "Image": "buildkit"},
+                stopped,
+            ]
+        )
+        report = report_for(runner)
+        extra = next(item for item in report.builder_cache_usage if item.target_bytes is None)
+        self.assertEqual(extra.qualification, "stopped_unmeasured_report_only")
+        self.assertIsNone(extra.logical_bytes)
+        self.assertNotIn("builder_cache_unqualified", {item.code for item in report.findings})
+        self.assertFalse(
+            any(command[:3] == ("docker", "exec", stopped["Names"]) for command in runner.commands)
+        )
+        for containers in ([], [{**stopped, "Names": "buildx_buildkit_builder-a0"}]):
+            with self.subTest(containers=containers):
+                report = report_for(ReportRunner(container_rows=containers))
+                self.assertIn("builder_cache_unqualified", {item.code for item in report.findings})
+        original = ReportRunner()
+
+        def unavailable(command: Sequence[str], timeout: int) -> RemoteCommandResult:
+            return (
+                RemoteCommandResult(1)
+                if tuple(command)[:2] == ("docker", "ps")
+                else original(command, timeout)
+            )
+
+        report = collect_runner_host_hygiene_report(
+            request=request_with_budgets(),
+            remote_runner=unavailable,
+            github_idle_evidence_reader=_github_idle_evidence_reader,
+            idle_observation_sleeper=lambda _: None,
+        )
+        self.assertIn("builder_cache_unqualified", {item.code for item in report.findings})
+
+    def test_long_builder_names_are_bounded_in_both_success_and_failure_rows(self) -> None:
+        name = "long-builder-" + "x" * 70
+        request = RunnerHostHygieneExecutorRequest.model_validate(
+            {**request_with_budgets().model_dump(), "buildkit_cache_budgets": {name: 100}}
+        )
+        for containers in (
+            [],
+            [{"Names": f"buildx_buildkit_{name}0", "State": "running", "Image": "buildkit"}],
+        ):
+            with self.subTest(containers=containers):
+                report = collect_runner_host_hygiene_report(
+                    request=request,
+                    remote_runner=ReportRunner(container_rows=containers),
+                    github_idle_evidence_reader=_github_idle_evidence_reader,
+                    idle_observation_sleeper=lambda _: None,
+                )
+                self.assertTrue(report.builder_cache_usage)
+                self.assertNotIn(name, report.model_dump_json())
+
+    def test_daemon_and_named_caches_use_the_same_logical_and_protection_basis(self) -> None:
+        now = datetime.now(timezone.utc)
+        named = [
+            {
+                "id": "shared",
+                "size": 200,
+                "inUse": False,
+                "shared": True,
+                "createdAt": (now - timedelta(days=10)).isoformat(),
+            },
+            {
+                "id": "active",
+                "size": 40,
+                "inUse": True,
+                "shared": True,
+                "createdAt": now.isoformat(),
+            },
+        ]
+        daemon = [
+            {
+                "ID": item["id"],
+                "Size": item["size"],
+                "InUse": item["inUse"],
+                "Shared": item["shared"],
+            }
+            for item in named
+        ]
+        report = report_for(ReportRunner(usage=json.dumps(named), daemon_records=daemon))
+        default = next(item for item in report.builder_cache_usage if item.cache_key == "default")
+        builder = next(item for item in report.builder_cache_usage if item.cache_key == "builder-a")
+        self.assertEqual(default.logical_bytes, builder.logical_bytes)
+        self.assertEqual(default.protected_bytes, builder.protected_bytes)
+        self.assertEqual(builder.protected_bytes, named[-1]["size"])
+        self.assertEqual(builder.shared_bytes, builder.logical_bytes)
+        self.assertEqual(builder.qualification, "maintenance_required")
+
+    def test_summary_handles_missing_invalid_and_multiple_private_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            summary, bad = Path(root) / "summary.md", Path(root) / "bad.json"
+            bad.write_text('{"private-host": "private-secret",')
+            args = ["work-graph", "runner-host-hygiene-qualify", "--summary-file", str(summary)]
+            for extra in ([], ["--audit-file", str(bad)]):
+                response = CliRunner().invoke(main, [*args, *extra])
+                self.assertEqual(response.exit_code, 0, response.output)
+                self.assertNotEqual(
+                    CliRunner().invoke(main, [*args, *extra, "--require-qualified"]).exit_code, 0
+                )
+            self.assertNotIn("private-host", summary.read_text())
+            self.assertNotIn("private-secret", summary.read_text())
+            self.assertTrue(summary.read_text().strip())

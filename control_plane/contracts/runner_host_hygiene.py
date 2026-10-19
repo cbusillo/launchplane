@@ -390,6 +390,7 @@ class RunnerHostHygieneBuilderCacheUsage(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     cache_key: str
+    source: Literal["docker_engine", "buildctl"] = "buildctl"
     target_bytes: int | None = Field(default=None, ge=1)
     availability: RunnerHostHygieneEvidenceAvailability
     logical_bytes: int | None = Field(default=None, ge=0)
@@ -426,6 +427,8 @@ class RunnerHostHygieneBuilderCacheUsage(BaseModel):
 
     @property
     def qualification(self) -> str:
+        if self.target_bytes is None and self.reason_code == "builder_not_running":
+            return "stopped_unmeasured_report_only"
         if self.availability != "available" or self.logical_bytes is None:
             return "unknown"
         if self.target_bytes is None:
@@ -438,6 +441,15 @@ class RunnerHostHygieneBuilderCacheUsage(BaseModel):
         ):
             return "protected_cache"
         return "maintenance_required"
+
+    @property
+    def accounted_for(self) -> bool:
+        return self.qualification in {
+            "within_target",
+            "protected_cache",
+            "unbudgeted_report_only",
+            "stopped_unmeasured_report_only",
+        }
 
 
 class RunnerHostHygieneObservation(BaseModel):
@@ -1079,6 +1091,16 @@ class RunnerHostHygieneAuditDeliveryEnvelope(BaseModel):
                 )
         return self
 
+    @property
+    def maintenance_completed(self) -> bool:
+        return (
+            self.terminal_audit is not None
+            and self.terminal_audit.status == "completed"
+            and self.terminal_audit.request.mutate
+            and self.planned_delivery_state == "delivered"
+            and self.terminal_delivery_state == "delivered"
+        )
+
 
 class RunnerHostHygieneAdapterPolicy(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -1220,7 +1242,7 @@ def evaluate_runner_host_hygiene(
     unqualified_builders = tuple(
         f"{item.cache_key}:{item.qualification}:recovery={item.recovery_owner}"
         for item in observation.builder_cache_usage
-        if item.qualification not in {"within_target", "protected_cache", "unbudgeted_report_only"}
+        if not item.accounted_for
     )
     if unqualified_builders or (
         observation.require_builder_cache_evidence and not observation.builder_cache_usage

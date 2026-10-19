@@ -669,7 +669,7 @@ dry-run planning only.
 Weekday green means a report's planned audit was delivered. It does not mean
 retention is working. The workflow summary now separates report delivery,
 report status, retention qualification and accepted terminal maintenance.
-Executor JSON also exposes the derived `maintenance_completed` boolean.
+The qualifier uses the audit envelope's single `maintenance_completed` rule.
 Accepted planned delivery, `blocked`, `not_needed` and pending terminal delivery
 never establish completed maintenance. A completed action can still leave cache
 above target or have unknown measurements; completion and retention are separate.
@@ -685,16 +685,24 @@ Reports measure each configured builder using its own container's read-only
 `buildctl du --format '{{json .}}'`. They retain only aggregate counters, never
 raw cache descriptions. The existing complete Docker container inventory also
 identifies unbudgeted named caches: these remain measured report-only rows with
-an admin recovery assignment, no target and no cleanup permission. Their actual
-producer/retention responsibility must be reviewed independently before any
+an admin recovery assignment, no target and no cleanup permission. Stopped
+unbudgeted containers have an explicit unmeasured report-only state and are never probed or counted as zero. A configured
+stopped or missing builder remains unknown. Existing orphan findings still apply. Their actual producer/retention responsibility must be reviewed independently before any
 budget or maintenance is proposed. The daemon-default cache remains a distinct
 row from the named builders.
 
 The report's invariant is that every configured builder has measured logical
-usage within target, or measured protected/in-use/shared/recent-cache evidence
-explaining the excess; otherwise it records a maintenance or measurement finding
-with a recovery assignment. The seven-day floor applies to named-builder age
-accounting. Missing, failed, malformed, duplicate or truncated measurements are
+usage within target, or measured in-use/recent-cache evidence
+explaining the excess; otherwise it records a maintenance or measurement
+finding with a recovery assignment. Named-builder age accounting uses the
+selected action's configured
+retention duration, with the existing seven-day minimum for other named rows.
+Shared bytes remain information only; sharing does not protect a record from GC.
+The daemon and named rows use the same logical record sum, including shared
+records; the pre-existing Docker reclaimable aggregate remains unchanged and is
+a different basis. The default-daemon action has no age filter. Report-only
+budgets never enter interrupted-action recovery identity. Missing, failed,
+malformed, duplicate or truncated measurements are
 unknown, never zero. Logical targets are not physical-volume quotas, and excess
 is not an expected-reclaim estimate. Overlapping protection categories are
 counted once. [BuildKit's accounting implementation](https://github.com/moby/buildkit/blob/master/cmd/buildctl/diskusage.go)
@@ -709,8 +717,11 @@ uv run launchplane work-graph runner-host-hygiene-qualify \
   --require-qualified
 ```
 
-The default report-only mode prints diagnosis without failing delivery. The
-explicit qualification mode exits nonzero for stale/missing evidence, report
+The default report-only mode prints diagnosis without failing delivery; invalid
+or absent artifacts produce fixed unqualified diagnostics. With `--summary-file`,
+only bounded action/audit identifiers, snapshot time and contract codes are
+rendered. Detailed JSON stays out of that job log. Summary snapshots do not claim
+current-time freshness after a long Sunday batch. The explicit qualification mode exits nonzero for stale/missing evidence, report
 findings, pending planned delivery or action blockers other than the expected
 `mutate_not_requested` dry-run blocker. Legacy artifacts without builder evidence
 remain unqualified. `--maximum-age-seconds` bounds review-artifact age separately

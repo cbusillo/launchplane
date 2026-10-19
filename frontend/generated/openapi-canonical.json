@@ -46020,6 +46020,15 @@
             ],
             "title": "Shared Bytes"
           },
+          "source": {
+            "default": "buildctl",
+            "enum": [
+              "docker_engine",
+              "buildctl"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
           "target_bytes": {
             "anyOf": [
               {

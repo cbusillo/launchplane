@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+import hashlib
+import json
 from typing import TypedDict
 
 import click
@@ -50,10 +52,7 @@ def qualify_runner_host_hygiene(
     retained = (
         report.require_builder_cache_evidence
         and bool(report.builder_cache_usage)
-        and all(
-            item.qualification in {"within_target", "protected_cache", "unbudgeted_report_only"}
-            for item in report.builder_cache_usage
-        )
+        and all(item.accounted_for for item in report.builder_cache_usage)
     )
     return {
         "audit_record_key": audit.audit_record_key,
@@ -62,13 +61,7 @@ def qualify_runner_host_hygiene(
         "fresh": fresh,
         "report_delivery": audit.planned_delivery_state,
         "report_status": report.status,
-        "maintenance_completed": (
-            audit.terminal_audit is not None
-            and audit.terminal_audit.status == "completed"
-            and audit.terminal_audit.request.mutate
-            and audit.planned_delivery_state == "delivered"
-            and audit.terminal_delivery_state == "delivered"
-        ),
+        "maintenance_completed": audit.maintenance_completed,
         "retention_accounted_for": retained,
         "qualified": fresh
         and retained
@@ -84,49 +77,79 @@ def qualify_runner_host_hygiene(
     }
 
 
+def _summary(audit: RunnerHostHygieneAuditDeliveryEnvelope, result: HygieneQualification) -> str:
+    reference = hashlib.sha256(audit.audit_record_key.encode()).hexdigest()[:12]
+    try:
+        observed = datetime.fromisoformat(str(result["observed_at"])).isoformat()
+    except ValueError:
+        observed = "unavailable"
+    lines = [
+        f"\n### Hygiene snapshot: {audit.action} ({reference})\n",
+        f"- observed_at: `{observed}`",
+    ]
+    # Historical snapshots may be hours apart on Sunday. Do not imply the
+    # current-time freshness verdict is a fact about that historical action.
+    fields = {
+        key: value
+        for key, value in result.items()
+        if key
+        in {
+            "report_delivery",
+            "report_status",
+            "maintenance_completed",
+            "retention_accounted_for",
+            "blockers",
+            "findings",
+        }
+    }
+    lines.extend(f"- {key}: `{value}`" for key, value in fields.items())
+    return "\n".join(lines) + "\n"
+
+
 @click.command("runner-host-hygiene-qualify")
-@click.option("--audit-file", type=click.Path(exists=True, path_type=Path), required=True)
+@click.option("--audit-file", "audit_files", multiple=True, type=click.Path(path_type=Path))
 @click.option("--as-of", type=click.DateTime(formats=["%Y-%m-%dT%H:%M:%S%z"]))
 @click.option("--maximum-age-seconds", type=click.IntRange(min=1), default=3600, show_default=True)
 @click.option("--require-qualified/--report-only", default=False)
 @click.option("--summary-file", type=click.Path(path_type=Path))
 def runner_host_hygiene_qualify(
-    audit_file: Path,
+    audit_files: tuple[Path, ...],
     as_of: datetime | None,
     maximum_age_seconds: int,
     require_qualified: bool,
     summary_file: Path | None,
 ) -> None:
-    """Read one existing audit artifact; never contact or change a host."""
-    import json
-
-    try:
-        audit = RunnerHostHygieneAuditDeliveryEnvelope.model_validate_json(audit_file.read_text())
-        result = qualify_runner_host_hygiene(
-            audit,
-            as_of=as_of or datetime.now(timezone.utc),
-            maximum_age_seconds=maximum_age_seconds,
-        )
-        if summary_file is not None:
-            # Render only bounded contract codes and booleans, never host names,
-            # paths, raw Docker output or free-text evidence in Actions summaries.
+    """Read existing audit artifacts; never contact or change a host."""
+    outputs: list[dict[str, object]] = []
+    summaries: list[str] = []
+    for audit_file in audit_files:
+        try:
+            audit = RunnerHostHygieneAuditDeliveryEnvelope.model_validate_json(
+                audit_file.read_text()
+            )
+            result = qualify_runner_host_hygiene(
+                audit,
+                as_of=as_of or datetime.now(timezone.utc),
+                maximum_age_seconds=maximum_age_seconds,
+            )
+            outputs.append(dict(result))
+            summaries.append(_summary(audit, result))
+        except (OSError, ValueError):
+            outputs.append({"qualified": False, "reason_code": "audit_artifact_invalid"})
+            summaries.append(
+                "\n### Hygiene snapshot unavailable\n\nUnqualified: invalid audit artifact.\n"
+            )
+    if not outputs:
+        outputs.append({"qualified": False, "reason_code": "audit_artifact_missing"})
+        summaries.append("\n### Hygiene snapshot unavailable\n\nUnqualified: no audit artifact.\n")
+    if summary_file is not None:
+        try:
             with summary_file.open("a") as output:
-                output.write("\n### Runner host hygiene qualification\n\n")
-                for key, value in result.items():
-                    if key not in (
-                        "report_delivery",
-                        "report_status",
-                        "maintenance_completed",
-                        "retention_accounted_for",
-                        "fresh",
-                        "qualified",
-                        "blockers",
-                        "findings",
-                    ):
-                        continue
-                    output.write(f"- {key}: `{value}`\n")
-        click.echo(json.dumps(result, indent=2))
-    except (OSError, ValueError) as error:
-        raise click.ClickException(str(error)) from error
-    if require_qualified and not result["qualified"]:
+                output.write("".join(summaries))
+        except OSError:
+            outputs.append({"qualified": False, "reason_code": "summary_unavailable"})
+            click.echo("Hygiene summary unavailable.", err=True)
+    else:
+        click.echo(json.dumps(outputs, indent=2))
+    if require_qualified and any(not item["qualified"] for item in outputs):
         raise click.ClickException("runner host hygiene qualification needs attention")
