@@ -177,8 +177,8 @@ The supported source is:
   One configured binding to a context-scoped, write-only current secret is
   required; global, instance-scoped and duplicate bindings are refused. The
   policy's merge identity must have kind `github_app`. Each resolution mints a
-  fresh installation token for exactly the policy's repository, with Contents
-  and Pull requests write, Workflows write, and Checks
+  fresh installation token for exactly the policy's repository, with Contents,
+  Issues and Pull requests write, Workflows write, and Checks
   and Commit statuses read. The installation must provide at least those grants;
   it may also serve other approved operations. The freshly issued train token
   must contain only the native train permissions, regardless of the installation's
@@ -188,6 +188,9 @@ The supported source is:
   not stored as runtime configuration. No Administration permission is used.
   Every train token has this same permission set, including tokens resolved for
   reads; Workflows write lets branch updates and merges include workflow files.
+  Issues write projects graph-derived planning labels after a landing, within
+  the selected App's already-accepted installation grants. Missing installation
+  grants refuse before minting; an issued token missing this capability is revoked.
   The event reconciler also mints narrower tokens from a product repository's
   App: a read-only build-provenance token, and a pull-request feedback token
   with only Pull requests write and Contents read
