@@ -2624,7 +2624,10 @@ times, fixed provider statuses, traceback presence, host function names and
 native traceback line numbers from
 this namespace's logs within the provider's existing checkpoint clock-skew
 window within the provider-returned list. Provider retention can already have
-removed older candidates. Missing or bounded evidence is explicitly unavailable. An unavailable event log
+removed older candidates. Locations refer to the exact emitted program of the
+original effect, including its transport prefix and embedded libraries. Rebuild
+that deployed program before mapping a location to code; repository file lines
+and a newer program are not equivalent. Missing or bounded evidence is explicitly unavailable. An unavailable event log
 retains its event metadata with `log_available: false`; the oldest candidates
 are read first. If host observation is unavailable, journal and event evidence
 survive with `host_observation_unavailable`, and unobserved custody/copy values
