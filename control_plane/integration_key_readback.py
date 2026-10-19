@@ -7,8 +7,10 @@ variables. This read-back runs the lane's runtime key-safety rules over those
 keys after the deploy, so a mislabelled key or a shared production key with no
 recorded reason shows up on the deployment record, not only at write time.
 
-It reports and never refuses: the deploy has already happened, and a promotion
-would roll a live site back on a refusal (launchplane#2768).
+The read-back reports and never refuses: the deploy has already happened, and a
+promotion would roll a live site back on a refusal (launchplane#2768). A
+non-production deploy runs the same evaluation before the provider deploy and
+refuses on ``fail`` (launchplane#2773).
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ from control_plane.contracts.deployment_record import (
     IntegrationKeyReadbackStatus,
 )
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyTarget
+from control_plane.contracts.secret_record import SecretBinding
 from control_plane.runtime_key_safety import (
     RuntimeKeySafetyPolicyReadStore,
     evaluate_runtime_key_safety_from_store,
@@ -43,7 +46,7 @@ def integration_key_readback(
     # database connection, is recorded as unavailable and never interrupts the
     # deploy's completion or its deployment record.
     try:
-        return _integration_key_readback(
+        return evaluate_delivered_integration_keys(
             record_store=record_store, context_name=context_name, instance_name=instance_name
         )
     except Exception:
@@ -56,9 +59,14 @@ def integration_key_readback(
         return IntegrationKeyReadbackEvidence(status="unavailable")
 
 
-def _integration_key_readback(
+def evaluate_delivered_integration_keys(
     *, record_store: object, context_name: str, instance_name: str
 ) -> IntegrationKeyReadbackEvidence:
+    """Evaluate the integration keys Launchplane delivers to a lane under its active policy.
+
+    ``unavailable`` means the store cannot list bindings or has no active policy; a
+    failed read raises, so each caller decides whether that interrupts its work.
+    """
     if not all(callable(getattr(record_store, name, None)) for name in _REQUIRED_STORE_METHODS):
         return IntegrationKeyReadbackEvidence(status="unavailable")
     store = cast(RuntimeKeySafetyPolicyReadStore, record_store)
@@ -66,21 +74,12 @@ def _integration_key_readback(
         policy_record = latest_active_runtime_key_safety_policy(store)
     except ValueError:
         return IntegrationKeyReadbackEvidence(status="unavailable")
-    target = RuntimeKeySafetyTarget(
-        context=context_name,
-        instance=instance_name,
-        environment_class=runtime_key_safety_environment_class(instance_name),
-    )
+    target = _lane_target(context_name=context_name, instance_name=instance_name)
     delivered_integration_keys = tuple(
         dict.fromkeys(
             binding.binding_key
-            for binding in store.list_secret_bindings(
-                integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
-                limit=None,
-            )
-            if binding.status == "configured"
-            and runtime_secret_binding_matches_target(binding=binding, target=target)
-            and is_integration_runtime_key(
+            for binding in _delivered_runtime_bindings(store, target=target)
+            if is_integration_runtime_key(
                 binding.binding_key, extra_markers=policy_record.integration_key_markers
             )
         )
@@ -104,4 +103,40 @@ def _integration_key_readback(
             IntegrationKeyReadbackFinding(binding_key=finding.binding_key, code=finding.code)
             for finding in (*evaluation.findings, *evaluation.reported)
         ),
+    )
+
+
+def lane_receives_managed_runtime_bindings(
+    *, record_store: object, context_name: str, instance_name: str
+) -> bool:
+    """Whether the store delivers any configured managed runtime binding to the lane."""
+    if not callable(getattr(record_store, "list_secret_bindings", None)):
+        return False
+    return bool(
+        _delivered_runtime_bindings(
+            cast(RuntimeKeySafetyPolicyReadStore, record_store),
+            target=_lane_target(context_name=context_name, instance_name=instance_name),
+        )
+    )
+
+
+def _lane_target(*, context_name: str, instance_name: str) -> RuntimeKeySafetyTarget:
+    return RuntimeKeySafetyTarget(
+        context=context_name,
+        instance=instance_name,
+        environment_class=runtime_key_safety_environment_class(instance_name),
+    )
+
+
+def _delivered_runtime_bindings(
+    store: RuntimeKeySafetyPolicyReadStore, *, target: RuntimeKeySafetyTarget
+) -> tuple[SecretBinding, ...]:
+    return tuple(
+        binding
+        for binding in store.list_secret_bindings(
+            integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+            limit=None,
+        )
+        if binding.status == "configured"
+        and runtime_secret_binding_matches_target(binding=binding, target=target)
     )

@@ -67,6 +67,10 @@ from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.repository_inventory import RepositoryInventoryRecord
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.contracts.runtime_key_safety_policy import (
+    RuntimeKeySafetyPolicyRecord,
+    RuntimeSecretSafetyRule,
+)
 from control_plane.contracts.secret_record import SecretBinding, SecretRecord
 from control_plane.contracts.odoo_stable_bootstrap_operation import (
     OdooStableBootstrapOperationRecord,
@@ -2540,6 +2544,15 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
             current_version_id="version-before",
             created_at="2026-10-02T00:00:00Z",
             updated_at="2026-10-02T00:00:00Z",
+        )
+        # A testing lane that receives managed keys deploys only under an active policy.
+        self.store.write_runtime_key_safety_policy_record(
+            RuntimeKeySafetyPolicyRecord(
+                record_id="test-policy",
+                source="test",
+                updated_at=record.updated_at,
+                rules=(RuntimeSecretSafetyRule(binding_key=record.name, secret_class="testing"),),
+            )
         )
         self.store.write_secret_record(record)
         self.store.write_secret_binding(
