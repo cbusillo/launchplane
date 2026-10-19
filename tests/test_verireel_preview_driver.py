@@ -19,6 +19,7 @@ from control_plane.workflows.verireel_preview_driver import _preview_application
 from control_plane.workflows.verireel_preview_driver import _preview_database_identifiers
 from control_plane.workflows.verireel_preview_driver import _build_preview_runtime_identity
 from control_plane.workflows.verireel_preview_driver import _build_preview_database_command
+from control_plane.workflows.verireel_preview_driver import _build_admin_database_url
 from control_plane.workflows.verireel_preview_driver import _ensure_application
 from control_plane.workflows.verireel_preview_driver import _preview_database_admin_module_source
 from control_plane.workflows.verireel_preview_driver import _resolve_preview_secret
@@ -82,14 +83,24 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
 
     def test_shared_database_or_role_refuses_before_refresh_or_destroy(self) -> None:
         database, role = _preview_database_identifiers("pr-71")
-        for database_url in (
-            f"postgresql://{role}:password@db:5432/production",
-            f"postgresql://production:password@db:5432/{database}",
-            f"postgresql://{role}:password@other-host:5432/{database}",
+        template_url = "postgresql://admin:password@db:5432/testing"
+        for database_url, template, app_present in (
+            (f"postgresql://{role}:password@db:5432/production", template_url, True),
+            (f"postgresql://production:password@db:5432/{database}", template_url, True),
+            (f"postgresql://{role}:password@other-host:5432/{database}", template_url, True),
+            (f"postgresql://{role}:password@db:5433/{database}", template_url, True),
+            ("", f"postgresql://admin:password@db:5432/{database}", False),
+            ("", f"postgresql://{role}:password@db:5432/testing", False),
+            ("", f"postgresql://admin:password@db:5432/{database}", True),
         ):
             for operation in ("refresh", "destroy"):
                 with (
-                    self.subTest(database_url=database_url, operation=operation),
+                    self.subTest(
+                        database_url=database_url,
+                        template=template,
+                        app_present=app_present,
+                        operation=operation,
+                    ),
                     TemporaryDirectory() as directory,
                     patch(
                         "control_plane.workflows.verireel_preview_driver.dokploy_source.read_dokploy_config",
@@ -99,7 +110,7 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
                         "control_plane.workflows.verireel_preview_driver._template_application_payload",
                         return_value=(
                             _template_target(),
-                            {"env": "DATABASE_URL=postgresql://admin:password@db:5432/testing"},
+                            {"env": f"DATABASE_URL={template}"},
                         ),
                     ),
                     patch(
@@ -108,7 +119,7 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
                     ),
                     patch(
                         "control_plane.workflows.verireel_preview_driver._find_application_by_name",
-                        return_value={"applicationId": "app-preview"},
+                        return_value={"applicationId": "app-preview"} if app_present else None,
                     ),
                     patch(
                         "control_plane.workflows.verireel_preview_driver._fetch_application",
@@ -128,7 +139,7 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
                         side_effect=AssertionError("Unsafe database reached provider effects"),
                     ),
                 ):
-                    with self.assertRaises(click.ClickException):
+                    with self.assertRaises(VeriReelPreviewRefreshConfigError):
                         if operation == "destroy":
                             execute_verireel_preview_destroy(
                                 control_plane_root=Path(directory),
@@ -171,6 +182,7 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
         )
         cleanup_order: list[str] = []
         database, role = _preview_database_identifiers(request.preview_slug)
+        template_database_url = "postgresql://admin:password@db:5432/verireel"
 
         def _delete_recovery_schedule(**kwargs: object) -> None:
             cleanup_order.append("schedule")
@@ -190,7 +202,7 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
                 "control_plane.workflows.verireel_preview_driver._template_application_payload",
                 return_value=(
                     _template_target(),
-                    {"env": "DATABASE_URL=postgresql://admin:password@db:5432/verireel"},
+                    {"env": f"DATABASE_URL={template_database_url}"},
                 ),
             ),
             patch(
@@ -213,17 +225,46 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
             ) as destroy_resource,
             patch(
                 "control_plane.workflows.verireel_preview_driver._run_application_command_with_retries"
-            ),
+            ) as drop,
+            patch(
+                "control_plane.workflows.verireel_preview_driver._build_preview_database_command",
+                wraps=_build_preview_database_command,
+            ) as build_command,
         ):
             result = execute_verireel_preview_destroy(
                 control_plane_root=Path(temporary_directory_name),
                 request=request,
             )
+            self.assertEqual(cleanup_order, ["application"])
+            destroy_resource.assert_called_once()
+            self.assertEqual(result.destroy_status, "pass")
+            self.assertEqual(result.error_message, "")
 
-        self.assertEqual(cleanup_order, ["application"])
-        destroy_resource.assert_called_once()
-        self.assertEqual(result.destroy_status, "pass")
-        self.assertEqual(result.error_message, "")
+            for application in (None, {"applicationId": "app-preview"}):
+                with (
+                    self.subTest(application=application),
+                    patch(
+                        "control_plane.workflows.verireel_preview_driver._find_application_by_name",
+                        return_value=application,
+                    ),
+                    patch(
+                        "control_plane.workflows.verireel_preview_driver._fetch_application",
+                        return_value={"env": ""},
+                    ),
+                ):
+                    drop.reset_mock()
+                    build_command.reset_mock()
+                    retried = execute_verireel_preview_destroy(
+                        control_plane_root=Path(temporary_directory_name), request=request
+                    )
+                    self.assertEqual(retried.destroy_status, "pass")
+                    drop.assert_called_once()
+                    build_command.assert_called_once_with(
+                        action="drop",
+                        admin_database_url=_build_admin_database_url(template_database_url),
+                        database_name=database,
+                        role_name=role,
+                    )
 
     def test_destroy_refuses_incomplete_inventory_before_any_cleanup(self) -> None:
         request = VeriReelPreviewDestroyRequest(

@@ -1507,17 +1507,17 @@ def execute_verireel_preview_destroy(
     application_id = str((application or {}).get("applicationId") or "").strip()
     database_name, role_name = _preview_database_identifiers(request.preview_slug, database_prefix)
     template_database = _parse_database_url(template_database_url)
-    existing_database = None
+    application_payload = None
     if application_id:
         application_payload = _fetch_application(
             host=host, token=token, application_id=application_id
         )
-        existing_database = _resolve_existing_preview_database(
-            application_payload,
-            database_name=database_name,
-            role_name=role_name,
-            template_database=template_database,
-        )
+    existing_database = _resolve_existing_preview_database(
+        application_payload,
+        database_name=database_name,
+        role_name=role_name,
+        template_database=template_database,
+    )
     database_parts = existing_database or _DatabaseParts(
         host=template_database.host,
         port=template_database.port,
