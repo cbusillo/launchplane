@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Literal
+from typing import Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -12,12 +12,58 @@ from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBu
 
 
 ODOO_UPGRADE_REHEARSAL_ROUTE = "/v1/products/{product}/odoo-upgrade-rehearsal"
+ODOO_UPGRADE_REHEARSAL_PREFLIGHT_ROUTE = ODOO_UPGRADE_REHEARSAL_ROUTE + "/preflight"
 REHEARSAL_PUBLIC_FAILURE_MESSAGES = {
     "rehearsal_storage_capacity_insufficient": "No rehearsal action started. Requalify storage capacity and review a new operation key.",
     "rehearsal_precheck_refused": "No rehearsal action started. Requalify the prerequisite and review a new operation key.",
 }
 RehearsalAction = Literal["prepare", "execute", "simulate-final", "verify", "retire"]
 RehearsalState = Literal["planned", "prepared", "upgraded", "switched", "verified", "retired"]
+RehearsalBackingRole = Literal[
+    "database", "filestore", "runner_scratch", "database_scratch", "host_custody"
+]
+
+
+class RehearsalBackingGroup(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    group_id: str = Field(pattern=r"^[a-f0-9]{64}$")
+    available_bytes: int = Field(ge=0, strict=True)
+    roles: tuple[RehearsalBackingRole, ...] = Field(min_length=1)
+
+
+class RehearsalPreflightObservation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    observed_at: datetime
+    reader_host_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    odoo_version: str = Field(pattern=r"^[0-9]+(?:\.[0-9]+)*$")
+    database_bytes: int = Field(gt=0, strict=True)
+    filestore_apparent_bytes: int = Field(ge=0, strict=True)
+    filestore_allocated_bytes: int = Field(ge=0, strict=True)
+    backing_basis: Literal["allocation-parent"]
+    backing_groups: tuple[RehearsalBackingGroup, ...] = Field(min_length=1)
+    read_only: Literal[True]
+
+    @model_validator(mode="after")
+    def complete(self) -> "RehearsalPreflightObservation":
+        roles = [role for group in self.backing_groups for role in group.roles]
+        groups = [group.group_id for group in self.backing_groups]
+        if (
+            self.observed_at.utcoffset() is None
+            or set(roles) != set(get_args(RehearsalBackingRole))
+            or len(roles) != len(set(roles))
+            or len(groups) != len(set(groups))
+        ):
+            raise ValueError("Preflight requires current, complete backing observations.")
+        return self
+
+
+class RehearsalPreflightResult(RehearsalPreflightObservation):
+    product: str = Field(min_length=1)
+    source_context: str = Field(min_length=1)
+    reader_server_id: str = Field(pattern=r"^[a-zA-Z0-9_-]+$")
+    source_binding_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
 class RehearsalPrerequisite(StrEnum):

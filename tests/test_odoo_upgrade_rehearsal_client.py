@@ -21,6 +21,146 @@ from control_plane.contracts.odoo_upgrade_rehearsal import (
 
 
 class RehearsalClientTests(unittest.TestCase):
+    def preflight(
+        self,
+        *,
+        evidence: str = "",
+        changes: dict[str, Any] | None = None,
+        extra_args: tuple[str, ...] = (),
+    ) -> tuple[int, dict[str, Any], Mock, Mock]:
+        from tests.test_odoo_rehearsal_preflight import observation
+
+        client = runpy.run_path(
+            str(Path(__file__).resolve().parents[1] / "scripts/odoo-upgrade-rehearsal.py")
+        )
+        read = Mock(
+            return_value={
+                "status": "accepted",
+                "trace_id": "fixture-preflight-trace",
+                "result": {
+                    **observation(),
+                    "product": "fixture-product",
+                    "source_context": "fixture-context",
+                    "reader_server_id": "fixture-reader",
+                    "source_binding_sha256": "a" * 64,
+                    **(changes or {}),
+                },
+            }
+        )
+        write = Mock(side_effect=AssertionError("Preflight must use only the GET transport"))
+        transport = {
+            "resolve_settings": lambda args: {
+                "service_url": "https://service.invalid",
+                "token": "private-fixture-token",
+            },
+            "validate_service_url": lambda url: None,
+            "request_launchplane_read": read,
+            "request_launchplane": write,
+            "public_trace_id": lambda value: value,
+        }
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            helper = root / "launchplane-write-action.py"
+            helper.touch()
+            args = [
+                "client",
+                "preflight",
+                "--product",
+                "fixture-product",
+                "--source-context",
+                "fixture-context",
+                "--operator-helper",
+                str(helper),
+            ]
+            destination = root / "preflight.json"
+            if evidence:
+                args.extend(("--evidence-file", str(destination)))
+                if evidence == "existing":
+                    destination.write_text("preserved evidence")
+                if evidence == "raced":
+
+                    def concurrent_evidence(**kwargs: Any) -> dict[str, Any]:
+                        destination.write_text("preserved concurrent evidence")
+                        return dict(read.return_value)
+
+                    read.side_effect = concurrent_evidence
+            args.extend(extra_args)
+            output = io.StringIO()
+            with (
+                patch.object(sys, "argv", args),
+                patch("runpy.run_path", return_value=transport),
+                redirect_stdout(output),
+            ):
+                code = client["main"]()
+            result = json.loads(output.getvalue())
+            self.assertNotIn("private-fixture-token", output.getvalue())
+            if evidence == "new" and code == 0:
+                self.assertEqual(json.loads(destination.read_text()), result)
+                self.assertEqual(destination.stat().st_mode & 0o777, 0o600)
+            elif evidence == "raced":
+                self.assertEqual(destination.read_text(), "preserved concurrent evidence")
+            else:
+                self.assertFalse(destination.exists())
+            self.assertEqual(
+                set(root.iterdir()), {helper, destination} if destination.exists() else {helper}
+            )
+        return code, result, read, write
+
+    def test_preflight_uses_only_the_read_transport_with_optional_private_evidence(self) -> None:
+        from control_plane.contracts.odoo_upgrade_rehearsal import (
+            ODOO_UPGRADE_REHEARSAL_PREFLIGHT_ROUTE,
+        )
+
+        for evidence in ("", "new"):
+            with self.subTest(evidence=evidence):
+                code, result, read, write = self.preflight(evidence=evidence)
+                self.assertEqual(code, 0)
+                self.assertEqual(result["status"], "verified")
+                self.assertEqual(result["trace_id"], "fixture-preflight-trace")
+                self.assertEqual(
+                    read.call_args.kwargs["query"], {"source_context": "fixture-context"}
+                )
+                self.assertEqual(
+                    read.call_args.kwargs["path"],
+                    ODOO_UPGRADE_REHEARSAL_PREFLIGHT_ROUTE.format(product="fixture-product"),
+                )
+                self.assertNotIn("idempotency_key", read.call_args.kwargs)
+                self.assertNotIn("body", read.call_args.kwargs)
+                write.assert_not_called()
+
+    def test_preflight_refuses_foreign_or_incomplete_observations_before_saving_evidence(
+        self,
+    ) -> None:
+        cases: tuple[dict[str, Any], ...] = (
+            {"product": "another-product"},
+            {"source_context": "another-context"},
+            {"backing_groups": []},
+        )
+        for changes in cases:
+            with self.subTest(changes=changes):
+                code, result, read, write = self.preflight(evidence="new", changes=changes)
+                self.assertNotEqual(code, 0)
+                self.assertEqual(result["status"], "unavailable")
+                self.assertFalse(result["original_key_required"])
+                read.assert_called_once()
+                write.assert_not_called()
+
+    def test_preflight_rejects_existing_evidence_and_rehearsal_keys(self) -> None:
+        for kwargs in (
+            {"evidence": "existing"},
+            {"extra_args": ("--idempotency-key", "forbidden-key")},
+            {"extra_args": ("--payload-file", "/nonexistent/intent.json")},
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaises(SystemExit):
+                self.preflight(**kwargs)
+
+    def test_preflight_preserves_evidence_created_while_the_read_is_in_progress(self) -> None:
+        code, result, read, write = self.preflight(evidence="raced")
+        self.assertNotEqual(code, 0)
+        self.assertEqual(result["status"], "unavailable")
+        read.assert_called_once()
+        write.assert_not_called()
+
     def call(
         self,
         mode: str,
