@@ -187,6 +187,8 @@ class RehearsalHostResult(BaseModel):
             "attachment_unreadable",
             "attachment_size_mismatch",
             "attachment_hash_mismatch",
+            "attachment_size_and_hash_mismatch",
+            "attachment_content_matches_checksum_size_mismatch",
             "verified",
             "incomplete",
             "writer_active",

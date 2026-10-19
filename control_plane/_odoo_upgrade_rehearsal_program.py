@@ -417,7 +417,8 @@ def attachment_validation(containers, database, mode):
         'dependency_unavailable','environment_unavailable','database_unavailable',
         'attachment_query_unavailable','attachment_metadata_invalid','attachment_path_unsafe',
         'attachment_missing','attachment_unreadable','attachment_size_mismatch',
-        'attachment_hash_mismatch','verified','incomplete'}:
+        'attachment_hash_mismatch','attachment_size_and_hash_mismatch',
+        'attachment_content_matches_checksum_size_mismatch','verified','incomplete'}:
         raise RuntimeError('Attachment observation is unverified')
     return value['reason']
 

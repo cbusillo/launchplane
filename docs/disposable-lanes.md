@@ -2642,6 +2642,15 @@ The observation allows up to ten minutes of scanning within the existing host
 job limit, so a large retained filestore can reach its content checks. It holds
 the existing execution lock for that scan; an incomplete scan still grants no
 continuation and starts from the beginning on a later observation.
+When the first size mismatch is found, readback hashes that same open regular
+file within the remaining budget. `attachment_content_matches_checksum_size_mismatch`
+means its bytes match the database checksum despite different `file_size`
+metadata; `attachment_size_and_hash_mismatch` means both disagree. Neither code
+proves the retained archive, other attachments, sanitization or recovery
+eligibility. No attachment path, checksum or size is exported. The file must
+remain stable while hashed. Capture/apply still refuses a size mismatch before
+hashing; these additional readback codes do not relax that gate or authorize a
+metadata rewrite. A timeout retains `incomplete` and the original hold.
 `failure_events_after_checkpoint` projects bounded provider event identities,
 times, fixed provider statuses, traceback presence, host function names and
 native traceback line numbers from
