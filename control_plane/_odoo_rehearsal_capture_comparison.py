@@ -42,7 +42,7 @@ def capture_comparison_file(path):
             raise ValueError('Capture comparison custody changed')
 
 
-def captured_attachment_table_lines(stream,containers,deadline,output_limit):
+def captured_attachment_table_chunks(stream,containers,deadline,output_limit):
     # Decode selected table data to a pipe. No database connection, SQL
     # execution, output file, dump copy or application runtime is involved.
     remaining=max(1,int(deadline-time.monotonic()))
@@ -53,7 +53,6 @@ def captured_attachment_table_lines(stream,containers,deadline,output_limit):
     try:
         with selectors.DefaultSelector() as selector:
             selector.register(process.stdout,selectors.EVENT_READ)
-            pending=b''
             consumed=0
             while True:
                 remaining=deadline-time.monotonic()
@@ -61,20 +60,11 @@ def captured_attachment_table_lines(stream,containers,deadline,output_limit):
                     raise TimeoutError('Captured database observation expired')
                 chunk=os.read(process.stdout.fileno(),65536)
                 if not chunk:
-                    if pending:
-                        raise ValueError('Captured database output is incomplete')
                     break
                 consumed+=len(chunk)
                 if consumed>output_limit:
                     raise ValueError('Captured database output exceeds its bound')
-                pending+=chunk
-                while b'\n' in pending:
-                    line,pending=pending.split(b'\n',1)
-                    if len(line)>1048576:
-                        raise ValueError('Captured database row exceeds its bound')
-                    yield line+b'\n'
-                if len(pending)>1048576:
-                    raise ValueError('Captured database row exceeds its bound')
+                yield chunk
         remaining=deadline-time.monotonic()
         if remaining<=0:
             raise TimeoutError('Captured database observation expired')
@@ -92,34 +82,64 @@ def captured_attachment_table_lines(stream,containers,deadline,output_limit):
         process.wait()
 
 
-def captured_attachment_reference_present(lines,reference):
+def captured_attachment_reference_present(chunks,reference):
     prefix=b'COPY public.ir_attachment ('
     suffix=b') FROM stdin;\n'
     columns=None
     complete=False
     found=False
-    for line in lines:
-        if line.startswith(b'COPY '):
-            if columns is not None or not line.startswith(prefix) or not line.endswith(suffix):
-                raise ValueError('Captured attachment table is ambiguous')
-            columns=line[len(prefix):-len(suffix)].split(b', ')
-            if (len(columns)!=len(set(columns)) or
-                    not all(key in columns for key in (b'store_fname',b'checksum',b'file_size'))):
-                raise ValueError('Captured attachment columns are unavailable')
-            indexes=[columns.index(key) for key in (b'store_fname',b'checksum',b'file_size')]
-            continue
-        if columns is None or complete:
-            continue
-        if line==b'\\.\n':
-            complete=True
-            continue
-        values=line.rstrip(b'\n').split(b'\t')
-        if len(values)!=len(columns):
-            raise ValueError('Captured attachment row is incomplete')
-        if [values[index] for index in indexes]==[
-                reference['name'].encode(),reference['checksum'].encode(),str(reference['size']).encode()]:
-            found=True
-    if not complete:
+    metadata=b''
+    index=0
+    offset=0
+    marker=b''
+    row_matches=True
+    expected={}
+    for chunk in chunks:
+        # COPY escapes tabs/newlines inside values. Only literal delimiters
+        # end fields/rows. Compare the three short values incrementally;
+        # discard arbitrary-length index_content/db_datas and other fields.
+        for part in re.split(b'([\t\n])',chunk):
+            if columns is None or complete:
+                metadata+=part
+                if len(metadata)>65536:
+                    raise ValueError('Captured database metadata exceeds its bound')
+                if part!=b'\n':
+                    continue
+                line,metadata=metadata,b''
+                if not line.startswith(b'COPY '):
+                    continue
+                if columns is not None or not line.startswith(prefix) or not line.endswith(suffix):
+                    raise ValueError('Captured attachment table is ambiguous')
+                columns=line[len(prefix):-len(suffix)].split(b', ')
+                keys=(b'store_fname',b'checksum',b'file_size')
+                if len(columns)!=len(set(columns)) or not all(key in columns for key in keys):
+                    raise ValueError('Captured attachment columns are unavailable')
+                values=(reference['name'].encode(),reference['checksum'].encode(),str(reference['size']).encode())
+                expected={columns.index(key):value for key,value in zip(keys,values)}
+                continue
+            if part not in (b'\t',b'\n'):
+                if index==0:
+                    marker=(marker+part)[:3]
+                if index in expected and part!=expected[index][offset:offset+len(part)]:
+                    row_matches=False
+                offset+=len(part)
+                continue
+            if part==b'\n' and index==0 and offset==2 and marker==b'\\.':
+                complete=True
+                continue
+            if index in expected and offset!=len(expected[index]):
+                row_matches=False
+            if part==b'\t':
+                index+=1
+                if index>=len(columns):
+                    raise ValueError('Captured attachment row has excess fields')
+                offset=0
+                continue
+            if index+1!=len(columns):
+                raise ValueError('Captured attachment row is incomplete')
+            found=found or row_matches
+            index,offset,marker,row_matches=0,0,b'',True
+    if not complete or metadata:
         raise ValueError('Captured attachment table is incomplete')
     return found
 
@@ -162,7 +182,7 @@ def compare_captured_database_reference(spec,root,containers,reference):
             if consumed!=metadata.st_size or value.hexdigest()!=receipt['database_sha256']:
                 return 'unavailable'
             stream.seek(0)
-            lines=captured_attachment_table_lines(stream,containers,deadline,bound)
+            lines=captured_attachment_table_chunks(stream,containers,deadline,bound)
             try:
                 found=captured_attachment_reference_present(lines,reference)
             finally:

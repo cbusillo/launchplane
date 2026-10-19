@@ -2695,8 +2695,10 @@ production data or identifying which attachment row originally failed.
 decoded selected table; it does not establish a sanitizer defect.
 Unsupported, incomplete, changed or unavailable input returns `unavailable`;
 the ten-minute dump/hash/decode budget returns `incomplete` on expiry. Decoded
-output is bounded by the reviewed database byte budget, and individual lines
-are bounded to one MiB. The decoder has a native timeout and its local process
+output is bounded by the reviewed database byte budget. The parser compares
+only the three required fields incrementally and discards other content, so a
+large `index_content` or `db_datas` value does not require buffering its row.
+SQL metadata is bounded separately. The decoder has a native timeout and its local process
 and pipes are closed on every exit. These codes keep the original journal and
 `hold_unknown`; they authorize neither data repair nor resumed execution.
 `failure_events_after_checkpoint` projects bounded provider event identities,

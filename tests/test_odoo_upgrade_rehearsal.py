@@ -1571,24 +1571,28 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         processes = []
         output = b"COPY fixture\nrow\n"
         exit_code = 0
+        stall = False
+        output_fixture = root / "decoder-output-fixture"
 
         def decoder_process(arguments: list[str], **kwargs: Any) -> Any:
             self.assertIn("--file=-", arguments)
             self.assertFalse(any(arg == "-d" or arg.startswith("--dbname") for arg in arguments))
+            output_fixture.write_bytes(output)
             program = (
-                "import sys; assert sys.stdin.buffer.read()==b'fixture stdin'; "
-                f"sys.stdout.buffer.write(bytes.fromhex({output.hex()!r})); sys.exit({exit_code})"
+                "import sys,time; from pathlib import Path; assert sys.stdin.buffer.read()==b'fixture stdin'; "
+                f"sys.stdout.buffer.write(Path({str(output_fixture)!r}).read_bytes()); "
+                f"time.sleep(5 if {stall!r} else 0); sys.exit({exit_code})"
             )
             process = original_popen([sys.executable, "-c", program], **kwargs)
             processes.append(process)
             return process
 
-        decode = self.host["captured_attachment_table_lines"]
+        decode = self.host["captured_attachment_table_chunks"]
         with patch.object(self.host["subprocess"], "Popen", side_effect=decoder_process):
             with dump.open("rb") as stream:
                 self.assertEqual(
-                    list(decode(stream, self.inspect(), time.monotonic() + 10, len(output))),
-                    output.splitlines(keepends=True),
+                    b"".join(decode(stream, self.inspect(), time.monotonic() + 10, len(output))),
+                    output,
                 )
             with dump.open("rb") as stream, self.assertRaises(ValueError):
                 list(decode(stream, self.inspect(), time.monotonic() + 10, len(output) - 1))
@@ -1600,6 +1604,30 @@ class RehearsalHostSafetyTests(unittest.TestCase):
                 list(decode(stream, self.inspect(), time.monotonic() + 10, len(output)))
             with dump.open("rb") as stream, self.assertRaises(TimeoutError):
                 list(decode(stream, self.inspect(), time.monotonic() - 1, len(output)))
+            exit_code = 137  # An unexplained hard kill is not proof of timeout.
+            with dump.open("rb") as stream, self.assertRaises(ValueError):
+                list(decode(stream, self.inspect(), time.monotonic() + 10, len(output)))
+            stall = True
+            with dump.open("rb") as stream, self.assertRaises(TimeoutError):
+                list(decode(stream, self.inspect(), time.monotonic() + 0.1, len(output)))
+            stall = False
+            exit_code = 0
+            checksum = hashlib.sha1(b"attachment fixture").hexdigest()
+            name = checksum[:2] + "/" + checksum
+            reference = {"name": name, "checksum": checksum, "size": 19}
+            output = (
+                b"COPY public.ir_attachment (name, store_fname, checksum, file_size) FROM stdin;\n"
+                + b"x" * (2 * 1024**2)
+                + b"\t\\N\t\\N\t0\n"
+                + ("target\t" + name + "\t" + checksum + "\t19\n\\.\n").encode()
+            )
+            with dump.open("rb") as stream:
+                self.assertTrue(
+                    self.host["captured_attachment_reference_present"](
+                        decode(stream, self.inspect(), time.monotonic() + 10, len(output)),
+                        reference,
+                    )
+                )
         self.assertTrue(all(process.poll() is not None for process in processes))
         self.assertEqual(dump.read_bytes(), b"fixture stdin")
 
@@ -1643,10 +1671,22 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         decoder = Mock(return_value=iter(lines))
         compare = self.host["compare_captured_database_reference"]
         before = {p: p.read_bytes() for p in (root / "capture.json", dump)}
-        with patch.dict(self.host, {"captured_attachment_table_lines": decoder}):
+        with patch.dict(self.host, {"captured_attachment_table_chunks": decoder}):
             self.assertEqual(compare(spec, root, self.inspect(), reference), "reference_present")
             decoder.return_value = iter([header, row.replace(b"\t19\t", b"\t20\t"), b"\\.\n"])
             self.assertEqual(compare(spec, root, self.inspect(), reference), "reference_not_found")
+            large_row = b"41\t" + b"x" * (2 * 1024**2) + b"\t0\t\\N\t\\N\n"
+            sql_output = header + large_row + row + b"\\.\n"
+            self.assertTrue(
+                self.host["captured_attachment_reference_present"](
+                    (sql_output[i : i + 65536] for i in range(0, len(sql_output), 65536)), reference
+                )
+            )
+            self.assertTrue(
+                self.host["captured_attachment_reference_present"](
+                    (bytes([value]) for value in header + row + b"\\.\n"), reference
+                )
+            )
             decoder.return_value = iter([header, row])
             self.assertEqual(compare(spec, root, self.inspect(), reference), "unavailable")
             decoder.return_value = iter([header, b"too\tfew\n", b"\\.\n"])
@@ -1818,7 +1858,7 @@ class RehearsalHostSafetyTests(unittest.TestCase):
             b"\\.\n",
         ]
         with patch.dict(
-            self.host, {"captured_attachment_table_lines": Mock(return_value=iter(table))}
+            self.host, {"captured_attachment_table_chunks": Mock(return_value=iter(table))}
         ):
             observed = self.run_host(spec)
         RehearsalHostResult.model_validate(observed)
