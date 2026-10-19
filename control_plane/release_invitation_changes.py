@@ -1,12 +1,14 @@
-"""Client-facing invitation changes from persisted preview and train evidence."""
+"""Invitation content and notification evidence for release changes."""
 
 import hashlib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol, cast
 from urllib.parse import parse_qs, urlsplit
 
-from control_plane.client_test_notes import _markdown_lines
+from github_plan_status.client_test_notes import ENGINEERING_RELEASE_TESTS
+
+from control_plane.client_test_notes import _markdown_lines, client_test_notes
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlanRecord
@@ -46,6 +48,8 @@ class InvitationChange:
     legacy_url: str
     feature_name: str = ""
     batch_pull_request_number: int | None = None
+    client_review_requested: bool = False
+    release_test_notes: str = ""
 
 
 def _invitation_batch(
@@ -187,11 +191,15 @@ def client_invitation_changes(
         decisions = store.list_product_review_decision_records(
             repository=repository, pull_request_number=item.pull_request_number
         )
-        if (repository.casefold(), item.pull_request_number) in requested or any(
+        client_review_requested = (
+            repository.casefold(),
+            item.pull_request_number,
+        ) in requested or any(
             decision.product == profile.product
             and decision.owner_github_id == profile.owner.github_id
             for decision in decisions
-        ):
+        )
+        if client_review_requested:
             if not item.owner_test_notes.strip():
                 batch = (
                     f" in batch {repository}#{change.batch_pull_request_number}"
@@ -208,6 +216,20 @@ def client_invitation_changes(
                     f"{repository}#{item.pull_request_number}{batch}. "
                     f"{advice}"
                 )
+        # Release-only test steps belong in an opened request, but never supply
+        # the preview-review evidence that opens one or sends a new Client ping.
+        notes = re.sub(r"<!--[\s\S]*?-->", "", item.owner_test_notes).strip()
+        first, _, steps = notes.partition("\n")
+        release_test_notes = (
+            steps.strip()
+            if first == ENGINEERING_RELEASE_TESTS and not client_test_notes(notes).error
+            else ""
+        )
+        if client_review_requested or release_test_notes:
             key = hashlib.sha256(f"{repository}:{item.pull_request_number}".encode()).hexdigest()
-            changes[key] = change
+            changes[key] = replace(
+                change,
+                client_review_requested=client_review_requested,
+                release_test_notes=release_test_notes,
+            )
     return changes

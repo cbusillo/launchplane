@@ -10,6 +10,8 @@ from typing import Any, cast
 import unittest
 from unittest.mock import patch
 
+from github_plan_status.client_test_notes import ENGINEERING_RELEASE_TESTS
+
 from control_plane.contracts.release_review import (
     ReleaseReviewDecisionRecord,
     ReleaseReviewItem,
@@ -75,6 +77,7 @@ from tests.test_release_review import decision, github_read, profile, seed
 
 class ReleaseInvitationTests(unittest.TestCase):
     def test_manual_request_adoption_is_receipt_only_and_preserves_original(self) -> None:
+        release_test_change = self.add_release_test_change()
         assert self.review.checklist is not None
         candidate_marker = release_invitation_marker(
             self.profile.product, self.review.checklist.candidate
@@ -133,6 +136,13 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.assertEqual(len(self.posts), 2)
         self.assertTrue(adopt_release_invitation(**kwargs, dry_run=False))
         self.assertEqual(len(self.posts), 2)
+        # Adoption covers only already-requested Client changes. Later preview
+        # evidence for a release-only change is still a material addition.
+        self.record_client_evidence(release_test_change, request_only=True)
+        self.change_candidate(source_commit="e" * 40)
+        self.assertTrue(self.publish())
+        self.assertEqual(len(self.posts), 3)
+        self.assertIn(f"@{self.profile.owner.github_login}", self.comments[-1]["body"])
         self.complete_release()
         self.assertFalse(self.publish())
         self.assertEqual(self.comments[0], original)
@@ -255,10 +265,11 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.lose_response = False
         self.read_count = 0
         self.now = datetime.now(UTC)
+        self.public_origin = "https://launchplane.example.invalid"
         for target, replacement in (
             ("_now", lambda: self.now),
             ("monotonic", lambda: self.now.timestamp()),
-            ("launchplane_public_origin_from_env", lambda: "https://launchplane.example.invalid"),
+            ("launchplane_public_origin_from_env", lambda: self.public_origin),
             ("current_release_review", self.read_review),
             ("resolve_launchplane_github_token", lambda **kwargs: "delivery-token"),
             ("resolve_delivery_github_app_id", lambda **kwargs: 77),
@@ -1039,6 +1050,142 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.assertEqual(
             self.store.list_release_review_decision_records(product="example-site"), ()
         )
+
+    def add_release_test_change(self) -> ReleaseReviewItem:
+        assert self.review.checklist is not None
+        item = self.review.checklist.items[0].model_copy(
+            update={
+                "pull_request_number": 51,
+                "url": "https://github.com/example/site/pull/51",
+                "owner_test_notes": ENGINEERING_RELEASE_TESTS
+                + "\nCheck login and logout on the testing site.",
+            }
+        )
+        self.review = self.review.model_copy(
+            update={
+                "checklist": self.review.checklist.model_copy(
+                    update={"items": (*self.review.checklist.items, item)}
+                )
+            }
+        )
+        return item
+
+    def test_release_test_steps_appear_on_urgent_opening_without_automatic_request(self) -> None:
+        self.make_engineering_only()
+        item = self.add_release_test_change()
+        for backoff in (None, ReleaseInvitationBackoff()):
+            self.assertFalse(self.publish(backoff))
+        self.assertEqual((self.issues, self.posts, self.edits), ([], [], []))
+        self.assertTrue(self.publish(urgent_reason="Verify the login reliability fix."))
+        body = self.comments[0]["body"]
+        self.assertIn(item.url, body)
+        self.assertIn(item.owner_test_notes.splitlines()[1], body)
+        self.assertNotIn(ENGINEERING_RELEASE_TESTS, body)
+        self.assertEqual(
+            self.store.list_release_review_decision_records(product=self.profile.product), ()
+        )
+        # A new engineering-only candidate never reopens a decided release.
+        assert self.review.checklist is not None
+        accepted = decision(self.store, date=self.now.isoformat()).model_copy(
+            update={"checklist": self.review.checklist}
+        )
+        self.store.write_release_review_decision_record(accepted)
+        posts = len(self.posts)
+        self.now += timedelta(seconds=1)
+        self.change_candidate(source_commit="e" * 40)
+        self.assertFalse(self.publish(ReleaseInvitationBackoff()))
+        self.assertEqual(len(self.posts), posts)
+        self.assertEqual(
+            self.store.list_release_review_decision_records(product=self.profile.product),
+            (accepted,),
+        )
+
+    def test_release_test_additions_update_current_request_without_another_ping(self) -> None:
+        assert self.review.checklist is not None
+        original = self.review.checklist.items[0]
+        self.assertTrue(self.publish())
+        posts = len(self.posts)
+        item = self.add_release_test_change()
+        self.change_candidate(source_commit="e" * 40)
+        self.assertTrue(self.publish(ReleaseInvitationBackoff()))
+        self.assertEqual(len(self.posts), posts)
+        self.assertEqual(len(self.comments), 1)
+        body = self.comments[0]["body"]
+        self.assertIn(item.url, body)
+        self.assertIn(item.owner_test_notes.splitlines()[1], body)
+        self.assertNotIn(f"@{self.profile.owner.github_login}", body)
+        self.assertNotIn(ENGINEERING_RELEASE_TESTS, body)
+        # Q121's new ping names only the additions. The following silent update
+        # restores the complete testing list, including release-only steps.
+        self.add_client_change(43)
+        assert self.review.checklist is not None
+        addition = self.review.checklist.items[-1]
+        self.change_candidate(source_commit="f" * 40)
+        self.assertTrue(self.publish())
+        self.assertEqual(len(self.posts), posts + 1)
+        self.assertIn(addition.url, self.comments[-1]["body"])
+        self.assertNotIn(original.url, self.comments[-1]["body"])
+        self.assertNotIn(item.url, self.comments[-1]["body"])
+        self.assertTrue(self.publish())
+        self.assertEqual(len(self.posts), posts + 1)
+        self.assertIn(item.url, self.comments[-1]["body"])
+        self.assertIn(item.owner_test_notes.splitlines()[1], self.comments[-1]["body"])
+        self.assertNotIn(f"@{self.profile.owner.github_login}", self.comments[-1]["body"])
+
+    def test_current_request_and_reminder_refresh_release_steps_without_an_extra_ping(self) -> None:
+        self.make_engineering_only()
+        self.assertTrue(self.publish(urgent_reason="Reliability fix."))
+        # Model a request emitted by the old publisher for the same candidate:
+        # adding the previously omitted checklist item changes no lane version.
+        release_page = f"{self.public_origin}/ui/owner-review?product={self.profile.product}"
+
+        def release_action(body: str) -> str:
+            return next(paragraph for paragraph in body.split("\n\n") if release_page in paragraph)
+
+        no_test_action = release_action(self.comments[0]["body"])
+        item = self.add_release_test_change()
+        posts = len(self.posts)
+        self.assertTrue(self.publish(ReleaseInvitationBackoff()))
+        self.assertEqual(len(self.posts), posts)
+        body = self.comments[0]["body"]
+        self.assertIn(item.url, body)
+        self.assertIn(item.owner_test_notes.splitlines()[1], body)
+        self.assertNotEqual(release_action(body), no_test_action)
+        self.now += timedelta(days=4)
+        self.assertTrue(self.publish())
+        self.assertEqual(len(self.posts), posts + 1)
+        self.assertIn(item.owner_test_notes.splitlines()[1], self.comments[-1]["body"])
+        self.assertNotEqual(release_action(self.comments[-1]["body"]), no_test_action)
+
+    def test_batch_release_test_steps_use_the_constituent_without_preview_evidence(self) -> None:
+        batch = self.seed_train_batch()
+        assert self.review.checklist is not None
+        steps = "Check login and logout on the testing site."
+        notes = f"### #41 Login reliability\n{ENGINEERING_RELEASE_TESTS}\n{steps}\n\n"
+        self.review = self.review.model_copy(
+            update={
+                "checklist": self.review.checklist.model_copy(
+                    update={
+                        "items": (
+                            batch.model_copy(
+                                update={"owner_test_notes": notes + batch.owner_test_notes}
+                            ),
+                        )
+                    }
+                )
+            }
+        )
+        # Without preview-review evidence, even this recorded batch stays quiet.
+        with patch.object(self.store, "list_product_review_decision_records", return_value=()):
+            self.assertFalse(self.publish())
+        self.assertEqual((self.issues, self.posts), ([], []))
+        self.assertTrue(self.publish())
+        body = self.comments[0]["body"]
+        self.assertIn("https://github.com/example/site/pull/41", body)
+        self.assertIn("https://github.com/example/site/pull/43", body)
+        self.assertIn(steps, body)
+        self.assertNotIn(batch.url, body)
+        self.assertNotIn(ENGINEERING_RELEASE_TESTS, body)
 
     def test_engineering_only_after_decision_waits_then_rides_with_client_release(self) -> None:
         self.assertTrue(self.publish())
