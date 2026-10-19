@@ -123,11 +123,22 @@ test("a changed-build admission refusal returns to inspection without another wr
   let saved;
   let writes = 0;
   await assert.rejects(runTestingRebuild(original, dependencies({
-    submit: async () => { writes++; throw new LaunchplaneApiError("Inspect again", 409, "refusal-trace", "testing_rebuild_not_ready"); },
+    submit: async (_product, _payload, options) => { options.onDispatch(); writes++; throw new LaunchplaneApiError("Inspect again", 409, "refusal-trace", "testing_rebuild_not_ready"); },
     persist: value => { saved = value; },
   })));
   assert.equal(saved, null);
   assert.equal(writes, 1);
+});
+
+test("a dispatched key collision retains the original request for observation", async () => {
+  let saved;
+  await assert.rejects(runTestingRebuild(original, dependencies({
+    submit: async (_product, _payload, options) => { options.onDispatch(); throw new LaunchplaneApiError("Key already used", 409, "collision-trace", "idempotency_key_reused"); },
+    persist: value => { saved = value; },
+  })));
+  assert.equal(saved.key, original.key);
+  assert.deepEqual(saved.payload, original.payload);
+  assert.equal(saved.dispatchStarted, true);
 });
 
 test("an expired watch retains its admitted operation and can resume by reading", async () => {

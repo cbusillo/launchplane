@@ -1004,6 +1004,12 @@ verification failures carry `testing_rebuild_inputs_unverified`; an unfinished
 rebuild carries `testing_rebuild_active`.
 These are preflight conflicts (HTTP 409), not request-schema errors. Provider
 authorization denials remain denials; exception/provider payloads are not exposed.
+Inspection keeps its diagnostic checkpoint. The signed-in submit adapter uses
+the stable `testing_rebuild_not_ready` admission code for a refusal proven before
+enqueue, with the safe specific message. Browser recovery can then return a
+first refused submit to inspection without maintaining a copy of checkpoint
+codes. Key collisions and uncertain or previously dispatched requests retain
+their original request and key.
 
 Staff holds and the hold writer's timestamp/source label are excluded from the
 shared serving-target input projection. A hold pauses preparation and cutover;

@@ -165,6 +165,26 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
             self.store.read_artifact_manifest(self.manifest.artifact_id)
         self.assertEqual(self.fixture.effects, [])
 
+    async def test_submit_admission_disposition_is_independent_of_inspection_checkpoint(
+        self,
+    ) -> None:
+        from control_plane.testing_rebuild_service import TestingRebuildRefused
+
+        before = self.store.list_odoo_stable_target_replacement_operation_records()
+        failure = TestingRebuildRefused(
+            "testing_route_compilation_failed", "Testing route compilation refused."
+        )
+        with patch.object(preflight, "capture_rebuild_intent", side_effect=failure):
+            inspected = await self.call("GET", path=self.url + "/inputs")
+            submitted = await self.call("POST", self.payload)
+        for response, code in ((inspected, failure.code), (submitted, "testing_rebuild_not_ready")):
+            self.assertEqual(response.status_code, 409, response.text)
+            self.assertEqual(response.json()["error"]["code"], code)
+            self.assertEqual(response.json()["error"]["message"], str(failure))
+            self.assertTrue(response.json()["trace_id"])
+        self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), before)
+        self.assertEqual(self.fixture.effects, [])
+
     async def test_provider_denial_and_unavailable_preflight_cannot_queue(self) -> None:
         import click
         from control_plane.dokploy import api
@@ -209,6 +229,8 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
                         response.json()["error"]["code"],
                         "authorization_denied"
                         if status == 403
+                        else "testing_rebuild_not_ready"
+                        if method == "POST"
                         else "testing_rebuild_inputs_unverified",
                     )
                     self.assertNotIn("private-", response.text)

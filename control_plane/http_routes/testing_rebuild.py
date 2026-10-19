@@ -168,7 +168,7 @@ def register_testing_rebuild_routes(
             ),
         )
 
-    def refuse(error: Exception, trace_id: str) -> NoReturn:
+    def refuse(error: Exception, trace_id: str, *, admission: bool = False) -> NoReturn:
         if isinstance(error, NativeSourceAuthorizationDenied):
             status, code, message = (
                 403,
@@ -176,7 +176,13 @@ def register_testing_rebuild_routes(
                 "The existing provider identity refused the testing preflight read.",
             )
         elif isinstance(error, TestingRebuildRefused):
-            status, code, message = 409, error.code, str(error)
+            # A submit refusal proves no operation was queued. Keep that stable
+            # browser recovery contract separate from the inspection checkpoint.
+            status, code, message = (
+                409,
+                "testing_rebuild_not_ready" if admission else error.code,
+                str(error),
+            )
         else:
             status, code, message = (
                 409,
@@ -300,7 +306,7 @@ def register_testing_rebuild_routes(
             BuildProvenanceError,
             click.ClickException,
         ) as error:
-            refuse(error, trace_id)
+            refuse(error, trace_id, admission=True)
 
         try:
             records, _ = enqueue_odoo_target_replacement_apply_operation(
@@ -332,7 +338,7 @@ def register_testing_rebuild_routes(
                 message="Testing changed or another operation holds the lane. Inspect again.",
             ) from error
         except OdooTargetReplacementApplyAdmissionRefusedError as error:
-            refuse(error, trace_id)
+            refuse(error, trace_id, admission=True)
         operation_id = str(records["odoo_stable_target_replacement_operation_id"])
         return response(
             store.read_odoo_stable_target_replacement_operation_record(operation_id), trace_id

@@ -199,10 +199,17 @@ def capture_rebuild_intent(
     ):
         raise ValueError("Rebuild requires an exclusive active Odoo testing context.")
     lane = next(
-        item
-        for item in profile.lanes
-        if (item.context, item.instance) == (operation.context, "testing")
+        (
+            item
+            for item in profile.lanes
+            if (item.context, item.instance) == (operation.context, "testing")
+        ),
+        None,
     )
+    if lane is None:
+        raise TestingRebuildRefused(
+            "testing_rebuild_inputs_unverified", "The original testing lane is unavailable."
+        )
     before = read_snapshot(store, product=operation.product, context=operation.context)
     if (before.target.context, before.target.instance, before.target.target_type) != (
         operation.context,

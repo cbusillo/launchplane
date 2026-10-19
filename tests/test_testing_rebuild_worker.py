@@ -599,6 +599,25 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertEqual(self.effects, [])
         self.assertEqual(self.current(), self.fixture.before)
 
+    def test_capture_refuses_a_removed_lane_with_retained_context_ownership(self) -> None:
+        profile = self.store.read_product_profile_record(self.operation.product)
+        self.store.write_product_profile_record(
+            profile.model_copy(
+                update={
+                    "lanes": tuple(
+                        lane for lane in profile.lanes if lane.context != self.operation.context
+                    ),
+                    "historical_contexts": (*profile.historical_contexts, self.operation.context),
+                }
+            )
+        )
+        with patch.object(DokployTestingRouteTransport, "read") as read:
+            with self.assertRaises(service.TestingRebuildRefused) as refused:
+                self.capture_function(root=self.root, store=self.store, operation=self.operation)
+        self.assertEqual(refused.exception.code, "testing_rebuild_inputs_unverified")
+        read.assert_not_called()
+        self.assertEqual(self.effects, [])
+
     def test_one_action_preserves_address_credentials_and_retires_only_after_publication(
         self,
     ) -> None:

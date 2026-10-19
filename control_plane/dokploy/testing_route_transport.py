@@ -412,10 +412,15 @@ class DokployTestingRouteTransport:
 
     def read(self) -> dict[str, Any]:
         frame = self._run({"mode": "read"})
-        static = yaml.safe_load(frame["static_configuration"])
-        provider = static.get("providers", {}).get("file", {}) if isinstance(static, dict) else {}
+        try:
+            static = yaml.safe_load(frame["static_configuration"])
+        except yaml.YAMLError:
+            static = None
+        providers = static.get("providers") if isinstance(static, dict) else None
+        provider = providers.get("file") if isinstance(providers, dict) else None
         if (
-            provider.get("directory") != TRAEFIK_DYNAMIC_DIRECTORY
+            not isinstance(provider, dict)
+            or provider.get("directory") != TRAEFIK_DYNAMIC_DIRECTORY
             or provider.get("watch") is not True
         ):
             raise TestingRouteObservationRefused(

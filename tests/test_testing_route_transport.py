@@ -849,6 +849,13 @@ class TestingRouteTransportTests(unittest.TestCase):
                 {"static_configuration": "providers: {file: {watch: false}}"},
                 "testing_route_provider_unverified",
             ),
+            ({"static_configuration": "[invalid-yaml"}, "testing_route_provider_unverified"),
+            ({"static_configuration": "providers: null"}, "testing_route_provider_unverified"),
+            ({"static_configuration": "providers: []"}, "testing_route_provider_unverified"),
+            (
+                {"static_configuration": "providers: {file: []}"},
+                "testing_route_provider_unverified",
+            ),
         ):
             with (
                 self.subTest(expected=expected),

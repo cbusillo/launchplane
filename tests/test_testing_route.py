@@ -151,9 +151,9 @@ class TestingRouteTests(unittest.TestCase):
         document = route_document(plan, self.new)
         applied = self.apply(plan, self.new)
         self.assertEqual(observe_testing_route(plan, applied, document), self.new)
-        self.assertEqual(
-            applied["routers"]["acme-http@internal"], original["routers"]["acme-http@internal"]
-        )
+        applied["routers"]["acme-http@internal"]["rule"] = "PathPrefix(`/`)"
+        with self.assertRaises(ValueError):
+            observe_testing_route(plan, applied, document)
 
     def test_equivalent_docker_aliases_are_bound_and_observed_individually(self) -> None:
         self.raw["services"]["alias@docker"] = deepcopy(self.raw["services"]["old@docker"])
