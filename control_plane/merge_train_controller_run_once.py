@@ -1,3 +1,4 @@
+from control_plane.contracts.github_app_installation_token import GitHubAppInstallationToken
 import hashlib
 from control_plane.merge_train_pr_feedback import queue_landing_planning_feedback
 from control_plane.merge_train_policy_binding import merge_train_policy_bindings_match
@@ -421,7 +422,7 @@ def execute_merge_train_controller_run_once(
     policy: MergeTrainPolicy,
     policy_sha256: str,
     repository_policy: MergeTrainRepositoryPolicy,
-    token: str,
+    token: str | GitHubAppInstallationToken,
     trace_id: str,
     recorded_at: str,
     candidate_store: MergeTrainBatchCandidateRecordStore,

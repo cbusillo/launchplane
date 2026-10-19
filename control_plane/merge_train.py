@@ -136,6 +136,7 @@ class MergeTrainPullRequestSnapshot(BaseModel):
     owner_review_required: bool = Field(default=False, exclude_if=lambda value: not value)
     client_test_notes_error: str = Field(default="", exclude_if=lambda value: not value)
     required_checks_status: MergeTrainCheckStatus = "unknown"
+    required_checks_observation_error: str = Field(default="", exclude_if=lambda value: not value)
     branch_update_required: bool = False
     # Set only for bot-authored pull requests; see merge_train_dependency_updates.
     dependency_update_class: DependencyUpdateClass | None = Field(
@@ -202,6 +203,7 @@ class MergeTrainQueueEntry(BaseModel):
     owner_review_required: bool = Field(default=False, exclude_if=lambda value: not value)
     client_test_notes_error: str = Field(default="", exclude_if=lambda value: not value)
     required_checks_status: MergeTrainCheckStatus
+    required_checks_observation_error: str = Field(default="", exclude_if=lambda value: not value)
     branch_update_required: bool
     eligible: bool
     ineligible_reasons: tuple[str, ...] = ()
@@ -843,6 +845,11 @@ def _build_queue_entry(
             if pull_request.required_checks_status != "pass":
                 ineligible_reasons.append(
                     f"current-head required checks are {pull_request.required_checks_status}"
+                    + (
+                        f"; {pull_request.required_checks_observation_error}"
+                        if pull_request.required_checks_observation_error
+                        else ""
+                    )
                 )
             if pull_request.mergeable != "mergeable" and not (
                 pull_request.mergeable == "unknown" and allow_unknown_mergeability
@@ -883,6 +890,7 @@ def _build_queue_entry(
         owner_review_required=pull_request.owner_review_required,
         client_test_notes_error=pull_request.client_test_notes_error,
         required_checks_status=pull_request.required_checks_status,
+        required_checks_observation_error=pull_request.required_checks_observation_error,
         branch_update_required=pull_request.branch_update_required,
         eligible=not ineligible_reasons,
         ineligible_reasons=tuple(ineligible_reasons),
@@ -1042,15 +1050,20 @@ def _next_action_for_selected_pr(
             f"Add {repository_policy.blocked_label}; pull request has merge conflicts.",
         )
     if selected_pr.required_checks_status == "fail":
+        diagnostic = (
+            f" Check history unavailable: {selected_pr.required_checks_observation_error}."
+            if selected_pr.required_checks_observation_error
+            else ""
+        )
         if selected_pr.owner_review_required:
             return (
                 "block",
                 "Current-head review or required checks failed on pull request "
-                f"#{selected_pr.number}.",
+                f"#{selected_pr.number}." + diagnostic,
             )
         return (
             "block",
-            f"Add {repository_policy.blocked_label}; required checks failed.",
+            f"Add {repository_policy.blocked_label}; required checks failed." + diagnostic,
         )
     if selected_pr.branch_update_required and not skip_branch_update:
         return "update_branch", "Refresh the pull request against the current base branch."

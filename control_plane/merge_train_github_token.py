@@ -4,6 +4,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from pathlib import Path
+from typing import Literal, overload
 
 import click
 from sqlalchemy.exc import SQLAlchemyError
@@ -17,7 +18,7 @@ from control_plane.github_app_identity import (
 )
 from collections import OrderedDict
 from threading import Lock
-from control_plane.github_app_identity import GitHubAppInstallationToken
+from control_plane.contracts.github_app_installation_token import GitHubAppInstallationToken
 
 MERGE_TRAIN_GITHUB_APP_SECRET_INTEGRATION = "merge_train_github_app"
 _LOGGER = logging.getLogger(__name__)
@@ -37,13 +38,36 @@ def invalidate_cached_merge_train_github_token(token: str) -> None:
                 del _TOKEN_CACHE[key]
 
 
+@overload
 def resolve_merge_train_github_token(
     *,
     source: MergeTrainGitHubTokenSource,
     control_plane_root: Path,
     repository: str = "",
     raise_resolution_errors: bool = False,
-) -> str:
+    include_permissions: Literal[False] = False,
+) -> str: ...
+
+
+@overload
+def resolve_merge_train_github_token(
+    *,
+    source: MergeTrainGitHubTokenSource,
+    control_plane_root: Path,
+    repository: str = "",
+    raise_resolution_errors: bool = False,
+    include_permissions: Literal[True],
+) -> GitHubAppInstallationToken | str: ...
+
+
+def resolve_merge_train_github_token(
+    *,
+    source: MergeTrainGitHubTokenSource,
+    control_plane_root: Path,
+    repository: str = "",
+    raise_resolution_errors: bool = False,
+    include_permissions: bool = False,
+) -> GitHubAppInstallationToken | str:
     if source.github_app is not None:
         app = source.github_app
         try:
@@ -70,7 +94,7 @@ def resolve_merge_train_github_token(
                     expires_at = datetime.fromisoformat(cached.expires_at.replace("Z", "+00:00"))
                     if expires_at > now + _TOKEN_REFRESH_MARGIN:
                         _TOKEN_CACHE.move_to_end(cache_key)
-                        return cached.token
+                        return cached if include_permissions else cached.token
                     del _TOKEN_CACHE[cache_key]
             issued = mint_merge_train_installation_token(
                 identity=GitHubAppIdentity(app_id=app.app_id, private_key=private_key),
@@ -82,7 +106,7 @@ def resolve_merge_train_github_token(
                 _TOKEN_CACHE.move_to_end(cache_key)
                 while len(_TOKEN_CACHE) > _TOKEN_CACHE_CAPACITY:
                     _TOKEN_CACHE.popitem(last=False)
-            return issued.token
+            return issued if include_permissions else issued.token
         except GitHubAppPermissionError as error:
             # Only schema-owned permission names/levels; never provider errors or secret values.
             _LOGGER.warning(
@@ -104,3 +128,8 @@ def resolve_merge_train_github_token(
                 ) from error
             return ""
     return ""
+
+
+def merge_train_github_token_value(token: str | GitHubAppInstallationToken) -> str:
+    """Unwrap only at consumers that do not observe technical checks."""
+    return token.token if isinstance(token, GitHubAppInstallationToken) else token

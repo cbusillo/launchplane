@@ -2085,6 +2085,32 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                     )
                 self.assertEqual(result["check_runs"], [check])
                 self.assertNotIn("private provider response", "\n".join(logs.output))
+                if isinstance(metadata, MergeTrainGitHubError) and metadata.status_code is not None:
+                    self.assertIn(f"HTTP {metadata.status_code}", "\n".join(logs.output))
+                    self.assertIn(
+                        "/repos/{owner}/{repo}/actions/runs",
+                        str(result["actions_observation_error"]),
+                    )
+                    self.assertNotIn(
+                        "private provider response", str(result["actions_observation_error"])
+                    )
+
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=({"check_runs": [check]}, {"total_count": 0, "workflow_runs": []})
+        )
+        with (
+            patch(
+                "github_plan_status.workflow_runs.current_workflow_runs",
+                side_effect=ValueError("private-provider-message"),
+            ),
+            self.assertLogs("control_plane.merge_train_github", level="WARNING") as logs,
+        ):
+            result = _list_check_runs(
+                transport=transport, repository_path="example/tool", encoded_head_sha="head"
+            )
+        self.assertEqual(result["actions_observation_error"], "actions_history_selection_malformed")
+        self.assertNotIn("ValueError", "\n".join(logs.output))
+        self.assertNotIn("private-provider-message", "\n".join(logs.output))
 
     def test_observe_batch_candidate_checks_keeps_latest_duplicate_pending(self) -> None:
         candidate = _batch_candidate().model_copy(

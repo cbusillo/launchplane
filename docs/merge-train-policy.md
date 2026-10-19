@@ -176,18 +176,19 @@ The supported source is:
   `merge_train_github_app`, binding key `private_key`, in that exact context.
   One configured binding to a context-scoped, write-only current secret is
   required; global, instance-scoped and duplicate bindings are refused. The
-  policy's merge identity must have kind `github_app`. Each resolution mints a
-  fresh installation token for exactly the policy's repository, with Contents,
+  policy's merge identity must have kind `github_app`. Resolution reuses an
+  unexpired exact-repository token or mints a fresh one, with Contents,
   Issues and Pull requests write, Workflows write, and Checks
   and Commit statuses read. The installation must provide at least those grants;
   it may also serve other approved operations. The freshly issued train token
-  must contain only the native train permissions, regardless of the installation's
-  broader capabilities. App and
+  must contain only these mandatory permissions plus Actions read when the
+  same verified installation already grants Actions read or write. It never
+  requests Actions write or a new installation grant. App and
   installation identity, returned repository ID/name, token permissions and
   expiry are verified; a token that fails verification is revoked. Tokens are
   not stored as runtime configuration. No Administration permission is used.
-  Every train token has this same permission set, including tokens resolved for
-  reads; Workflows write lets branch updates and merges include workflow files.
+  Read resolutions use the same selected token permissions. Workflows write
+  lets branch updates and merges include workflow files.
   Issues write projects graph-derived planning labels after a landing, within
   the selected App's already-accepted installation grants. Missing installation
   grants refuse before minting; an issued token missing this capability is revoked.
@@ -835,7 +836,24 @@ removed if its workflow was cancelled, after all current executions have settled
 successfully. Genuine failed executions keep their existing blockers. Different
 workflows, events, source repositories and PR targets remain independent; newer
 reruns and incomplete or unavailable metadata retain the existing blockers.
-Unavailable metadata emits a bounded warning without provider bodies or credentials.
+The native token selects Actions read only when the policy's verified installation
+already advertises it, and verifies the issued token against that exact selection.
+It never requests Actions write or changes installation grants. Its issued scopes
+travel with the credential through HTTP, scheduler, admission, governance and
+recovery readers, including cache hits. For a proved private repository, a known
+absent Actions read skips the inventory request and records `actions_read_not_granted`. Public or unknown
+visibility keeps the provider-read path with the same credential, since public
+workflow history needs no Actions grant. Visibility comes from the exact issued
+token's repository response. Passing and pending-only heads keep their existing
+behavior. Existing cached tokens retain their verified
+scopes until the normal refresh, rather than gaining inferred capabilities.
+Unavailable metadata emits a bounded warning and a separate original-head queue
+diagnostic, without changing eligibility or dependency-hold reason cardinality.
+An already ineligible checked-ready head also includes it in its existing
+checks-failed reason; a selected failed head keeps its block action and detail.
+Provider refusals include the HTTP status and a redacted route, without provider
+bodies or credentials. A refused or invalid mint still fails closed without an
+alternate credential or retry through another carrier.
 Transient provider failures preserve their original controller retry and quota evidence.
 This applies to original-head, candidate and base check reads without changing
 required-check identities, admission, or landing protection.

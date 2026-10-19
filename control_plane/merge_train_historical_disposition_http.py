@@ -70,6 +70,7 @@ def run_merge_train_historical_disposition(
             source=repository_policy.github_token,
             repository=repository_policy.repository,
             control_plane_root=control_plane_root,
+            include_permissions=True,
         )
         if not token:
             raise HistoricalDispositionError("github_token_not_configured", status_code=503)

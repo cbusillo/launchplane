@@ -8,6 +8,8 @@ record's ``scheduler`` block stays the switch: ``enabled`` selects the target an
 ``mutate`` decides whether the pass may act.
 """
 
+from control_plane.contracts.github_app_installation_token import GitHubAppInstallationToken
+
 import logging
 import time
 from contextlib import nullcontext
@@ -54,7 +56,10 @@ from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
     UrllibMergeTrainGitHubTransport,
 )
-from control_plane.merge_train_github_token import resolve_merge_train_github_token
+from control_plane.merge_train_github_token import (
+    resolve_merge_train_github_token,
+    merge_train_github_token_value,
+)
 from control_plane.merge_train_planning_scope import PlanningScopeResolver, planning_scope_resolver
 from control_plane.merge_train_branch_refresh import optional_merge_train_branch_refresh_read_store
 from control_plane.merge_train_policy_source import (
@@ -285,6 +290,7 @@ def _run_scheduled_target(
         source=repository_policy.github_token,
         repository=repository_policy.repository,
         control_plane_root=control_plane_root,
+        include_permissions=True,
     )
     if not token:
         return _target_result(
@@ -316,7 +322,7 @@ def _run_level1(
     record_store: object,
     policy_record: MergeTrainPolicyRecord,
     repository_policy: MergeTrainRepositoryPolicy,
-    token: str,
+    token: str | GitHubAppInstallationToken,
     trace_id: str,
     now: Callable[[], str],
 ) -> MergeTrainScheduledTargetResult:
@@ -356,7 +362,7 @@ def _run_controller(
     control_plane_root: Path,
     policy_record: MergeTrainPolicyRecord,
     repository_policy: MergeTrainRepositoryPolicy,
-    token: str,
+    token: str | GitHubAppInstallationToken,
     trace_id: str,
     now: Callable[[], str],
 ) -> MergeTrainScheduledTargetResult:
@@ -371,8 +377,8 @@ def _run_controller(
         store=record_store,
         repository_evidence_provider=GitHubRepositoryEvidenceProvider(
             control_plane_root=control_plane_root,
-            github_token=lambda **_: token,
-            github_token_scope=lambda **_: nullcontext(token),
+            github_token=lambda **_: merge_train_github_token_value(token),
+            github_token_scope=lambda **_: nullcontext(merge_train_github_token_value(token)),
             github_api=github_api_request,
             token_context=_LAUNCHPLANE_SERVICE_CONTEXT,
             reuse_commit_trees=True,
@@ -414,7 +420,7 @@ def _run_controller(
             record_store=record_store,
             policy_record=policy_record,
             repository_policy=repository_policy,
-            token=token,
+            token=merge_train_github_token_value(token),
             trace_id=trace_id,
             response={
                 "result": controller_result.accepted_result,

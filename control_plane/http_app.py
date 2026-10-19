@@ -405,7 +405,10 @@ from control_plane.contracts.ingress_route_audit_record import (
     build_ingress_route_audit_record_id,
 )
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
-from control_plane.merge_train_github_token import resolve_merge_train_github_token
+from control_plane.merge_train_github_token import (
+    resolve_merge_train_github_token,
+    merge_train_github_token_value,
+)
 from control_plane.merge_train_planning_scope import planning_scope_resolver
 from control_plane.merge_train_policy_source import (
     MergeTrainPolicyStoreMissingError,
@@ -6695,6 +6698,7 @@ def create_launchplane_fastapi_app(
             source=repository_policy.github_token,
             repository=repository_policy.repository,
             control_plane_root=resolved_control_plane_root,
+            include_permissions=True,
         )
         if not token:
             raise _launchplane_http_error(
@@ -6914,6 +6918,7 @@ def create_launchplane_fastapi_app(
             source=repository_policy.github_token,
             repository=repository_policy.repository,
             control_plane_root=resolved_control_plane_root,
+            include_permissions=True,
         )
         if not token:
             raise _launchplane_http_error(
@@ -6987,8 +6992,10 @@ def create_launchplane_fastapi_app(
                 repository_evidence_provider=repository_evidence_provider
                 or GitHubRepositoryEvidenceProvider(
                     control_plane_root=resolved_control_plane_root,
-                    github_token=lambda **_: token,
-                    github_token_scope=lambda **_: nullcontext(token),
+                    github_token=lambda **_: merge_train_github_token_value(token),
+                    github_token_scope=lambda **_: nullcontext(
+                        merge_train_github_token_value(token)
+                    ),
                     github_api=github_api_request,
                     token_context=_LAUNCHPLANE_SERVICE_CONTEXT,
                     reuse_commit_trees=True,
@@ -12070,6 +12077,7 @@ def create_launchplane_fastapi_app(
             source=repository_policy.github_token,
             repository=repository_policy.repository,
             control_plane_root=resolved_control_plane_root,
+            include_permissions=True,
         )
         if not token:
             raise _launchplane_http_error(
@@ -12271,6 +12279,7 @@ def create_launchplane_fastapi_app(
             source=repository_policy.github_token,
             repository=repository_policy.repository,
             control_plane_root=resolved_control_plane_root,
+            include_permissions=True,
         )
         if not token:
             raise _launchplane_http_error(
@@ -12492,6 +12501,7 @@ def create_launchplane_fastapi_app(
             source=repository_policy.github_token,
             repository=repository_policy.repository,
             control_plane_root=resolved_control_plane_root,
+            include_permissions=True,
         )
         if not token:
             raise _launchplane_http_error(
@@ -29268,6 +29278,7 @@ def create_launchplane_fastapi_app(
                     source=source,
                     repository=repository,
                     control_plane_root=resolved_control_plane_root,
+                    include_permissions=True,
                 ),
             ),
             now=utc_now_timestamp,

@@ -87,6 +87,43 @@ class _FakeSnapshotReader:
 
 
 class MergeTrainDryRunTests(unittest.TestCase):
+    def test_unavailable_check_observation_preserves_queue_admission(self) -> None:
+        reason = "actions_read_not_granted"
+        for status in ("fail", "pass"):
+            with self.subTest(status=status):
+                pr = _pull_request(1, created_at="2026-05-08T10:00:00Z").model_copy(
+                    update={
+                        "required_checks_status": status,
+                        "required_checks_observation_error": reason,
+                    }
+                )
+                result = build_merge_train_dry_run_result(
+                    policy=build_test_merge_train_policy(),
+                    snapshot=MergeTrainDryRunSnapshot(
+                        repository="cbusillo/sellyouroutboard",
+                        base_branch="main",
+                        pull_requests=(pr,),
+                    ),
+                )
+                baseline = build_merge_train_dry_run_result(
+                    policy=build_test_merge_train_policy(),
+                    snapshot=MergeTrainDryRunSnapshot(
+                        repository="cbusillo/sellyouroutboard",
+                        base_branch="main",
+                        pull_requests=(
+                            pr.model_copy(update={"required_checks_observation_error": ""}),
+                        ),
+                    ),
+                )
+                self.assertEqual(result.queue[0].eligible, baseline.queue[0].eligible)
+                self.assertEqual(
+                    result.queue[0].ineligible_reasons, baseline.queue[0].ineligible_reasons
+                )
+                self.assertEqual(result.intended_next_action, baseline.intended_next_action)
+                self.assertEqual(result.queue[0].required_checks_observation_error, reason)
+                if status == "fail":
+                    self.assertIn(reason, result.next_action_detail)
+
     def test_remaining_planned_unknown_head_keeps_an_older_unaccepted_feature_out(self) -> None:
         waiting = _pull_request(1, created_at="2026-05-08T10:00:00Z").model_copy(
             update={"owner_review_required": True, "required_checks_status": "pending"}

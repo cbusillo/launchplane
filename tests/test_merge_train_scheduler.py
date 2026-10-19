@@ -6,6 +6,9 @@ from unittest.mock import MagicMock, patch
 from typing import cast
 
 from control_plane import merge_train_events, merge_train_scheduler
+from control_plane.contracts.github_app_installation_token import GitHubAppInstallationToken
+from control_plane.merge_train_github_token import merge_train_github_token_value
+from control_plane.merge_train_github import GitHubMergeTrainClient, UrllibMergeTrainGitHubTransport
 from control_plane.merge_train import (
     MergeTrainBranchClient,
     apply_merge_train_branch_update_intent,
@@ -167,6 +170,16 @@ class MergeTrainSchedulerPassTests(TestCase):
         self.mocks["evaluate_merge_train_admission_from_store"].return_value = _admission(
             "admitted"
         )
+        credential = GitHubAppInstallationToken(
+            token="token",
+            app_id=1,
+            installation_id=2,
+            repository_id=3,
+            repository="cbusillo/alpha",
+            expires_at="unused",
+            permissions=("checks:read",),
+        )
+        self.mocks["resolve_merge_train_github_token"].return_value = credential
         revoked: list[str] = []
         reads: list[str] = []
 
@@ -188,7 +201,17 @@ class MergeTrainSchedulerPassTests(TestCase):
             for _ in range(2):
                 self.assertEqual(evidence.list_open_pull_requests("cbusillo/alpha", limit=1), ())
             # The controller still needs its credential after admission evidence completes.
-            provider(path="/repos/cbusillo/alpha/pulls", token=kwargs["token"])
+            self.assertIs(kwargs["token"], credential)
+            self.assertIsInstance(evaluator.technical_check_client, GitHubMergeTrainClient)
+            assert isinstance(evaluator.technical_check_client, GitHubMergeTrainClient)
+            technical_transport = evaluator.technical_check_client.transport
+            assert isinstance(technical_transport, UrllibMergeTrainGitHubTransport)
+            self.assertEqual(technical_transport.token_permissions, credential.permissions)
+            snapshot_transport = UrllibMergeTrainGitHubTransport(token=credential)
+            self.assertEqual(snapshot_transport.token_permissions, credential.permissions)
+            provider(
+                path="/repos/cbusillo/alpha/pulls", token=merge_train_github_token_value(credential)
+            )
             return _controller_result()
 
         self.mocks["execute_merge_train_controller_run_once"].side_effect = execute

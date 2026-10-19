@@ -6,6 +6,9 @@ from control_plane.contracts.ordinary_agent_provider import (
 )
 
 from collections.abc import Callable, Mapping
+from control_plane.contracts.github_app_installation_token import (
+    GitHubAppInstallationToken as GitHubAppInstallationToken,
+)
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -128,18 +131,6 @@ class GitHubAppPermissionError(GitHubAppIdentityError):
 class GitHubAppIdentity:
     app_id: int
     private_key: str = field(repr=False)
-
-
-@dataclass(frozen=True, slots=True)
-class GitHubAppInstallationToken:
-    token: str = field(repr=False)
-    app_id: int
-    installation_id: int
-    repository_id: int
-    repository: str
-    expires_at: str
-    permissions: tuple[str, ...] = ()
-    app_slug: str = ""
 
 
 def resolve_advisory_github_app_identity(*, control_plane_root: Path) -> GitHubAppIdentity:
@@ -316,6 +307,7 @@ def mint_merge_train_installation_token(
         allowed_token_permissions=_MERGE_TRAIN_TOKEN_PERMISSIONS,
         identity_label="Merge train GitHub App",
         permission_boundary_label="native merge train",
+        optional_read_permissions=("actions",),
         api_request=api_request,
         now=now,
     )
@@ -349,6 +341,7 @@ def _mint_repository_installation_token(
     before_token_mint: Callable[[int, int], None] | None = None,
     confirm_app_identity_endpoint: bool = True,
     validation_error_revoke_api_request: GitHubApiRequest | None = None,
+    optional_read_permissions: tuple[str, ...] = (),
 ) -> GitHubAppInstallationToken:
     normalized_repository = repository.strip()
     if normalized_repository.count("/") != 1:
@@ -442,13 +435,23 @@ def _mint_repository_installation_token(
             raise GitHubAppIdentityError(
                 "GitHub App installation account does not match repository inventory owner."
             )
-    _validate_permissions(
+    installed_permissions = _validate_permissions(
         installation_payload.get("permissions"),
         label="installation",
         required_permissions=required_installation_permissions,
         allowed_permissions=allowed_installation_permissions,
         permission_boundary_label=permission_boundary_label,
     )
+    # Select only an already accepted grant on this verified installation. The
+    # selected request is also the returned-token ceiling; unrequested scopes
+    # remain invalid, including Actions write or an unsolicited Actions read.
+    optional_permissions = {
+        permission: "read"
+        for permission in optional_read_permissions
+        if installed_permissions.get(permission) in {"read", "write"}
+    }
+    requested_permissions = {**requested_permissions, **optional_permissions}
+    allowed_token_permissions = {**allowed_token_permissions, **optional_permissions}
     if before_token_mint is not None:
         before_token_mint(identity.app_id, installation_id)
     token_payload = json_object(
@@ -517,6 +520,9 @@ def _mint_repository_installation_token(
             raise GitHubAppIdentityError(
                 "GitHub App installation token repository does not match exact repository name."
             )
+        repository_private = repository_payload.get("private")
+        if repository_private is not None and not isinstance(repository_private, bool):
+            raise GitHubAppIdentityError("GitHub App token repository visibility is invalid.")
         return GitHubAppInstallationToken(
             token=token,
             app_id=identity.app_id,
@@ -525,6 +531,7 @@ def _mint_repository_installation_token(
             repository=normalized_repository,
             expires_at=expires_at,
             app_slug=app_slug,
+            repository_private=repository_private,
             permissions=tuple(
                 f"{permission}:{access}"
                 for permission, access in sorted(observed_permissions.items())
