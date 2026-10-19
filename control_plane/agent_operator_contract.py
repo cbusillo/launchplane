@@ -181,7 +181,7 @@ OPERATION_SPECS = (
     OperationSpec(
         "POST",
         DISPOSABLE_LANE_OBSERVATION_ROUTE,
-        "Inspect or collect exact-lane service safety evidence, record unknown assertions, clear evidence or prepare a retained testing replacement; unavailable facts stay unknown.",
+        "Inspect or collect exact-lane service safety evidence, record unknown assertions or prepare a retained testing replacement. Clear requires the reviewed inspection's expected_binding_sha256 and the same currently owned preview or declared testing lane; changed bindings refuse without deleting evidence. Unavailable facts stay unknown.",
         ("service_api",),
         ("inspect", "collect", "record", "clear", "prepare-rebuild"),
         "none",

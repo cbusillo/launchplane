@@ -148,6 +148,79 @@ class DisposableRuntimeAuthorityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cleared.status_code, 202, cleared.text)
         self.assertEqual(self.store.read_product_profile_record("example-site"), initial)
 
+    async def test_clear_requires_current_reviewed_binding_and_preserves_other_observations(
+        self,
+    ) -> None:
+        profile = self.store.read_product_profile_record("example-site")
+        scopes = (
+            (self.context, "testing"),
+            (self.context, "prod"),
+            ("undeclared-context", "testing"),
+            (self.context, "unowned-preview"),
+        )
+        for context, instance in scopes:
+            record_safety(
+                self.store,
+                profile.product,
+                context,
+                instance,
+                usage="in_use",
+                data="only_copy",
+                production_resources="shared",
+            )
+        original = {
+            scope: self.store.read_disposable_lane_safety(profile.product, *scope)
+            for scope in scopes
+        }
+        inspected = await self.observe()
+        self.assertEqual(inspected.status_code, 202, inspected.text)
+        proof = inspected.json()["result"]["binding_sha256"]
+        for arguments in (
+            {},
+            {"expected_binding_sha256": "fabricated-inspection"},
+            *(
+                {"context": context, "instance": instance, "expected_binding_sha256": proof}
+                for context, instance in scopes[1:]
+            ),
+        ):
+            with self.subTest(arguments=arguments):
+                response = await self.observe(mode="clear", **arguments)
+                self.assertEqual(response.status_code, 409, response.text)
+                self.assertEqual(response.json()["error"]["code"], "disposable_observation_refused")
+                self.assertEqual(
+                    {
+                        scope: self.store.read_disposable_lane_safety(profile.product, *scope)
+                        for scope in scopes
+                    },
+                    original,
+                )
+        identity = self.store.read_dokploy_target_id_record(
+            context_name=self.context, instance_name="testing"
+        )
+        self.store.write_dokploy_target_id_record(
+            identity.model_copy(update={"target_id": "replacement-testing-target"})
+        )
+        stale = await self.observe(mode="clear", expected_binding_sha256=proof)
+        self.assertEqual(stale.status_code, 409, stale.text)
+        self.assertEqual(
+            self.store.read_disposable_lane_safety(profile.product, self.context, "testing"),
+            original[(self.context, "testing")],
+        )
+        current = await self.observe()
+        current_proof = current.json()["result"]["binding_sha256"]
+        self.assertNotEqual(current_proof, proof)
+        cleared = await self.observe(mode="clear", expected_binding_sha256=current_proof)
+        self.assertEqual(cleared.status_code, 202, cleared.text)
+        self.assertEqual(cleared.json()["result"]["binding_sha256"], current_proof)
+        self.assertIsNone(
+            self.store.read_disposable_lane_safety(profile.product, self.context, "testing")
+        )
+        for scope in scopes[1:]:
+            self.assertEqual(
+                self.store.read_disposable_lane_safety(profile.product, *scope), original[scope]
+            )
+        self.assertEqual(self.store.read_product_profile_record(profile.product), profile)
+
     async def test_generic_profile_writer_cannot_manufacture_safety(self) -> None:
         from control_plane.service_auth import LocalOperatorPolicyRule
 
@@ -760,7 +833,12 @@ class DisposableRuntimeAuthorityTests(unittest.IsolatedAsyncioTestCase):
             ("production_resources", "shared"),
         ):
             with self.subTest(field=field):
-                await self.observe(mode="clear", **scope)
+                cleared = await self.observe(
+                    mode="clear",
+                    expected_binding_sha256=inspected.json()["result"]["binding_sha256"],
+                    **scope,
+                )
+                self.assertEqual(cleared.status_code, 202, cleared.text)
                 protected = await self.observe(
                     **scope,
                     mode="record",
@@ -780,6 +858,85 @@ class DisposableRuntimeAuthorityTests(unittest.IsolatedAsyncioTestCase):
                 )
                 assert evidence is not None
                 self.assertEqual(getattr(evidence, field), value)
+
+    async def test_clear_rechecks_owned_preview_identity_and_binding(self) -> None:
+        from control_plane.contracts.preview_record import PreviewRecord
+
+        profile = self.store.read_product_profile_record("example-site")
+        profile = profile.model_copy(
+            update={
+                "preview": profile.preview.model_copy(
+                    update={"context": "example-site-preview", "slug_template": "pr-{number}"}
+                )
+            }
+        )
+        self.store.write_product_profile_record(profile)
+        preview = PreviewRecord(
+            preview_id="clear-preview",
+            context=profile.preview.context,
+            anchor_repo=profile.repository,
+            anchor_pr_number=7,
+            anchor_pr_url="https://github.com/example/example-site/pull/7",
+            preview_label="preview",
+            canonical_url="https://pr-7.example.invalid",
+            state="active",
+            created_at=profile.updated_at,
+            updated_at=profile.updated_at,
+            eligible_at=profile.updated_at,
+        )
+        self.store.write_preview_record(preview)
+        scope = dict(context=preview.context, instance="pr-7", preview_id=preview.preview_id)
+        inspected = await self.observe(**scope)
+        self.assertEqual(inspected.status_code, 202, inspected.text)
+        proof = inspected.json()["result"]["binding_sha256"]
+        record_safety(
+            self.store,
+            profile.product,
+            preview.context,
+            "pr-7",
+            preview=preview,
+            usage="in_use",
+            data="only_copy",
+            production_resources="shared",
+        )
+        protected = self.store.read_disposable_lane_safety(profile.product, preview.context, "pr-7")
+        for candidate in (
+            {**scope, "preview_id": "fabricated-preview"},
+            {**scope, "preview_id": ""},
+        ):
+            response = await self.observe(mode="clear", expected_binding_sha256=proof, **candidate)
+            self.assertEqual(response.status_code, 409, response.text)
+            self.assertEqual(
+                self.store.read_disposable_lane_safety(profile.product, preview.context, "pr-7"),
+                protected,
+            )
+        for changes in (
+            {
+                "updated_at": (
+                    datetime.fromisoformat(preview.updated_at) + timedelta(seconds=1)
+                ).isoformat()
+            },
+            {"state": "destroyed"},
+            {"anchor_repo": "foreign/repository"},
+        ):
+            with self.subTest(changes=changes):
+                self.store.write_preview_record(preview.model_copy(update=changes))
+                response = await self.observe(mode="clear", expected_binding_sha256=proof, **scope)
+                self.assertEqual(response.status_code, 409, response.text)
+                self.assertEqual(
+                    self.store.read_disposable_lane_safety(
+                        profile.product, preview.context, "pr-7"
+                    ),
+                    protected,
+                )
+        self.store.write_preview_record(preview)
+        response = await self.observe(mode="clear", expected_binding_sha256=proof, **scope)
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertIsNone(
+            self.store.read_disposable_lane_safety(profile.product, preview.context, "pr-7")
+        )
+        self.assertEqual(self.store.read_preview_record(preview.preview_id), preview)
+        self.assertEqual(self.store.read_product_profile_record(profile.product), profile)
 
     async def test_collection_missing_product_and_invalid_request_keep_structured_refusals(
         self,

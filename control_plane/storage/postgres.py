@@ -6896,8 +6896,9 @@ class PostgresRecordStore(HumanSessionStore):
         filters: Sequence[object],
     ) -> RecordModel:
         statement = select(orm_model).where(*cast(Any, filters)).limit(1)
-        with self._session_factory() as session:
-            row = session.scalar(statement)
+        held = getattr(self._disposable_authority_context, "session", None)
+        with nullcontext(held) if held is not None else self._session_factory() as session:
+            row = session.scalar(statement.execution_options(populate_existing=True))
             if row is None:
                 raise FileNotFoundError(
                     f"No Launchplane record found in {orm_model.__tablename__} for {tuple(filters)!r}"
@@ -6938,8 +6939,9 @@ class PostgresRecordStore(HumanSessionStore):
             statement = statement.offset(offset)
         if limit is not None:
             statement = statement.limit(limit)
-        with self._session_factory() as session:
-            rows = session.scalars(statement).all()
+        held = getattr(self._disposable_authority_context, "session", None)
+        with nullcontext(held) if held is not None else self._session_factory() as session:
+            rows = session.scalars(statement.execution_options(populate_existing=True)).all()
             return tuple(
                 self._read_payload(
                     model_type=model_type,
@@ -10713,6 +10715,50 @@ class PostgresRecordStore(HumanSessionStore):
             if row is not None:
                 session.delete(row)
                 session.commit()
+
+    def clear_reviewed_disposable_lane_safety(
+        self,
+        *,
+        product: str,
+        context: str,
+        instance: str,
+        preview_id: str,
+        expected_binding_sha256: str,
+    ) -> str:
+        """Keep exact scope and the reviewed binding unchanged through deletion."""
+        from control_plane.disposable_lanes import resolve_disposable_observation_binding
+
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            if preview_id and not self.database_url.startswith("sqlite"):
+                session.execute(text("SET LOCAL lock_timeout = '5s'"))
+                # Preview writers have their own locks. Include inserts, which
+                # can turn a uniquely owned preview into an ambiguous lane.
+                session.execute(text("LOCK TABLE launchplane_preview_records IN SHARE MODE"))
+            outer = getattr(self._disposable_authority_context, "session", None)
+            self._disposable_authority_context.session = session
+            try:
+                binding = resolve_disposable_observation_binding(
+                    self,
+                    product=product,
+                    context=context,
+                    instance=instance,
+                    preview_id=preview_id,
+                )
+                if not expected_binding_sha256 or binding.binding_sha256 != expected_binding_sha256:
+                    raise ValueError("Observed lane bindings changed; inspect them again.")
+                row = session.get(
+                    LaunchplaneDisposableLaneSafetyRow,
+                    (product, context, instance),
+                    with_for_update=True,
+                )
+                if row is not None:
+                    session.delete(row)
+                session.commit()
+                return binding.binding_sha256
+            finally:
+                self._disposable_authority_context.session = outer
 
     def read_disposable_replacement_preparation(
         self, operation_id: str
@@ -26935,8 +26981,9 @@ class PostgresRecordStore(HumanSessionStore):
             .where(LaunchplaneProductProfileRow.product == product)
             .limit(1)
         )
-        with self._session_factory() as session:
-            row = session.scalar(statement)
+        held = getattr(self._disposable_authority_context, "session", None)
+        with nullcontext(held) if held is not None else self._session_factory() as session:
+            row = session.scalar(statement.execution_options(populate_existing=True))
             if row is None:
                 raise FileNotFoundError(
                     "No Launchplane record found in launchplane_product_profiles "
@@ -26956,8 +27003,9 @@ class PostgresRecordStore(HumanSessionStore):
         if filters:
             statement = statement.where(*cast(Any, filters))
         statement = statement.order_by(LaunchplaneProductProfileRow.product.asc())
-        with self._session_factory() as session:
-            rows = session.scalars(statement).all()
+        held = getattr(self._disposable_authority_context, "session", None)
+        with nullcontext(held) if held is not None else self._session_factory() as session:
+            rows = session.scalars(statement.execution_options(populate_existing=True)).all()
             return tuple(self._read_product_profile_payload(row.payload) for row in rows)
 
     def write_legacy_preview_plan(self, completion: LaunchplaneIdempotencyRecord) -> None:

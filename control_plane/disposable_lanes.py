@@ -1,5 +1,6 @@
 """Lane eligibility is separate from identity and from historical recovery proof."""
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -132,6 +133,59 @@ def disposable_lane_binding_sha256(
     return hashlib.sha256(
         json.dumps(bindings, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
+
+
+@dataclass(frozen=True)
+class DisposableLaneObservationBinding:
+    profile: LaunchplaneProductProfileRecord
+    target: DokployTargetRecord | None
+    target_id: DokployTargetIdRecord | None
+    preview: PreviewRecord | None
+    binding_sha256: str
+
+
+def resolve_disposable_observation_binding(
+    store: DisposableLaneStore,
+    *,
+    product: str,
+    context: str,
+    instance: str,
+    preview_id: str = "",
+) -> DisposableLaneObservationBinding:
+    """Use the same exact lane and binding for inspection and evidence writes."""
+    profile = store.read_product_profile_record(product)
+    preview = None
+    if preview_id:
+        preview = resolve_disposable_preview(store, profile, context, instance)
+        if preview.preview_id != preview_id:
+            raise ValueError("Observation does not match the owned preview.")
+    elif instance != "testing" or not any(
+        (lane.context, lane.instance) == (context, instance) for lane in profile.lanes
+    ):
+        raise ValueError("Observation requires an exact owned testing lane.")
+    try:
+        target = store.read_dokploy_target_record(context_name=context, instance_name=instance)
+    except FileNotFoundError:
+        target = None
+    try:
+        target_id = store.read_dokploy_target_id_record(
+            context_name=context, instance_name=instance
+        )
+    except FileNotFoundError:
+        target_id = None
+    return DisposableLaneObservationBinding(
+        profile=profile,
+        target=target,
+        target_id=target_id,
+        preview=preview,
+        binding_sha256=disposable_lane_binding_sha256(
+            profile,
+            target,
+            target_id,
+            preview,
+            disposable_lane_configuration(store, context, instance),
+        ),
+    )
 
 
 def require_disposable_lane(

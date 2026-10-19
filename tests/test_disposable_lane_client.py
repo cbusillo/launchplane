@@ -23,6 +23,7 @@ class DisposableLaneClientTests(unittest.TestCase):
         truncated: bool = False,
         provider_mutation: bool = False,
         binding_sha256: str = "a" * 64,
+        inspected_binding_sha256: str = "a" * 64,
         usage: str = "unknown",
         reason_code: object = None,
         runtime_facts: bool | None = False,
@@ -30,6 +31,8 @@ class DisposableLaneClientTests(unittest.TestCase):
         data: str = "unknown",
         production_resources: str = "unknown",
         lifetime_seconds: int | None = None,
+        expected_binding_sha256: str | None = None,
+        request_mock: Mock | None = None,
     ) -> tuple[int, str, Mock]:
         client = runpy.run_path(
             str(Path(__file__).resolve().parents[1] / "scripts/collect-disposable-lane.py")
@@ -37,7 +40,7 @@ class DisposableLaneClientTests(unittest.TestCase):
         facts = {"usage": usage, "data": data, "production_resources": production_resources}
         inspected = {
             "trace_id": "fixture-trace",
-            "result": {"mode": "inspect", "binding_sha256": "a" * 64, **facts},
+            "result": {"mode": "inspect", "binding_sha256": inspected_binding_sha256, **facts},
         }
         collected_result: dict[str, object] = {
             "mode": collection_mode,
@@ -64,14 +67,22 @@ class DisposableLaneClientTests(unittest.TestCase):
         }
         if private_fact:
             collected_result["usage"] = "private-fixture"
-        request = Mock(
-            side_effect=[inspected, http.client.IncompleteRead(b"", 1) if truncated else collected]
-        )
+        request = request_mock if request_mock is not None else Mock()
+        request.side_effect = [
+            inspected,
+            http.client.IncompleteRead(b"", 1) if truncated else collected,
+        ]
         if command_mode == "clear":
             request.side_effect = [
-                {
+                http.client.IncompleteRead(b"", 1)
+                if truncated
+                else {
                     "trace_id": "fixture-trace",
-                    "result": {"mode": "clear", "provider_mutation": False},
+                    "result": {
+                        "mode": "clear",
+                        "provider_mutation": provider_mutation,
+                        "binding_sha256": binding_sha256,
+                    },
                 }
             ]
         transport = {
@@ -117,6 +128,8 @@ class DisposableLaneClientTests(unittest.TestCase):
                 ]
             if lifetime_seconds is not None:
                 arguments += ["--lifetime-seconds", str(lifetime_seconds)]
+            if expected_binding_sha256 is not None:
+                arguments += ["--expected-binding-sha256", expected_binding_sha256]
             output = io.StringIO()
             with (
                 patch("sys.argv", arguments),
@@ -143,10 +156,49 @@ class DisposableLaneClientTests(unittest.TestCase):
         self.assertNotIn("private-evidence", output)
 
     def test_clear_uses_the_existing_evidence_only_service_operation(self) -> None:
-        status, output, request = self.call_client(command_mode="clear")
+        proof = "a" * 64
+        status, output, request = self.call_client(
+            command_mode="clear", expected_binding_sha256=proof
+        )
         self.assertEqual(status, 0, output)
         request.assert_called_once()
-        self.assertEqual(request.call_args.kwargs["body"]["mode"], "clear")
+        body = request.call_args.kwargs["body"]
+        self.assertEqual(body["mode"], "clear")
+        self.assertEqual(body["expected_binding_sha256"], proof)
+        self.assertEqual(
+            (body["product"], body["context"], body["instance"]), ("example", "example", "testing")
+        )
+
+    def test_clear_requires_reviewed_input_and_checks_receipt_without_retry(self) -> None:
+        for proof in (None, "", "invalid"):
+            request = Mock()
+            with self.subTest(proof=proof), self.assertRaises(SystemExit) as refusal:
+                self.call_client(
+                    command_mode="clear", expected_binding_sha256=proof, request_mock=request
+                )
+            self.assertEqual(refusal.exception.code, 2)
+            request.assert_not_called()
+        for changes in (
+            {"binding_sha256": "b" * 64},
+            {"provider_mutation": True},
+            {"truncated": True},
+        ):
+            with self.subTest(changes=changes):
+                status, output, request = self.call_client(
+                    command_mode="clear", expected_binding_sha256="a" * 64, **changes
+                )
+                self.assertEqual(status, 1, output)
+                request.assert_called_once()
+                self.assertEqual(json.loads(output)["status"], "unverified")
+
+    def test_inspect_exposes_binding_for_review_before_clear(self) -> None:
+        proof = "c" * 64
+        status, output, request = self.call_client(
+            command_mode="inspect", inspected_binding_sha256=proof
+        )
+        self.assertEqual(status, 0, output)
+        request.assert_called_once()
+        self.assertEqual(json.loads(output)["binding_sha256"], proof)
 
     def test_observation_lifetime_uses_the_service_contract_limit(self) -> None:
         from control_plane.contracts.disposable_lane import MAX_DISPOSABLE_LANE_SAFETY_SECONDS

@@ -27,6 +27,7 @@ def main() -> int:
     for field in ("product", "context", "instance"):
         parser.add_argument(f"--{field}", required=True)
     parser.add_argument("--preview-id", default="")
+    parser.add_argument("--expected-binding-sha256", default="")
     parser.add_argument("--lifetime-seconds", type=int)
     parser.add_argument("--usage", choices=("unknown", "unused", "in_use"), default="unknown")
     parser.add_argument(
@@ -42,6 +43,10 @@ def main() -> int:
     args = parser.parse_args()
     if args.mode == "record" and not args.preview_id:
         parser.error("Recording cleanup facts requires an exact preview ID.")
+    if args.mode == "clear" and not re.fullmatch(r"[0-9a-f]{64}", args.expected_binding_sha256):
+        parser.error("Clearing requires --expected-binding-sha256 from a reviewed inspection.")
+    if args.mode != "clear" and args.expected_binding_sha256:
+        parser.error("Only clear accepts an explicitly reviewed binding.")
     helper = args.operator_helper.expanduser().resolve(strict=True)
     if helper.name != "launchplane-write-action.py":
         parser.error("Select the installed Launchplane operator helper.")
@@ -56,6 +61,7 @@ def main() -> int:
         context=args.context,
         instance=args.instance,
         preview_id=args.preview_id,
+        expected_binding_sha256=args.expected_binding_sha256,
     )
     try:
         response = transport["request_launchplane"](
@@ -69,6 +75,7 @@ def main() -> int:
             if (
                 response["result"]["mode"] != "clear"
                 or response["result"]["provider_mutation"] is not False
+                or response["result"]["binding_sha256"] != payload.expected_binding_sha256
             ):
                 raise ValueError("The observation clear did not settle as requested.")
             print(
@@ -116,6 +123,20 @@ def main() -> int:
                 timeout=240,
             )
         result = response["result"]
+        if args.mode == "inspect":
+            digest = result["binding_sha256"]
+            if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+                raise ValueError("The inspection did not return a valid binding.")
+            print(
+                json.dumps(
+                    {
+                        "mode": "inspect",
+                        "binding_sha256": digest,
+                        "trace_id": transport["public_trace_id"](response["trace_id"]),
+                    }
+                )
+            )
+            return 0
         if result["mode"] != args.mode:
             raise ValueError("The collection did not settle as requested.")
         if args.mode in {"collect", "record"} and (
