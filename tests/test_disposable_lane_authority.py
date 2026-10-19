@@ -193,6 +193,7 @@ class DisposableRuntimeAuthorityTests(unittest.IsolatedAsyncioTestCase):
         inspected = await self.observe()
         self.assertEqual(inspected.status_code, 202, inspected.text)
         proof = inspected.json()["result"]["binding_sha256"]
+        observation_proof = inspected.json()["result"]["observation_sha256"]
         for arguments in (
             {},
             {"expected_binding_sha256": "fabricated-inspection"},
@@ -234,7 +235,11 @@ class DisposableRuntimeAuthorityTests(unittest.IsolatedAsyncioTestCase):
         self.store.write_dokploy_target_id_record(
             identity.model_copy(update={"target_id": "replacement-testing-target"})
         )
-        stale = await self.observe(mode="clear", expected_binding_sha256=proof)
+        stale = await self.observe(
+            mode="clear",
+            expected_binding_sha256=proof,
+            expected_observation_sha256=observation_proof,
+        )
         self.assertEqual(stale.status_code, 409, stale.text)
         self.assertEqual(
             self.store.read_disposable_lane_safety(profile.product, self.context, "testing"),
@@ -243,6 +248,7 @@ class DisposableRuntimeAuthorityTests(unittest.IsolatedAsyncioTestCase):
         current = await self.observe()
         current_proof = current.json()["result"]["binding_sha256"]
         self.assertNotEqual(current_proof, proof)
+        self.assertEqual(current.json()["result"]["observation_sha256"], observation_proof)
         cleared = await self.observe(
             mode="clear",
             expected_binding_sha256=current_proof,

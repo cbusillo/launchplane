@@ -8,7 +8,6 @@ from pathlib import Path
 import runpy
 from tempfile import TemporaryDirectory
 import unittest
-from typing import Any
 from unittest.mock import Mock, patch
 
 from control_plane.disposable_lane_collection import disposable_collection_coverage
@@ -35,6 +34,7 @@ class DisposableLaneClientTests(unittest.TestCase):
         expected_binding_sha256: str | None = None,
         expected_observation_sha256: str | None = "d" * 64,
         observation_sha256: str = "d" * 64,
+        observation: object = None,
         request_mock: Mock | None = None,
     ) -> tuple[int, str, Mock]:
         client = runpy.run_path(
@@ -48,7 +48,7 @@ class DisposableLaneClientTests(unittest.TestCase):
                 "binding_sha256": inspected_binding_sha256,
                 "source_coverage": disposable_collection_coverage(),
                 "observation_sha256": observation_sha256,
-                "observation": None,
+                "observation": observation,
                 **facts,
             },
         }
@@ -170,15 +170,18 @@ class DisposableLaneClientTests(unittest.TestCase):
 
     def test_clear_uses_the_existing_evidence_only_service_operation(self) -> None:
         proof = "a" * 64
+        observation_proof = "d" * 64
         status, output, request = self.call_client(
-            command_mode="clear", expected_binding_sha256=proof
+            command_mode="clear",
+            expected_binding_sha256=proof,
+            expected_observation_sha256=observation_proof,
         )
         self.assertEqual(status, 0, output)
         request.assert_called_once()
         body = request.call_args.kwargs["body"]
         self.assertEqual(body["mode"], "clear")
         self.assertEqual(body["expected_binding_sha256"], proof)
-        self.assertTrue(body["expected_observation_sha256"])
+        self.assertEqual(body["expected_observation_sha256"], observation_proof)
         self.assertEqual(
             (body["product"], body["context"], body["instance"]), ("example", "example", "testing")
         )
@@ -194,13 +197,14 @@ class DisposableLaneClientTests(unittest.TestCase):
             request.assert_not_called()
         for proof in (None, "", "invalid"):
             request = Mock()
-            with self.subTest(observation=proof), self.assertRaises(SystemExit):
+            with self.subTest(observation=proof), self.assertRaises(SystemExit) as refusal:
                 self.call_client(
                     command_mode="clear",
                     expected_binding_sha256="a" * 64,
                     expected_observation_sha256=proof,
                     request_mock=request,
                 )
+            self.assertEqual(refusal.exception.code, 2)
             request.assert_not_called()
         for changes in (
             {"observation_sha256": "e" * 64},
@@ -216,38 +220,49 @@ class DisposableLaneClientTests(unittest.TestCase):
                 request.assert_called_once()
                 self.assertEqual(json.loads(output)["status"], "unverified")
 
-    def test_new_clear_field_refuses_an_older_service_before_its_handler(self) -> None:
-        from pydantic import ConfigDict, ValidationError, create_model
-        from control_plane.contracts.disposable_lane import DisposableLaneObservationRequest
-
-        _, _, request = self.call_client(command_mode="clear", expected_binding_sha256="a" * 64)
-        body = request.call_args.kwargs["body"]
-        # The starting service had these fields and rejected unknown fields.
-        fields: dict[str, Any] = {}
-        for name, field in DisposableLaneObservationRequest.model_fields.items():
-            if name != "expected_observation_sha256":
-                assert field.annotation is not None
-                fields[name] = (field.annotation, field.default)
-        legacy = create_model(
-            "LegacyObservationRequest", __config__=ConfigDict(extra="forbid"), **fields
-        )
-        legacy.model_validate(
-            {name: value for name, value in body.items() if name != "expected_observation_sha256"}
-        )
-        with self.assertRaises(ValidationError):
-            legacy.model_validate(body)
-
     def test_inspect_exposes_binding_for_review_before_clear(self) -> None:
         proof = "c" * 64
-        status, output, request = self.call_client(
-            command_mode="inspect", inspected_binding_sha256=proof
+        observation_proof = "e" * 64
+        protection = {"usage": "in_use", "data": "only_copy", "production_resources": "shared"}
+        for observation in (None, {**protection, "private_debug": "private-fixture"}):
+            with self.subTest(observation=observation):
+                status, output, request = self.call_client(
+                    command_mode="inspect",
+                    inspected_binding_sha256=proof,
+                    observation_sha256=observation_proof,
+                    observation=observation,
+                )
+                self.assertEqual(status, 0, output)
+                request.assert_called_once()
+                result = json.loads(output)
+                self.assertEqual(result["binding_sha256"], proof)
+                self.assertEqual(result.get("observation_sha256"), observation_proof)
+                self.assertIn("observation", result)
+                self.assertEqual(result["observation"], protection if observation else None)
+                self.assertEqual(result["source_coverage"], disposable_collection_coverage())
+                self.assertIn("facts", result)
+                self.assertNotIn("private-fixture", output)
+                self.assertNotIn("expected_observation_sha256", request.call_args.kwargs["body"])
+
+    def test_inspect_refuses_invalid_recorded_protection_without_printing_it(self) -> None:
+        protection = {"usage": "in_use", "data": "only_copy", "production_resources": "shared"}
+        invalid_reports: tuple[object, ...] = (
+            *({**protection, key: "private-fixture"} for key in protection),
+            {"usage": "in_use", "private_debug": "private-fixture"},
+            "private-fixture",
         )
-        self.assertEqual(status, 0, output)
-        request.assert_called_once()
-        self.assertEqual(json.loads(output)["binding_sha256"], proof)
-        self.assertEqual(json.loads(output)["source_coverage"], disposable_collection_coverage())
-        self.assertIn("facts", json.loads(output))
-        self.assertNotIn("expected_observation_sha256", request.call_args.kwargs["body"])
+        for digest, observation in (
+            ("private-fixture", None),
+            *(("e" * 64, report) for report in invalid_reports),
+        ):
+            with self.subTest(digest=digest, observation=observation):
+                status, output, request = self.call_client(
+                    command_mode="inspect", observation_sha256=digest, observation=observation
+                )
+                self.assertEqual(status, 1, output)
+                request.assert_called_once()
+                self.assertEqual(json.loads(output)["status"], "unverified")
+                self.assertNotIn("private-fixture", output)
 
     def test_observation_lifetime_uses_the_service_contract_limit(self) -> None:
         from control_plane.contracts.disposable_lane import MAX_DISPOSABLE_LANE_SAFETY_SECONDS
