@@ -1939,7 +1939,7 @@ and a changed reviewed record. Apply requires PostgreSQL fencing. Override,
 private prior/replacement snapshots and the public idempotency receipt commit
 atomically in existing storage. Prior values and binding references stay inside
 the service; responses contain names and digests only. Readback checks the same
-generation and current override intent while tolerating later apply timestamps.
+generation and current override intent while tolerating ordinary apply observations.
 
 After an uncertain response, preserve the review and original key, inspect
 readback and replay only that key through the service. Never bootstrap, restore,

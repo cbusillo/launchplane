@@ -7,7 +7,10 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
-from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
+from control_plane.contracts.odoo_instance_override_record import (
+    OdooInstanceOverrideRecord,
+    odoo_override_intent_payload,
+)
 from control_plane.disposable_lanes import disposable_lane_configuration
 from control_plane.odoo_testing_restore import (
     FreshOdooTestingGeneration,
@@ -193,8 +196,8 @@ def sanitization_readback(
     if (
         generation is None
         or generation_binding(generation) != audit.plan.generation_binding_sha256
-        or current.model_dump(mode="json", exclude={"updated_at", "last_apply"})
-        != audit.after.model_dump(mode="json", exclude={"updated_at", "last_apply"})
+        or canonical_json_sha256(odoo_override_intent_payload(current))
+        != canonical_json_sha256(odoo_override_intent_payload(audit.after))
     ):
         raise ValueError("The current generation or override intent differs from the receipt.")
     return audit.plan.model_copy(update={"applied": True})

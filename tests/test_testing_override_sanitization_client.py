@@ -1,17 +1,13 @@
 """Exercise the existing bounded-client contract for record sanitization."""
 
-from pathlib import Path
-import runpy
-
-from tests import test_testing_public_ingress_client as client_tests
+from tests.support import bounded_testing_client as support
 
 
-class TestingOverrideSanitizationClientTests(client_tests.TestingPublicIngressClientTests):
+class TestingOverrideSanitizationClientTests(support.BoundedTestingClientContract):
+    script_filename = "sanitize-testing-overrides.py"
+
     def setUp(self) -> None:
         super().setUp()
-        self.client = runpy.run_path(
-            str(Path(__file__).resolve().parents[1] / "scripts/sanitize-testing-overrides.py")
-        )
         self.receipt["result"].update(generation_preserved=True, copy_preserved=True)
 
     def test_receipt_without_preservation_proof_is_not_saved(self) -> None:

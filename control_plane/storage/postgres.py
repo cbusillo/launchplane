@@ -11341,17 +11341,17 @@ class PostgresRecordStore(HumanSessionStore):
             sanitization_snapshot,
         )
 
-        with self.testing_replacement_execution_lock(request.operation_id) as check:
-            if check is None:
-                raise ValueError("The testing executor cannot be excluded.")
-            with self._session_factory() as session:
-                self._begin_serialized_write(session)
-                status, receipt_row, reservation = self._reserve_db_only_mutation_in_session(
-                    session=session, mutation=mutation
-                )
-                if status != "acquired":
-                    return status, reservation
-                assert receipt_row is not None
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            status, receipt_row, reservation = self._reserve_db_only_mutation_in_session(
+                session=session, mutation=mutation
+            )
+            if status != "acquired":
+                return status, reservation
+            assert receipt_row is not None
+            with self.testing_replacement_execution_lock(request.operation_id) as check:
+                if check is None:
+                    raise ValueError("The testing executor cannot be excluded.")
                 if self.database_dialect_name == "postgresql":
                     self._lock_odoo_stable_lane(
                         session, product=product, context=request.context, instance="testing"
@@ -11372,7 +11372,12 @@ class PostgresRecordStore(HumanSessionStore):
                     (product, request.context),
                     with_for_update=True,
                 )
-                snapshot = sanitization_snapshot(self, product, request)
+                outer = getattr(self._disposable_authority_context, "session", None)
+                self._disposable_authority_context.session = session
+                try:
+                    snapshot = sanitization_snapshot(self, product, request)
+                finally:
+                    self._disposable_authority_context.session = outer
                 if (
                     generation_row is None
                     or FreshOdooTestingGeneration.model_validate(generation_row.payload)

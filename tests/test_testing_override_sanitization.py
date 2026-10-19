@@ -4,6 +4,8 @@ import unittest
 
 from control_plane.contracts.odoo_instance_override_record import (
     OdooAddonSettingOverride,
+    OdooConfigParameterOverride,
+    OdooWebsiteBootstrapPayload,
     OdooInstanceOverrideRecord,
     OdooOverrideValue,
 )
@@ -23,11 +25,40 @@ class TestingOverrideSanitizationScenario(FreshTestingBootstrapScenario):
     def setUp(self) -> None:
         self.seed(self.database_url, initial_generation=True)
         self.patches()
+        from control_plane.integration_readback import INTEGRATION_FAMILIES
+
+        self.integration_key = next(
+            key for family in INTEGRATION_FAMILIES for key in family.config_parameters
+        )
         self.original_overrides = OdooInstanceOverrideRecord(
             context=self.fixture.context,
             instance="testing",
             apply_on=("restore", "deploy"),
             updated_at=self.profile.updated_at,
+            config_parameters=(
+                OdooConfigParameterOverride(
+                    key="fixture.toggle", value=OdooOverrideValue(source="literal", value=False)
+                ),
+                OdooConfigParameterOverride(
+                    key=self.integration_key,
+                    value=OdooOverrideValue(source="literal", value="fixture connection"),
+                ),
+                OdooConfigParameterOverride(
+                    key="google_analytics.fixture",
+                    value=OdooOverrideValue(source="literal", value="fixture analytics"),
+                ),
+                OdooConfigParameterOverride(
+                    key="private.fixture.token",
+                    value=OdooOverrideValue(
+                        source="secret_binding", secret_binding_id="old-config-fixture-binding"
+                    ),
+                ),
+            ),
+            website_bootstrap=OdooWebsiteBootstrapPayload(
+                name="Fixture website",
+                canonical_url="https://old.example.invalid",
+                homepage_url="/",
+            ),
             addon_settings=(
                 OdooAddonSettingOverride(
                     addon="shopify",
@@ -162,11 +193,11 @@ class TestingOverrideSanitizationHttpTests(
             )
         self.assertEqual(denied.status_code, 403, denied.text)
         self.assertEqual(denied.json()["error"]["code"], "authorization_denied")
-        for changes in (
-            {"instance": "prod"},
-            {"context": "other"},
-            {"operation_id": "other-generation"},
-            {"mode": "readback"},
+        for changes, status, code in (
+            ({"instance": "prod"}, 400, "invalid_request"),
+            ({"context": "other"}, 409, "testing_override_sanitization_unverified"),
+            ({"operation_id": "other-generation"}, 409, "testing_override_sanitization_unverified"),
+            ({"mode": "readback"}, 400, "review_required"),
         ):
             with self.subTest(changes=changes):
                 response = await request(
@@ -176,7 +207,8 @@ class TestingOverrideSanitizationHttpTests(
                     headers={"Authorization": "Bearer local-operator-token"},
                     payload={**self.sanitize_payload, **changes},
                 )
-                self.assertGreaterEqual(response.status_code, 400)
+                self.assertEqual(response.status_code, status, response.text)
+                self.assertEqual(response.json()["error"]["code"], code)
         self.assertEqual(
             self.store.read_odoo_instance_override_record(
                 context_name=self.fixture.context, instance_name="testing"
@@ -249,7 +281,25 @@ class TestingOverrideSanitizationTests(TestingOverrideSanitizationScenario):
         assert audit is not None
         self.assertEqual(audit.before, self.original_overrides)
         self.assertFalse(audit.after.addon_settings)
-        rendered = build_post_deploy_environment(audit.after, workflow_intent="restore")
+        from control_plane.odoo_testing_restore import fresh_testing_override_record
+
+        assert generation is not None
+        effective = fresh_testing_override_record(audit.after, generation)
+        assert effective is not None
+        rendered = build_post_deploy_environment(effective, workflow_intent="restore")
+        kept = {item.key: item.value for item in audit.after.config_parameters}
+        self.assertIs(kept["fixture.toggle"].value, False)
+        self.assertNotIn(self.integration_key, kept)
+        self.assertNotIn("google_analytics.fixture", kept)
+        self.assertNotIn("private.fixture.token", kept)
+        assert audit.after.website_bootstrap is not None
+        assert self.original_overrides.website_bootstrap is not None
+        self.assertEqual(
+            audit.after.website_bootstrap.name, self.original_overrides.website_bootstrap.name
+        )
+        self.assertEqual(
+            audit.after.website_bootstrap.canonical_url, "https://" + generation.domain_host
+        )
         self.assertFalse(rendered.required_container_environment_keys)
         preflight_fresh_testing_intent(
             modules="website",
@@ -450,6 +500,109 @@ class TestingOverrideSanitizationTests(TestingOverrideSanitizationScenario):
             ),
             self.original_overrides,
         )
+
+    def test_unverifiable_credential_separation_refuses_planning(self) -> None:
+        from unittest.mock import patch
+        from control_plane.odoo_testing_restore import TestingCredentialsOverlap
+        from control_plane.testing_override_sanitization import sanitization_snapshot
+
+        with patch(
+            "control_plane.odoo_testing_restore.require_distinct_testing_credentials",
+            side_effect=TestingCredentialsOverlap("fixture overlap"),
+        ):
+            with self.assertRaises(TestingCredentialsOverlap):
+                sanitization_snapshot(
+                    self.store,
+                    self.profile.product,
+                    TestingOverrideSanitizationRequest.model_validate(self.sanitize_payload),
+                )
+        self.assertEqual(
+            self.store.read_odoo_instance_override_record(
+                context_name=self.fixture.context, instance_name="testing"
+            ),
+            self.original_overrides,
+        )
+
+    def test_readback_tolerates_normal_post_deploy_observations(self) -> None:
+        from control_plane.contracts.odoo_instance_override_record import OdooOverrideApplyResult
+        from control_plane.testing_override_sanitization import sanitization_readback
+
+        body, plan = self.reviewed()
+        self.store.sanitize_testing_overrides(
+            product=self.profile.product, request=body, mutation=self.mutation(body, plan)
+        )
+        self.store.update_odoo_instance_override_apply_result(
+            context_name=self.fixture.context,
+            instance_name="testing",
+            last_apply=OdooOverrideApplyResult(
+                attempted=True, status="pass", applied_at="2026-10-19T06:43:00Z"
+            ),
+            updated_at="2026-10-19T06:43:00Z",
+            source_label="odoo-post-deploy-driver",
+        )
+        self.assertTrue(sanitization_readback(self.store, self.profile.product, body).applied)
+
+    def test_readback_still_protects_website_verification_intent(self) -> None:
+        from control_plane.testing_override_sanitization import sanitization_readback
+
+        body, plan = self.reviewed()
+        self.store.sanitize_testing_overrides(
+            product=self.profile.product, request=body, mutation=self.mutation(body, plan)
+        )
+        record = self.store.read_odoo_instance_override_record(
+            context_name=self.fixture.context, instance_name="testing"
+        )
+        self.store.write_odoo_instance_override_record(
+            record.model_copy(
+                update={
+                    "last_apply": record.last_apply.model_copy(
+                        update={"website_settings_verified": False}
+                    ),
+                }
+            )
+        )
+        with self.assertRaises(ValueError):
+            sanitization_readback(self.store, self.profile.product, body)
+
+    def test_readback_distinguishes_boolean_and_integer_setting_values(self) -> None:
+        from control_plane.testing_override_sanitization import sanitization_readback
+
+        body, plan = self.reviewed()
+        self.store.sanitize_testing_overrides(
+            product=self.profile.product, request=body, mutation=self.mutation(body, plan)
+        )
+        record = self.store.read_odoo_instance_override_record(
+            context_name=self.fixture.context, instance_name="testing"
+        )
+        self.store.write_odoo_instance_override_record(
+            record.model_copy(
+                update={
+                    "config_parameters": tuple(
+                        item.model_copy(
+                            update={"value": OdooOverrideValue(source="literal", value=0)}
+                        )
+                        if item.key == "fixture.toggle"
+                        else item
+                        for item in record.config_parameters
+                    ),
+                }
+            )
+        )
+        with self.assertRaises(ValueError):
+            sanitization_readback(self.store, self.profile.product, body)
+
+    def test_completed_key_replays_while_executor_lock_is_held(self) -> None:
+        body, plan = self.reviewed()
+        mutation = self.mutation(body, plan)
+        self.store.sanitize_testing_overrides(
+            product=self.profile.product, request=body, mutation=mutation
+        )
+        with self.store.testing_replacement_execution_lock(body.operation_id) as held:
+            self.assertIsNotNone(held)
+            result = self.store.sanitize_testing_overrides(
+                product=self.profile.product, request=body, mutation=mutation
+            )
+            self.assertEqual(result[0], "replayed")
 
     def test_readback_detects_subsequent_intent_drift(self) -> None:
         from control_plane.testing_override_sanitization import sanitization_readback

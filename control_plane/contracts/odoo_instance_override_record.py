@@ -292,3 +292,15 @@ class OdooInstanceOverrideRecord(BaseModel):
         if len(addon_setting_keys) != len(set(addon_setting_keys)):
             raise ValueError("Odoo instance override record has duplicate addon settings")
         return self
+
+
+def odoo_override_intent_payload(record: OdooInstanceOverrideRecord) -> dict[str, object]:
+    """Keep website intent while excluding ordinary apply observations."""
+    return record.model_dump(
+        mode="json",
+        exclude={
+            "last_apply": {"attempted", "status", "applied_at", "detail"},
+            "updated_at": True,
+            "source_label": True,
+        },
+    )

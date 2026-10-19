@@ -16,7 +16,10 @@ from control_plane.contracts.product_profile_record import (
     ProductSecretConfigRequirement,
     product_config_requirement_applies_to_lane,
 )
-from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
+from control_plane.contracts.odoo_instance_override_record import (
+    OdooInstanceOverrideRecord,
+    odoo_override_intent_payload,
+)
 from control_plane.docker_errors import docker_daemon_authorization_denied
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -1438,15 +1441,10 @@ def fresh_testing_authority_sha256(
             # every intent field, but do not make publishing a result look like
             # a new restore intent. Legacy journals retain their exact digest;
             # an absent preimage is never permission to rebind a held operation.
-            "overrides": override.model_dump(
-                mode="json",
-                exclude={}
+            "overrides": (
+                override.model_dump(mode="json")
                 if include_override_results
-                else {
-                    "last_apply": {"attempted", "status", "applied_at", "detail"},
-                    "updated_at": True,
-                    "source_label": True,
-                },
+                else odoo_override_intent_payload(override)
             )
             if override is not None
             else None,
