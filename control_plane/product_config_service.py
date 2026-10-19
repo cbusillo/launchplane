@@ -50,6 +50,10 @@ class ProductConfigProfileReader(Protocol):
     ) -> tuple[LaunchplaneProductProfileRecord, ...]: ...
 
 
+class ProductConfigOwnershipMismatchError(control_plane_product_config.ProductConfigError):
+    """Readable product profiles positively disagree with the requested ownership."""
+
+
 def resolve_product_config_profile(
     record_store: ProductConfigProfileReader,
     *,
@@ -79,7 +83,7 @@ def resolve_product_config_profile(
         lane.context.strip() == context and (not instance or lane.instance.strip() == instance)
         for lane in profile.lanes
     ):
-        raise control_plane_product_config.ProductConfigError(
+        raise ProductConfigOwnershipMismatchError(
             "Product config target is not owned by the named product.",
             code="product_config_lane_not_owned",
         )
@@ -88,7 +92,7 @@ def resolve_product_config_profile(
         context=context,
         instance="" if context_wide else instance,
     ) != frozenset((product,)):
-        raise control_plane_product_config.ProductConfigError(
+        raise ProductConfigOwnershipMismatchError(
             "Product config requires the named product to own the target alone.",
             code="product_config_lane_not_owned",
         )

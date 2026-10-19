@@ -54,7 +54,9 @@ class RealMariaDBRecoveryTests(unittest.TestCase):
         self.assertEqual(list(self.paths[0].iterdir()), [])
         self.assertEqual(list(self.paths[1].iterdir()), [])
 
-    def seed_database(self, engine: str = "InnoDB") -> None:
+    def seed_database(
+        self, engine: str = "InnoDB", *, keep_running: bool = False, tmpfs: bool = False
+    ) -> str:
         name = "lp-recovery-fixture-" + uuid.uuid4().hex
         identifier = self.docker(
             "run",
@@ -65,6 +67,7 @@ class RealMariaDBRecoveryTests(unittest.TestCase):
             "none",
             "--env",
             "MARIADB_ALLOW_EMPTY_ROOT_PASSWORD=1",
+            *(["--tmpfs", "/tmp"] if tmpfs else []),
             "--health-cmd",
             "healthcheck.sh --connect --innodb_initialized",
             "--health-interval",
@@ -97,8 +100,10 @@ class RealMariaDBRecoveryTests(unittest.TestCase):
             "--user=root",
             f"--execute=CREATE DATABASE fixture; CREATE TABLE fixture.items (note VARCHAR(80)) ENGINE={engine}; INSERT INTO fixture.items VALUES ('restored-business-row');",
         )
-        self.docker("stop", "--time", "30", identifier)
+        if not keep_running:
+            self.docker("stop", "--time", "30", identifier)
         (self.paths[1] / "settings").write_text("retained fixture settings")
+        return identifier
 
     def test_populated_cold_database_and_config_survive_real_recovery(self) -> None:
         self.seed_database()

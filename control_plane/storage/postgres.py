@@ -11674,6 +11674,7 @@ class PostgresRecordStore(HumanSessionStore):
         expected: dict[str, Any] | None,
         replacement: dict[str, Any],
         reservation: LaunchplaneIdempotencyRecord | None = None,
+        expected_authority: dict[str, Any] | None = None,
     ) -> None:
         """Append-only identities and compare-and-write custody, without lane publication."""
         from control_plane.contracts.production_recipient import ProductionRecipientRecord
@@ -11687,11 +11688,18 @@ class PostgresRecordStore(HumanSessionStore):
 
                 require_publication_lease(self, session, reservation)
             from control_plane.production_recipient import (
+                RecipientAuthorityChanged,
                 authority_snapshot,
                 same_recipient_authority,
             )
 
             superseding = expected is not None and expected.get("plan_sha256") != record.plan_sha256
+            if expected_authority is not None and not same_recipient_authority(
+                authority_snapshot(self, record.product, record.context), expected_authority
+            ):
+                raise RecipientAuthorityChanged(
+                    "Published recovery authority changed before custody committed."
+                )
             if (
                 expected is None
                 or superseding
@@ -11706,7 +11714,9 @@ class PostgresRecordStore(HumanSessionStore):
                     record.authority_snapshot,
                 )
             ):
-                raise ValueError("Production authority changed before custody committed.")
+                raise RecipientAuthorityChanged(
+                    "Production authority changed before custody committed."
+                )
             row = session.get(
                 LaunchplaneProductionRecipientRow,
                 (record.product, record.context),
@@ -11799,7 +11809,12 @@ class PostgresRecordStore(HumanSessionStore):
                 for key in (
                     (
                         mutable
-                        - {"phase", "execution", "writer_custody", "activation_history"}
+                        - {
+                            "phase",
+                            "execution",
+                            "writer_custody",
+                            "activation_history",
+                        }
                         - ({"activation"} if not previous.execution else set())
                     )
                     if not superseding
