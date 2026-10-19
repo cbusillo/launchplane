@@ -5572,11 +5572,10 @@ def _without_superseded_actions_checks(
         for check in check_runs
     ]
     if not any(
-        identity is not None and _check_run_status(cast(dict[str, object], check)) != "pass"
+        identity is not None and _check_run_status(cast(dict[str, object], check)) == "fail"
         for check, identity in zip(check_runs, identities, strict=True)
     ):
         return check_runs
-    runs: list[dict[str, object]] = []
 
     def unavailable(reason: str) -> list[object]:
         logger.warning(
@@ -5586,33 +5585,24 @@ def _without_superseded_actions_checks(
         return check_runs
 
     try:
-        for page in range(1, 11):
-            query = urlencode({"head_sha": head_sha, "per_page": "100", "page": str(page)})
-            payload = _json_object(
-                transport.request(
-                    method="GET",
-                    path=f"/repos/{repository_path}/actions/runs?{query}",
-                ),
-                "GitHub workflow runs response",
-            )
-            values, total = payload.get("workflow_runs"), payload.get("total_count")
-            if (
-                not isinstance(values, list)
-                or not isinstance(total, int)
-                or isinstance(total, bool)
-            ):
-                return unavailable("malformed_workflow_inventory")
-            runs.extend(_json_object(value, "GitHub workflow run") for value in values)
-            if len(values) < 100:
-                if len(runs) != total:
-                    return unavailable("incomplete_workflow_inventory")
-                break
-        else:
-            return unavailable("workflow_inventory_bound")
+        runs = _read_actions_workflow_inventory(
+            transport=transport,
+            repository_path=repository_path,
+            head_sha=head_sha,
+        )
+    except MergeTrainGitHubError as error:
+        malformed = isinstance(error.__cause__, json.JSONDecodeError)
+        if error.rate_limited or (
+            not malformed and (error.status_code is None or error.status_code >= 500)
+        ):
+            raise  # Preserve retry classification, cause and quota reset evidence.
+        return unavailable(type(error).__name__)
+    if runs is None:
+        return unavailable("workflow_inventory_incomplete_or_malformed")
+    try:
         selection = current_workflow_runs(runs, head_sha)
         current = selection["current"]
         # A new run without jobs must never turn an old failed head green.
-        # Retain its existing blockers until all current executions settle.
         if not current or any(
             run.get("status") != "completed"
             or run.get("conclusion") not in {"success", "neutral", "skipped"}
@@ -5625,21 +5615,43 @@ def _without_superseded_actions_checks(
             for run in selection["superseded"]
             if run["id"] not in current_ids and run.get("conclusion") == "cancelled"
         }
-    except (
-        MergeTrainGitHubError,
-        HTTPError,
-        URLError,
-        OSError,
-        ValueError,
-        KeyError,
-        TypeError,
-    ) as error:
+    except (ValueError, KeyError, TypeError, AttributeError) as error:
         return unavailable(type(error).__name__)
     return [
         check
         for check, identity in zip(check_runs, identities, strict=True)
         if identity not in superseded
     ]
+
+
+def _read_actions_workflow_inventory(
+    *,
+    transport: MergeTrainGitHubTransport,
+    repository_path: str,
+    head_sha: str,
+) -> list[dict[str, object]] | None:
+    """Separate provider request failures from inconclusive response evidence."""
+    runs: list[dict[str, object]] = []
+    for page in range(1, 11):
+        query = urlencode({"head_sha": head_sha, "per_page": "100", "page": str(page)})
+        value = transport.request(
+            method="GET", path=f"/repos/{repository_path}/actions/runs?{query}"
+        )
+        try:
+            payload = _json_object(value, "GitHub workflow runs response")
+            values, total = payload.get("workflow_runs"), payload.get("total_count")
+            if (
+                not isinstance(values, list)
+                or not isinstance(total, int)
+                or isinstance(total, bool)
+            ):
+                return None
+            runs.extend(_json_object(run, "GitHub workflow run") for run in values)
+            if len(values) < 100:
+                return runs if len(runs) == total else None
+        except MergeTrainGitHubError:
+            return None
+    return None
 
 
 def _latest_check_runs(check_runs: list[object]) -> list[object]:
