@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
+from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.storage.postgres import PostgresRecordStore
@@ -97,6 +98,9 @@ class RealPostgresDisposableObservationClearTests(unittest.TestCase):
                             **scope,
                             preview_id=preview.preview_id,
                             expected_binding_sha256=reviewed.binding_sha256,
+                            expected_observation_sha256=disposable_lanes.disposable_lane_observation_sha256(
+                                first.read_disposable_lane_safety(**scope)
+                            ),
                         )
                         try:
                             if not snapshot_read.wait(10):
@@ -142,3 +146,46 @@ class RealPostgresDisposableObservationClearTests(unittest.TestCase):
                             disposable_lanes.resolve_disposable_observation_binding(
                                 first, **scope, preview_id=preview.preview_id
                             )
+
+    def test_busy_authority_times_out_without_clearing_the_reviewed_report(self) -> None:
+        from control_plane import disposable_lanes
+        from tests.test_director_bounded_writes import DirectorBoundedWritesTests
+        from tests.support.disposable_lanes import record_safety
+
+        fixture = DirectorBoundedWritesTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        with (
+            _head_postgres_database() as url,
+            closing(PostgresRecordStore(database_url=url)) as first,
+            closing(PostgresRecordStore(database_url=url)) as second,
+            ThreadPoolExecutor(max_workers=1) as pool,
+        ):
+            first.write_product_profile_record(fixture.profile)
+            first.write_preview_record(fixture.preview)
+            scope = dict(
+                product=fixture.profile.product,
+                context=fixture.preview.context,
+                instance=fixture.profile.preview.slug_template.format(
+                    number=fixture.preview.anchor_pr_number
+                ),
+            )
+            record_safety(first, **scope, preview=fixture.preview, usage="in_use")
+            reviewed = disposable_lanes.resolve_disposable_observation_binding(
+                first, **scope, preview_id=fixture.preview.preview_id
+            )
+            protected = first.read_disposable_lane_safety(**scope)
+            with first.serialize_disposable_testing_resources():
+                clearing = pool.submit(
+                    second.clear_reviewed_disposable_lane_safety,
+                    **scope,
+                    preview_id=fixture.preview.preview_id,
+                    expected_binding_sha256=reviewed.binding_sha256,
+                    expected_observation_sha256=disposable_lanes.disposable_lane_observation_sha256(
+                        protected
+                    ),
+                )
+                with self.assertRaises(SQLAlchemyError):
+                    clearing.result(timeout=15)
+                self.assertEqual(first.read_disposable_lane_safety(**scope), protected)
+            self.assertEqual(second.read_disposable_lane_safety(**scope), protected)

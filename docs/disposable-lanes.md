@@ -338,12 +338,17 @@ For testing lanes, caller-supplied facts and references remain assertions: while
 stores usage, custody and isolation as `unknown`, even if the request asserts
 `unused`, `reproducible` or `isolated`. Those assertions never permit an apply.
 `clear` removes this product's exact-scope observation only when
-`expected_binding_sha256` matches the reviewed current `inspect` binding and
-the lane is still its declared testing lane or exact owned preview. Validation
+`expected_binding_sha256` matches the reviewed current `inspect` binding,
+`expected_observation_sha256` matches its complete recorded observation (or
+absence), and the lane is still its declared testing lane or exact owned preview. Validation
 and deletion share a database transaction that excludes binding and preview
 changes. A missing or stale digest, undeclared lane, production lane or changed
 preview refuses with `409 disposable_observation_refused` without deleting
-evidence. Clear changes no staff hold, custody inventory, provider resource or
+evidence. A later protective report also refuses an older review on an unchanged
+lane. Inspect exposes the observation digest and a safe stored protection summary;
+these are retained reports, not newly collected facts. Invalid ownership, including
+a destroyed or ambiguous preview, leaves its observation in place.
+Clear changes no staff hold, custody inventory, provider resource or
 historical operation. Clear a protective report only after resolving its source:
 the person has stopped using the lane, the needed copy is preserved, or resource
 separation is complete. Then record fresh facts and references. A safe assertion
@@ -1356,11 +1361,15 @@ Refresh after hold, target, profile, runtime or secret-metadata changes. Existin
 `clear` removes only the observation and restores missing evidence. Run the
 client's `inspect` command, review the returned `binding_sha256` and resolve
 every protection, then pass that exact digest to `clear` with
-`--expected-binding-sha256 <reviewed-binding>`, retaining the same product,
+`--expected-binding-sha256 <reviewed-binding>` and
+`--expected-observation-sha256 <reviewed-observation>`, retaining the same product,
 context, instance and preview ID. Clear sends one request; it never silently
 re-inspects changed bindings or retries an uncertain result. A refused clear
-requires a new inspection and review. Rollback
-retains observations; the previous service rejects the new `collect` request.
+requires a new inspection and review. A new clear client against an older service
+fails request validation on the unknown observation-digest field before deletion;
+an older clear client against this service refuses its missing digest. Non-clear
+client requests retain their older shape. Rollback retains observations; the
+previous service rejects the new `collect` request.
 The service catalog deliberately publishes all existing API modes. The repo
 client supports `inspect`, `collect`, preview `record` and binding-bound `clear`. Catalog-helper integration is
 coordinated on codex-skills#1308; that consumer must refresh its vendored

@@ -597,10 +597,17 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
                 )
             )
 
-        payload["mode"] = "clear"
+        inspected = observe()
+        self.assertEqual(inspected.status_code, 202, inspected.text)
+        payload.update(
+            mode="clear",
+            expected_binding_sha256=inspected.json()["result"]["binding_sha256"],
+            expected_observation_sha256=inspected.json()["result"]["observation_sha256"],
+        )
         cleared = observe()
         self.assertEqual(cleared.status_code, 202, cleared.text)
         payload["mode"] = "inspect"
+        payload.pop("expected_observation_sha256")
         inspected = observe()
         self.assertEqual(inspected.status_code, 202, inspected.text)
         payload.update(

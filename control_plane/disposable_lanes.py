@@ -7,6 +7,7 @@ import json
 from typing import Protocol
 
 from control_plane.contracts.disposable_lane import DisposableLaneSafety
+from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.preview_record import PreviewRecord
@@ -142,6 +143,11 @@ class DisposableLaneObservationBinding:
     target_id: DokployTargetIdRecord | None
     preview: PreviewRecord | None
     binding_sha256: str
+
+
+def disposable_lane_observation_sha256(observation: DisposableLaneSafety | None) -> str:
+    """Bind the reviewed report, including its evidence and freshness, or its absence."""
+    return canonical_json_sha256(observation.model_dump(mode="json") if observation else None)
 
 
 def resolve_disposable_observation_binding(

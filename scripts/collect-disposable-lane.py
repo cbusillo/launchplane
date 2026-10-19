@@ -28,6 +28,7 @@ def main() -> int:
         parser.add_argument(f"--{field}", required=True)
     parser.add_argument("--preview-id", default="")
     parser.add_argument("--expected-binding-sha256", default="")
+    parser.add_argument("--expected-observation-sha256", default="")
     parser.add_argument("--lifetime-seconds", type=int)
     parser.add_argument("--usage", choices=("unknown", "unused", "in_use"), default="unknown")
     parser.add_argument(
@@ -45,7 +46,11 @@ def main() -> int:
         parser.error("Recording cleanup facts requires an exact preview ID.")
     if args.mode == "clear" and not re.fullmatch(r"[0-9a-f]{64}", args.expected_binding_sha256):
         parser.error("Clearing requires --expected-binding-sha256 from a reviewed inspection.")
-    if args.mode != "clear" and args.expected_binding_sha256:
+    if args.mode == "clear" and not re.fullmatch(r"[0-9a-f]{64}", args.expected_observation_sha256):
+        parser.error(
+            "Clearing requires --expected-observation-sha256 from the same reviewed inspection."
+        )
+    if args.mode != "clear" and (args.expected_binding_sha256 or args.expected_observation_sha256):
         parser.error("Only clear accepts an explicitly reviewed binding.")
     helper = args.operator_helper.expanduser().resolve(strict=True)
     if helper.name != "launchplane-write-action.py":
@@ -62,13 +67,17 @@ def main() -> int:
         instance=args.instance,
         preview_id=args.preview_id,
         expected_binding_sha256=args.expected_binding_sha256,
+        expected_observation_sha256=args.expected_observation_sha256,
     )
     try:
         response = transport["request_launchplane"](
             service_url=settings["service_url"],
             path=DISPOSABLE_LANE_OBSERVATION_ROUTE,
             settings=settings,
-            body=payload.model_dump(mode="json"),
+            body=payload.model_dump(
+                mode="json",
+                exclude={"expected_observation_sha256"} if payload.mode != "clear" else set(),
+            ),
             timeout=30,
         )
         if args.mode == "clear":
@@ -76,6 +85,7 @@ def main() -> int:
                 response["result"]["mode"] != "clear"
                 or response["result"]["provider_mutation"] is not False
                 or response["result"]["binding_sha256"] != payload.expected_binding_sha256
+                or response["result"]["observation_sha256"] != payload.expected_observation_sha256
             ):
                 raise ValueError("The observation clear did not settle as requested.")
             print(
@@ -119,24 +129,36 @@ def main() -> int:
                 service_url=settings["service_url"],
                 path=DISPOSABLE_LANE_OBSERVATION_ROUTE,
                 settings=settings,
-                body=payload.model_dump(mode="json"),
+                body=payload.model_dump(
+                    mode="json",
+                    exclude={"expected_observation_sha256"} if payload.mode != "clear" else set(),
+                ),
                 timeout=240,
             )
         result = response["result"]
+        inspection: dict[str, object] = {}
         if args.mode == "inspect":
             digest = result["binding_sha256"]
             if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
                 raise ValueError("The inspection did not return a valid binding.")
-            print(
-                json.dumps(
-                    {
-                        "mode": "inspect",
-                        "binding_sha256": digest,
-                        "trace_id": transport["public_trace_id"](response["trace_id"]),
-                    }
-                )
-            )
-            return 0
+            inspection["binding_sha256"] = digest
+            if "observation_sha256" in result:
+                observation_digest = result["observation_sha256"]
+                if not isinstance(observation_digest, str) or not re.fullmatch(
+                    r"[0-9a-f]{64}", observation_digest
+                ):
+                    raise ValueError("The inspection did not return a valid observation digest.")
+                report = result["observation"]
+                if report is not None:
+                    report = {key: report[key] for key in ("usage", "data", "production_resources")}
+                    if (
+                        report["usage"] not in {"unknown", "unused", "in_use"}
+                        or report["data"] not in {"unknown", "reproducible", "only_copy"}
+                        or report["production_resources"]
+                        not in {"unknown", "isolated", "shared", "separation_ready"}
+                    ):
+                        raise ValueError("Invalid recorded observation.")
+                inspection.update(observation_sha256=observation_digest, observation=report)
         if result["mode"] != args.mode:
             raise ValueError("The collection did not settle as requested.")
         if args.mode in {"collect", "record"} and (
@@ -203,6 +225,7 @@ def main() -> int:
             json.dumps(
                 {
                     "mode": args.mode,
+                    **inspection,
                     "facts": facts,
                     "historical_usage_retained": historical_usage_retained,
                     "odoo_usage": {**usage_facts, "reason_code": reason_code},

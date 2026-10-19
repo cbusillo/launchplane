@@ -4,6 +4,7 @@ from typing import Any
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+import threading
 from unittest.mock import patch
 
 from control_plane.contracts.deploy_target import ProviderTargetRecord
@@ -16,6 +17,7 @@ from control_plane.storage.postgres import PostgresRecordStore
 from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
 from tests.support.auth import scoped_agent_transport
 from tests.support.disposable_lanes import record_safety
+from control_plane.disposable_lanes import disposable_lane_observation_sha256
 from tests.support.http import request
 from tests.support.profiles import _generic_site_profile_payload
 
@@ -144,7 +146,22 @@ class DisposableRuntimeAuthorityTests(unittest.IsolatedAsyncioTestCase):
         denied = await self.observe(instance="prod")
         self.assertEqual(denied.status_code, 409, denied.text)
         self.assertEqual(self.store.read_product_profile_record("example-site"), stored)
-        cleared = await self.observe(mode="clear", expected_binding_sha256=proof)
+        clearing = await self.observe()
+        event_loop_thread = threading.get_ident()
+        clear = self.store.clear_reviewed_disposable_lane_safety
+
+        def blocking_clear(**arguments: str) -> str:
+            self.assertNotEqual(threading.get_ident(), event_loop_thread)
+            return clear(**arguments)
+
+        with patch.object(
+            self.store, "clear_reviewed_disposable_lane_safety", side_effect=blocking_clear
+        ):
+            cleared = await self.observe(
+                mode="clear",
+                expected_binding_sha256=proof,
+                expected_observation_sha256=clearing.json()["result"]["observation_sha256"],
+            )
         self.assertEqual(cleared.status_code, 202, cleared.text)
         self.assertEqual(self.store.read_product_profile_record("example-site"), initial)
 
@@ -168,23 +185,40 @@ class DisposableRuntimeAuthorityTests(unittest.IsolatedAsyncioTestCase):
                 data="only_copy",
                 production_resources="shared",
             )
-        original = {
-            scope: self.store.read_disposable_lane_safety(profile.product, *scope)
-            for scope in scopes
-        }
+        original = {}
+        for scope in scopes:
+            recorded = self.store.read_disposable_lane_safety(profile.product, *scope)
+            assert recorded is not None
+            original[scope] = recorded
         inspected = await self.observe()
         self.assertEqual(inspected.status_code, 202, inspected.text)
         proof = inspected.json()["result"]["binding_sha256"]
         for arguments in (
             {},
             {"expected_binding_sha256": "fabricated-inspection"},
+            {"expected_binding_sha256": proof, "expected_observation_sha256": ""},
             *(
-                {"context": context, "instance": instance, "expected_binding_sha256": proof}
+                {
+                    "context": context,
+                    "instance": instance,
+                    "expected_binding_sha256": original[(context, instance)].binding_sha256,
+                    "expected_observation_sha256": disposable_lane_observation_sha256(
+                        original[(context, instance)]
+                    ),
+                }
                 for context, instance in scopes[1:]
             ),
         ):
             with self.subTest(arguments=arguments):
-                response = await self.observe(mode="clear", **arguments)
+                response = await self.observe(
+                    mode="clear",
+                    **{
+                        "expected_observation_sha256": inspected.json()["result"][
+                            "observation_sha256"
+                        ],
+                        **arguments,
+                    },
+                )
                 self.assertEqual(response.status_code, 409, response.text)
                 self.assertEqual(response.json()["error"]["code"], "disposable_observation_refused")
                 self.assertEqual(
@@ -209,7 +243,11 @@ class DisposableRuntimeAuthorityTests(unittest.IsolatedAsyncioTestCase):
         current = await self.observe()
         current_proof = current.json()["result"]["binding_sha256"]
         self.assertNotEqual(current_proof, proof)
-        cleared = await self.observe(mode="clear", expected_binding_sha256=current_proof)
+        cleared = await self.observe(
+            mode="clear",
+            expected_binding_sha256=current_proof,
+            expected_observation_sha256=current.json()["result"]["observation_sha256"],
+        )
         self.assertEqual(cleared.status_code, 202, cleared.text)
         self.assertEqual(cleared.json()["result"]["binding_sha256"], current_proof)
         self.assertIsNone(
@@ -833,8 +871,10 @@ class DisposableRuntimeAuthorityTests(unittest.IsolatedAsyncioTestCase):
             ("production_resources", "shared"),
         ):
             with self.subTest(field=field):
+                clearing = await self.observe(**scope)
                 cleared = await self.observe(
                     mode="clear",
+                    expected_observation_sha256=clearing.json()["result"]["observation_sha256"],
                     expected_binding_sha256=inspected.json()["result"]["binding_sha256"],
                     **scope,
                 )
@@ -900,28 +940,45 @@ class DisposableRuntimeAuthorityTests(unittest.IsolatedAsyncioTestCase):
             production_resources="shared",
         )
         protected = self.store.read_disposable_lane_safety(profile.product, preview.context, "pr-7")
+        stale = await self.observe(
+            mode="clear",
+            expected_binding_sha256=proof,
+            expected_observation_sha256=inspected.json()["result"]["observation_sha256"],
+            **scope,
+        )
+        self.assertEqual(stale.status_code, 409, stale.text)
+        self.assertEqual(
+            self.store.read_disposable_lane_safety(profile.product, preview.context, "pr-7"),
+            protected,
+        )
+        current_observation = disposable_lane_observation_sha256(protected)
         for candidate in (
             {**scope, "preview_id": "fabricated-preview"},
             {**scope, "preview_id": ""},
         ):
-            response = await self.observe(mode="clear", expected_binding_sha256=proof, **candidate)
+            response = await self.observe(
+                mode="clear",
+                expected_binding_sha256=proof,
+                expected_observation_sha256=current_observation,
+                **candidate,
+            )
             self.assertEqual(response.status_code, 409, response.text)
             self.assertEqual(
                 self.store.read_disposable_lane_safety(profile.product, preview.context, "pr-7"),
                 protected,
             )
         for changes in (
-            {
-                "updated_at": (
-                    datetime.fromisoformat(preview.updated_at) + timedelta(seconds=1)
-                ).isoformat()
-            },
             {"state": "destroyed"},
             {"anchor_repo": "foreign/repository"},
         ):
             with self.subTest(changes=changes):
                 self.store.write_preview_record(preview.model_copy(update=changes))
-                response = await self.observe(mode="clear", expected_binding_sha256=proof, **scope)
+                response = await self.observe(
+                    mode="clear",
+                    expected_binding_sha256=proof,
+                    expected_observation_sha256=current_observation,
+                    **scope,
+                )
                 self.assertEqual(response.status_code, 409, response.text)
                 self.assertEqual(
                     self.store.read_disposable_lane_safety(
@@ -930,7 +987,13 @@ class DisposableRuntimeAuthorityTests(unittest.IsolatedAsyncioTestCase):
                     protected,
                 )
         self.store.write_preview_record(preview)
-        response = await self.observe(mode="clear", expected_binding_sha256=proof, **scope)
+        clearing = await self.observe(**scope)
+        response = await self.observe(
+            mode="clear",
+            expected_binding_sha256=proof,
+            expected_observation_sha256=clearing.json()["result"]["observation_sha256"],
+            **scope,
+        )
         self.assertEqual(response.status_code, 202, response.text)
         self.assertIsNone(
             self.store.read_disposable_lane_safety(profile.product, preview.context, "pr-7")

@@ -6902,7 +6902,7 @@ class PostgresRecordStore(HumanSessionStore):
         filters: Sequence[object],
     ) -> RecordModel:
         statement = select(orm_model).where(*cast(Any, filters)).limit(1)
-        held = getattr(self._disposable_authority_context, "session", None)
+        held = getattr(self._disposable_authority_context, "observation_read_session", None)
         with nullcontext(held) if held is not None else self._session_factory() as session:
             row = session.scalar(statement.execution_options(populate_existing=True))
             if row is None:
@@ -6945,7 +6945,7 @@ class PostgresRecordStore(HumanSessionStore):
             statement = statement.offset(offset)
         if limit is not None:
             statement = statement.limit(limit)
-        held = getattr(self._disposable_authority_context, "session", None)
+        held = getattr(self._disposable_authority_context, "observation_read_session", None)
         with nullcontext(held) if held is not None else self._session_factory() as session:
             rows = session.scalars(statement.execution_options(populate_existing=True)).all()
             return tuple(
@@ -10730,20 +10730,25 @@ class PostgresRecordStore(HumanSessionStore):
         instance: str,
         preview_id: str,
         expected_binding_sha256: str,
+        expected_observation_sha256: str,
     ) -> str:
         """Keep exact scope and the reviewed binding unchanged through deletion."""
-        from control_plane.disposable_lanes import resolve_disposable_observation_binding
+        from control_plane.disposable_lanes import (
+            resolve_disposable_observation_binding,
+            disposable_lane_observation_sha256,
+        )
 
         with self._session_factory() as session:
             self._begin_serialized_write(session)
+            if not self.database_url.startswith("sqlite"):
+                session.execute(text("SET LOCAL lock_timeout = '5s'"))
             self._lock_product_authority_bundle_write(session)
             if preview_id and not self.database_url.startswith("sqlite"):
-                session.execute(text("SET LOCAL lock_timeout = '5s'"))
                 # Preview writers have their own locks. Include inserts, which
                 # can turn a uniquely owned preview into an ambiguous lane.
                 session.execute(text("LOCK TABLE launchplane_preview_records IN SHARE MODE"))
-            outer = getattr(self._disposable_authority_context, "session", None)
-            self._disposable_authority_context.session = session
+            outer = getattr(self._disposable_authority_context, "observation_read_session", None)
+            self._disposable_authority_context.observation_read_session = session
             try:
                 binding = resolve_disposable_observation_binding(
                     self,
@@ -10759,12 +10764,24 @@ class PostgresRecordStore(HumanSessionStore):
                     (product, context, instance),
                     with_for_update=True,
                 )
+                current = (
+                    self._read_payload(model_type=DisposableLaneSafety, payload=row.payload)
+                    if row is not None
+                    else None
+                )
+                if (
+                    not expected_observation_sha256
+                    or disposable_lane_observation_sha256(current) != expected_observation_sha256
+                ):
+                    raise ValueError(
+                        "The recorded observation changed; inspect and review it again."
+                    )
                 if row is not None:
                     session.delete(row)
                 session.commit()
                 return binding.binding_sha256
             finally:
-                self._disposable_authority_context.session = outer
+                self._disposable_authority_context.observation_read_session = outer
 
     def read_disposable_replacement_preparation(
         self, operation_id: str
@@ -27108,7 +27125,7 @@ class PostgresRecordStore(HumanSessionStore):
             .where(LaunchplaneProductProfileRow.product == product)
             .limit(1)
         )
-        held = getattr(self._disposable_authority_context, "session", None)
+        held = getattr(self._disposable_authority_context, "observation_read_session", None)
         with nullcontext(held) if held is not None else self._session_factory() as session:
             row = session.scalar(statement.execution_options(populate_existing=True))
             if row is None:
@@ -27130,7 +27147,7 @@ class PostgresRecordStore(HumanSessionStore):
         if filters:
             statement = statement.where(*cast(Any, filters))
         statement = statement.order_by(LaunchplaneProductProfileRow.product.asc())
-        held = getattr(self._disposable_authority_context, "session", None)
+        held = getattr(self._disposable_authority_context, "observation_read_session", None)
         with nullcontext(held) if held is not None else self._session_factory() as session:
             rows = session.scalars(statement.execution_options(populate_existing=True)).all()
             return tuple(self._read_product_profile_payload(row.payload) for row in rows)

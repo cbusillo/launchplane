@@ -8,6 +8,7 @@ from pathlib import Path
 import runpy
 from tempfile import TemporaryDirectory
 import unittest
+from typing import Any
 from unittest.mock import Mock, patch
 
 from control_plane.disposable_lane_collection import disposable_collection_coverage
@@ -32,6 +33,8 @@ class DisposableLaneClientTests(unittest.TestCase):
         production_resources: str = "unknown",
         lifetime_seconds: int | None = None,
         expected_binding_sha256: str | None = None,
+        expected_observation_sha256: str | None = "d" * 64,
+        observation_sha256: str = "d" * 64,
         request_mock: Mock | None = None,
     ) -> tuple[int, str, Mock]:
         client = runpy.run_path(
@@ -40,7 +43,14 @@ class DisposableLaneClientTests(unittest.TestCase):
         facts = {"usage": usage, "data": data, "production_resources": production_resources}
         inspected = {
             "trace_id": "fixture-trace",
-            "result": {"mode": "inspect", "binding_sha256": inspected_binding_sha256, **facts},
+            "result": {
+                "mode": "inspect",
+                "binding_sha256": inspected_binding_sha256,
+                "source_coverage": disposable_collection_coverage(),
+                "observation_sha256": observation_sha256,
+                "observation": None,
+                **facts,
+            },
         }
         collected_result: dict[str, object] = {
             "mode": collection_mode,
@@ -82,6 +92,7 @@ class DisposableLaneClientTests(unittest.TestCase):
                         "mode": "clear",
                         "provider_mutation": provider_mutation,
                         "binding_sha256": binding_sha256,
+                        "observation_sha256": observation_sha256,
                     },
                 }
             ]
@@ -128,6 +139,8 @@ class DisposableLaneClientTests(unittest.TestCase):
                 ]
             if lifetime_seconds is not None:
                 arguments += ["--lifetime-seconds", str(lifetime_seconds)]
+            if command_mode == "clear" and expected_observation_sha256 is not None:
+                arguments += ["--expected-observation-sha256", expected_observation_sha256]
             if expected_binding_sha256 is not None:
                 arguments += ["--expected-binding-sha256", expected_binding_sha256]
             output = io.StringIO()
@@ -165,6 +178,7 @@ class DisposableLaneClientTests(unittest.TestCase):
         body = request.call_args.kwargs["body"]
         self.assertEqual(body["mode"], "clear")
         self.assertEqual(body["expected_binding_sha256"], proof)
+        self.assertTrue(body["expected_observation_sha256"])
         self.assertEqual(
             (body["product"], body["context"], body["instance"]), ("example", "example", "testing")
         )
@@ -178,7 +192,18 @@ class DisposableLaneClientTests(unittest.TestCase):
                 )
             self.assertEqual(refusal.exception.code, 2)
             request.assert_not_called()
+        for proof in (None, "", "invalid"):
+            request = Mock()
+            with self.subTest(observation=proof), self.assertRaises(SystemExit):
+                self.call_client(
+                    command_mode="clear",
+                    expected_binding_sha256="a" * 64,
+                    expected_observation_sha256=proof,
+                    request_mock=request,
+                )
+            request.assert_not_called()
         for changes in (
+            {"observation_sha256": "e" * 64},
             {"binding_sha256": "b" * 64},
             {"provider_mutation": True},
             {"truncated": True},
@@ -191,6 +216,27 @@ class DisposableLaneClientTests(unittest.TestCase):
                 request.assert_called_once()
                 self.assertEqual(json.loads(output)["status"], "unverified")
 
+    def test_new_clear_field_refuses_an_older_service_before_its_handler(self) -> None:
+        from pydantic import ConfigDict, ValidationError, create_model
+        from control_plane.contracts.disposable_lane import DisposableLaneObservationRequest
+
+        _, _, request = self.call_client(command_mode="clear", expected_binding_sha256="a" * 64)
+        body = request.call_args.kwargs["body"]
+        # The starting service had these fields and rejected unknown fields.
+        fields: dict[str, Any] = {}
+        for name, field in DisposableLaneObservationRequest.model_fields.items():
+            if name != "expected_observation_sha256":
+                assert field.annotation is not None
+                fields[name] = (field.annotation, field.default)
+        legacy = create_model(
+            "LegacyObservationRequest", __config__=ConfigDict(extra="forbid"), **fields
+        )
+        legacy.model_validate(
+            {name: value for name, value in body.items() if name != "expected_observation_sha256"}
+        )
+        with self.assertRaises(ValidationError):
+            legacy.model_validate(body)
+
     def test_inspect_exposes_binding_for_review_before_clear(self) -> None:
         proof = "c" * 64
         status, output, request = self.call_client(
@@ -199,6 +245,9 @@ class DisposableLaneClientTests(unittest.TestCase):
         self.assertEqual(status, 0, output)
         request.assert_called_once()
         self.assertEqual(json.loads(output)["binding_sha256"], proof)
+        self.assertEqual(json.loads(output)["source_coverage"], disposable_collection_coverage())
+        self.assertIn("facts", json.loads(output))
+        self.assertNotIn("expected_observation_sha256", request.call_args.kwargs["body"])
 
     def test_observation_lifetime_uses_the_service_contract_limit(self) -> None:
         from control_plane.contracts.disposable_lane import MAX_DISPOSABLE_LANE_SAFETY_SECONDS

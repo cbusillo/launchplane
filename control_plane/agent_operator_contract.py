@@ -200,11 +200,11 @@ OPERATION_SPECS = (
     OperationSpec(
         "POST",
         DISPOSABLE_LANE_OBSERVATION_ROUTE,
-        "Inspect or collect exact-lane service safety evidence, record unknown assertions or prepare a retained testing replacement. Clear requires the reviewed inspection's expected_binding_sha256 and the same currently owned preview or declared testing lane; changed bindings refuse without deleting evidence. Unavailable facts stay unknown.",
+        "Inspect or collect exact-lane service safety evidence, record unknown assertions or prepare a retained testing replacement. Clear requires the reviewed inspection's expected_binding_sha256 and expected_observation_sha256, comparing the exact current report or its absence on the same owned preview or declared testing lane; changed bindings or later reports refuse without deleting evidence. Unavailable facts stay unknown.",
         ("service_api",),
         ("inspect", "collect", "record", "clear", "prepare-rebuild"),
         "none",
-        ("expected_binding_sha256",),
+        ("expected_binding_sha256", "expected_observation_sha256"),
     ),
     OperationSpec(
         "POST",
