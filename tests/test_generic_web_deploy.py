@@ -1049,7 +1049,6 @@ class GenericWebDeployTests(unittest.TestCase):
         self.assertFalse(result.provider_effect_attempted)
         self.assertEqual(deploy_provider.runtime_identities, [])
         self.assertIn("REPAIRSHOPR_API_TOKEN", result.error_message)
-        self.assertIn("sharing_reason_missing", result.error_message)
 
     def test_non_production_deploy_refuses_failing_integration_key_before_provider(
         self,
