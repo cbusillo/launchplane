@@ -1,4 +1,5 @@
 import json
+import re
 import signal
 import subprocess
 import sys
@@ -17,6 +18,11 @@ class _Clock:
 
     def __call__(self) -> float:
         return self.now
+
+
+def _tally_counts(stderr: str, label: str) -> dict[str, int]:
+    (line,) = [line for line in stderr.splitlines() if label in line]
+    return {key: int(value) for key, value in re.findall(r"(\w+)=(\d+)\b", line)}
 
 
 class GitHubRequestTimingTests(unittest.TestCase):
@@ -60,8 +66,10 @@ class GitHubRequestTimingTests(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIsInstance(json.loads(result.stdout), (dict, list))
-                self.assertIn("example/repo@main trace test", result.stderr)
-                self.assertIn("requests=2 not_modified=1 non_304_requests=1", result.stderr)
+                counts = _tally_counts(result.stderr, "example/repo@main trace test")
+                self.assertEqual(counts["requests"], 2)
+                self.assertEqual(counts["not_modified"], 1)
+                self.assertEqual(counts["non_304_requests"], 1)
                 self.assertNotIn("unrelated INFO", result.stderr)
 
     def test_web_startup_emits_tallies_through_existing_handler(self) -> None:
@@ -103,8 +111,9 @@ class GitHubRequestTimingTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(result.stderr.startswith("host: "), result.stderr)
-        self.assertEqual(result.stderr.count("trace web"), 1)
-        self.assertIn("requests=0 not_modified=0 non_304_requests=0", result.stderr)
+        counts = _tally_counts(result.stderr, "trace web")
+        self.assertEqual(counts["requests"], 0)
+        self.assertEqual(counts["not_modified"], 0)
 
     def test_logs_a_slow_request_without_its_query(self) -> None:
         clock = _Clock()
