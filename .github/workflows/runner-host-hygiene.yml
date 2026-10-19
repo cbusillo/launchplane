@@ -384,6 +384,21 @@ jobs:
               | tee "runner-host-hygiene-result-${artifact_suffix}.json"
           }
 
+          expected_suffixes=(manual)
+          if [ "$EVENT_NAME" = "schedule" ]; then
+            expected_suffixes=(report)
+            if [ "$SCHEDULE_EXPRESSION" = "17 10 * * 0" ]; then
+              expected_suffixes=(default-cache dangling-images)
+              for builder_name in "${buildkit_builder_names[@]}"; do
+                expected_suffixes+=("builder-$builder_name")
+              done
+              for generated_cache_key in "${generated_cache_keys[@]}"; do
+                expected_suffixes+=("generated-$generated_cache_key")
+              done
+            fi
+          fi
+          printf '%s\n' "${expected_suffixes[@]}" > "$RUNNER_TEMP/runner-host-hygiene-expected.txt"
+
           if [ "$EVENT_NAME" = "schedule" ]; then
             audit_date="$(date -u +%F)"
             audit_prefix="runner-host-hygiene/${audit_date}/${RUNNER_HOST_NAME}"
@@ -515,12 +530,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          shopt -s nullglob
           artifact_args=()
-          for result in runner-host-hygiene-result-*.json; do
-            suffix="${result#runner-host-hygiene-result-}"
-            artifact_args+=(--audit-file "$RUNNER_TEMP/runner-host-hygiene-audit-evidence-$suffix")
-          done
+          if [ -f "$RUNNER_TEMP/runner-host-hygiene-expected.txt" ]; then
+            while IFS= read -r suffix; do
+              artifact_args+=(--audit-file "$RUNNER_TEMP/runner-host-hygiene-audit-evidence-$suffix.json")
+            done < "$RUNNER_TEMP/runner-host-hygiene-expected.txt"
+          fi
           uv run launchplane work-graph runner-host-hygiene-qualify \
             "${artifact_args[@]}" --report-only \
             --summary-file "$GITHUB_STEP_SUMMARY"

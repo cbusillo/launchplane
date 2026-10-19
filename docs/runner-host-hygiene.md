@@ -670,7 +670,11 @@ Weekday green means a report's planned audit was delivered. It does not mean
 retention is working. The workflow summary now separates report delivery,
 report status, retention qualification and accepted terminal maintenance. The
 qualifier uses the audit envelope's single `maintenance_completed` rule.
-Accepted planned delivery, `blocked`, `not_needed` and pending terminal
+The latest existing audit record supplies the report and blockers; terminal
+status and delivery are shown even when a failed action has a healthy report.
+A run-local expected-action manifest also renders missing evidence for later
+Sunday targets when the summary step can run. A job cancellation can prevent
+the summary step itself. Accepted planned delivery, `blocked`, `not_needed` and pending terminal
 delivery never establish completed maintenance. A completed action can still
 leave cache above target or have unknown measurements; completion and retention
 are separate.
@@ -732,7 +736,8 @@ The default report-only mode prints diagnosis without failing delivery; invalid
 or absent artifacts produce fixed unqualified diagnostics. With `--summary-file`,
 only bounded action/audit identifiers, snapshot time and contract codes are
 rendered. Detailed JSON stays out of that job log. Summary snapshots do not claim
-current-time freshness after a long Sunday batch. The explicit qualification mode exits nonzero for stale/missing evidence, report
+current-time freshness after a long Sunday batch. The explicit qualification
+mode exits nonzero for stale/missing evidence, report
 findings, unresolved execution/recovery, pending delivery or action blockers other
 than recognized existing not-needed outcomes and the expected
 `mutate_not_requested` dry-run blocker. Legacy artifacts without builder evidence

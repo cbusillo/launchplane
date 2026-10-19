@@ -1522,7 +1522,7 @@ def _collect_builder_cache_usage(
             records = [
                 {
                     "id": row.get("ID"),
-                    "size": row.get("Size"),
+                    "size": _engine_build_cache_size(row),
                     "inUse": row.get("InUse"),
                     "shared": row.get("Shared"),
                 }
@@ -1532,6 +1532,7 @@ def _collect_builder_cache_usage(
                 json.dumps(records),
                 observed_at=datetime.now(timezone.utc).isoformat(),
                 minimum_age_hours=0,
+                source="docker_engine",
             )
             rows.append(
                 RunnerHostHygieneBuilderCacheUsage.model_validate(
@@ -1651,8 +1652,19 @@ def _collect_builder_cache_usage(
     return tuple(rows)
 
 
+def _engine_build_cache_size(row: dict[str, object]) -> int | None:
+    size = _optional_non_negative_int(row.get("Size"))
+    # Engine omits BuildKit mutability. Active zero can be a synthetic unknown
+    # size, so it cannot establish complete logical accounting.
+    return None if row.get("InUse") is True and size == 0 else size
+
+
 def _parse_builder_cache_usage(
-    output: str, *, observed_at: str, minimum_age_hours: int
+    output: str,
+    *,
+    observed_at: str,
+    minimum_age_hours: int,
+    source: Literal["docker_engine", "buildctl"] = "buildctl",
 ) -> dict[str, int]:
     payload = json.loads(output)
     if payload is None:
@@ -1689,8 +1701,11 @@ def _parse_builder_cache_usage(
             or type(item.get("shared")) is not bool
         ):
             raise ValueError("builder counters are incomplete")
-        if item.get("mutable") is True and item["inUse"]:
-            raise ValueError("mutable active record size is unknown")
+        if source == "buildctl":
+            if type(item.get("mutable")) is not bool:
+                raise ValueError("builder mutability evidence is incomplete")
+            if item["mutable"] and item["inUse"]:
+                raise ValueError("mutable active record size is unknown")
         recent = False
         if minimum_age_hours:
             if "lastUsedAt" not in item:
@@ -4013,7 +4028,7 @@ def _parse_docker_disk_usage(output: str) -> _DockerDiskUsageSnapshot:
     for row in build_cache_rows:
         in_use = row.get("InUse")
         shared = row.get("Shared")
-        raw_size = _optional_non_negative_int(row.get("Size"))
+        raw_size = _engine_build_cache_size(row)
         if not isinstance(in_use, bool) or not isinstance(shared, bool) or raw_size is None:
             build_cache_partial = True
             build_cache_measurements_known = False

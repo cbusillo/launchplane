@@ -7,6 +7,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
+import click
 from click.testing import CliRunner
 
 from control_plane.cli import main
@@ -196,6 +197,7 @@ class HygieneQualificationTests(unittest.TestCase):
             "id": "cache",
             "size": 200 * _BUILDCTL_STORAGE_MB_BYTES,
             "inUse": False,
+            "mutable": False,
             "shared": False,
             "createdAt": (now - timedelta(days=10)).isoformat(),
             "lastUsedAt": (now - timedelta(days=1)).isoformat(),
@@ -247,13 +249,19 @@ class HygieneQualificationTests(unittest.TestCase):
             "id": "one",
             "size": 1,
             "inUse": False,
+            "mutable": False,
             "shared": False,
             "createdAt": now.isoformat(),
+            "lastUsedAt": now.isoformat(),
         }
         for records in (
             [record, record],
             [{**record, "size": -1}],
-            [{**record, "createdAt": None}],
+            [{key: value for key, value in record.items() if key != "lastUsedAt"}],
+            [{**record, "lastUsedAt": now.replace(tzinfo=None).isoformat()}],
+            [{**record, "lastUsedAt": (now + timedelta(seconds=1)).isoformat()}],
+            [{key: value for key, value in record.items() if key != "mutable"}],
+            [{**record, "mutable": "false"}],
         ):
             with self.subTest(records=records), self.assertRaises(ValueError):
                 _parse_builder_cache_usage(
@@ -484,6 +492,7 @@ class HygieneQualificationTests(unittest.TestCase):
                 "id": "shared",
                 "size": 200 * _BUILDCTL_STORAGE_MB_BYTES,
                 "inUse": False,
+                "mutable": False,
                 "shared": True,
                 "createdAt": (now - timedelta(days=10)).isoformat(),
                 "lastUsedAt": (now - timedelta(days=10)).isoformat(),
@@ -492,6 +501,7 @@ class HygieneQualificationTests(unittest.TestCase):
                 "id": "active",
                 "size": 40,
                 "inUse": True,
+                "mutable": False,
                 "shared": True,
                 "createdAt": now.isoformat(),
                 "lastUsedAt": now.isoformat(),
@@ -623,6 +633,7 @@ class HygieneQualificationTests(unittest.TestCase):
             "id": "old",
             "size": target + 1,
             "inUse": False,
+            "mutable": False,
             "shared": False,
             "lastUsedAt": None,
             "createdAt": now.isoformat(),
@@ -647,8 +658,133 @@ class HygieneQualificationTests(unittest.TestCase):
                 minimum_age_hours=168,
             )
 
+    def test_engine_active_zero_is_unknown_but_empty_and_inactive_zero_are_measured(self) -> None:
+        for records, known in (
+            ([{"ID": "active", "Size": 0, "InUse": True, "Shared": False}], False),
+            ([{"ID": "inactive", "Size": 0, "InUse": False, "Shared": False}], True),
+            ([], True),
+        ):
+            with self.subTest(records=records):
+                report = report_for(ReportRunner(daemon_records=records))
+                row = next(
+                    item for item in report.builder_cache_usage if item.cache_key == "default"
+                )
+                aggregate = next(
+                    item
+                    for item in report.cache_class_telemetry
+                    if item.cache_class == "docker_build_cache"
+                )
+                self.assertEqual(row.accounted_for, known)
+                if known:
+                    self.assertEqual(row.logical_bytes, 0)
+                    self.assertEqual(aggregate.logical_bytes, 0)
+                else:
+                    self.assertIsNone(row.logical_bytes)
+                    self.assertIsNone(aggregate.logical_bytes)
+                    self.assertNotEqual(aggregate.availability, "available")
+                    self.assertIn(
+                        "builder_cache_unqualified", {item.code for item in report.findings}
+                    )
+        now = datetime.now(timezone.utc).isoformat()
+        for mutable, active in ((True, False), (False, True)):
+            measured = _parse_builder_cache_usage(
+                json.dumps(
+                    [
+                        {
+                            "id": "zero",
+                            "size": 0,
+                            "inUse": active,
+                            "shared": False,
+                            "mutable": mutable,
+                            "lastUsedAt": None,
+                        }
+                    ]
+                ),
+                observed_at=now,
+                minimum_age_hours=168,
+            )
+            self.assertEqual(measured["logical_bytes"], 0)
+
+    def test_failed_terminal_uses_latest_evidence_and_reports_action_failure(self) -> None:
+        for cause in ("idle", "collection", "command"):
+            with self.subTest(cause=cause), tempfile.TemporaryDirectory() as root:
+                request = request_with_budgets(mutate=True)
+                runner = ReportRunner()
+                probes = 0
+
+                def fail(command: Sequence[str], timeout: int) -> RemoteCommandResult:
+                    nonlocal probes
+                    if tuple(command)[:2] == ("bash", "-lc") and "pgrep -af" in command[2]:
+                        probes += 1
+                        if probes > 2 and cause == "collection":
+                            raise click.ClickException("measurement unavailable")
+                        if probes > 2 and cause == "idle":
+                            return RemoteCommandResult(
+                                0, "789 /opt/actions-runner/bin/Runner.Worker spawnclient 456\n"
+                            )
+                    if command[0] == "flock" and cause == "command":
+                        return RemoteCommandResult(1)
+                    return runner(command, timeout)
+
+                artifact, summary = Path(root) / "audit.json", Path(root) / "summary.md"
+                spool = RunnerHostHygieneAuditSpool(
+                    root=Path(root) / "spool", artifact_file=artifact
+                )
+                execute_runner_host_hygiene_executor(
+                    request=request,
+                    remote_runner=fail,
+                    audit_poster=_AuditPoster(),
+                    audit_spool=spool,
+                    github_idle_evidence_reader=_github_idle_evidence_reader,
+                    audit_delivery_sleeper=lambda _: None,
+                )
+                envelope = spool.read(
+                    host_name=request.host_name,
+                    action=request.action,
+                    audit_record_key=request.audit_record_key,
+                )
+                assert envelope is not None and envelope.terminal_audit is not None
+                terminal = envelope.terminal_audit
+                self.assertEqual(terminal.status, "failed")
+                result = qualify_runner_host_hygiene(
+                    envelope, as_of=datetime.now(timezone.utc), maximum_age_seconds=3600
+                )
+                self.assertEqual(
+                    result["blockers"],
+                    tuple(
+                        item.code
+                        for item in terminal.plan.blockers
+                        if item.code != "mutate_not_requested"
+                    ),
+                )
+                current_report = terminal.post_apply_report or terminal.pre_apply_report
+                self.assertEqual(
+                    result["findings"], tuple(item.code for item in current_report.findings)
+                )
+                self.assertEqual(result["terminal_status"], terminal.status)
+                self.assertFalse(result["maintenance_completed"])
+                self.assertFalse(result["qualified"])
+                if cause == "idle":
+                    self.assertTrue(result["blockers"])
+                    self.assertTrue(result["findings"])
+                if cause == "command":
+                    self.assertEqual(result["report_status"], "healthy")
+                response = CliRunner().invoke(
+                    main,
+                    [
+                        "work-graph",
+                        "runner-host-hygiene-qualify",
+                        "--audit-file",
+                        str(artifact),
+                        "--summary-file",
+                        str(summary),
+                    ],
+                )
+                self.assertEqual(response.exit_code, 0, response.output)
+                self.assertIn(f"terminal_status: `{terminal.status}`", summary.read_text())
+
     def test_idle_blocks_action_qualification_without_erasing_retention_accounting(self) -> None:
-        from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneFinding
+        from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyBlocker
 
         request = request_with_budgets()
         with tempfile.TemporaryDirectory() as root:
@@ -667,22 +803,17 @@ class HygieneQualificationTests(unittest.TestCase):
                 audit_record_key=request.audit_record_key,
             )
             assert envelope is not None
-            report = envelope.planned_audit.pre_apply_report.model_copy(
+            plan = envelope.planned_audit.plan.model_copy(
                 update={
-                    "status": "attention",
-                    "findings": (
-                        RunnerHostHygieneFinding(
-                            code="idle_evidence_active", message="active jobs"
+                    "blockers": (
+                        RunnerHostHygieneApplyBlocker(
+                            code="idle_evidence_stale", message="stale idle evidence"
                         ),
-                    ),
+                    )
                 }
             )
             updated = envelope.model_copy(
-                update={
-                    "planned_audit": envelope.planned_audit.model_copy(
-                        update={"pre_apply_report": report}
-                    )
-                }
+                update={"planned_audit": envelope.planned_audit.model_copy(update={"plan": plan})}
             )
             result = qualify_runner_host_hygiene(
                 updated, as_of=datetime.now(timezone.utc), maximum_age_seconds=3600

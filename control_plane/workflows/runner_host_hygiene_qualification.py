@@ -24,6 +24,8 @@ class HygieneQualification(TypedDict):
     report_delivery: str
     report_status: str
     execution_state: str
+    terminal_status: str
+    terminal_delivery: str | None
     recovery_required: bool
     action_not_needed: bool
     maintenance_completed: bool
@@ -40,8 +42,8 @@ def qualify_runner_host_hygiene(
     as_of: datetime,
     maximum_age_seconds: int,
 ) -> HygieneQualification:
-    report = audit.terminal_audit.post_apply_report if audit.terminal_audit else None
-    report = report or audit.planned_audit.pre_apply_report
+    current = audit.terminal_audit or audit.action_authorization or audit.planned_audit
+    report = current.post_apply_report or current.pre_apply_report
     try:
         observed = datetime.fromisoformat(report.observed_at)
         fresh = (
@@ -50,12 +52,10 @@ def qualify_runner_host_hygiene(
         )
     except (ValueError, TypeError):
         fresh = False
-    not_needed = _generated_cache_apply_not_needed(audit.planned_audit.plan)
+    not_needed = _generated_cache_apply_not_needed(current.plan)
     unresolved = RunnerHostHygieneAuditSpool.is_unresolved(audit)
     blockers = tuple(
-        item.code
-        for item in audit.planned_audit.plan.blockers
-        if item.code != "mutate_not_requested"
+        item.code for item in current.plan.blockers if item.code != "mutate_not_requested"
     )
     retained = (
         report.require_builder_cache_evidence
@@ -70,6 +70,8 @@ def qualify_runner_host_hygiene(
         "report_delivery": audit.planned_delivery_state,
         "report_status": report.status,
         "execution_state": audit.execution_state,
+        "terminal_status": audit.terminal_audit.status if audit.terminal_audit else "not_recorded",
+        "terminal_delivery": audit.terminal_delivery_state,
         "recovery_required": unresolved,
         "action_not_needed": not_needed,
         "maintenance_completed": audit.maintenance_completed,
@@ -112,6 +114,8 @@ def _summary(
             "report_delivery",
             "report_status",
             "execution_state",
+            "terminal_status",
+            "terminal_delivery",
             "recovery_required",
             "action_not_needed",
             "maintenance_completed",
