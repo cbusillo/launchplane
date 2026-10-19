@@ -20,6 +20,8 @@ from control_plane.dokploy.testing_route import (
     TestingLaneRoute,
 )
 from control_plane.dokploy.testing_route_transport import (
+    MAX_TRAEFIK_API_BYTES,
+    READ_TRAEFIK_API,
     TRAEFIK_DYNAMIC_DIRECTORY,
 )
 from control_plane.dokploy.testing_route_execution import (
@@ -48,6 +50,44 @@ def docker(*arguments: str, content: bytes | None = None) -> str:
     os.environ.get("LAUNCHPLANE_TEST_TRAEFIK_IMAGE"), "isolated Traefik image not selected"
 )
 class TestingRouteRehearsalTests(unittest.TestCase):
+    def test_api_reader_works_with_no_bridge_or_published_port(self) -> None:
+        proxy = "lp-testing-api-" + uuid4().hex[:12]
+        try:
+            docker(
+                "run",
+                "-d",
+                "--pull=never",
+                "--name",
+                proxy,
+                "--network",
+                "none",
+                os.environ["LAUNCHPLANE_TEST_TRAEFIK_IMAGE"],
+                "--api.insecure=true",
+            )
+            deadline = time.monotonic() + 15
+            while True:
+                try:
+                    raw = docker(
+                        "exec",
+                        "-e",
+                        "http_proxy=http://unreachable.invalid:9",
+                        proxy,
+                        "sh",
+                        "-c",
+                        READ_TRAEFIK_API,
+                        "_",
+                        str(MAX_TRAEFIK_API_BYTES + 1),
+                    )
+                    break
+                except subprocess.CalledProcessError:
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.1)
+            self.assertIsInstance(json.loads(raw), dict)
+            self.assertLessEqual(len(raw.encode()), MAX_TRAEFIK_API_BYTES)
+        finally:
+            docker("rm", "-f", proxy)
+
     def test_owned_route_switch_and_inverse_keep_public_requests_serving(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory).resolve()
