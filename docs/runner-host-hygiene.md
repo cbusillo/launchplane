@@ -663,3 +663,100 @@ name:
 
 Until those are present for another action, that action remains report-only or
 dry-run planning only.
+
+## Qualify an existing configuration after drift
+
+A green report workflow proves delivery of its planned audit. It does not prove
+maintenance ran. Executor JSON exposes `maintenance_completed`, true only for a
+completed action with accepted terminal delivery. `blocked`, `not_needed`, a
+pending delivery, and an accepted dry-run never count as completed maintenance.
+Even completed maintenance does not prove a retained-space target was reached:
+seven-day protected or in-use cache can remain above it.
+
+Use the offline acceptance check before reviewing a correction to existing
+hygiene settings. It reads review artifacts only and makes no network calls,
+writes no settings and grants no cleanup authority:
+
+```bash
+uv run launchplane work-graph runner-host-hygiene-qualify \
+  --requests-file /private/evidence/proposed-builder-requests.json \
+  --evidence-file /private/evidence/host-qualification.json
+```
+
+The requests file is an array of existing `RunnerHostHygieneExecutorRequest`
+payloads, one per configured named-builder schedule entry. Use the existing
+allowlist, retained-image inputs, host, service user, roots, observation settings
+and per-builder target, with `mutate: false`. Do not invent a second catalog.
+The owning Actions settings remain authority until #3513's qualified
+record-backed projection replaces them. That projection can call
+`qualify_runner_host_hygiene` using these same typed executor requests; these
+files are temporary review evidence, never a configuration store.
+
+The evidence file follows `HygieneQualificationEvidence` in
+`control_plane/workflows/runner_host_hygiene_qualification.py`:
+
+- `host_name` and timezone-aware `observed_at` bind a fresh collection to the
+  host. Each request's existing maximum evidence age applies. Future or stale
+  collections fail qualification.
+- `service_units` is the complete independently observed systemd runner fleet.
+  `registrations` is the complete independently reconciled repository/lane/
+  runner/service mapping, using the existing `RunnerHostGitHubBinding` shape.
+  Mark `services_complete` and `registrations_complete` true only after full
+  enumeration. They must agree exactly with every proposed request's bindings.
+  Adding a runner requires reviewing its exact binding, not relaxing coverage
+  or inferring a repository from a service name.
+- `image_references` is the complete observed exact image-reference inventory;
+  `images_complete` must reflect collection completeness. Existing
+  `retained_warm_builders` are image references despite their historical name.
+  A live BuildKit container is not evidence a retained image exists. When a
+  producer emits run-specific verification tags, compare its current build
+  outputs and intended warm-image lifecycle before proposing exact replacement
+  references or correcting the producer. A wildcard, dropping a missing image,
+  or substituting the builder container is not a correction. A single existing
+  run-specific tag proves only this snapshot, not durability across later runs.
+- `builders` contains every observed named builder with its exact name,
+  `availability` (`complete`, `partial`, `unavailable`) and nullable
+  `logical_bytes` from that builder's own read-only accounting. The
+  daemon-default cache row and physical state-volume allocation are not named
+  builder logical usage. Mark `builders_complete` false on an incomplete or
+  truncated enumeration. Unknown usage never becomes zero.
+- An above-target builder needs `constraint` (`protected`, `in_use`,
+  `recent_cache`, `maintenance_blocked`), a nonempty `evidence` reference and
+  `recovery_owner`. Use measured retention/in-use evidence, not an inferred
+  reclaim estimate. An owned protection explanation accounts for an excess;
+  blocked maintenance still requires attention. A builder with no configured
+  budget keeps `builder_ownership_unqualified`; identify its existing owner
+  before proposing any budget or cleanup. Never borrow another product's target.
+- Optional `audits` are existing `RunnerHostHygieneAuditDeliveryEnvelope`
+  artifacts. Completion is reported separately and requires matching current
+  host/key/action/target/budget/retained images, accepted planned and terminal
+  delivery and fresh terminal report evidence. A report-only planned audit
+  cannot establish completion.
+
+Output keeps `configuration_qualified`, `retention_accounted_for`, per-builder
+usage/explanation/recovery owner and `accepted_terminal_completion` separate.
+Exit zero means the supplied configuration matches the complete fresh evidence
+and every configured builder is within target or has an owned protection
+explanation. It does not authorize apply or assert terminal maintenance happened.
+A maintenance blocker, unknown measurement, missing retained image or omitted
+service exits nonzero with structured diagnostics. This is evidence validation,
+not independent authentication of manually prepared files: retain the original
+read-only collection receipts privately for the reviewer.
+
+For the fleet/image drift diagnosed in #4138 and infrastructure #607, compare the
+current settings against a newly collected full fleet and current producer image
+semantics, prepare exact corrections, and run this check again. Preserve all
+ordinary idle, freshness, lock, allowlist, audit and replay checks in the executor.
+After a separately authorized live settings correction, obtain a fresh accepted
+report-only audit before assessing the existing per-builder maintenance request.
+Any live apply or manual maintenance is a separate exact Director decision on
+infrastructure #607. Its decision must account for the existing Sunday schedule
+resuming once permanent blockers clear. No prune, host reconfiguration, legacy
+timer enablement or new grant follows from source landing.
+
+This check adds no train, deploy or recovery admission gate. Failed qualification
+holds the proposed hygiene correction for its recovery owner; it does not stop
+product CI or releases. Existing shared-host maintenance continues to require
+full idle evidence and its host lock. Insufficient retained-image evidence can
+still block that maintenance until the producer/lifecycle correction is qualified.
+Q507 and the wider #896/#1838/#1842 posture holds remain unchanged.

@@ -2,6 +2,7 @@ from json import JSONDecodeError
 import json
 import os
 from pathlib import Path
+from datetime import datetime, timezone
 from urllib.parse import urlencode
 from urllib.parse import urlsplit
 from urllib.request import Request
@@ -97,6 +98,10 @@ from control_plane.workflows.runner_host_hygiene_executor import (
 from control_plane.workflows.runner_host_hygiene_audit_spool import (
     RunnerHostHygieneAuditSpool,
 )
+from control_plane.workflows.runner_host_hygiene_qualification import (
+    HygieneQualificationEvidence,
+    qualify_runner_host_hygiene,
+)
 from control_plane.workflows.ship import utc_now_timestamp
 
 
@@ -115,6 +120,7 @@ def register_runner_lane_commands(work_graph: click.Group) -> None:
         name="runner-lane-retirement-executor",
     )
     work_graph.add_command(runner_host_hygiene_report, name="runner-host-hygiene-report")
+    work_graph.add_command(runner_host_hygiene_qualify)
     work_graph.add_command(runner_host_hygiene_apply_plan, name="runner-host-hygiene-apply-plan")
     work_graph.add_command(
         runner_host_hygiene_adapter_boundary_plan,
@@ -124,6 +130,29 @@ def register_runner_lane_commands(work_graph: click.Group) -> None:
         runner_host_hygiene_executor,
         name="runner-host-hygiene-executor",
     )
+
+
+@click.command("runner-host-hygiene-qualify")
+@click.option("--requests-file", type=click.Path(exists=True, path_type=Path), required=True)
+@click.option("--evidence-file", type=click.Path(exists=True, path_type=Path), required=True)
+def runner_host_hygiene_qualify(requests_file: Path, evidence_file: Path) -> None:
+    """Qualify saved existing hygiene inputs without contacting or changing a host."""
+    try:
+        raw_requests = json.loads(requests_file.read_text())
+        if not isinstance(raw_requests, list):
+            raise ValueError("requests file must contain an array of executor requests")
+        result = qualify_runner_host_hygiene(
+            requests=tuple(
+                RunnerHostHygieneExecutorRequest.model_validate(item) for item in raw_requests
+            ),
+            evidence=HygieneQualificationEvidence.model_validate_json(evidence_file.read_text()),
+            now=datetime.now(timezone.utc),
+        )
+    except (OSError, ValueError) as error:
+        raise click.ClickException(str(error)) from error
+    click.echo(result.model_dump_json(indent=2))
+    if not result.configuration_qualified or not result.retention_accounted_for:
+        raise click.ClickException("runner host hygiene qualification needs attention")
 
 
 @click.command("runner-inventory")

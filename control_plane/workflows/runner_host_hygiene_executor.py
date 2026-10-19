@@ -557,6 +557,17 @@ class RunnerHostHygieneExecutorResult(BaseModel):
     audit_delivery_pending: bool = False
     reconciled: bool = False
     message: str
+    maintenance_completed: bool = False
+
+    @model_validator(mode="after")
+    def _classify_maintenance(self) -> "RunnerHostHygieneExecutorResult":
+        terminal = self.terminal_response or {}
+        self.maintenance_completed = (
+            self.status == "completed"
+            and not self.audit_delivery_pending
+            and (terminal.get("status") == "accepted" or self.reconciled)
+        )
+        return self
 
 
 def _strip_text_fields(*values: str) -> tuple[str, ...]:
