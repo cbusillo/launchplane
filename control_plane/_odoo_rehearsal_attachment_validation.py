@@ -11,7 +11,8 @@ import sys
 import time
 
 
-def validate_attachment_files(rows, root, deadline, *, check_content=True, classify_size=False):
+def validate_attachment_files(rows, root, deadline, *, check_content=True, classify_size=False,
+        failure_reference=None):
     if root.resolve() != root.absolute() or not root.is_dir():
         return 'attachment_path_unsafe'
     for name, checksum, size in rows:
@@ -50,6 +51,9 @@ def validate_attachment_files(rows, root, deadline, *, check_content=True, class
                         after.st_size, after.st_mtime_ns, after.st_ctime_ns):
                     return 'attachment_unreadable'
             if value.hexdigest() != checksum:
+                if size_mismatch and failure_reference is not None:
+                    failure_reference.update({'name':name,'checksum':checksum,'size':size,
+                        'copied_size':metadata.st_size,'copied_sha1':value.hexdigest()})
                 return 'attachment_size_and_hash_mismatch' if size_mismatch else 'attachment_hash_mismatch'
             if size_mismatch:
                 return 'attachment_content_matches_checksum_size_mismatch'
@@ -63,7 +67,7 @@ def validate_attachment_files(rows, root, deadline, *, check_content=True, class
     return 'verified'
 
 
-def attachment_validation_main():
+def attachment_validation_main(*, failure_reference=None):
     try:
         import psycopg2
     except ImportError:
@@ -72,7 +76,7 @@ def attachment_validation_main():
         database = os.environ['ODOO_DB_NAME']
         user = os.environ['ODOO_DB_USER']
         password = os.environ['ODOO_DB_PASSWORD']
-        bounded = sys.argv[1] == 'observe'
+        bounded = sys.argv[1] in {'observe','compare'}
     except (KeyError, IndexError):
         return 'environment_unavailable'
     try:
@@ -94,7 +98,8 @@ def attachment_validation_main():
                 cursor.execute('SELECT store_fname,checksum,file_size FROM ir_attachment WHERE store_fname IS NOT NULL')
                 reason = validate_attachment_files(cursor,
                     Path('/volumes/data/filestore')/database, deadline,
-                    check_content=check_content, classify_size=bounded)
+                    check_content=check_content, classify_size=bounded,
+                    failure_reference=failure_reference if sys.argv[1]=='compare' else None)
                 if reason != 'verified':
                     return reason
         return 'verified'
@@ -111,6 +116,10 @@ def attachment_validation_main():
 
 
 if __name__ == '__main__':
-    result = attachment_validation_main()
-    print('attachment_validation='+json.dumps({'reason':result}).encode().hex())
+    reference = {}
+    result = attachment_validation_main(failure_reference=reference)
+    payload = {'reason':result}
+    if sys.argv[1:] == ['compare'] and result == 'attachment_size_and_hash_mismatch':
+        payload['reference'] = reference
+    print('attachment_validation='+json.dumps(payload).encode().hex())
 """
