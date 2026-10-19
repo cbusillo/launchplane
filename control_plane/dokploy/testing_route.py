@@ -113,6 +113,63 @@ def route_document(plan: TestingLaneRoute, backend: str) -> dict[str, Any]:
     return document
 
 
+def testing_ingress_entrypoints(raw: dict[str, Any], host: str) -> tuple[str, ...]:
+    """Discover potentially serving application listeners, not proxy-internal ones.
+
+    Compilation still checks all possibly matching rules on those listeners.
+    Non-exact rules enter that check so conflicts cannot hide on another listener.
+    """
+    routers = raw.get("routers")
+    if not isinstance(routers, dict):
+        raise ValueError("Applied testing router inventory is unavailable.")
+    points: set[str] = set()
+    for name, router in routers.items():
+        if (
+            isinstance(name, str)
+            and not name.endswith("@internal")
+            and isinstance(router, dict)
+            and host_rule_may_match(str(router.get("rule") or ""), host)
+        ):
+            bound = router.get("entryPoints")
+            if (
+                not isinstance(bound, list)
+                or not bound
+                or any(not isinstance(point, str) or not point for point in bound)
+            ):
+                raise ValueError("The testing application's entrypoints are unbound.")
+            points.update(bound)
+    if not points:
+        raise ValueError("The testing application's entrypoints are unavailable.")
+    return tuple(sorted(points))
+
+
+def canonical_acme_challenge(name: str, router: dict[str, Any]) -> bool:
+    """Keep the canonical challenge above every admitted application winner."""
+    if name != "acme-http@internal":
+        return False
+    configuration = router_configuration(router)
+    syntax = configuration.pop("ruleSyntax", None)
+    points = configuration.get("entryPoints")
+    priority = configuration.get("priority")
+    if (
+        router.get("status") != "enabled"
+        or syntax not in {None, "default", "v3"}
+        or not isinstance(points, list)
+        or not points
+        or any(not isinstance(point, str) or not point for point in points)
+        or type(priority) is not int
+        or priority not in {2**31 - 1, 2**63 - 1}
+    ):
+        return False
+    return configuration == {
+        "rule": "PathPrefix(`/.well-known/acme-challenge/`)",
+        "service": name,
+        "entryPoints": points,
+        "priority": priority,
+        "middlewares": [],
+    }
+
+
 def possible_lane_routers(
     raw: dict[str, Any], host: str, entrypoints: tuple[str, ...]
 ) -> dict[str, dict[str, Any]]:
@@ -127,6 +184,8 @@ def possible_lane_routers(
             or not isinstance(router.get("entryPoints"), list)
         ):
             raise ValueError("Applied testing router inventory is incomplete.")
+        if canonical_acme_challenge(name, router):
+            continue
         if set(router["entryPoints"]) & set(entrypoints) and host_rule_may_match(
             str(router.get("rule") or ""), host
         ):
@@ -227,6 +286,7 @@ def compile_testing_route(
     connection_middleware = identifier + "-connections"
     owned_middlewares: dict[str, Any] = {}
     used_entrypoints: set[str] = set()
+    equivalents: dict[tuple[str, ...], dict[str, Any]] = {}
     for index, (name, router) in enumerate(sorted(matches.items())):
         configuration = router_configuration(router)
         rule = str(router.get("rule") or "")
@@ -239,16 +299,39 @@ def compile_testing_route(
         ):
             raise ValueError("Testing predecessor is not the exact healthy lane backend.")
         points = tuple(router["entryPoints"])
-        if (
-            not points
-            or used_entrypoints & set(points)
-            or not set(points) <= set(public_entrypoints)
-        ):
+        if not points or not set(points) <= set(public_entrypoints):
             raise ValueError("Testing predecessor has overlapping or unbound entrypoints.")
-        used_entrypoints.update(points)
         priority = router.get("priority") or len(rule.encode())
         if type(priority) is not int or not 0 < priority < 2147482647:
             raise ValueError("Testing predecessor priority cannot admit a strict winner.")
+        references = configuration["middlewares"]
+        if not isinstance(references, list) or any(
+            not isinstance(reference, str) for reference in references
+        ):
+            raise ValueError("Testing predecessor middleware is malformed.")
+        # Service names can differ only after every service has been bound to
+        # the same observed backend above. Keep all aliases in legacy_routers:
+        # observation must still reject drift in any of them after takeover.
+        behavior = {
+            **configuration,
+            "rule": f"Host(`{host}`)",
+            "entryPoints": sorted(set(points)),
+            "priority": priority,
+            "middlewares": [
+                reference if "@" in reference else reference + "@docker" for reference in references
+            ],
+        }
+        service = str(router.get("service") or "")
+        service = service if "@" in service else service + "@docker"
+        behavior["loadBalancer"] = raw["services"][service]["loadBalancer"]
+        behavior.pop("service", None)
+        group = tuple(sorted(set(points)))
+        if used_entrypoints & set(points):
+            if equivalents.get(group) != behavior:
+                raise ValueError("Testing predecessor aliases have conflicting routing behavior.")
+            continue
+        equivalents[group] = behavior
+        used_entrypoints.update(points)
         middlewares = []
         for reference in router.get("middlewares", []):
             if not isinstance(reference, str):

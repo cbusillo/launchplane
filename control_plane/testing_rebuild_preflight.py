@@ -25,7 +25,10 @@ from control_plane.odoo_testing_native_source import native_testing_source_autho
 from control_plane.testing_candidate_runtime import candidate_credential_authority
 from control_plane.runtime_environments import resolve_site_runtime_environment
 from control_plane.dokploy import post_deploy, api
-from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
+from control_plane.dokploy.native_copy_stream import (
+    NativeSourceAuthorizationDenied,
+    NativeSourceUnavailable,
+)
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_rebuild_service import (
     capture_rebuild_intent,
@@ -92,7 +95,22 @@ def inspect_testing_rebuild(
             raise NativeSourceAuthorizationDenied(
                 "The provider refused the native preflight read."
             ) from error
+        raise TestingRebuildRefused(
+            "testing_rebuild_inputs_unverified",
+            "The retained testing inputs could not be verified.",
+        ) from error
+    except NativeSourceUnavailable as error:
+        raise TestingRebuildRefused(
+            "testing_rebuild_observation_unavailable",
+            "The retained testing observation is unavailable.",
+        ) from error
+    except (NativeSourceAuthorizationDenied, TestingRebuildRefused):
         raise
+    except (ValueError, click.ClickException, FileNotFoundError) as error:
+        raise TestingRebuildRefused(
+            "testing_rebuild_inputs_unverified",
+            "The retained testing inputs could not be verified.",
+        ) from error
     try:
         candidate_credential_authority(store, lane.context)
     except NativeSourceAuthorizationDenied:
@@ -110,7 +128,9 @@ def inspect_testing_rebuild(
         limit=1,
     )
     if active:
-        raise ValueError("The testing lane already has an unfinished rebuild.")
+        raise TestingRebuildRefused(
+            "testing_rebuild_active", "The testing lane already has an unfinished rebuild."
+        )
     try:
         if apply.data_source_mode == "production_restore":
             native_testing_source_authority(

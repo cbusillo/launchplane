@@ -51,6 +51,18 @@ class TestingRouteWriteNotStarted(NativeSourceUnavailable):
     """The fixed program returned before invoking its only route writer."""
 
 
+class TestingRouteObservationRefused(ValueError):
+    """A fixed observation fence failed, independently of read availability."""
+
+    def __init__(
+        self,
+        code: Literal["testing_route_provider_unverified", "testing_route_identity_changed"],
+        message: str,
+    ) -> None:
+        self.code = code
+        super().__init__(message)
+
+
 def testing_route_host_program() -> str:
     """The emitted host program uses the same conservative rule evaluator."""
     return (
@@ -400,18 +412,28 @@ class DokployTestingRouteTransport:
 
     def read(self) -> dict[str, Any]:
         frame = self._run({"mode": "read"})
-        static = yaml.safe_load(frame["static_configuration"])
-        provider = static.get("providers", {}).get("file", {}) if isinstance(static, dict) else {}
+        try:
+            static = yaml.safe_load(frame["static_configuration"])
+        except yaml.YAMLError:
+            static = None
+        providers = static.get("providers") if isinstance(static, dict) else None
+        provider = providers.get("file") if isinstance(providers, dict) else None
         if (
-            provider.get("directory") != TRAEFIK_DYNAMIC_DIRECTORY
+            not isinstance(provider, dict)
+            or provider.get("directory") != TRAEFIK_DYNAMIC_DIRECTORY
             or provider.get("watch") is not True
         ):
-            raise ValueError("The managed proxy does not watch its directory mount.")
+            raise TestingRouteObservationRefused(
+                "testing_route_provider_unverified",
+                "The managed proxy does not watch its directory mount.",
+            )
         observed_identity = parse_runtime_identity_payload(frame.get("old_identity"))
         if observed_identity is not None and observed_identity.model_dump(
             exclude={"deployed_at"}
         ) != self.old_runtime_identity.model_dump(exclude={"deployed_at"}):
-            raise ValueError("Retained testing runtime identity changed.")
+            raise TestingRouteObservationRefused(
+                "testing_route_identity_changed", "Retained testing runtime identity changed."
+            )
         return frame
 
     def execution_intent(
