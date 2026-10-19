@@ -1627,10 +1627,16 @@ envelope:
 
 The response `records` object contains durable record ids for records written or
 selected by this call. The response `result` object is the controller decision.
-It always includes `repository`, `base_branch`, `mode`, and
-`controller_action`; it may also include redacted `dry_run_result`, `candidate`,
-`landing_plan`, `stack_discovery`, `stack_collapse_plan`, and matching record id
-fields. Callers may report controller action, record ids, PR numbers, check
+[`contracts/merge-train-controller-reply.schema.json`](../contracts/merge-train-controller-reply.schema.json)
+publishes every field of this accepted reply as JSON Schema. It is generated from
+`control_plane/contracts/merge_train_controller_reply.py`, and the test suite
+checks every controller reply it produces against that contract, so a new reply
+field fails Launchplane's tests until the contract declares it. Regenerate the
+published file with
+`uv run --extra dev python -m control_plane.contracts.merge_train_controller_reply contracts/merge-train-controller-reply.schema.json`.
+Clients pin this published schema rather than copying the field list; the
+codex-skills merge-train helper does, and its CI fails when its pin differs.
+Callers may report controller action, record ids, PR numbers, check
 states, binding-safe labels from policy, trace id, and compact details. They
 must not report GitHub tokens, raw request headers, private API base URLs, local
 paths, or unchecked provider responses.
