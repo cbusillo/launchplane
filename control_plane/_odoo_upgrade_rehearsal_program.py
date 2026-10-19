@@ -6,9 +6,11 @@ only, and raw failure material remains outside every application mount.
 
 from control_plane._odoo_rehearsal_source_reader import REHEARSAL_SOURCE_READER_LIBRARY
 from control_plane._odoo_rehearsal_attachment_validation import ATTACHMENT_VALIDATION_PROGRAM
+from control_plane._odoo_rehearsal_capture_comparison import REHEARSAL_CAPTURE_COMPARISON_LIBRARY
 
 ODOO_UPGRADE_REHEARSAL_PROGRAM = (
     REHEARSAL_SOURCE_READER_LIBRARY
+    + REHEARSAL_CAPTURE_COMPARISON_LIBRARY
     + "\nATTACHMENT_VALIDATION_PROGRAM = "
     + repr(ATTACHMENT_VALIDATION_PROGRAM)
     + "\n"
@@ -397,15 +399,22 @@ def custody_observation(spec, root, action):
         'source_snapshot_directory_present':directory(root/database_names(spec)['source'])}
 
 
-def capture_attachment_observation(spec):
+def capture_attachment_observation(spec,root):
     database=database_names(spec)['source']
     containers=inspection(spec,database,spec['source_image'])
     if containers['web'][1].get('State',{}).get('Running') is not False:
         return 'writer_active'
-    return attachment_validation(containers,database,'observe')
+    value=attachment_validation_payload(containers,database,'compare')
+    if value['reason']=='attachment_size_and_hash_mismatch':
+        return compare_retained_attachment(spec,root,value['reference'])
+    return value['reason']
 
 
 def attachment_validation(containers, database, mode):
+    return attachment_validation_payload(containers,database,mode)['reason']
+
+
+def attachment_validation_payload(containers, database, mode):
     result=docker('exec','-i','-e','PYTHONDONTWRITEBYTECODE=1','-e','ODOO_DB_NAME='+database,
         containers['script-runner'][0],'python3','-',mode,
         stdin=ATTACHMENT_VALIDATION_PROGRAM.encode()).decode()
@@ -413,14 +422,19 @@ def attachment_validation(containers, database, mode):
     if len(rows)!=1:
         raise RuntimeError('Attachment observation is unverified')
     value=json.loads(bytes.fromhex(rows[0]))
-    if not isinstance(value,dict) or set(value)!={'reason'} or not isinstance(value['reason'],str) or value['reason'] not in {
+    if not isinstance(value,dict) or not isinstance(value.get('reason'),str) or value['reason'] not in {
         'dependency_unavailable','environment_unavailable','database_unavailable',
         'attachment_query_unavailable','attachment_metadata_invalid','attachment_path_unsafe',
         'attachment_missing','attachment_unreadable','attachment_size_mismatch',
         'attachment_hash_mismatch','attachment_size_and_hash_mismatch',
         'attachment_content_matches_checksum_size_mismatch','verified','incomplete'}:
         raise RuntimeError('Attachment observation is unverified')
-    return value['reason']
+    private=mode=='compare' and value['reason']=='attachment_size_and_hash_mismatch'
+    if set(value)!=({'reason','reference'} if private else {'reason'}):
+        raise RuntimeError('Attachment observation is unverified')
+    if private and not valid_attachment_reference(value['reference']):
+        raise RuntimeError('Attachment observation is unverified')
+    return value
 
 
 def observe(spec, root, receipt, lock_held=False):
@@ -465,7 +479,7 @@ def observe(spec, root, receipt, lock_held=False):
                 and not custody['capture_pending_present']
                 and not custody['source_snapshot_directory_present']):
             try:
-                result['capture_attachment_validation']=capture_attachment_observation(spec)
+                result['capture_attachment_validation']=capture_attachment_observation(spec,root)
             except RehearsalCommandFailure:
                 result['capture_attachment_validation']='runtime_unavailable'
         print('rehearsal_result='+json.dumps(result).encode().hex())

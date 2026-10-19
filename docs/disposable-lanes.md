@@ -2651,6 +2651,31 @@ eligibility. No attachment path, checksum or size is exported. The file must
 remain stable while hashed. Capture/apply still refuses a size mismatch before
 hashing; these additional readback codes do not relax that gate or authorize a
 metadata rewrite. A timeout retains `incomplete` and the original hold.
+If both size and content disagree, the same bound observation may compare that
+exact row/file with the retained original tar. Its canonical reference stays
+inside the runner-to-host pipe and host memory; public output contains only a
+fixed code. Under the existing host lock, the probe reads a bounded regular
+`capture.json`, checks the original source binding, then streams the retained
+regular archive against the recorded digest. The standard tar reader visits
+bounded headers and reads the one matching member without filesystem extraction.
+It rejects unsafe/duplicate matching members and trailing archive data, keeps
+metadata memory bounded, and requires stable custody before publishing a comparison.
+An additional ten-minute archive budget stays inside the existing host job limit.
+Unsupported, changed, unavailable or untrusted evidence returns
+`capture_comparison_unavailable`; an expired budget returns `incomplete`.
+
+`capture_attachment_matches_reference_copy_differs` means the captured member
+matches both database references while the inspected runner copy differs.
+`capture_attachment_checksum_matches_size_metadata_differs` means the captured
+content matches the checksum but its size also conflicts with the metadata.
+`capture_attachment_matches_copy_reference_differs` means the captured member
+and inspected copy agree with each other while differing from the database
+reference. `capture_attachment_differs_from_copy_and_reference` records a third
+set of bytes; `capture_attachment_not_present` means no matching regular member
+was found in the verified archive. These are observations of one row and the
+retained archive, not proof about the current business source, other attachment
+rows, the raw database dump, sanitization or recovery eligibility. They retain
+`hold_unknown` and never recopy, rewrite, recapture, restore or resume execute.
 `failure_events_after_checkpoint` projects bounded provider event identities,
 times, fixed provider statuses, traceback presence, host function names and
 native traceback line numbers from
