@@ -404,6 +404,7 @@ from control_plane.contracts.ingress_route_audit_record import (
 )
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from control_plane.merge_train_github_token import resolve_merge_train_github_token
+from control_plane.merge_train_planning_scope import planning_scope_resolver
 from control_plane.merge_train_policy_source import (
     MergeTrainPolicyStoreMissingError,
     resolve_merge_train_policy_record,
@@ -12388,6 +12389,22 @@ def create_launchplane_fastapi_app(
             recorded_at=utc_now_timestamp(),
             response_trace_id=trace_id,
             planning_author_ids=repository_policy.enqueue.trusted_automation_github_user_ids,
+            planning_scope_resolver=planning_scope_resolver(
+                policy=policy_record.policy,
+                source_repository=repository_policy.repository,
+                authorize=lambda target: resolved_authz_policy_runtime.allows(
+                    identity=identity,
+                    action=target.service_authz.action,
+                    product=target.service_authz.product,
+                    context=target.service_authz.context,
+                ),
+                resolve_token=lambda target: resolve_merge_train_github_token(
+                    source=target.github_token,
+                    repository=target.repository,
+                    control_plane_root=resolved_control_plane_root,
+                    raise_resolution_errors=True,
+                ),
+            ),
         )
         result: dict[str, object] = {"feedback": feedback_record.model_dump(mode="json")}
         if feedback_record.delivery_status == "failed":

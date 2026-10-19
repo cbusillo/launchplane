@@ -55,6 +55,7 @@ from control_plane.merge_train_github import (
     UrllibMergeTrainGitHubTransport,
 )
 from control_plane.merge_train_github_token import resolve_merge_train_github_token
+from control_plane.merge_train_planning_scope import PlanningScopeResolver, planning_scope_resolver
 from control_plane.merge_train_branch_refresh import optional_merge_train_branch_refresh_read_store
 from control_plane.merge_train_policy_source import (
     MergeTrainPolicyStoreMissingError,
@@ -414,6 +415,17 @@ def _run_controller(
                 "records": controller_result.records,
             },
             now=now,
+            planning_resolver=planning_scope_resolver(
+                policy=policy_record.policy,
+                source_repository=repository_policy.repository,
+                authorize=lambda target: target.service_authz == repository_policy.service_authz,
+                resolve_token=lambda target: resolve_merge_train_github_token(
+                    source=target.github_token,
+                    repository=target.repository,
+                    control_plane_root=control_plane_root,
+                    raise_resolution_errors=True,
+                ),
+            ),
         )
     diagnosis = controller_result.accepted_result.get("last_controller_result")
     reason = (
@@ -476,6 +488,7 @@ def _deliver_controller_feedback(
     trace_id: str,
     response: dict[str, object],
     now: Callable[[], str],
+    planning_resolver: PlanningScopeResolver | None = None,
 ) -> tuple[int, int]:
     payloads = build_feedback_payloads(
         response=response, source=MERGE_TRAIN_SCHEDULER_FEEDBACK_SOURCE
@@ -505,6 +518,7 @@ def _deliver_controller_feedback(
             response_trace_id=trace_id,
             defer_until=backoff,
             planning_author_ids=repository_policy.enqueue.trusted_automation_github_user_ids,
+            planning_scope_resolver=planning_resolver,
         )
         if feedback_record.delivery_status == "failed":
             failed += 1
@@ -552,6 +566,7 @@ def _deliver_controller_feedback(
                 token=token,
                 attempted_at=attempted_at,
                 planning_author_ids=repository_policy.enqueue.trusted_automation_github_user_ids,
+                planning_scope_resolver=planning_resolver,
             )
             feedback_store.write_merge_train_pr_feedback_record(recovered)
         if recovered.delivery_status == "delivered":

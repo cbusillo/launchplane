@@ -3,7 +3,6 @@ import re
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from time import time_ns
-from urllib.error import HTTPError, URLError
 from typing import ContextManager, Protocol, cast
 
 import click
@@ -16,6 +15,8 @@ from control_plane.contracts.merge_train_pr_feedback_record import (
     merge_train_pr_feedback_marker,
 )
 from control_plane.workflows.launchplane import upsert_github_issue_comment
+from control_plane.merge_train_provider_failure import provider_failure
+from control_plane.merge_train_planning_scope import PlanningScopeResolver
 from control_plane.merge_train_planning_completion import (
     PlanningCompletionFailure,
     PlanningCompletionPending,
@@ -160,41 +161,53 @@ def queue_landing_planning_feedback(
         request = MergeTrainPrFeedbackEnvelope.model_validate(payload)
         if request.event != "completed":
             continue
-        latest = feedback_store.list_merge_train_pr_feedback_records(
-            repository=request.repository,
-            base_branch=request.base_branch,
-            pr_number=request.pull_request_number,
-            limit=1,
-        )
-        if latest and (
-            latest[0].controller_record_id == landing_record.record_id
-            or _timestamp(latest[0].recorded_at) > _timestamp(landing_record.updated_at)
+        with feedback_store.merge_train_feedback_delivery_lock(
+            repository=request.repository, pull_request_number=request.pull_request_number
         ):
-            continue
-        queued = build_merge_train_pr_feedback_record(
-            request=request,
-            policy_key=repository_policy.policy_key,
-            policy_sha256=landing_record.landing_plan.policy_sha256,
-            token="",
-            recorded_at=landing_record.updated_at,
-            response_trace_id=trace_id,
-            defer_until=landing_record.updated_at,
-        ).model_copy(
-            update={
-                "provider_retry_at": "",
-                "error_message": "Native landing planning completion queued for delivery.",
-            }
-        )
-        queued = queued.model_copy(
-            update={
-                "comment_markdown": queued.comment_markdown
-                + "\n\n"
-                + PLANNING_RECEIPT_PREFIX
-                + json.dumps({"ok": False, "status": "queued"}, sort_keys=True)
-                + " -->"
-            }
-        )
-        feedback_store.write_merge_train_pr_feedback_record(queued)
+            latest = feedback_store.list_merge_train_pr_feedback_records(
+                repository=request.repository,
+                base_branch=request.base_branch,
+                pr_number=request.pull_request_number,
+                limit=1,
+            )
+            queued_at = landing_record.updated_at
+            if latest:
+                previous = latest[0]
+                same_landing = previous.controller_record_id == landing_record.record_id
+                if same_landing:
+                    if (
+                        previous.event == "completed"
+                        and PLANNING_RECEIPT_PREFIX in previous.comment_markdown
+                    ):
+                        continue
+                    # Preserve both saved evidence records. Completion is observed
+                    # after this building record even when its clock is ahead.
+                    if _timestamp(previous.recorded_at) >= _timestamp(queued_at):
+                        queued_at = previous.recorded_at
+                elif _timestamp(previous.recorded_at) > _timestamp(landing_record.updated_at):
+                    continue
+            queued = build_merge_train_pr_feedback_record(
+                request=request,
+                policy_key=repository_policy.policy_key,
+                policy_sha256=landing_record.landing_plan.policy_sha256,
+                token="",
+                recorded_at=queued_at,
+                response_trace_id=trace_id,
+                defer_until=queued_at,
+            ).model_copy(
+                update={
+                    "provider_retry_at": "",
+                    "error_message": "Native landing planning completion queued for delivery.",
+                }
+            )
+            queued = queued.model_copy(
+                update={
+                    "comment_markdown": _planning_comment(
+                        queued.comment_markdown, {"ok": False, "status": "queued"}
+                    )
+                }
+            )
+            feedback_store.write_merge_train_pr_feedback_record(queued)
 
 
 def write_merge_train_pr_feedback_record(
@@ -208,6 +221,7 @@ def write_merge_train_pr_feedback_record(
     response_trace_id: str,
     defer_until: str = "",
     planning_author_ids: tuple[int, ...] = (),
+    planning_scope_resolver: PlanningScopeResolver | None = None,
 ) -> MergeTrainPrFeedbackRecord:
     with store.merge_train_feedback_delivery_lock(
         repository=request.repository, pull_request_number=request.pull_request_number
@@ -221,6 +235,7 @@ def write_merge_train_pr_feedback_record(
             response_trace_id=response_trace_id,
             defer_until=defer_until,
             planning_author_ids=planning_author_ids,
+            planning_scope_resolver=planning_scope_resolver,
         )
         store.write_merge_train_pr_feedback_record(record)
         return record
@@ -236,6 +251,7 @@ def build_merge_train_pr_feedback_record(
     response_trace_id: str,
     defer_until: str = "",
     planning_author_ids: tuple[int, ...] = (),
+    planning_scope_resolver: PlanningScopeResolver | None = None,
 ) -> MergeTrainPrFeedbackRecord:
     marker = merge_train_pr_feedback_marker(
         repository=request.repository,
@@ -291,6 +307,7 @@ def build_merge_train_pr_feedback_record(
         token=token,
         attempted_at=recorded_at,
         planning_author_ids=planning_author_ids,
+        planning_scope_resolver=planning_scope_resolver,
     )
 
 
@@ -300,6 +317,7 @@ def deliver_merge_train_pr_feedback_record(
     token: str,
     attempted_at: str,
     planning_author_ids: tuple[int, ...] = (),
+    planning_scope_resolver: PlanningScopeResolver | None = None,
 ) -> MergeTrainPrFeedbackRecord:
     """Deliver the saved body; retry metadata never changes its evidence chronology."""
     attempts = record.delivery_attempts + (record.delivery_status == "failed")
@@ -338,6 +356,7 @@ def deliver_merge_train_pr_feedback_record(
                         token=token,
                         trusted_author_ids=planning_author_ids,
                         attempted_at=attempted_at,
+                        scope_resolver=planning_scope_resolver,
                     )
                 except PlanningCompletionSourceReview as exc:
                     if exc.receipt is None:
@@ -416,48 +435,28 @@ def _timestamp(value: str) -> datetime:
 def _delivery_retry(
     error: click.ClickException, *, attempted_at: str, attempts: int
 ) -> tuple[bool, str, str]:
-    cause = error.__cause__
-    transient = isinstance(cause, (URLError, OSError)) or isinstance(
-        error, PlanningCompletionPending
-    )
-    rate_limited = False
+    evidence = provider_failure(error)
+    transient = evidence.retryable or isinstance(error, PlanningCompletionPending)
+    rate_limited = evidence.rate_limited
     if isinstance(error, PlanningCompletionProviderFailure):
         transient = error.retryable
         rate_limited = error.rate_limited
     deadlines = [
         _timestamp(attempted_at) + timedelta(seconds=min(60 * 2 ** min(attempts - 1, 4), 900))
     ]
-    if isinstance(cause, HTTPError):
-        headers = cause.headers
-        remaining = headers.get("x-ratelimit-remaining", "") if headers else ""
-        retry_after = headers.get("retry-after", "") if headers else ""
-        secondary_limit = False
-        if cause.code == 403 and remaining != "0" and not retry_after:
+    if transient:
+        retry_after = evidence.retry_after
+        if retry_after.isdigit():
+            deadlines.append(_timestamp(attempted_at) + timedelta(seconds=int(retry_after)))
+        elif retry_after:
             try:
-                payload = json.loads(cause.read(4096))
-                message = payload.get("message") if isinstance(payload, dict) else None
-                secondary_limit = (
-                    isinstance(message, str) and "secondary rate limit" in message.casefold()
-                )
-            except (OSError, TypeError, ValueError):
+                parsed = parsedate_to_datetime(retry_after)
+                if parsed.tzinfo is not None:
+                    deadlines.append(parsed)
+            except (ValueError, TypeError):
                 pass
-        rate_limited = cause.code == 429 or (
-            cause.code == 403 and (remaining == "0" or bool(retry_after) or secondary_limit)
-        )
-        transient = rate_limited or cause.code >= 500
-        if transient:
-            if retry_after.isdigit():
-                deadlines.append(_timestamp(attempted_at) + timedelta(seconds=int(retry_after)))
-            elif retry_after:
-                try:
-                    parsed = parsedate_to_datetime(retry_after)
-                    if parsed.tzinfo is not None:
-                        deadlines.append(parsed)
-                except (ValueError, TypeError):
-                    pass
-            reset = headers.get("x-ratelimit-reset", "") if headers else ""
-            if remaining == "0" and reset.isdigit():
-                deadlines.append(datetime.fromtimestamp(int(reset), tz=timezone.utc))
+        if evidence.remaining == "0" and evidence.reset.isdigit():
+            deadlines.append(datetime.fromtimestamp(int(evidence.reset), tz=timezone.utc))
     retry_at = max(deadlines).isoformat() if transient else ""
     return transient, retry_at, retry_at if rate_limited else ""
 

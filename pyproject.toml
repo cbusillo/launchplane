@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Launchplane control-plane contracts and workflows for deployment truth and promotion"
 requires-python = ">=3.13"
 dependencies = [
+    "codex-skills-plan-status @ https://github.com/cbusillo/codex-skills/archive/5e4ab847915742011a89c55f650055e294fdaaa0.tar.gz#subdirectory=skills/github/scripts",
     "pyyaml>=6.0.3",
     "Authlib>=1.7.2",
     "click>=8.4.2",
@@ -43,6 +44,9 @@ launchplane = "control_plane.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["control_plane"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.ruff]
 line-length = 100

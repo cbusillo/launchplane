@@ -38,7 +38,11 @@ def invalidate_cached_merge_train_github_token(token: str) -> None:
 
 
 def resolve_merge_train_github_token(
-    *, source: MergeTrainGitHubTokenSource, control_plane_root: Path, repository: str = ""
+    *,
+    source: MergeTrainGitHubTokenSource,
+    control_plane_root: Path,
+    repository: str = "",
+    raise_resolution_errors: bool = False,
 ) -> str:
     if source.github_app is not None:
         app = source.github_app
@@ -91,5 +95,12 @@ def resolve_merge_train_github_token(
                 "Merge train App credentials unavailable: resolution_failed (%s)",
                 type(error).__name__,
             )
+            if raise_resolution_errors:
+                # Scoped feedback distinguishes a real absent binding/grant
+                # from a failed mint. Keep the transport cause for its existing
+                # retry/denial classifier without persisting credential details.
+                raise click.ClickException(
+                    "Configured merge train GitHub credential resolution failed."
+                ) from error
             return ""
     return ""
