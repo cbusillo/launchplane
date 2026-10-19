@@ -110,7 +110,10 @@ reservation. The webhook request never waits on a deploy.
     replace that failure with a generic cancellation reason. Structured operation
     reads identify Launchplane's recovery cancellation without exposing caller or
     provider free text. After three failed attempts of one
-    artifact the reconcile fails until a newer build.
+    artifact the reconcile fails until a newer build or an explicit reviewed
+    [testing retry](testing-deploy-retry.md) re-arms the exact artifact's budget
+    while retaining data. The service fences inventory and release-tuple changes,
+    preserves failed-operation history and reuses the reconciler's deploy path.
   - That operation already runs Odoo post-deploy, so there is no separate
     post-deploy step.
   - **Generic-web:** the reconcile deploys the verified image itself, in

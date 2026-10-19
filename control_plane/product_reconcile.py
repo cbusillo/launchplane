@@ -593,13 +593,16 @@ def reconcile_testing_target(
     if generation is not None and not generation.reconcile_requested_at:
         plan.update(action="wait", held=True, reason="fresh_testing_bootstrap_incomplete")
         return ReconcileOutcome(plan)
+    rearmed_after = testing_retry_after_operation(
+        record_store=record_store, profile=profile, lane=lane, artifact_id=manifest.artifact_id
+    )
     envelope = OdooTargetReplacementApplyEnvelope(
         product=profile.product,
         replacement=OdooStableTargetReplacementApplyRequest(
             product=profile.product,
             instance=TESTING_INSTANCE,
             strategy="recreate-in-place",
-            allow_empty_data=True,
+            allow_empty_data=not bool(rearmed_after),
             data_source_mode="upstream_restore"
             if generation and not generation.completed_at
             else "existing",
@@ -629,6 +632,7 @@ def reconcile_testing_target(
         ),
         idempotency_scope=idempotency_scope,
         generation_prepared_at=generation.prepared_at if generation is not None else "",
+        rearmed_after_operation_id=rearmed_after,
     )
     if attempt.last_failed is not None:
         # The operation's own status read needs the grant that starts a deploy;
@@ -678,8 +682,8 @@ def reconcile_testing_target(
             plan,
             error=(
                 f"The testing deploy of {manifest.artifact_id} failed "
-                f"{attempt.failed_attempts} times; Launchplane stops retrying it until a "
-                f"newer build. Last attempt {attempt.last_failed_operation_id}: "
+                f"{attempt.failed_attempts} times; use the reviewed testing retry control "
+                f"or a newer build. Last attempt {attempt.last_failed_operation_id}: "
                 f"{plan['last_failed_error_code']}: {plan['last_failed_error_summary']}"
             ),
         )
@@ -1128,6 +1132,50 @@ class _TestingAttempt:
         return self.last_failed.operation_id if self.last_failed is not None else ""
 
 
+def testing_retry_after_operation(
+    *,
+    record_store: object,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+    artifact_id: str,
+) -> str:
+    if not isinstance(record_store, PostgresRecordStore):
+        return ""
+    try:
+        request = record_store.read_product_reconcile_request(f"{profile.product}:testing")
+    except FileNotFoundError:
+        return ""
+    rearm = request.testing_retry_rearm
+    if rearm is None or (rearm.context, rearm.artifact_id) != (lane.context, artifact_id):
+        return ""
+    if (
+        record_store.read_testing_retry_binding(product=profile.product, context=lane.context)
+        != rearm.lane_binding_sha256
+    ):
+        return ""
+    return rearm.after_operation_id
+
+
+def testing_artifact_attempt(
+    *,
+    record_store: object,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+    artifact_id: str,
+    generation_prepared_at: str = "",
+) -> _TestingAttempt:
+    return _next_testing_attempt(
+        record_store=record_store,
+        testing_runs_desired=lambda: False,
+        base_key=f"{RECONCILE_SOURCE}:{profile.product}:{lane.context}:testing:{artifact_id}",
+        idempotency_scope=reconcile_reservation_scope(profile.product),
+        generation_prepared_at=generation_prepared_at,
+        rearmed_after_operation_id=testing_retry_after_operation(
+            record_store=record_store, profile=profile, lane=lane, artifact_id=artifact_id
+        ),
+    )
+
+
 def _next_testing_attempt(
     *,
     record_store: object,
@@ -1135,6 +1183,7 @@ def _next_testing_attempt(
     base_key: str,
     idempotency_scope: str,
     generation_prepared_at: str = "",
+    rearmed_after_operation_id: str = "",
 ) -> _TestingAttempt:
     """Follow this artifact's earlier attempts to the active one or the next key.
 
@@ -1189,6 +1238,11 @@ def _next_testing_attempt(
             ):
                 failed_attempts += 1
                 last_failed = existing
+        if existing.operation_id == rearmed_after_operation_id:
+            # Only the reviewed terminal prefix is forgiven. Later failures still
+            # spend the bounded budget, and active/unknown attempts above never do.
+            failed_attempts = 0
+            last_failed = None
         # A passed attempt that testing no longer runs was rolled back: deploy again.
         key = f"{base_key}:after-{existing.operation_id}"
     raise ProductReconcileError(

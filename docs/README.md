@@ -44,6 +44,8 @@ not describe runtime authority until it is implemented, deployed, and activated.
 - [event-driven-deploys.md](event-driven-deploys.md) — GitHub App webhook
   receiver and reconciler that deploy verified builds to testing and previews
   without the product repository calling Launchplane.
+- [testing-deploy-retry.md](testing-deploy-retry.md) — reviewed exact-artifact
+  recovery of an exhausted Odoo testing retry budget with retained data.
 - [preview-workflow-contract.md](preview-workflow-contract.md) — reusable thin
   preview workflow event, idempotency, feedback, and lifecycle contract.
 - [product-retirement.md](product-retirement.md) — reviewed product retirement,

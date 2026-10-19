@@ -48,6 +48,36 @@
       {
         "idempotency": "apply",
         "identity_dependencies": [
+          "read_operator_mutation_identity"
+        ],
+        "method": "POST",
+        "modes": [
+          "dry-run",
+          "apply"
+        ],
+        "operation_id": "rearm_testing_retry",
+        "path": "/v1/products/{product}/testing-retry",
+        "purpose": "Review and re-arm the exhausted attempt budget for the exact verified Odoo testing artifact, retaining existing data and all operation history; the reconciler performs deployment.",
+        "response_statuses": [
+          "202",
+          "400",
+          "401",
+          "403",
+          "404",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [
+          "reviewed_plan_sha256"
+        ],
+        "schema_fingerprint_sha256": "86e1fa186a0bd5391ffa676966d737d0644fe5700c895c61863974345a4dbb4f",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
+        "idempotency": "apply",
+        "identity_dependencies": [
           "read_browser_mutation_identity"
         ],
         "method": "POST",
@@ -830,8 +860,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "1630fbd66f597080f746bdb9b78ac536e7c35fba"
+    "source_commit_sha": "e996dd2cac5feebbd01fa8d32e0524c3e929667f"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "a62b7bc5969b92bdaac6a0d8a4a3bf52319d42b80824e7ff27edb8e2d3871386"
+  "semantic_digest_sha256": "24858f419ed8619093422cf2be6de88148b3d30f216c844836b1f088d270a39f"
 }
