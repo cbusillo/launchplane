@@ -37,7 +37,9 @@ access to an invalid policy or silently starting with bootstrap authority.
   credentials, granting access, or changing who can merge (see
   [DIRECTION.md](../DIRECTION.md#stop-boundaries)). Do not create, edit,
   retarget, or dispatch a workflow, secret, or local helper to make a denied
-  operation succeed.
+  operation succeed. Fixing the refusing tool's rule through a reviewed source
+  change, as [Denial Handling](#denial-handling) requires, is not such a
+  workaround.
 
 The [feedback continuation foundation](every-code-feedback-resume.md), which is
 not continued and remains unwired in code, defines
