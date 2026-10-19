@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from urllib.parse import urlsplit
 
+from control_plane.route_binding_reconcile import (
+    RouteBindingReviewSources,
+    RouteBindingSourceChanged,
+)
 from control_plane.contracts.merge_train_stall import MergeTrainStallRecord
 from control_plane.contracts.odoo_upgrade_rehearsal import OdooUpgradeRehearsalRecord
 from control_plane.contracts.testing_rebuild import TestingRebuildRecord
@@ -27785,6 +27789,8 @@ class PostgresRecordStore(HumanSessionStore):
         expected_record: EnvironmentRouteBindingRecord | None,
         replacement_record: EnvironmentRouteBindingRecord,
         mutation: DbOnlyMutationRequest,
+        reviewed_sources: RouteBindingReviewSources | None = None,
+        reviewed_product: str = "",
     ) -> RouteBindingReconcileWriteResult:
         if expected_record is not None and (
             expected_record.product,
@@ -27815,6 +27821,8 @@ class PostgresRecordStore(HumanSessionStore):
         reservation_insert_error: IntegrityError | None = None
         with self._session_factory() as session:
             self._begin_serialized_write(session)
+            if reviewed_sources is not None:
+                self._lock_product_authority_bundle_write(session)
             self._lock_route_binding_write(
                 session,
                 binding_key=replacement_record.binding_key,
@@ -27848,10 +27856,14 @@ class PostgresRecordStore(HumanSessionStore):
                     reservation_row=reservation_row,
                     mutation_reservation=stored_reservation,
                     mutation=mutation,
+                    reviewed_sources=reviewed_sources,
+                    reviewed_product=reviewed_product,
                 )
 
         with self._session_factory() as session:
             self._begin_serialized_write(session)
+            if reviewed_sources is not None:
+                self._lock_product_authority_bundle_write(session)
             self._lock_route_binding_write(
                 session,
                 binding_key=replacement_record.binding_key,
@@ -27933,6 +27945,8 @@ class PostgresRecordStore(HumanSessionStore):
                 reservation_row=reservation_row,
                 mutation_reservation=reclaimed_reservation,
                 mutation=mutation,
+                reviewed_sources=reviewed_sources,
+                reviewed_product=reviewed_product,
             )
 
     def _reconcile_route_binding_locked(
@@ -27945,7 +27959,16 @@ class PostgresRecordStore(HumanSessionStore):
         reservation_row: LaunchplaneIdempotencyRow,
         mutation_reservation: LaunchplaneIdempotencyRecord,
         mutation: DbOnlyMutationRequest,
+        reviewed_sources: RouteBindingReviewSources | None = None,
+        reviewed_product: str = "",
     ) -> RouteBindingReconcileWriteResult:
+        if reviewed_sources is not None:
+            self._check_browser_route_binding_sources(
+                session=session,
+                product=reviewed_product,
+                replacement_record=replacement_record,
+                sources=reviewed_sources,
+            )
         row = session.scalar(statement)
         current_record = (
             self._read_payload(
@@ -28001,6 +28024,85 @@ class PostgresRecordStore(HumanSessionStore):
             current_record=replacement_record,
             idempotency_record=completion,
         )
+
+    def _check_browser_route_binding_sources(
+        self,
+        *,
+        session: Any,
+        product: str,
+        replacement_record: EnvironmentRouteBindingRecord,
+        sources: RouteBindingReviewSources,
+    ) -> None:
+        # Fence the five planned rows and lane ownership through commit. This is
+        # not an assertion about external provider truth or all historical audits.
+        require_bundle_context_owner(
+            ProductAuthorityBundle(
+                required_context_owner=(product, replacement_record.context),
+                required_product_config_target=(
+                    product,
+                    replacement_record.context,
+                    replacement_record.instance,
+                ),
+            ),
+            (
+                self._read_product_profile_payload(row.payload)
+                for row in session.scalars(select(LaunchplaneProductProfileRow)).all()
+            ),
+        )
+        checks = (
+            (
+                LaunchplaneDokployTargetRow,
+                DokployTargetRecord,
+                sources.dokploy_target,
+                (
+                    LaunchplaneDokployTargetRow.context == replacement_record.context,
+                    LaunchplaneDokployTargetRow.instance == replacement_record.instance,
+                ),
+            ),
+            (
+                LaunchplaneDokployTargetIdRow,
+                DokployTargetIdRecord,
+                sources.dokploy_target_id,
+                (
+                    LaunchplaneDokployTargetIdRow.context == replacement_record.context,
+                    LaunchplaneDokployTargetIdRow.instance == replacement_record.instance,
+                ),
+            ),
+            (
+                LaunchplaneProviderTargetRow,
+                ProviderTargetRecord,
+                sources.provider_target,
+                (
+                    LaunchplaneProviderTargetRow.context == replacement_record.context,
+                    LaunchplaneProviderTargetRow.instance == replacement_record.instance,
+                ),
+            ),
+            (
+                LaunchplaneEdgeEndpointRow,
+                EdgeEndpointRecord,
+                sources.edge_endpoint,
+                (LaunchplaneEdgeEndpointRow.endpoint_key == sources.edge_endpoint.endpoint_key,),
+            ),
+            (
+                LaunchplaneIngressRouteAuditRow,
+                IngressRouteAuditRecord,
+                sources.ingress_audit,
+                (LaunchplaneIngressRouteAuditRow.record_id == sources.ingress_audit.record_id,),
+            ),
+        )
+        for row_type, record_type, expected, filters in checks:
+            statement = select(row_type).where(*filters).limit(1)
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            row = session.scalar(statement)
+            if (
+                row is None
+                or self._read_payload(model_type=record_type, payload=_payload_from_row(row))
+                != expected
+            ):
+                raise RouteBindingSourceChanged(
+                    "Reviewed route binding source changed before commit."
+                )
 
     def _sync_route_binding_row(
         self,
@@ -29106,6 +29208,87 @@ class PostgresRecordStore(HumanSessionStore):
         updated_at: str,
         source_label: str,
     ) -> tuple[DokployTargetRecord, ProviderTargetRecord]:
+        with self._session_factory() as session:
+            result = self._compare_and_write_dokploy_target_domains_in_session(
+                session=session,
+                expected_record=expected_record,
+                expected_target_id_record=expected_target_id_record,
+                expected_provider_target_record=expected_provider_target_record,
+                domains=domains,
+                updated_at=updated_at,
+                source_label=source_label,
+            )
+            session.commit()
+            return result
+
+    def commit_dokploy_domain_repair(
+        self,
+        *,
+        expected_record: DokployTargetRecord,
+        expected_target_id_record: DokployTargetIdRecord,
+        expected_provider_target_record: ProviderTargetRecord,
+        domains: tuple[str, ...],
+        updated_at: str,
+        source_label: str,
+        product: str,
+        mutation: DbOnlyMutationRequest,
+    ) -> tuple[str, LaunchplaneIdempotencyRecord]:
+        """Commit the reviewed record-only repair and its immutable receipt together."""
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            status, reservation_row, reservation = self._reserve_db_only_mutation_in_session(
+                session=session,
+                mutation=mutation,
+            )
+            if status != "acquired":
+                return status, reservation
+            assert reservation_row is not None
+            self._lock_product_authority_bundle_write(session)
+            require_bundle_context_owner(
+                ProductAuthorityBundle(
+                    required_context_owner=(product, expected_record.context),
+                    required_product_config_target=(
+                        product,
+                        expected_record.context,
+                        expected_record.instance,
+                    ),
+                ),
+                (
+                    self._read_product_profile_payload(row.payload)
+                    for row in session.scalars(select(LaunchplaneProductProfileRow)).all()
+                ),
+            )
+            self._compare_and_write_dokploy_target_domains_in_session(
+                session=session,
+                expected_record=expected_record,
+                expected_target_id_record=expected_target_id_record,
+                expected_provider_target_record=expected_provider_target_record,
+                domains=domains,
+                updated_at=updated_at,
+                source_label=source_label,
+            )
+            completion = complete_launchplane_mutation_reservation(
+                reservation,
+                response_status_code=mutation.response_status_code,
+                response_trace_id=mutation.response_trace_id,
+                completed_at=self._database_mutation_timestamp(session),
+                response_payload=mutation.response_payload,
+            )
+            self._sync_idempotency_row(reservation_row, completion)
+            session.commit()
+            return "written", completion
+
+    def _compare_and_write_dokploy_target_domains_in_session(
+        self,
+        *,
+        session: Any,
+        expected_record: DokployTargetRecord,
+        expected_target_id_record: DokployTargetIdRecord,
+        expected_provider_target_record: ProviderTargetRecord,
+        domains: tuple[str, ...],
+        updated_at: str,
+        source_label: str,
+    ) -> tuple[DokployTargetRecord, ProviderTargetRecord]:
         replacement_record = expected_record.model_copy(
             update={
                 "domains": domains,
@@ -29129,67 +29312,66 @@ class PostgresRecordStore(HumanSessionStore):
         )
         if not self.database_url.startswith("sqlite"):
             statement = statement.with_for_update()
-        with self._session_factory() as session:
-            row = session.scalar(statement)
-            if row is None:
-                raise FileNotFoundError(
-                    "Dokploy target record was missing during compare-and-write."
-                )
-            current_record = self._read_payload(
-                model_type=DokployTargetRecord,
-                payload=_payload_from_row(row),
+        row = session.scalar(statement)
+        if row is None:
+            raise FileNotFoundError("Dokploy target record was missing during compare-and-write.")
+        current_record = self._read_payload(
+            model_type=DokployTargetRecord,
+            payload=_payload_from_row(row),
+        )
+        if current_record != expected_record:
+            raise DokployTargetRecordChanged(
+                "Dokploy target record changed during domain authority repair."
             )
-            if current_record != expected_record:
-                raise ValueError("Dokploy target record changed during domain authority repair.")
-            target_id_statement = (
-                select(LaunchplaneDokployTargetIdRow)
-                .where(
-                    LaunchplaneDokployTargetIdRow.context == expected_target_id_record.context,
-                    LaunchplaneDokployTargetIdRow.instance == expected_target_id_record.instance,
-                )
-                .limit(1)
+        target_id_statement = (
+            select(LaunchplaneDokployTargetIdRow)
+            .where(
+                LaunchplaneDokployTargetIdRow.context == expected_target_id_record.context,
+                LaunchplaneDokployTargetIdRow.instance == expected_target_id_record.instance,
             )
-            if not self.database_url.startswith("sqlite"):
-                target_id_statement = target_id_statement.with_for_update()
-            target_id_row = session.scalar(target_id_statement)
-            if target_id_row is None:
-                raise FileNotFoundError(
-                    "Dokploy target-id record was missing during compare-and-write."
-                )
-            current_target_id_record = self._read_payload(
-                model_type=DokployTargetIdRecord,
-                payload=_payload_from_row(target_id_row),
+            .limit(1)
+        )
+        if not self.database_url.startswith("sqlite"):
+            target_id_statement = target_id_statement.with_for_update()
+        target_id_row = session.scalar(target_id_statement)
+        if target_id_row is None:
+            raise FileNotFoundError(
+                "Dokploy target-id record was missing during compare-and-write."
             )
-            if current_target_id_record != expected_target_id_record:
-                raise ValueError("Dokploy target-id record changed during domain authority repair.")
-            provider_statement = (
-                select(LaunchplaneProviderTargetRow)
-                .where(
-                    LaunchplaneProviderTargetRow.context == expected_provider_target_record.context,
-                    LaunchplaneProviderTargetRow.instance
-                    == expected_provider_target_record.instance,
-                )
-                .limit(1)
+        current_target_id_record = self._read_payload(
+            model_type=DokployTargetIdRecord,
+            payload=_payload_from_row(target_id_row),
+        )
+        if current_target_id_record != expected_target_id_record:
+            raise DokployTargetRecordChanged(
+                "Dokploy target-id record changed during domain authority repair."
             )
-            if not self.database_url.startswith("sqlite"):
-                provider_statement = provider_statement.with_for_update()
-            provider_row = session.scalar(provider_statement)
-            if provider_row is None:
-                raise FileNotFoundError(
-                    "Provider-target record was missing during compare-and-write."
-                )
-            current_provider_target_record = self._read_payload(
-                model_type=ProviderTargetRecord,
-                payload=_payload_from_row(provider_row),
+        provider_statement = (
+            select(LaunchplaneProviderTargetRow)
+            .where(
+                LaunchplaneProviderTargetRow.context == expected_provider_target_record.context,
+                LaunchplaneProviderTargetRow.instance == expected_provider_target_record.instance,
             )
-            if current_provider_target_record != expected_provider_target_record:
-                raise ValueError("Provider-target record changed during domain authority repair.")
-            self._protect_testing_hold_non_use(session, replacement_record)
-            row.updated_at = replacement_record.updated_at
-            row.payload = self._payload_dict(replacement_record)
-            provider_row.updated_at = replacement_provider_target_record.updated_at
-            provider_row.payload = self._payload_dict(replacement_provider_target_record)
-            session.commit()
+            .limit(1)
+        )
+        if not self.database_url.startswith("sqlite"):
+            provider_statement = provider_statement.with_for_update()
+        provider_row = session.scalar(provider_statement)
+        if provider_row is None:
+            raise FileNotFoundError("Provider-target record was missing during compare-and-write.")
+        current_provider_target_record = self._read_payload(
+            model_type=ProviderTargetRecord,
+            payload=_payload_from_row(provider_row),
+        )
+        if current_provider_target_record != expected_provider_target_record:
+            raise DokployTargetRecordChanged(
+                "Provider-target record changed during domain authority repair."
+            )
+        self._protect_testing_hold_non_use(session, replacement_record)
+        row.updated_at = replacement_record.updated_at
+        row.payload = self._payload_dict(replacement_record)
+        provider_row.updated_at = replacement_provider_target_record.updated_at
+        provider_row.payload = self._payload_dict(replacement_provider_target_record)
         return replacement_record, replacement_provider_target_record
 
     def read_dokploy_target_record(

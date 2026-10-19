@@ -209,6 +209,8 @@ UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
 
 
 UI_OPENAPI_WRITE_OPERATIONS: dict[str, str] = {
+    "/v1/dokploy-targets/setup": "setup_dokploy_target",
+    "/v1/route-bindings/reconcile": "reconcile_route_binding",
     "/v1/products/{product}/testing-rebuild": "submit_testing_rebuild",
     "/v1/products/{product}/testing-rebuild/lookup": "lookup_testing_rebuild",
     "/v1/products/{product}/testing-rebuild/operations/{operation_id}/resume": "resume_testing_rebuild",

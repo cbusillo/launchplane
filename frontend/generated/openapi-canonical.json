@@ -4228,6 +4228,25 @@
         "title": "BootstrapEvidence",
         "type": "object"
       },
+      "BrowserRouteRepairRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "reviewed_plan_sha256": {
+            "default": "",
+            "title": "Reviewed Plan Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product"
+        ],
+        "title": "BrowserRouteRepairRequest",
+        "type": "object"
+      },
       "BusinessHoursWindow": {
         "additionalProperties": false,
         "properties": {
@@ -5872,6 +5891,116 @@
         "title": "DisposableLaneObservationRequest",
         "type": "object"
       },
+      "DokployDomainRepairReview": {
+        "additionalProperties": false,
+        "properties": {
+          "applied": {
+            "default": false,
+            "title": "Applied",
+            "type": "boolean"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "current_domains": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Current Domains",
+            "type": "array"
+          },
+          "expected_confirmation": {
+            "title": "Expected Confirmation",
+            "type": "string"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "observed_domains": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Observed Domains",
+            "type": "array"
+          },
+          "operation": {
+            "const": "repair-domain-authority",
+            "default": "repair-domain-authority",
+            "title": "Operation",
+            "type": "string"
+          },
+          "plan_sha256": {
+            "title": "Plan Sha256",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "proposed_domains": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Proposed Domains",
+            "type": "array"
+          },
+          "proposed_primary_domain": {
+            "title": "Proposed Primary Domain",
+            "type": "string"
+          },
+          "source_records": {
+            "items": {
+              "$ref": "#/components/schemas/RouteRepairSource"
+            },
+            "title": "Source Records",
+            "type": "array"
+          },
+          "status": {
+            "enum": [
+              "ready",
+              "unchanged"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "target_id": {
+            "title": "Target Id",
+            "type": "string"
+          },
+          "target_name": {
+            "title": "Target Name",
+            "type": "string"
+          },
+          "target_type": {
+            "enum": [
+              "application",
+              "compose"
+            ],
+            "title": "Target Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "context",
+          "instance",
+          "status",
+          "plan_sha256",
+          "expected_confirmation",
+          "target_type",
+          "target_id",
+          "target_name",
+          "current_domains",
+          "proposed_domains",
+          "observed_domains",
+          "proposed_primary_domain",
+          "source_records"
+        ],
+        "title": "DokployDomainRepairReview",
+        "type": "object"
+      },
       "DokployTargetIdRecord": {
         "additionalProperties": false,
         "properties": {
@@ -6200,6 +6329,16 @@
             "title": "App Name",
             "type": "string"
           },
+          "browser_review": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BrowserRouteRepairRequest"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "compose_path": {
             "default": "docker-compose.yml",
             "title": "Compose Path",
@@ -6422,6 +6561,77 @@
           "instance"
         ],
         "title": "DokployTargetSetupEnvelope",
+        "type": "object"
+      },
+      "DokployTargetSetupResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "original_trace_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Original Trace Id"
+          },
+          "records": {
+            "additionalProperties": true,
+            "title": "Records",
+            "type": "object"
+          },
+          "replayed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Replayed"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result"
+          },
+          "review": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DokployDomainRepairReview"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
+          "status": {
+            "const": "accepted",
+            "default": "accepted",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "records"
+        ],
+        "title": "DokployTargetSetupResponse",
         "type": "object"
       },
       "DokployTargetShopifyPolicy": {
@@ -44630,6 +44840,16 @@
       "RouteBindingReconcileEnvelope": {
         "additionalProperties": false,
         "properties": {
+          "browser_review": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BrowserRouteRepairRequest"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "confirmation": {
             "default": "",
             "title": "Confirmation",
@@ -44683,6 +44903,96 @@
           "expected_current"
         ],
         "title": "RouteBindingReconcileEnvelope",
+        "type": "object"
+      },
+      "RouteBindingReconcileFinding": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "detail"
+        ],
+        "title": "RouteBindingReconcileFinding",
+        "type": "object"
+      },
+      "RouteBindingReconcileResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "original_trace_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Original Trace Id"
+          },
+          "records": {
+            "additionalProperties": true,
+            "title": "Records",
+            "type": "object"
+          },
+          "replayed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Replayed"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result"
+          },
+          "review": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RouteBindingRepairReview"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
+          "status": {
+            "const": "accepted",
+            "default": "accepted",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "records"
+        ],
+        "title": "RouteBindingReconcileResponse",
         "type": "object"
       },
       "RouteBindingRecordResponse": {
@@ -44760,6 +45070,135 @@
           "records"
         ],
         "title": "RouteBindingRecordsResponse",
+        "type": "object"
+      },
+      "RouteBindingRepairReview": {
+        "additionalProperties": false,
+        "properties": {
+          "applied": {
+            "default": false,
+            "title": "Applied",
+            "type": "boolean"
+          },
+          "binding_operation": {
+            "enum": [
+              "create",
+              "refresh",
+              "none"
+            ],
+            "title": "Binding Operation",
+            "type": "string"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "current_domains": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Current Domains",
+            "type": "array"
+          },
+          "current_record": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EnvironmentRouteBindingReadModel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
+          "current_record_sha256": {
+            "title": "Current Record Sha256",
+            "type": "string"
+          },
+          "expected_confirmation": {
+            "title": "Expected Confirmation",
+            "type": "string"
+          },
+          "expected_current": {
+            "$ref": "#/components/schemas/RouteBindingExpectedCurrent"
+          },
+          "findings": {
+            "items": {
+              "$ref": "#/components/schemas/RouteBindingReconcileFinding"
+            },
+            "title": "Findings",
+            "type": "array"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "operation": {
+            "const": "reconcile-route-binding",
+            "default": "reconcile-route-binding",
+            "title": "Operation",
+            "type": "string"
+          },
+          "plan_sha256": {
+            "title": "Plan Sha256",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "proposed_domains": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Proposed Domains",
+            "type": "array"
+          },
+          "proposed_record": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EnvironmentRouteBindingReadModel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
+          "source_records": {
+            "items": {
+              "$ref": "#/components/schemas/RouteRepairSource"
+            },
+            "title": "Source Records",
+            "type": "array"
+          },
+          "status": {
+            "enum": [
+              "ready",
+              "unchanged",
+              "blocked",
+              "conflict"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "context",
+          "instance",
+          "status",
+          "binding_operation",
+          "plan_sha256",
+          "expected_confirmation",
+          "expected_current",
+          "current_record_sha256",
+          "current_domains",
+          "proposed_domains",
+          "findings",
+          "source_records"
+        ],
+        "title": "RouteBindingRepairReview",
         "type": "object"
       },
       "RouteBindingSource": {
@@ -44841,6 +45280,25 @@
           "owner"
         ],
         "title": "RouteBindingTlsReadModel",
+        "type": "object"
+      },
+      "RouteRepairSource": {
+        "additionalProperties": false,
+        "properties": {
+          "identity": {
+            "title": "Identity",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "identity",
+          "version"
+        ],
+        "title": "RouteRepairSource",
         "type": "object"
       },
       "RunnerHostDockerToolchainObservation": {
@@ -60308,7 +60766,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                  "$ref": "#/components/schemas/DokployTargetSetupResponse"
                 }
               }
             },
@@ -96627,6 +97085,16 @@
               "title": "Authorization",
               "type": "string"
             }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -96644,7 +97112,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                  "$ref": "#/components/schemas/RouteBindingReconcileResponse"
                 }
               }
             },
@@ -101502,6 +101970,7 @@
     "/v1/work-graph/tenant-admission/evaluation": "read_tenant_admission_evaluation"
   },
   "x-launchplane-ui-write-operations": {
+    "/v1/dokploy-targets/setup": "setup_dokploy_target",
     "/v1/drivers/odoo/service-restart": "restart_lane_service",
     "/v1/local-consumer-deliveries": "deliver_testing_local_consumer",
     "/v1/odoo-prod-promotions": "enqueue_odoo_prod_promotion",
@@ -101535,6 +102004,7 @@
     "/v1/products/{product}/testing-rebuild/operations/{operation_id}/resume": "resume_testing_rebuild",
     "/v1/release-review/decisions": "write_release_review_decision",
     "/v1/release-review/urgent-openings": "open_urgent_release_review",
+    "/v1/route-bindings/reconcile": "reconcile_route_binding",
     "/v1/service/delivery/apply-receipt": "read_service_delivery_apply_receipt",
     "/v1/service/github-delivery/configuration": "configure_launchplane_github_delivery",
     "/v1/service/github-delivery/token-retirement": "retire_service_github_tokens",

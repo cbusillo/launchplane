@@ -1,3 +1,4 @@
+from control_plane import browser_route_repair
 from control_plane.dokploy_target_comparison import (
     DokployTargetComparisonEvidenceUnavailableError,
     require_provider_target_expectation,
@@ -758,6 +759,7 @@ from control_plane.contracts.preview_pr_feedback_remediation import (
 )
 from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
 from control_plane.contracts.route_binding_record import (
+    route_binding_record_sha256,
     EnvironmentRouteBindingRecord,
     redacted_route_binding_record,
 )
@@ -2677,6 +2679,18 @@ class IngressCanaryRouteApplyEnvelope(BaseModel):
         return self
 
 
+class DokployTargetSetupResponse(AcceptedEvidenceResponse):
+    review: browser_route_repair.DokployDomainRepairReview | None = Field(
+        default=None, json_schema_extra={"x-launchplane-optional-response": True}
+    )
+
+
+class RouteBindingReconcileResponse(AcceptedEvidenceResponse):
+    review: browser_route_repair.RouteBindingRepairReview | None = Field(
+        default=None, json_schema_extra={"x-launchplane-optional-response": True}
+    )
+
+
 class RouteBindingReconcileEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -2687,13 +2701,24 @@ class RouteBindingReconcileEnvelope(BaseModel):
     instance: str
     expected_current: control_plane_route_binding_reconcile.RouteBindingExpectedCurrent
     source_label: str = "operator-reconcile"
+    browser_review: browser_route_repair.BrowserRouteRepairRequest | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     reason: str = ""
     confirmation: str = ""
+
+    @property
+    def expected_confirmation(self) -> str:
+        return "APPLY LAUNCHPLANE ROUTE BINDING RECONCILE"
 
     @model_validator(mode="after")
     def _validate_envelope(self) -> "RouteBindingReconcileEnvelope":
         if self.schema_version != 1:
             raise ValueError("Unsupported route binding reconcile schema version")
+        if self.browser_review is not None:
+            self.browser_review.validate_mode(self.mode)
+            if self.browser_review.product != self.product.strip():
+                raise ValueError("Browser route repair product must match the requested lane.")
         self.product = self.product.strip()
         self.context = self.context.strip()
         self.instance = self.instance.strip()
@@ -2707,7 +2732,7 @@ class RouteBindingReconcileEnvelope(BaseModel):
         if self.mode == "apply":
             if not self.reason:
                 raise ValueError("Route binding reconcile apply requires a reason")
-            if self.confirmation != "APPLY LAUNCHPLANE ROUTE BINDING RECONCILE":
+            if self.confirmation != self.expected_confirmation:
                 raise ValueError("Route binding reconcile apply requires exact confirmation text")
         return self
 
@@ -5482,6 +5507,84 @@ def create_launchplane_fastapi_app(
     ) -> LaunchplaneIdentity:
         if isinstance(identity, TerminalAgentIdentity) and director_agent_identity(identity):
             return identity
+        return read_write_identity(authorization=authorization)
+
+    def require_route_repair_administrator(identity: GitHubHumanIdentity) -> None:
+        if not resolved_authz_policy_runtime.policy.names_administrator(identity):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=next_trace_id(),
+                code="authorization_denied",
+                message="Browser route repair requires the signed-in administrator.",
+            )
+
+    def read_domain_repair_identity(
+        request: Request,
+        response: Response,
+        setup_request: DokployTargetSetupEnvelope,
+        authorization: Annotated[str, Header(alias="Authorization")] = "",
+        cookie: Annotated[str, Header(alias="Cookie")] = "",
+    ) -> LaunchplaneIdentity:
+        identity = resolve_browser_mutation_identity(
+            request=request,
+            response=response,
+            authorization=authorization,
+            cookie=cookie,
+            allow_owner=False,
+        )
+        if isinstance(identity, GitHubHumanIdentity):
+            require_route_repair_administrator(identity)
+            if (
+                setup_request.operation != "repair-domain-authority"
+                or setup_request.browser_review is None
+            ):
+                raise _launchplane_http_error(
+                    status_code=403,
+                    trace_id=next_trace_id(),
+                    code="authorization_denied",
+                    message="Browser setup is limited to reviewed domain authority repair.",
+                )
+            return identity
+        if setup_request.browser_review is not None:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=next_trace_id(),
+                code="authorization_denied",
+                message="Browser review requires the signed-in administrator.",
+            )
+        return read_disposable_runtime_identity(identity=identity, authorization=authorization)
+
+    def read_binding_repair_identity(
+        request: Request,
+        response: Response,
+        binding_request: RouteBindingReconcileEnvelope,
+        authorization: Annotated[str, Header(alias="Authorization")] = "",
+        cookie: Annotated[str, Header(alias="Cookie")] = "",
+    ) -> LaunchplaneIdentity:
+        identity = resolve_browser_mutation_identity(
+            request=request,
+            response=response,
+            authorization=authorization,
+            cookie=cookie,
+            allow_owner=False,
+        )
+        if isinstance(identity, GitHubHumanIdentity):
+            require_route_repair_administrator(identity)
+            if binding_request.browser_review is None:
+                raise _launchplane_http_error(
+                    status_code=403,
+                    trace_id=next_trace_id(),
+                    code="authorization_denied",
+                    message="Browser route repair requires its reviewed lane request.",
+                )
+            return identity
+        if binding_request.browser_review is not None:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=next_trace_id(),
+                code="authorization_denied",
+                message="Browser review requires the signed-in administrator.",
+            )
         return read_write_identity(authorization=authorization)
 
     register_updater_proposal_route(
@@ -22619,10 +22722,10 @@ def create_launchplane_fastapi_app(
     async def reconcile_route_binding(
         request: Request,
         binding_request: RouteBindingReconcileEnvelope,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_binding_repair_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
-    ) -> AcceptedEvidenceResponse:
+    ) -> AcceptedEvidenceResponse | JSONResponse:
         trace_id = next_trace_id()
         authorization_action = (
             "route_binding.apply" if binding_request.mode == "apply" else "route_binding.read"
@@ -22680,7 +22783,7 @@ def create_launchplane_fastapi_app(
                 if preflight.record is None:
                     raise RuntimeError("Route binding mutation preflight requires evidence.")
                 if preflight.status == "replayed":
-                    return replay_idempotent_response(
+                    return binding_repair_replay(
                         trace_id=trace_id,
                         stored_record=preflight.record,
                         route_path=_ROUTE_BINDING_RECONCILE_ROUTE,
@@ -22718,27 +22821,80 @@ def create_launchplane_fastapi_app(
                     f"Unsupported route binding mutation preflight status: {preflight.status}"
                 )
 
+        expected_current = binding_request.expected_current
+        if binding_request.browser_review is not None:
+            require_browser_repair_lane(
+                record_store=record_store,
+                product=binding_request.product,
+                context=binding_request.context,
+                instance=binding_request.instance,
+                trace_id=trace_id,
+            )
+            if binding_request.mode == "dry-run":
+                try:
+                    current = route_binding_store.read_route_binding_record(
+                        product=binding_request.product,
+                        context_name=binding_request.context,
+                        instance_name=binding_request.instance,
+                    )
+                except FileNotFoundError:
+                    current = None
+                expected_current = (
+                    control_plane_route_binding_reconcile.RouteBindingExpectedCurrent(
+                        state="present" if current else "absent",
+                        record_sha256=route_binding_record_sha256(current) if current else "",
+                    )
+                )
         reconcile_plan = control_plane_route_binding_reconcile.plan_route_binding_reconcile(
             record_store=route_binding_store,
             request=control_plane_route_binding_reconcile.RouteBindingReconcileRequest(
                 product=binding_request.product,
                 context=binding_request.context,
                 instance=binding_request.instance,
-                expected_current=binding_request.expected_current,
+                expected_current=expected_current,
                 source_label=binding_request.source_label,
                 evaluated_at=utc_now_timestamp(),
             ),
         )
 
+        review = None
+        if binding_request.browser_review is not None:
+            review = browser_route_repair.binding_repair_review(
+                product=binding_request.product,
+                context=binding_request.context,
+                instance=binding_request.instance,
+                plan=reconcile_plan,
+                expected_current=expected_current,
+                expected_confirmation=binding_request.expected_confirmation,
+                applied=binding_request.mode == "apply"
+                and reconcile_plan.status in {"ready", "unchanged"},
+            )
+            if (
+                binding_request.mode == "apply"
+                and binding_request.browser_review.reviewed_plan_sha256 != review.plan_sha256
+            ):
+                assert isinstance(record_store, PostgresRecordStore)
+                return settle_browser_route_repair_stale(
+                    database_store=record_store,
+                    identity=identity,
+                    route_path=_ROUTE_BINDING_RECONCILE_ROUTE,
+                    idempotency_key=normalized_key,
+                    fingerprint=payload_fingerprint,
+                    trace_id=trace_id,
+                    message="Reviewed route binding plan changed. Review fresh lane evidence before applying.",
+                )
+
         def reconcile_response(*, route_binding_status: str) -> AcceptedEvidenceResponse:
             result_payload = reconcile_plan.model_dump(mode="json", exclude_none=True)
+            if binding_request.browser_review is not None:
+                result_payload["reason"] = binding_request.reason
             result_payload["mode"] = binding_request.mode
             result_payload["route_binding_status"] = route_binding_status
             if reconcile_plan.record is not None:
                 result_payload["record"] = redacted_route_binding_record(
                     reconcile_plan.record
                 ).model_dump(mode="json")
-            return accepted_evidence_response(
+            base_response = accepted_evidence_response(
                 trace_id=trace_id,
                 records={
                     "route_binding_status": route_binding_status,
@@ -22747,6 +22903,14 @@ def create_launchplane_fastapi_app(
                     "instance": binding_request.instance,
                 },
                 result=result_payload,
+            )
+            return (
+                RouteBindingReconcileResponse(
+                    **base_response.model_dump(),
+                    review=review,
+                )
+                if review is not None
+                else base_response
             )
 
         if reconcile_plan.status in {"blocked", "conflict"}:
@@ -22771,21 +22935,46 @@ def create_launchplane_fastapi_app(
             return response
         if mutation_store is None:
             raise RuntimeError("Route binding reconcile apply requires a mutation store.")
-        mutation_result = mutation_store.reconcile_route_binding_record(
-            expected_record=reconcile_plan.current_record,
-            replacement_record=reconcile_plan.record,
-            mutation=DbOnlyMutationRequest(
-                scope=idempotency_scope(identity),
-                route_path=_ROUTE_BINDING_RECONCILE_ROUTE,
-                idempotency_key=normalized_key,
-                request_fingerprint=payload_fingerprint,
-                lease_owner=trace_id,
-                response_status_code=202,
-                response_trace_id=trace_id,
-                response_payload=response.model_dump(mode="json", exclude_none=True),
-                lease_seconds=int(_DB_ONLY_MUTATION_LEASE.total_seconds()),
-            ),
+        mutation = DbOnlyMutationRequest(
+            scope=idempotency_scope(identity),
+            route_path=_ROUTE_BINDING_RECONCILE_ROUTE,
+            idempotency_key=normalized_key,
+            request_fingerprint=payload_fingerprint,
+            lease_owner=trace_id,
+            response_status_code=202,
+            response_trace_id=trace_id,
+            response_payload=response.model_dump(mode="json", exclude_none=True),
+            lease_seconds=int(_DB_ONLY_MUTATION_LEASE.total_seconds()),
         )
+        if binding_request.browser_review is not None:
+            assert isinstance(record_store, PostgresRecordStore)
+            try:
+                mutation_result = record_store.reconcile_route_binding_record(
+                    expected_record=reconcile_plan.current_record,
+                    replacement_record=reconcile_plan.record,
+                    mutation=mutation,
+                    reviewed_sources=reconcile_plan.review_sources,
+                    reviewed_product=binding_request.product,
+                )
+            except (
+                control_plane_route_binding_reconcile.RouteBindingSourceChanged,
+                ProductContextOwnershipError,
+            ):
+                return settle_browser_route_repair_stale(
+                    database_store=record_store,
+                    identity=identity,
+                    route_path=_ROUTE_BINDING_RECONCILE_ROUTE,
+                    idempotency_key=normalized_key,
+                    fingerprint=payload_fingerprint,
+                    trace_id=trace_id,
+                    message="Reviewed route source or lane ownership changed before commit. Review the lane again.",
+                )
+        else:
+            mutation_result = mutation_store.reconcile_route_binding_record(
+                expected_record=reconcile_plan.current_record,
+                replacement_record=reconcile_plan.record,
+                mutation=mutation,
+            )
         if mutation_result.status in {"created", "refreshed", "unchanged"}:
             if mutation_result.status != expected_write_status:
                 raise RuntimeError("Route binding reconcile write did not match the reviewed plan.")
@@ -22793,7 +22982,7 @@ def create_launchplane_fastapi_app(
         if mutation_result.status == "replayed":
             if mutation_result.idempotency_record is None:
                 raise RuntimeError("Replayed route binding reconcile requires evidence.")
-            return replay_idempotent_response(
+            return binding_repair_replay(
                 trace_id=trace_id,
                 stored_record=mutation_result.idempotency_record,
                 route_path=_ROUTE_BINDING_RECONCILE_ROUTE,
@@ -22816,6 +23005,17 @@ def create_launchplane_fastapi_app(
                 message="The route binding mutation requires reconciliation before retry.",
             )
         if mutation_result.status in {"changed", "missing"}:
+            if binding_request.browser_review is not None:
+                assert isinstance(record_store, PostgresRecordStore)
+                return settle_browser_route_repair_stale(
+                    database_store=record_store,
+                    identity=identity,
+                    route_path=_ROUTE_BINDING_RECONCILE_ROUTE,
+                    idempotency_key=normalized_key,
+                    fingerprint=payload_fingerprint,
+                    trace_id=trace_id,
+                    message="The route binding changed before the reviewed write. Review current evidence again.",
+                )
             raise _launchplane_http_error(
                 status_code=409,
                 trace_id=trace_id,
@@ -25969,18 +26169,395 @@ def create_launchplane_fastapi_app(
         )
         return response
 
+    def require_browser_repair_lane(
+        *,
+        record_store: object,
+        product: str,
+        context: str,
+        instance: str,
+        trace_id: str,
+    ) -> None:
+        database_store = require_dokploy_target_setup_database_store(
+            record_store=record_store, trace_id=trace_id
+        )
+        try:
+            profile = database_store.read_product_profile_record(product)
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message="The selected product was not found.",
+            ) from error
+        if _lane_setup_context_owner(
+            record_store=database_store, context=context
+        ) != product or not any(
+            lane.context == context and lane.instance == instance for lane in profile.lanes
+        ):
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="route_repair_lane_unqualified",
+                message="Route repair requires the product's exact, exclusively owned recorded lane.",
+            )
+
+    def browser_route_repair_refusal(
+        stored_record: LaunchplaneIdempotencyRecord,
+    ) -> JSONResponse | None:
+        if stored_record.response_status_code == 202:
+            return None
+        if stored_record.response_status_code != 409:
+            raise RuntimeError("Browser route repair receipt has an unsupported terminal status.")
+        failure = LaunchplaneErrorResponse.model_validate(stored_record.response_payload)
+        if failure.error.code != "stale":
+            raise RuntimeError(
+                "Browser route repair refusal requires its exact stored stale evidence."
+            )
+        return JSONResponse(
+            status_code=409, content=failure.model_dump(mode="json", exclude_none=True)
+        )
+
+    def settle_browser_route_repair_stale(
+        *,
+        database_store: PostgresRecordStore,
+        identity: LaunchplaneIdentity,
+        route_path: str,
+        idempotency_key: str,
+        fingerprint: str,
+        trace_id: str,
+        message: str,
+    ) -> AcceptedEvidenceResponse | JSONResponse:
+        failure = LaunchplaneErrorResponse(
+            trace_id=trace_id,
+            error=LaunchplaneErrorDetail(code="stale", message=message),
+        )
+        refusal = build_apply_idempotency_record(
+            identity=identity,
+            route_path=route_path,
+            idempotency_key=idempotency_key,
+            request_fingerprint_value=fingerprint,
+            trace_id=trace_id,
+            response=failure,
+        ).model_copy(update={"response_status_code": 409})
+        if database_store.write_idempotency_record_once(refusal):
+            response = browser_route_repair_refusal(refusal)
+            assert response is not None
+            return response
+        # A concurrent success or refusal owns this key. Never overwrite it or
+        # report a settled refusal while another reservation can still write.
+        preflight = database_store.prepare_db_only_mutation(
+            scope=idempotency_scope(identity),
+            route_path=route_path,
+            idempotency_key=idempotency_key,
+            request_fingerprint=fingerprint,
+        )
+        if preflight.status == "replayed":
+            if preflight.record is None:
+                raise RuntimeError("Terminal route repair winner requires its stored receipt.")
+            if route_path == _DOKPLOY_TARGET_SETUP_ROUTE:
+                return domain_repair_replay(trace_id=trace_id, stored_record=preflight.record)
+            return binding_repair_replay(
+                trace_id=trace_id, stored_record=preflight.record, route_path=route_path
+            )
+        raise _launchplane_http_error(
+            status_code=409,
+            trace_id=trace_id,
+            code="idempotency_key_reused"
+            if preflight.status == "conflict"
+            else "mutation_reconciliation_required"
+            if preflight.status == "reconcile_required"
+            else "mutation_in_progress",
+            message="The original route repair result is unproven. Preserve its exact request and key.",
+        )
+
+    def binding_repair_replay(
+        *,
+        trace_id: str,
+        stored_record: LaunchplaneIdempotencyRecord,
+        route_path: str,
+    ) -> RouteBindingReconcileResponse | JSONResponse:
+        refusal = browser_route_repair_refusal(stored_record)
+        if refusal is not None:
+            return refusal
+        base = replay_idempotent_response(
+            trace_id=trace_id, stored_record=stored_record, route_path=route_path
+        )
+        stored_review = stored_record.response_payload.get("review")
+        return RouteBindingReconcileResponse(
+            **base.model_dump(),
+            review=browser_route_repair.RouteBindingRepairReview.model_validate(stored_review)
+            if stored_review is not None
+            else None,
+        )
+
+    def domain_repair_replay(
+        *,
+        trace_id: str,
+        stored_record: LaunchplaneIdempotencyRecord,
+    ) -> DokployTargetSetupResponse | JSONResponse:
+        refusal = browser_route_repair_refusal(stored_record)
+        if refusal is not None:
+            return refusal
+        base = replay_idempotent_response(
+            trace_id=trace_id, stored_record=stored_record, route_path=_DOKPLOY_TARGET_SETUP_ROUTE
+        )
+        return DokployTargetSetupResponse(
+            **base.model_dump(),
+            review=browser_route_repair.DokployDomainRepairReview.model_validate(
+                stored_record.response_payload["review"]
+            ),
+        )
+
+    async def browser_domain_repair(
+        *,
+        request: Request,
+        setup_request: DokployTargetSetupEnvelope,
+        identity: LaunchplaneIdentity,
+        database_store: PostgresRecordStore,
+        idempotency_key: str,
+        trace_id: str,
+    ) -> AcceptedEvidenceResponse | JSONResponse:
+        from control_plane.dokploy import source as dokploy_source
+        from control_plane.dokploy_target_setup_http import (
+            fetch_dokploy_target_payload_for_setup,
+            fetch_dokploy_target_domains_for_setup,
+            ensure_dokploy_target_setup_context_is_not_historical,
+        )
+
+        browser_request = setup_request.browser_review
+        assert browser_request is not None
+        action = (
+            "dokploy_target.repair_domain_authority"
+            if setup_request.mode == "apply"
+            else "dokploy_target.repair_domain_authority.plan"
+        )
+        if not resolved_authz_policy_runtime.allows(
+            identity=identity,
+            action=action,
+            product="launchplane",
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="The administrator cannot repair domain authority for this lane.",
+            )
+        normalized_key = idempotency_key.strip()
+        fingerprint = ""
+        if setup_request.mode == "apply":
+            if not normalized_key:
+                raise _launchplane_http_error(
+                    status_code=400,
+                    trace_id=trace_id,
+                    code="idempotency_key_required",
+                    message="Domain repair apply requires its original Idempotency-Key.",
+                )
+            if (
+                setup_request.confirmation != setup_request.expected_confirmation
+                or not setup_request.reason
+            ):
+                raise _launchplane_http_error(
+                    status_code=400,
+                    trace_id=trace_id,
+                    code="confirmation_required",
+                    message="Domain repair apply requires confirmation and a reason.",
+                )
+            fingerprint = idempotency_request_fingerprint(
+                route_path=_DOKPLOY_TARGET_SETUP_ROUTE, payload=await request.json()
+            )
+            preflight = database_store.prepare_db_only_mutation(
+                scope=idempotency_scope(identity),
+                route_path=_DOKPLOY_TARGET_SETUP_ROUTE,
+                idempotency_key=normalized_key,
+                request_fingerprint=fingerprint,
+            )
+            if preflight.status == "replayed":
+                assert preflight.record is not None
+                return domain_repair_replay(trace_id=trace_id, stored_record=preflight.record)
+            if preflight.status not in {"missing", "released"}:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="idempotency_key_reused"
+                    if preflight.status == "conflict"
+                    else "mutation_in_progress"
+                    if preflight.status == "in_progress"
+                    else "mutation_reconciliation_required",
+                    message="Preserve the original domain repair payload and key; its existing receipt controls recovery.",
+                )
+
+        def execute_reviewed_repair() -> AcceptedEvidenceResponse | JSONResponse:
+            require_browser_repair_lane(
+                record_store=database_store,
+                product=browser_request.product,
+                context=setup_request.context,
+                instance=setup_request.instance,
+                trace_id=trace_id,
+            )
+            try:
+                ensure_dokploy_target_setup_context_is_not_historical(
+                    record_store=database_store, context=setup_request.context
+                )
+                host, token = dokploy_source.read_dokploy_config(
+                    control_plane_root=resolved_control_plane_root
+                )
+                plan = browser_route_repair.plan_browser_domain_repair(
+                    record_store=database_store,
+                    product=browser_request.product,
+                    context=setup_request.context,
+                    instance=setup_request.instance,
+                    host=host,
+                    token=token,
+                    expected_confirmation=setup_request.expected_confirmation,
+                    fetch_target_payload=fetch_dokploy_target_payload_for_setup,
+                    fetch_target_domains=fetch_dokploy_target_domains_for_setup,
+                )
+            except (ValueError, FileNotFoundError, click.ClickException) as error:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="domain_repair_evidence_unqualified",
+                    message=str(error),
+                ) from error
+            if set(plan.repair.result.requested_domains).intersection(
+                database_store.retained_disposable_hostnames()
+            ):
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="domain_repair_evidence_unqualified",
+                    message="A hostname remains reserved by retained testing custody.",
+                )
+            if (
+                setup_request.mode == "apply"
+                and browser_request.reviewed_plan_sha256 != plan.review.plan_sha256
+            ):
+                return settle_browser_route_repair_stale(
+                    database_store=database_store,
+                    identity=identity,
+                    route_path=_DOKPLOY_TARGET_SETUP_ROUTE,
+                    idempotency_key=normalized_key,
+                    fingerprint=fingerprint,
+                    trace_id=trace_id,
+                    message="Reviewed domain repair changed. Review fresh lane evidence before applying.",
+                )
+            response = DokployTargetSetupResponse(
+                trace_id=trace_id,
+                records={
+                    "product": browser_request.product,
+                    "context": setup_request.context,
+                    "instance": setup_request.instance,
+                },
+                result={
+                    "mode": setup_request.mode,
+                    "operation": setup_request.operation,
+                    "applied": setup_request.mode == "apply",
+                    "reason": setup_request.reason,
+                },
+                review=plan.review.model_copy(update={"applied": setup_request.mode == "apply"}),
+            )
+            if setup_request.mode == "dry-run":
+                return response
+            try:
+                status, receipt = database_store.commit_dokploy_domain_repair(
+                    expected_record=plan.repair.current_target,
+                    expected_target_id_record=plan.repair.target_id,
+                    expected_provider_target_record=plan.repair.current_provider_target,
+                    domains=plan.repair.result.requested_domains,
+                    updated_at=plan.repair.result.target_record.updated_at,
+                    source_label=plan.repair.result.target_record.source_label,
+                    product=browser_request.product,
+                    mutation=DbOnlyMutationRequest(
+                        scope=idempotency_scope(identity),
+                        route_path=_DOKPLOY_TARGET_SETUP_ROUTE,
+                        idempotency_key=normalized_key,
+                        request_fingerprint=fingerprint,
+                        lease_owner=trace_id,
+                        response_status_code=202,
+                        response_trace_id=trace_id,
+                        response_payload=response.model_dump(mode="json", exclude_none=True),
+                    ),
+                )
+            except (DokployTargetRecordChanged, FileNotFoundError, ProductContextOwnershipError):
+                return settle_browser_route_repair_stale(
+                    database_store=database_store,
+                    identity=identity,
+                    route_path=_DOKPLOY_TARGET_SETUP_ROUTE,
+                    idempotency_key=normalized_key,
+                    fingerprint=fingerprint,
+                    trace_id=trace_id,
+                    message="Domain authority changed before the repair committed. Review the lane again.",
+                )
+            if status == "written":
+                return response
+            if status == "replayed":
+                return domain_repair_replay(trace_id=trace_id, stored_record=receipt)
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="idempotency_key_reused"
+                if status == "idempotency_conflict"
+                else "mutation_in_progress"
+                if status == "reservation_in_progress"
+                else "mutation_reconciliation_required",
+                message="Preserve the original domain repair payload and key; its existing receipt controls recovery.",
+            )
+
+        from control_plane.application_state_volume import (
+            LANE_LOCK_PREFIX,
+            require_no_held_state_volume,
+        )
+
+        lock = (
+            database_store.testing_replacement_execution_lock(
+                LANE_LOCK_PREFIX + setup_request.context
+            )
+            if setup_request.mode == "apply" and setup_request.instance == "testing"
+            else nullcontext(lambda: None)
+        )
+        with lock as check:
+            if check is None:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="mutation_in_progress",
+                    message="Testing lane setup is busy; preserve the original domain repair request.",
+                )
+            check()
+            if setup_request.mode == "apply" and setup_request.instance == "testing":
+                try:
+                    require_no_held_state_volume(database_store, setup_request.context)
+                except ValueError as error:
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="domain_repair_evidence_unqualified",
+                        message=str(error),
+                    ) from error
+            return execute_reviewed_repair()
+
     async def setup_dokploy_target(
         request: Request,
         setup_request: DokployTargetSetupEnvelope,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_disposable_runtime_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_domain_repair_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
-    ) -> AcceptedEvidenceResponse:
+    ) -> AcceptedEvidenceResponse | JSONResponse:
         trace_id = next_trace_id()
         database_store = require_dokploy_target_setup_database_store(
             record_store=record_store,
             trace_id=trace_id,
         )
+        if setup_request.browser_review is not None:
+            return await browser_domain_repair(
+                request=request,
+                setup_request=setup_request,
+                identity=identity,
+                database_store=database_store,
+                idempotency_key=idempotency_key,
+                trace_id=trace_id,
+            )
         # Creation uses new placement; source completion keeps the testing
         # lane's tracked binding. Both require exclusive context ownership.
         lane_owner = _lane_setup_context_owner(
@@ -28184,7 +28761,7 @@ def create_launchplane_fastapi_app(
         setup_dokploy_target,
         methods=["POST"],
         status_code=202,
-        response_model=AcceptedEvidenceResponse,
+        response_model=DokployTargetSetupResponse,
         response_model_exclude_none=True,
         operation_id="setup_dokploy_target",
         summary="Plan or apply Dokploy target setup",
@@ -28294,7 +28871,7 @@ def create_launchplane_fastapi_app(
         _ROUTE_BINDING_RECONCILE_ROUTE,
         reconcile_route_binding,
         methods=["POST"],
-        response_model=AcceptedEvidenceResponse,
+        response_model=RouteBindingReconcileResponse,
         response_model_exclude_none=True,
         status_code=202,
         operation_id="reconcile_route_binding",

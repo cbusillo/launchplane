@@ -3354,3 +3354,22 @@
 .product-generic-web-panel code {
   overflow-wrap: anywhere;
 }
+
+.route-repair-panel { overflow-wrap: anywhere; min-width: 0; }
+.route-repair-sections { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+.route-repair-decision { min-width: 0; border-top: 1px solid var(--border); padding-top: 12px; }
+.route-repair-decision h3 { margin: 0 0 8px; }
+.route-repair-decision .product-config-field { margin: 16px 0; }
+.route-repair-decision input:not([type="checkbox"]) { width: 100%; min-height: 44px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text-strong); font: inherit; }
+.route-repair-decision .button { margin: 8px 8px 8px 0; white-space: normal; }
+.route-repair-review { margin-top: 16px; font-weight: 400; }
+.route-repair-review h4 { margin-bottom: 6px; }
+.route-repair-review details, .route-repair-decision > details { margin: 12px 0; }
+.route-repair-decision summary { cursor: pointer; font-weight: 600; }
+.route-repair-comparison { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.route-repair-decision .confirmation-check { display: flex; align-items: flex-start; gap: 10px; margin: 16px 0 8px; }
+@media (max-width: 900px) { .route-repair-sections { grid-template-columns: 1fr; } }
+@media (max-width: 480px) {
+  .route-repair-comparison { grid-template-columns: 1fr; gap: 0; }
+  .route-repair-decision .button { width: 100%; margin-right: 0; }
+}
