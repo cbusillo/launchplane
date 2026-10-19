@@ -2599,6 +2599,37 @@ ambiguous, populated or changed projects, credential/source drift, later effect
 phases and partial host work remain held for diagnosis. No new-key abandonment,
 direct provider cleanup, source capture or later rehearsal action is implied.
 
+Host schedules carry only the artifact identity fields the host consumes; the
+full artifact and record binding remain in service custody. The reviewed host
+program and its input use a compressed stdin wrapper, avoiding large Python
+arguments and Dokploy's base64-wrapped remote shell materialization limit.
+The shared schedule writer bounds the materialized command before provider
+mutation. Rehearsal renders and validates the exact storage/apply script before
+advancing its effect checkpoint, then executes that same string. Local size
+rejection cannot advance the effect checkpoint. Oversized
+scripts require compact delivery, rather than a provider row written before a
+shell-size failure. Exact apply scripts include purpose-local values resolved
+at execution, so this bound is enforced on the rendered script at that point.
+
+If prepare reached its host checkpoint but never started there, original-key
+readback can return `continue_original_prepare` with reason
+`prepare_host_not_started`. This requires the native `prepare_not_started`
+proof: no started marker, receipt path, raw source, copy receipts or project
+containers, with fresh unchanged service inputs and credential bindings. An old
+host response supplies no such proof. Continuation rechecks recorded placement
+and existing storage through readback, without recreating placement, storage or
+passwords. The host's execution lock and started marker still fence its first
+effect; an already started or uncertain host action remains held. This rule is
+limited to prepare, and never retries capture, migration or a later action.
+These two supported prepare continuations explicitly preserve the preceding
+effect phase and timestamp when atomically reacquiring their original lease.
+A local refusal or storage readback failure during continuation therefore keeps
+the original reservation and custody; it cannot release it as a fresh attempt.
+Other provider-operation retries retain their existing default behavior.
+Once placement exists, a readback without the matching original key still
+returns the host observation and `original_key_required`; it cannot supply a
+journal recovery disposition or authorize a retry.
+
 Elapsed times describe this isolated simulation. Real source writer drain,
 public DNS/TLS switching, business integration resumption and the actual
 production downtime window remain unmeasured. The consuming product issue must

@@ -154,6 +154,7 @@ class RehearsalHostResult(BaseModel):
     business_host_frozen: Literal[False]
     completed: bool = True
     raw_source_retained: bool = False
+    prepare_not_started: bool = False
     refusal_code: Literal[
         "", "rehearsal_storage_capacity_insufficient", "rehearsal_precheck_refused"
     ] = ""

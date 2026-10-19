@@ -966,6 +966,43 @@ class DurableProviderOperationRunnerTests(unittest.TestCase):
             self.assertEqual(stored.state, "reconcile_required")
             self.assertEqual(stored.provider_effect_phase, "test_effect")
 
+    def test_qualified_continuation_preserves_original_effect_on_local_rejection(self) -> None:
+        with TemporaryDirectory() as directory:
+            fixture = _StoreFixture(directory)
+            with self.assertRaises(RuntimeError):
+                fixture.run(_FakeAdapter(apply_error=RuntimeError("uncertain effect")))
+            original = fixture.stored()
+            recovery = _FakeAdapter(
+                observation=ProviderObservation(
+                    "absent", retry_safe=True, preserve_effect_checkpoint=True
+                ),
+                apply_error=ProviderMutationRejectedError(ValueError("local refusal")),
+            )
+            result = fixture.run(recovery)
+            self.assertEqual(result.status, "reconcile_required")
+            retained = fixture.stored()
+            self.assertEqual(retained.provider_effect_phase, original.provider_effect_phase)
+            self.assertEqual(
+                retained.provider_effect_started_at, original.provider_effect_started_at
+            )
+            self.assertGreater(retained.attempt, original.attempt)
+            self.assertEqual(
+                fixture.run(_FakeAdapter(), idempotency_key="replacement").status, "target_busy"
+            )
+
+    def test_default_absent_retry_releases_a_locally_rejected_new_attempt(self) -> None:
+        with TemporaryDirectory() as directory:
+            fixture = _StoreFixture(directory)
+            with self.assertRaises(RuntimeError):
+                fixture.run(_FakeAdapter(apply_error=RuntimeError("uncertain effect")))
+            recovery = _FakeAdapter(
+                observation=ProviderObservation("absent", retry_safe=True),
+                apply_error=ProviderMutationRejectedError(ValueError("local refusal")),
+            )
+            with self.assertRaises(ValueError):
+                fixture.run(recovery)
+            self.assertIsNone(fixture.maybe_stored())
+
     def test_non_durable_outcome_after_checkpoint_requires_reconciliation(self) -> None:
         with TemporaryDirectory() as directory:
             fixture = _StoreFixture(directory)

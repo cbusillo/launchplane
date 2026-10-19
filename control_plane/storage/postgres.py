@@ -9511,6 +9511,7 @@ class PostgresRecordStore(HumanSessionStore):
         reservation: LaunchplaneIdempotencyRecord,
         lease_owner: str,
         lease_seconds: int = 300,
+        preserve_effect_checkpoint: bool = False,
     ) -> MutationReconciliationRetryResult:
         if reservation.state != "reconcile_required":
             raise ValueError("Reconciled mutation retry requires reconcile-required state.")
@@ -9566,8 +9567,12 @@ class PostgresRecordStore(HumanSessionStore):
                     lease_seconds=lease_seconds,
                 ),
                 attempt=current_record.attempt + 1,
-                provider_effect_phase="",
-                provider_effect_started_at="",
+                provider_effect_phase=current_record.provider_effect_phase
+                if preserve_effect_checkpoint
+                else "",
+                provider_effect_started_at=current_record.provider_effect_started_at
+                if preserve_effect_checkpoint
+                else "",
                 updated_at=observed_at,
                 response_status_code=None,
                 response_trace_id="",

@@ -3,6 +3,7 @@
 from datetime import datetime, timezone
 import hashlib
 import os
+import re
 from pathlib import Path
 from typing import Any, cast
 from collections.abc import Callable
@@ -35,6 +36,16 @@ from control_plane.testing_local_credentials import prepare_rehearsal_local_cred
 from tests import test_testing_replacement_resources as resources
 from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
 from control_plane.contracts.odoo_upgrade_rehearsal import OdooUpgradeRehearsalRecord
+
+
+def python_heredoc(script: str) -> str:
+    match = re.search(r"python3\s+-\s*<<'(?P<delimiter>\w+)'\s*\n", script)
+    if match is None:
+        raise AssertionError("Host delivery must put its Python program on stdin")
+    body, delimiter, _ = script[match.end() :].partition("\n" + match["delimiter"] + "\n")
+    if not delimiter:
+        raise AssertionError("Host Python heredoc is unterminated")
+    return body
 
 
 class RehearsalScenario(unittest.TestCase):
@@ -354,24 +365,30 @@ class RehearsalScenario(unittest.TestCase):
 
     def test_actual_host_stdout_survives_the_shared_scheduler_marker_parser(self) -> None:
         import io
-        import shlex
+        import subprocess
         import sys
         from contextlib import redirect_stdout
         from control_plane.dokploy.post_deploy import extract_odoo_post_deploy_readback_markers
 
         record = self.record.model_copy(update={"compose_id": "own-compose"})
         adapter = self.adapter("prepare")
+        project_containers = b""
 
         def scheduler(
             record: OdooUpgradeRehearsalRecord, script: str, check: Callable[[], None]
         ) -> dict[str, str]:
-            lines = script.splitlines()
-            encoded = shlex.split(lines[2])[2]
-            program = "\n".join(lines[3:-1])
+            program = python_heredoc(script)
             output = io.StringIO()
             with (
-                patch.object(sys, "argv", ["host", encoded]),
+                patch.object(sys, "argv", ["host"]),
                 patch.object(Path, "home", return_value=self.root.resolve()),
+                patch.object(
+                    subprocess,
+                    "run",
+                    return_value=subprocess.CompletedProcess(
+                        [], 0, stdout=project_containers, stderr=b""
+                    ),
+                ),
                 redirect_stdout(output),
             ):
                 exec(compile(program, "<actual-host>", "exec"), {})
@@ -383,9 +400,129 @@ class RehearsalScenario(unittest.TestCase):
             result = adapter.host(record, "observe", lambda: None)
         self.assertEqual(result["intent_sha256"], record.intent_sha256)
         self.assertFalse(result["completed"])
+        self.assertTrue(result["prepare_not_started"])
+        project_containers = b"existing-rehearsal-container\n"
+        with patch.object(adapter, "run_script", side_effect=scheduler):
+            self.assertFalse(adapter.host(record, "observe", lambda: None)["prepare_not_started"])
+        project_containers = b""
+        marker = (
+            self.root
+            / ".local/state/launchplane-rehearsals"
+            / record.rehearsal_id
+            / "prepare.started"
+        )
+        marker.parent.mkdir(parents=True)
+        marker.touch()
+        with patch.object(adapter, "run_script", side_effect=scheduler):
+            self.assertFalse(adapter.host(record, "observe", lambda: None)["prepare_not_started"])
+        marker.unlink()
+        receipt = marker.with_name("prepare.json")
+        receipt.mkdir()
+        with patch.object(adapter, "run_script", side_effect=scheduler):
+            self.assertFalse(adapter.host(record, "observe", lambda: None)["prepare_not_started"])
         with patch.object(adapter, "run_script", return_value={}):
             with self.assertRaises(RehearsalRefused):
                 adapter.host(record, "observe", lambda: None)
+
+    def test_large_manifest_survives_provider_script_materialization_and_host_readback(
+        self,
+    ) -> None:
+        import io
+        import base64
+        import subprocess
+        import sys
+        from contextlib import redirect_stdout
+        from control_plane.dokploy.post_deploy import extract_odoo_post_deploy_readback_markers
+        from control_plane.dokploy.api import validate_dokploy_schedule_script
+
+        artifact = self.record.target_artifact
+        artifact = artifact.model_copy(
+            update={
+                "build_flags": artifact.build_flags.model_copy(
+                    update={
+                        "values": {
+                            **artifact.build_flags.values,
+                            "fixture_large_provenance": hashlib.shake_256(
+                                b"large artifact"
+                            ).hexdigest(350_000),
+                        }
+                    }
+                )
+            }
+        )
+        record = self.record.model_copy(
+            update={"compose_id": "own-compose", "target_artifact": artifact}
+        )
+        adapter = self.adapter("prepare")
+
+        def scheduler(
+            record: OdooUpgradeRehearsalRecord, script: str, check: Callable[[], None]
+        ) -> dict[str, str]:
+            # Enforce the Linux materializer bound independently of the test OS.
+            validate_dokploy_schedule_script({"script": script, "appName": record.rehearsal_id})
+            encoded = base64.b64encode(script.encode()).decode()
+            materialized = base64.b64decode(encoded, validate=True).decode()
+            body = python_heredoc(materialized)
+            output = io.StringIO()
+            with (
+                patch.object(sys, "argv", ["host"]),
+                patch.object(Path, "home", return_value=self.root.resolve()),
+                patch.object(
+                    subprocess,
+                    "run",
+                    return_value=subprocess.CompletedProcess([], 0, stdout=b"", stderr=b""),
+                ),
+                redirect_stdout(output),
+            ):
+                exec(compile(body, "<provider-host>", "exec"), {})
+            return extract_odoo_post_deploy_readback_markers({"logs": output.getvalue()})
+
+        with patch.object(adapter, "run_script", side_effect=scheduler):
+            result = adapter.host(record, "observe", lambda: None)
+        self.assertEqual(result["intent_sha256"], record.intent_sha256)
+        self.assertFalse(result["completed"])
+
+        prepare_rehearsal_local_credentials(self.store, self.identifier, actor=self.principal)
+        apply_script = adapter.host_script(record, "apply", operation_key="fixture-operation")
+        validate_dokploy_schedule_script({"script": apply_script, "appName": record.rehearsal_id})
+        compile(python_heredoc(apply_script), "<apply-transport>", "exec")
+
+    def test_oversize_host_script_is_refused_before_dispatch_checks(self) -> None:
+        import click
+        from control_plane.dokploy.api import DOKPLOY_SCHEDULE_MATERIALIZATION_LIMIT_BYTES
+
+        adapter = self.adapter("prepare")
+        checkpoint = Mock()
+        with self.assertRaises(click.ClickException):
+            adapter.run_script(
+                self.record, "x" * DOKPLOY_SCHEDULE_MATERIALIZATION_LIMIT_BYTES, checkpoint
+            )
+        checkpoint.assert_not_called()
+
+    def test_oversize_apply_payload_releases_fresh_action_without_provider_dispatch(self) -> None:
+        from control_plane.dokploy import api
+
+        retained = self.record.model_copy(update={"state": "switched", "compose_id": "own-compose"})
+        self.store.compare_and_write_odoo_upgrade_rehearsal(self.record, retained)
+        adapter = self.adapter("verify")
+        render = rehearsal_host_spec
+
+        def oversized(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            spec = render(*args, **kwargs)
+            if args[2] == "apply":
+                spec["oversize_fixture"] = hashlib.shake_256(b"apply payload").hexdigest(250_000)
+            return spec
+
+        with (
+            patch(
+                "control_plane.odoo_upgrade_rehearsal.rehearsal_host_spec", side_effect=oversized
+            ),
+            patch.object(api, "dokploy_request") as provider,
+        ):
+            with self.assertRaises(RehearsalRefused):
+                self.run_operation(adapter, "oversize-apply")
+        provider.assert_not_called()
+        self.assertEqual(self.store.list_held_provider_target_reservations(), ())
 
     def test_retirement_uses_retained_intent_without_source_or_credential_reads(self) -> None:
         retained = self.record.model_copy(update={"state": "verified", "compose_id": "own-compose"})
@@ -456,6 +593,7 @@ class RehearsalScenario(unittest.TestCase):
             checkpoint: Callable[[], None],
             *,
             operation_key: str,
+            prepared_script: str | None = None,
         ) -> dict[str, object]:
             checkpoint()
             action = adapter.request.action
@@ -512,6 +650,7 @@ class RehearsalScenario(unittest.TestCase):
         self.assertEqual(retired.copies, tuple(copies))
 
     def test_unknown_provider_effect_is_never_blindly_replayed(self) -> None:
+        prepare_rehearsal_local_credentials(self.store, self.identifier, actor=self.principal)
         prepared = self.record.model_copy(update={"state": "prepared", "compose_id": "own-compose"})
         self.store.compare_and_write_odoo_upgrade_rehearsal(self.record, prepared)
         adapter = self.adapter("execute")
@@ -778,6 +917,205 @@ class RehearsalScenario(unittest.TestCase):
                 host.call_args_list[1].kwargs["operation_key"],
             )
 
+    def test_prepare_host_continuation_requires_native_not_started_proof(self) -> None:
+        from control_plane.dokploy import api
+        from control_plane.odoo_testing_resources import OdooRehearsalResources
+
+        adapter = self.adapter("prepare")
+        before = self.authority()
+        creates = iter(
+            (
+                {"projectId": "own-project"},
+                {"environmentId": "own-environment"},
+                {"composeId": "own-compose"},
+            )
+        )
+        modes: list[str] = []
+        script = OdooRehearsalResources.script
+
+        def resource_script(resource: OdooRehearsalResources, mode: Any) -> str:
+            modes.append(mode)
+            return script(resource, mode)
+
+        def placement(*_: Any) -> tuple[str, str, str]:
+            record = self.store.read_odoo_upgrade_rehearsal(self.identifier)
+            assert record is not None
+            return record.project_id, record.environment_id, record.compose_id
+
+        def storage(record: OdooUpgradeRehearsalRecord, *_: Any) -> dict[str, str]:
+            return {
+                "testing_resources_ok": "true",
+                "testing_resources_binding_sha256": rehearsal_resource(record).binding_sha256,
+            }
+
+        incomplete = {
+            "completed": False,
+            "state": "planned",
+            "copies": [],
+            "raw_source_retained": False,
+        }
+        with (
+            patch(
+                "control_plane.dokploy.sandbox_placement.created_placement", side_effect=placement
+            ),
+            patch.object(api, "dokploy_request", side_effect=lambda **_: next(creates)) as create,
+            patch.object(
+                OdooRehearsalResources, "script", autospec=True, side_effect=resource_script
+            ),
+            patch.object(adapter, "run_script", side_effect=storage),
+            patch.object(
+                adapter,
+                "host",
+                side_effect=api.DokployRequestFailed(
+                    method="POST",
+                    path="/api/schedule.update",
+                    status_code=500,
+                    detail="fixture materialization failure",
+                ),
+            ) as host,
+        ):
+            with self.assertRaises(api.DokployRequestFailed):
+                self.run_operation(adapter, "original-prepare")
+            credentials = rehearsal_credentials(self.store, self.identifier)
+            host.side_effect = None
+            host.return_value = incomplete
+            self.assertEqual(
+                self.run_operation(adapter, "original-prepare").status, "reconcile_required"
+            )
+            self.assertEqual(modes, ["prepare"])
+            original = self.store.list_held_provider_target_reservations()[0]
+            host.return_value = {**incomplete, "prepare_not_started": True}
+            render = rehearsal_host_spec
+            renders = 0
+
+            def oversized(*args: Any, **kwargs: Any) -> dict[str, Any]:
+                nonlocal renders
+                spec = render(*args, **kwargs)
+                if args[2] == "apply":
+                    renders += 1
+                    if renders >= refuse_on_render:
+                        spec["oversize_fixture"] = hashlib.shake_256(b"continuation").hexdigest(
+                            250_000
+                        )
+                return spec
+
+            for refuse_on_render in (1, 2):
+                renders = 0
+                with patch(
+                    "control_plane.odoo_upgrade_rehearsal.rehearsal_host_spec",
+                    side_effect=oversized,
+                ):
+                    self.assertEqual(
+                        self.run_operation(adapter, "original-prepare").status, "reconcile_required"
+                    )
+                retained = self.store.list_held_provider_target_reservations()[0]
+                self.assertEqual(retained.provider_effect_phase, original.provider_effect_phase)
+                self.assertEqual(
+                    retained.provider_effect_started_at, original.provider_effect_started_at
+                )
+                if refuse_on_render == 1:
+                    self.assertEqual(retained, original)
+                else:
+                    self.assertGreater(retained.attempt, original.attempt)
+            with patch.object(
+                adapter,
+                "run_script",
+                side_effect=RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED),
+            ):
+                with self.assertRaises(RehearsalRefused):
+                    self.run_operation(adapter, "original-prepare")
+            retained = self.store.list_held_provider_target_reservations()[0]
+            self.assertEqual(retained.provider_effect_phase, original.provider_effect_phase)
+            self.assertEqual(
+                retained.provider_effect_started_at, original.provider_effect_started_at
+            )
+            self.assertEqual(self.run_operation(adapter, "replacement-key").status, "target_busy")
+            host.side_effect = [
+                {**incomplete, "prepare_not_started": True},
+                {"state": "prepared", "copies": [], "elapsed_seconds": {}},
+            ]
+            result = self.run_operation(adapter, "original-prepare")
+            self.assertEqual((result.status, result.response_status_code), ("completed", 202))
+            self.assertEqual(modes, ["prepare", "readback", "readback", "readback"])
+            self.assertEqual(create.call_count, 3)
+            self.assertEqual(rehearsal_credentials(self.store, self.identifier), credentials)
+            self.assertEqual(self.authority(), before)
+
+    def assert_prepare_size_refusal_retains_previous_phase(self, stage: str) -> None:
+        from control_plane.dokploy import api
+        from control_plane.odoo_testing_resources import OdooRehearsalResources
+
+        adapter = self.adapter("prepare")
+        creates = iter(
+            (
+                {"projectId": "own-project"},
+                {"environmentId": "own-environment"},
+                {"composeId": "own-compose"},
+            )
+        )
+        storage_script = OdooRehearsalResources.script
+        render = rehearsal_host_spec
+        observed: dict[str, Any] = {}
+        write_checkpoint = self.store.checkpoint_mutation_provider_effect
+
+        def track_checkpoint(**kwargs: Any) -> Any:
+            result = write_checkpoint(**kwargs)
+            observed[kwargs["effect_phase"]] = result.record
+            return result
+
+        def resource_script(resource: OdooRehearsalResources, mode: Any) -> str:
+            return (
+                "x" * api.DOKPLOY_SCHEDULE_MATERIALIZATION_LIMIT_BYTES
+                if stage == "storage"
+                else storage_script(resource, mode)
+            )
+
+        def host_spec(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            spec = render(*args, **kwargs)
+            spec["oversize_fixture"] = hashlib.shake_256(b"prepare apply").hexdigest(250_000)
+            return spec
+
+        def storage(record: OdooUpgradeRehearsalRecord, *_: Any) -> dict[str, str]:
+            return {
+                "testing_resources_ok": "true",
+                "testing_resources_binding_sha256": rehearsal_resource(record).binding_sha256,
+            }
+
+        with (
+            patch(
+                "control_plane.dokploy.sandbox_placement.created_placement",
+                return_value=("", "", ""),
+            ),
+            patch.object(api, "dokploy_request", side_effect=lambda **_: next(creates)) as create,
+            patch.object(
+                OdooRehearsalResources, "script", autospec=True, side_effect=resource_script
+            ),
+            patch(
+                "control_plane.odoo_upgrade_rehearsal.rehearsal_host_spec", side_effect=host_spec
+            ),
+            patch.object(adapter, "run_script", side_effect=storage) as dispatch,
+            patch.object(
+                self.store, "checkpoint_mutation_provider_effect", side_effect=track_checkpoint
+            ),
+        ):
+            self.assertEqual(
+                self.run_operation(adapter, "original-prepare").status, "reconcile_required"
+            )
+        retained = self.store.list_held_provider_target_reservations()[0]
+        expected_phase = "compose_id" if stage == "storage" else "independent_storage"
+        self.assertEqual(retained.provider_effect_phase, expected_phase)
+        self.assertEqual(
+            retained.provider_effect_started_at, observed[expected_phase].provider_effect_started_at
+        )
+        self.assertEqual(dispatch.call_count, 0 if stage == "storage" else 1)
+        self.assertEqual(create.call_count, 3)
+
+    def test_storage_size_refusal_retains_placement_checkpoint(self) -> None:
+        self.assert_prepare_size_refusal_retains_previous_phase("storage")
+
+    def test_host_size_refusal_retains_storage_checkpoint(self) -> None:
+        self.assert_prepare_size_refusal_retains_previous_phase("host")
+
     def test_lost_refusal_response_reconciles_only_the_same_operation_key(self) -> None:
         retained = self.record.model_copy(update={"state": "switched", "compose_id": "own-compose"})
         self.store.compare_and_write_odoo_upgrade_rehearsal(self.record, retained)
@@ -790,6 +1128,7 @@ class RehearsalScenario(unittest.TestCase):
             checkpoint: Callable[[], None],
             *,
             operation_key: str,
+            prepared_script: str | None = None,
         ) -> dict[str, object]:
             nonlocal original
             checkpoint()
@@ -1689,7 +2028,88 @@ class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             self.fixture.store.read_odoo_upgrade_rehearsal(self.fixture.identifier), partial
         )
-        self.fixture.record = partial
+        store = self.fixture.store
+        reservation = store.read_idempotency_record(
+            scope=self.fixture.principal,
+            route_path=ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=self.fixture.product),
+            idempotency_key="original-prepare",
+        )
+        assert reservation is not None
+        acquired = store.retry_reconciled_mutation(
+            reservation=reservation, lease_owner="fixture-host", lease_seconds=300
+        )
+        assert acquired.record is not None
+        checkpoint = store.checkpoint_mutation_provider_effect(
+            reservation=acquired.record, effect_phase="prepare", lease_seconds=300
+        )
+        assert checkpoint.record is not None
+        store.mark_mutation_reconcile_required(
+            reservation=checkpoint.record, reconciliation_key=checkpoint.record.reconciliation_key
+        )
+        placed = partial.model_copy(
+            update={
+                "project_id": "own-project",
+                "environment_id": "own-environment",
+                "compose_id": "own-compose",
+            }
+        )
+        store.compare_and_write_odoo_upgrade_rehearsal(partial, placed)
+        journal = store.list_held_provider_target_reservations()
+        for not_started in (False, True):
+            with patch.object(
+                OdooRehearsalAdapter,
+                "host",
+                return_value={
+                    "state": "planned",
+                    "copies": [],
+                    "completed": False,
+                    "raw_source_retained": False,
+                    "prepare_not_started": not_started,
+                },
+            ):
+                read = await request(
+                    app,
+                    "POST",
+                    ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=self.fixture.product),
+                    payload=self.fixture.request.model_copy(update={"mode": "readback"}).model_dump(
+                        mode="json"
+                    ),
+                    headers={"Idempotency-Key": "original-prepare"},
+                )
+            self.assertEqual(read.status_code, 202)
+            self.assertEqual(
+                read.json()["result"]["recovery_disposition"],
+                "continue_original_prepare" if not_started else "hold_unknown",
+            )
+            self.assertEqual(read.json()["result"]["provider_effect_phase"], "prepare")
+            self.assertEqual(store.read_odoo_upgrade_rehearsal(self.fixture.identifier), placed)
+            self.assertEqual(store.list_held_provider_target_reservations(), journal)
+        self.fixture.record = placed
+        for key in ("", "different-key"):
+            with patch.object(
+                OdooRehearsalAdapter,
+                "host",
+                return_value={
+                    "state": "planned",
+                    "copies": [],
+                    "completed": False,
+                    "raw_source_retained": False,
+                    "prepare_not_started": True,
+                },
+            ):
+                read = await request(
+                    app,
+                    "POST",
+                    ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=self.fixture.product),
+                    payload=self.fixture.request.model_copy(update={"mode": "readback"}).model_dump(
+                        mode="json"
+                    ),
+                    headers={"Idempotency-Key": key} if key else {},
+                )
+            self.assertEqual(read.status_code, 202)
+            self.assertTrue(read.json()["result"]["original_key_required"])
+            self.assertNotIn("recovery_disposition", read.json()["result"])
+            self.assertEqual(store.list_held_provider_target_reservations(), journal)
         from contextlib import contextmanager
 
         @contextmanager

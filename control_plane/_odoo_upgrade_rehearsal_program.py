@@ -385,9 +385,22 @@ def main():
                     copy=json.loads(saved.read_text())
                     validate_snapshots(spec,root,{},[copy],retired=True)
                     copies.append(copy)
+            prepare_not_started=False
+            marker=root/(action+'.started')
+            raw=root/'raw-source'
+            if (action=='prepare' and record['state']=='planned' and not copies
+                    and not marker.exists() and not marker.is_symlink()
+                    and not receipt.exists() and not receipt.is_symlink()
+                    and not raw.exists() and not raw.is_symlink()):
+                try:
+                    prepare_not_started=not docker('ps','-a','--filter',
+                        'label=com.docker.compose.project='+namespace,'--format','{{.ID}}').strip()
+                except Exception:
+                    pass
             result={'intent_sha256':record['intent_sha256'],'state':record['state'],'copies':copies,
                 'elapsed_seconds':record['elapsed_seconds'],'resources_preserved':True,'public_route':False,
-                'business_host_frozen':False,'completed':False,'raw_source_retained':(root/'raw-source').is_dir()}
+                'business_host_frozen':False,'completed':False,'raw_source_retained':raw.is_dir(),
+                'prepare_not_started':prepare_not_started}
             print('rehearsal_result='+json.dumps(result).encode().hex())
             return
         result=json.loads(receipt.read_text())
