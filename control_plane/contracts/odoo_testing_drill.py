@@ -4,6 +4,9 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 import re
 
+NATIVE_DRILL_QUALIFICATION_ROUTE = "service:odoo-testing-native-retirement"
+NATIVE_DRILL_MAINTENANCE_ROUTE = "service:odoo-testing-native-maintenance"
+
 
 class OdooTestingDrillStorageBudget(BaseModel):
     """Admin-supplied working headroom, never an inferred source-size guarantee."""
@@ -17,6 +20,18 @@ class OdooTestingDrillStorageBudget(BaseModel):
     retained_copy_bindings: tuple[str, ...] = Field(
         default=(), strict=False, exclude_if=lambda value: not value
     )
+    retained_candidate_namespaces: tuple[str, ...] = Field(
+        default=(), strict=False, exclude_if=lambda value: not value
+    )
+
+    @field_validator("retained_candidate_namespaces")
+    @classmethod
+    def validate_retained_namespaces(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        if len(values) != len(set(values)) or any(
+            not re.fullmatch(r"lp-testing-[a-f0-9]{32}", value) for value in values
+        ):
+            raise ValueError("Retained candidates require unique original namespaces.")
+        return values
 
     @field_validator("retained_copy_bindings")
     @classmethod

@@ -2195,16 +2195,55 @@ or a staff hold therefore protects the lane even after queueing. Protect a
 lane through the existing staff-testing hold before starting a session. Unknown
 or expired observations cannot substitute for that hold.
 
-The native drill stops the predecessor runtime only after verified cutover and
-publication. It retains that copy's physical storage and original custody;
-whole-copy deletion is outside the native rebuild. Failed or abandoned private
-candidates also retain their original allocation and any credentials they may
-have received. Environment evidence exposes original retained-copy bindings and
-candidate namespaces, including custody awaiting retirement or left by failure.
-Custody evidence alone does not claim a stopped runtime or completed restore.
-These copies require no new per-copy manual acknowledgement. Fresh headroom
-gates each new allocation, and exhaustion refuses another copy; source tests do
-not prove indefinite daily operation.
+The native rebuild stops its predecessor only after verified cutover and
+publication and preserves its storage. Scheduled drills add separate bounded
+maintenance before another allocation. A copy qualifies only when its original
+creator and retiring successor are both passing service drill operations. During
+that original retirement, the fixed host program quiesces its own web and runner,
+reads its committed database witness and maximum successful-login timestamp
+across all accounts, and gracefully stops the existing database. It never starts
+a stopped database to manufacture evidence. The recorded effective runtime and
+provider configuration include ordinary deploys between creation and retirement.
+
+The collector keeps the serving copy and its immediate predecessor from the
+current applied publication. It removes older qualified drill copies, up to four
+per pass, only while the original stopped process fingerprints, allocation labels,
+actual volume backing, private network membership, completed operations and route
+fences still agree. Holds, needed-copy/shared-resource facts, serving aliases,
+provider jobs and current explicit retention protect custody. Recent captured
+use skips cleanup until its existing daily window expires; unchanged stopped
+processes establish that the captured old-copy history has not changed. Today's
+serving-copy sign-ins cannot qualify another copy.
+
+The fixed executor holds the original namespace and host-owned receipt locks,
+records the exact original resource set before removal, and removes only stopped
+container IDs, their qualified named volumes and their exact Compose-owned
+internal default network ID without force. It preserves `dokploy-network` and
+refuses a same-name replacement network. Every invocation
+has its own durable finite admission bound to host boot and boot-time clock.
+Per-resource write-ahead results and a tombstone resolve partial removal or a
+lost reply. A still-present resource after uncertain dispatch stays unknown and
+is never resent. An excluded expired invocation may continue only its original
+remaining resource set after locked observation proves dispatched resources
+absent. Policy, worker and provider-effect leases are rechecked under lane then
+product-authority locks through the bounded program send; remote waits remain
+outside those locks.
+
+Manual/bootstrap copies and historical unqualified storage remain preserved.
+Failed or abandoned allocations retain their original recovery and credential
+custody; they do not qualify merely because they never served. An unresolved
+allocation blocks another automatic capture unless deliberately retained through
+the existing profile's `retained_candidate_namespaces`, using the exact namespace
+shown in evidence. `retained_copy_bindings` continues protecting completed copy
+witnesses. These exceptional policies do not change an in-flight source or byte
+budget. Normal daily copies require no per-copy manual acknowledgement.
+
+Environment evidence gives a truthful total and bounded examples from the
+original records, excluding only exact completed disposal tombstones. Immutable
+publications, generations and candidates remain provenance. This maintenance
+does not delete provider compose metadata or its configuration; physical-copy
+reclamation does not claim that metadata cleanup. Fresh headroom still gates
+allocation. Real host topology and repeated-drill qualification remain #3723.
 
 A drill consumes testing storage and loads production through the existing
 bounded read-only export. It never changes production data, ports, storage, routes,

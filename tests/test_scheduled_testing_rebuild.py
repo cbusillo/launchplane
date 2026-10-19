@@ -2,7 +2,8 @@
 
 from datetime import UTC, datetime
 import unittest
-from typing import Any
+import time
+from typing import Any, cast
 from unittest.mock import Mock, patch
 
 from sqlalchemy import event
@@ -81,6 +82,12 @@ class ScheduledNativeRebuildTests(unittest.TestCase):
         self.signins = self.enterContext(
             patch("control_plane.odoo_testing_drill.read_drill_recent_signins", return_value=False)
         )
+        self.enterContext(
+            patch(
+                "control_plane.odoo_testing_native_maintenance.native_maintenance_operation",
+                side_effect=self.native_maintenance,
+            )
+        )
         self.worker = workers.NativeTestingWorkerTests()
         self.worker.database_url = self.database_url
         self.worker.source_mode = "production"
@@ -121,6 +128,22 @@ class ScheduledNativeRebuildTests(unittest.TestCase):
         result = testing_drill_evidence(self.store, self.profile.product, self.context, "testing")
         assert result is not None
         return result
+
+    def native_maintenance(self, **kwargs: Any) -> dict[str, Any]:
+        payload = kwargs["payload"]
+        clock = {
+            "host_boot_id": "fixture-boot",
+            "host_monotonic": time.monotonic(),
+            "host_observed_at": time.time(),
+        }
+        if payload["mode"] == "inspect-original":
+            return {"type": "complete", "status": "missing", **clock}
+        if payload["mode"] == "qualify-retirement":
+            self.worker.provider_request(
+                path="/api/compose.stop", payload={"composeId": payload["identity"]["target_id"]}
+            )
+            return {"type": "complete", "status": "eligible", **clock}
+        raise AssertionError("This fixture must explicitly model old-copy physical collection")
 
     def test_two_scheduled_native_restores_preserve_address_original_witnesses_and_production(
         self,
@@ -198,6 +221,304 @@ class ScheduledNativeRebuildTests(unittest.TestCase):
         scheduler._observe(self.profile.product, self.context, slot, datetime.now(UTC).timestamp())
         self.assertEqual(self.evidence().status, "pass")
         self.assertIn(generation_binding(original), self.evidence().retained_copy_bindings)
+
+    def test_five_scheduled_copies_reclaim_older_drills_and_preserve_manual_baseline(self) -> None:
+        from control_plane import odoo_testing_native_maintenance as maintenance
+        from control_plane.dokploy import api
+        from control_plane.dokploy.testing_route_transport import DokployTestingRouteTransport
+        from control_plane.testing_serving_copy import published_testing_copy
+
+        manual = self.worker.fixture.candidate.namespace
+        physical = {manual}
+        archived: dict[str, dict[str, Any]] = {}
+        removals = []
+        fetch = cast(Mock, api.fetch_dokploy_target_payload).side_effect
+        read = self.worker.route_read
+
+        def provider(**kwargs: Any) -> Any:
+            return (
+                dict(archived[kwargs["target_id"]])
+                if kwargs["target_id"] in archived
+                else fetch(**kwargs)
+            )
+
+        def route() -> dict[str, Any]:
+            return {**read(), "execution_fence": {"status": "ready"}}
+
+        def host(**kwargs: Any) -> dict[str, Any]:
+            payload = kwargs["payload"]
+            identity = payload["identity"]
+            namespace = identity["namespace"]
+            if payload["mode"] == "qualify-retirement":
+                archived[identity["target_id"]] = dict(self.worker.old_provider)
+                return self.native_maintenance(**kwargs)
+            if payload["mode"] == "inspect-original":
+                return {
+                    "type": "complete",
+                    "status": "eligible" if namespace in physical else "disposed",
+                    "identity_sha256": payload["identity_sha256"],
+                    "host_boot_id": "fixture-boot",
+                    "host_monotonic": time.monotonic(),
+                    "host_observed_at": time.time(),
+                }
+
+            current = published_testing_copy(
+                self.store, product=self.profile.product, context=self.context
+            )
+            assert current is not None
+
+            def remove() -> None:
+                self.assertNotIn(
+                    identity["target_id"],
+                    {
+                        current.plan.after.target_id.target_id,
+                        current.plan.before.target_id.target_id,
+                    },
+                )
+                self.assertIn(namespace, physical)
+                physical.remove(namespace)
+                removals.append(namespace)
+
+            kwargs["dispatch_guard"](remove)
+            return {
+                "type": "complete",
+                "status": "disposed",
+                "identity_sha256": payload["identity_sha256"],
+            }
+
+        tick = datetime.now(UTC).timestamp()
+        with (
+            patch.object(maintenance, "native_maintenance_operation", side_effect=host),
+            patch.object(api, "fetch_dokploy_target_payload", side_effect=provider),
+            patch.object(DokployTestingRouteTransport, "read", side_effect=route),
+            patch(
+                "control_plane.dokploy_target_setup_http.fetch_dokploy_compose_domains_for_target_setup",
+                return_value=[],
+            ),
+        ):
+            for number in range(5):
+                self.worker.complete_second_rebuild(
+                    scheduled=True, scheduled_at=tick + number * DRILL_INTERVAL_SECONDS
+                )
+                physical.add(self.worker.fixture.candidate.namespace)
+                self.assertIn(manual, physical)
+                # Collection precedes allocation, preserving the current and
+                # immediate predecessor at that boundary plus one new copy.
+                self.assertLessEqual(len(physical), 4)
+                OdooTestingDrillScheduler(
+                    self.store, clock=lambda: tick + number * DRILL_INTERVAL_SECONDS
+                ).run_once()
+                self.assertLessEqual(self.evidence().disposal_attention, 3)
+        self.assertEqual(len(removals), 2)
+        self.assertNotIn(manual, removals)
+
+    def test_stale_scheduler_snapshot_keeps_fresh_refusal_original_operation_blocked(self) -> None:
+        self.refuse_after_writer_dispatch()
+        scheduler = OdooTestingDrillScheduler(self.store)
+        receipt = scheduler._read(self.worker.operation.idempotency_key)
+        assert receipt is not None
+        stale = receipt.model_copy(
+            update={
+                "response_payload": {
+                    key: value
+                    for key, value in receipt.response_payload.items()
+                    if key != "native_refusal"
+                }
+            }
+        )
+        self.assertTrue(
+            scheduler._observe(
+                self.profile.product,
+                self.context,
+                stale,
+                datetime.now(UTC).timestamp() + DRILL_TIMEOUT_SECONDS,
+            )
+        )
+
+    def test_later_skip_keeps_an_earlier_genuine_failure_alert_pending(self) -> None:
+        self.refuse_after_writer_dispatch()
+        self.store.update_odoo_testing_drill_receipt(
+            self.worker.operation.idempotency_key,
+            datetime.now(UTC).timestamp(),
+            {
+                "status": "skipped",
+                "failure_step": DRILL_DEADLINE_STEP,
+                "failure_trace": self.worker.operation.operation_id,
+                "alert_delivered": False,
+                "next_alert_at": 0,
+            },
+        )
+        notify = Mock(return_value=False)
+        scheduler = OdooTestingDrillScheduler(self.store, notify=notify)
+        scheduler._deliver_alerts(self.profile.product, self.context, datetime.now(UTC).timestamp())
+        notify.assert_called_once()
+        self.assertEqual(notify.call_args.args[2]["failure_step"], DRILL_DEADLINE_STEP)
+
+    def test_native_cleanup_continuation_preserves_the_original_slot_without_refusal(self) -> None:
+        from control_plane.odoo_testing_drill import DrillPrerequisite, native_drill_refusal
+
+        with (
+            patch(
+                "control_plane.odoo_testing_native_maintenance.reconcile_native_drill_storage",
+                side_effect=DrillPrerequisite("native_testing_copy_cleanup_pending"),
+            ),
+            self.assertRaises(service.NativeTestingRebuildPending),
+        ):
+            self.worker.complete_second_rebuild(scheduled=True)
+        self.assertIsNone(native_drill_refusal(self.store, self.worker.operation))
+        scheduler = OdooTestingDrillScheduler(self.store)
+        receipt = scheduler._read(self.worker.operation.idempotency_key)
+        assert receipt is not None
+        self.assertTrue(
+            scheduler._observe(
+                self.profile.product, self.context, receipt, datetime.now(UTC).timestamp()
+            )
+        )
+
+    def test_cleanup_larger_than_one_pass_resumes_without_allocating_another_slot(self) -> None:
+        from types import SimpleNamespace
+        from control_plane import odoo_testing_native_maintenance as maintenance
+        from control_plane.odoo_testing_drill import DRILL_SCOPE, DrillPrerequisite
+
+        candidate = self.worker.fixture.candidate
+        operation = self.worker.operation.model_copy(update={"idempotency_scope": DRILL_SCOPE})
+        executor = SimpleNamespace(operation=operation, store=self.store)
+        with (
+            patch.object(
+                maintenance,
+                "native_drill_maintenance_candidates",
+                side_effect=[(candidate,) * MAX_DISPOSALS_PER_PASS, (candidate,)],
+            ),
+            patch.object(maintenance, "_qualification", return_value={}),
+            patch.object(maintenance, "_reconcile_copy") as reconcile,
+        ):
+            with self.assertRaisesRegex(DrillPrerequisite, "native_testing_copy_cleanup_pending"):
+                maintenance.reconcile_native_drill_storage(executor)
+            self.assertEqual(reconcile.call_count, MAX_DISPOSALS_PER_PASS)
+        with patch.object(maintenance, "native_drill_maintenance_candidates", return_value=()):
+            maintenance.reconcile_native_drill_storage(executor)
+        self.assertEqual(executor.operation.operation_id, operation.operation_id)
+
+    def seed_failed_native_allocation(self) -> tuple[TestingCandidateAllocation, float]:
+        from control_plane.contracts.testing_candidate import testing_candidate_namespace
+        from control_plane.odoo_testing_drill import drill_receipt, lane_key
+
+        tick = datetime.now(UTC).timestamp()
+        self.worker.complete_second_rebuild(scheduled=True, scheduled_at=tick)
+        operation = self.worker.operation
+        namespace = testing_candidate_namespace(
+            operation.product, operation.context, "failed-original-allocation"
+        )
+        key = lane_key(operation.product, operation.context) + ":failed-original-allocation"
+        failed = operation.model_copy(
+            update={
+                "operation_id": "failed-original-allocation",
+                "idempotency_key": key,
+                "status": "fail",
+                "phase": "failed",
+                "result": None,
+                "finished_at": datetime.now(UTC).isoformat(),
+                "error_message": "Fixture original storage result unknown",
+            }
+        )
+        self.store.write_odoo_stable_target_replacement_operation_record(failed)
+        candidate = self.worker.fixture.candidate.model_copy(
+            update={
+                "namespace": namespace,
+                "operation_id": failed.operation_id,
+                "compose_id": namespace + "-compose",
+                "project_id": namespace + "-project",
+                "environment_id": namespace + "-environment",
+                "effect": "storage",
+                "resources_binding_sha256": "",
+                "application": None,
+                "serving_target_id": self.worker.current().target_id.target_id,
+            }
+        )
+        self.store.compare_and_write_testing_candidate(None, candidate)
+        self.store.write_idempotency_record(
+            drill_receipt(
+                key,
+                tick,
+                {"native_rebuild": True, "operation_id": failed.operation_id, "status": "fail"},
+            )
+        )
+        return candidate, tick
+
+    def test_unknown_failed_allocation_blocks_another_physical_capture(self) -> None:
+        candidate, tick = self.seed_failed_native_allocation()
+        before = self.worker.current()
+        with patch.object(service, "prepare_candidate_storage") as prepare:
+            self.worker.complete_second_rebuild(
+                scheduled=True, scheduled_at=tick + DRILL_INTERVAL_SECONDS, expected_status="fail"
+            )
+        prepare.assert_not_called()
+        self.assertEqual(self.worker.current().target_id, before.target_id)
+        self.assertIn(candidate.namespace, self.evidence().retained_candidate_namespaces)
+        self.assertEqual(
+            self.worker.execute().error_message,
+            "native_testing_copy_recovery_or_retention_required",
+        )
+
+    def test_explicit_original_namespace_retention_supports_continuing_after_failure(self) -> None:
+        candidate, tick = self.seed_failed_native_allocation()
+        profile = self.store.read_product_profile_record(self.profile.product)
+        self.store.write_product_profile_record(
+            profile.model_copy(
+                update={
+                    "lanes": tuple(
+                        lane.model_copy(
+                            update={
+                                "odoo_testing_drill_storage": self.budget.model_copy(
+                                    update={"retained_candidate_namespaces": (candidate.namespace,)}
+                                )
+                            }
+                        )
+                        if lane.instance == "testing"
+                        else lane
+                        for lane in profile.lanes
+                    )
+                }
+            )
+        )
+        self.worker.complete_second_rebuild(
+            scheduled=True, scheduled_at=tick + DRILL_INTERVAL_SECONDS
+        )
+        self.assertEqual(self.worker.execute().deploy_status, "pass")
+        self.assertEqual(self.store.read_testing_candidate(candidate.namespace), candidate)
+
+    def test_lost_original_inverse_reply_finishes_recovery_under_sticky_refusal(self) -> None:
+        from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
+        from control_plane.dokploy.testing_route_transport import DokployTestingRouteTransport
+
+        self.refuse_after_writer_dispatch()
+        route = self.worker.fixture.route
+        self.worker.switch(
+            route,
+            route.new_backend,
+            expected_backend=route.old_backend,
+            dispatch_guard=lambda send: send(),
+            desired_runtime_identity=self.worker.app.plan.runtime_identity,
+        )
+        self.worker.fail_public = True
+
+        def lost(*args: Any, **kwargs: Any) -> Any:
+            result = self.worker.switch(*args, **kwargs)
+            if args[1] == route.old_backend:
+                raise NativeSourceUnavailable(
+                    "Fixture inverse reply lost after physical application"
+                )
+            return result
+
+        with (
+            patch.object(DokployTestingRouteTransport, "publish", side_effect=lost),
+            self.assertRaises(service.NativeTestingRebuildPending),
+        ):
+            self.worker.execute()
+        effects = list(self.worker.effects)
+        result = self.worker.execute()
+        self.assertEqual(result.error_code, "candidate_public_health_failed")
+        self.assertEqual(self.worker.effects, effects)
 
     def test_native_capacity_refusal_precedes_preparation_and_uses_no_legacy_receiver(self) -> None:
         self.worker.capacity = False

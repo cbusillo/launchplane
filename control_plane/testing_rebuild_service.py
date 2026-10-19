@@ -454,10 +454,12 @@ class NativeTestingRebuildAdapter:
                         error, (DrillSkipped, DrillPrerequisite)
                     ):
                         raise
-                    if (
-                        isinstance(error, DrillPrerequisite)
-                        and error.code == "testing_storage_reconciliation_pending"
-                    ):
+                    if isinstance(error, DrillPrerequisite) and error.code in {
+                        "testing_storage_reconciliation_pending",
+                        "native_testing_copy_cleanup_pending",
+                        "native_testing_copy_cleanup_unknown",
+                        "native_testing_copy_cleanup_incomplete",
+                    }:
                         raise NativeTestingRebuildPending(
                             "Continue the original bounded storage reconciliation."
                         ) from error
@@ -797,6 +799,12 @@ class NativeTestingRebuildExecution:
             return True
         if self.route_backend() == self.plan.new.private_url:
             return False
+        checkpoint = self.adapter.checkpoints.load(self.plan)
+        if checkpoint.step == "rolling_back" and checkpoint.rollback_started:
+            # The original forward completed before this durable inverse was
+            # admitted. A lost inverse reply may already leave traffic on old;
+            # let the existing inverse observer finish its original outcome.
+            return False
         raise NativeTestingRebuildPending("The original forward route requires observation.")
 
     def guard(self, plan: TestingRebuildPlan | None = None, *, recovery: bool = False) -> None:
@@ -829,7 +837,9 @@ class NativeTestingRebuildExecution:
                 def allocation_budget(lane: ProductLaneProfile | None) -> object:
                     budget = lane.odoo_testing_drill_storage if lane is not None else None
                     return (
-                        budget.model_dump(exclude={"retained_copy_bindings"})
+                        budget.model_dump(
+                            exclude={"retained_copy_bindings", "retained_candidate_namespaces"}
+                        )
                         if budget is not None
                         else None
                     )
@@ -1259,6 +1269,11 @@ class NativeTestingRebuildExecution:
                 from control_plane.odoo_testing_drill import DRILL_SCOPE, DrillPrerequisite
 
                 if self.operation.idempotency_scope == DRILL_SCOPE:
+                    from control_plane.odoo_testing_native_maintenance import (
+                        reconcile_native_drill_storage,
+                    )
+
+                    reconcile_native_drill_storage(self)
                     # Keep the original bounded legacy cleanup ledger. Native
                     # predecessors remain in publication custody, never passed
                     # to the in-project database deletion program.
@@ -1283,7 +1298,12 @@ class NativeTestingRebuildExecution:
                             server_id=self.intent.server_id,
                             payload={
                                 **self.retained_payload("capacity"),
-                                "budget": budget.model_dump(exclude={"retained_copy_bindings"}),
+                                "budget": budget.model_dump(
+                                    exclude={
+                                        "retained_copy_bindings",
+                                        "retained_candidate_namespaces",
+                                    }
+                                ),
                                 "candidate_namespace": allocation.namespace,
                                 "candidate_allocated": bool(allocation.resources_binding_sha256),
                                 "candidate_resources_binding": candidate_resources(
@@ -1713,6 +1733,15 @@ class NativeTestingRebuildExecution:
         )
 
         def stop_compose() -> None:
+            from control_plane.odoo_testing_native_maintenance import (
+                qualifying_retirement,
+                qualify_and_stop,
+            )
+
+            qualification = qualifying_retirement(self)
+            if qualification is not None:
+                qualify_and_stop(self, qualification)
+                return
             api.dokploy_request(
                 host=self.host,
                 token=self.token,

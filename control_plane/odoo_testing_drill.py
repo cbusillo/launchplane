@@ -695,6 +695,7 @@ class OdooTestingDrillScheduler:
         self, product: str, context: str, receipt: LaunchplaneIdempotencyRecord, now: float
     ) -> bool:
         payload = dict(receipt.response_payload)
+        refusal_observed = False
         if (
             payload["status"] in {"queued", "fail"} or payload.get("native_refusal")
         ) and payload.get("operation_id"):
@@ -712,6 +713,7 @@ class OdooTestingDrillScheduler:
                 and native_drill_publication(self.store, product, context, operation.operation_id)
                 is None
             )
+            refusal_observed = refused_before_publication
             if (
                 not refused_before_publication
                 and operation.status in {"pending", "running"}
@@ -832,7 +834,7 @@ class OdooTestingDrillScheduler:
                 )
         # Never replace an unfinished or held generation with a new snapshot/key.
         if payload.get("operation_id") and (
-            payload["status"] == "fail" or payload.get("native_refusal")
+            payload["status"] == "fail" or payload.get("native_refusal") or refusal_observed
         ):
             operation = self.store.read_odoo_stable_target_replacement_operation_record(
                 str(payload["operation_id"])
@@ -855,6 +857,7 @@ class OdooTestingDrillScheduler:
             if (
                 payload["status"] == "skipped"
                 and payload.get("native_refusal", {}).get("status") == "skipped"
+                and not payload.get("failure_step")
             ):
                 continue
             if now < float(str(payload.get("next_alert_at", 0))):

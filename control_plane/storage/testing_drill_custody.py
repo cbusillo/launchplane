@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
-from sqlalchemy import and_, func, literal, or_, select, union_all
+from sqlalchemy import and_, exists, func, literal, or_, select, union_all
 from sqlalchemy.orm import aliased
 from sqlalchemy.engine import RowMapping
 
@@ -19,6 +19,81 @@ from control_plane.storage.postgres import (
     PostgresRecordStore,
 )
 from control_plane.testing_publication_storage import PUBLICATION_ROUTE, PUBLICATION_SCOPE
+from control_plane.contracts.odoo_testing_drill import NATIVE_DRILL_MAINTENANCE_ROUTE
+
+
+def _disposed(resource: Any, namespace: Any = None, resources_binding: Any = None) -> Any:
+    receipt = aliased(LaunchplaneIdempotencyRow)
+    payload = receipt.payload["response_payload"]
+    conditions = [
+        receipt.scope == DRILL_SCOPE,
+        receipt.route_path == NATIVE_DRILL_MAINTENANCE_ROUTE,
+        receipt.state == "completed",
+        payload["status"].as_string() == "disposed",
+        payload["identity"]["target_id"].as_string() == resource,
+    ]
+    if namespace is not None:
+        conditions.extend(
+            (
+                receipt.idempotency_key == namespace,
+                payload["identity"]["namespace"].as_string() == namespace,
+                payload["identity"]["resources_binding"].as_string() == resources_binding,
+            )
+        )
+    return exists(select(receipt.record_id).where(*conditions))
+
+
+def native_drill_maintenance_candidates(
+    store: PostgresRecordStore,
+    product: str,
+    context: str,
+    *,
+    protected_targets: tuple[str, ...],
+    retained_bindings: tuple[str, ...],
+    retained_namespaces: tuple[str, ...],
+    current_operation_id: str,
+    limit: int,
+) -> tuple[TestingCandidateAllocation, ...]:
+    """Bound normal cleanup and exceptional allocation backlog before capture."""
+    candidate = LaunchplaneTestingCandidateRow
+    operation = LaunchplaneOdooStableTargetReplacementOperationRow
+    payload = candidate.payload
+    statement = (
+        select(candidate.payload)
+        .join(operation, operation.operation_id == payload["operation_id"].as_string())
+        .where(
+            operation.product == product,
+            operation.context == context,
+            operation.instance == "testing",
+            operation.idempotency_scope == DRILL_SCOPE,
+            operation.operation_id != current_operation_id,
+            payload["product"].as_string() == product,
+            payload["context"].as_string() == context,
+            payload["namespace"].as_string() == candidate.namespace,
+            candidate.namespace.not_in(retained_namespaces),
+            func.coalesce(
+                payload["application"]["prepared"]["source_witness"].as_string(), ""
+            ).not_in(retained_bindings),
+            func.coalesce(payload["compose_id"].as_string(), "").not_in(protected_targets),
+            or_(
+                func.coalesce(payload["effect"].as_string(), "") != "",
+                func.coalesce(payload["project_id"].as_string(), "") != "",
+                func.coalesce(payload["compose_id"].as_string(), "") != "",
+            ),
+            ~_disposed(
+                payload["compose_id"].as_string(),
+                candidate.namespace,
+                payload["resources_binding_sha256"].as_string(),
+            ),
+        )
+        .order_by(operation.created_at.asc(), candidate.namespace.asc())
+        .limit(limit)
+    )
+    with store._session_factory() as session:
+        return tuple(
+            TestingCandidateAllocation.model_validate(payload)
+            for payload in session.scalars(statement)
+        )
 
 
 class NativeDrillCustodyEvidence(NamedTuple):
@@ -96,8 +171,14 @@ def native_drill_custody_evidence(
         pp["state"].as_string() == "applied",
         previous_target.is_not(None),
         previous_target != "",
+        ~_disposed(previous_target),
     ]
     candidate_where = [
+        ~_disposed(
+            cp["compose_id"].as_string(),
+            candidate.namespace,
+            cp["resources_binding_sha256"].as_string(),
+        ),
         or_(
             *(
                 cp[field].as_string().not_in(("",))
@@ -168,9 +249,8 @@ def native_drill_custody_evidence(
         .label("position"),
     ).cte("native_drill_ranked_custody")
     retained = select(*ranked.c).where(ranked.c.position == 1).cte("native_drill_retained_custody")
-    # A future native maintenance tombstone should qualify this resource CTE
-    # through NOT EXISTS on its original target/resources binding. Do not erase
-    # immutable publication/candidate records, and do not invent a new ledger.
+    # Exact disposal tombstones filter physical custody above; immutable
+    # publication and candidate records remain the provenance for the total.
     with store._session_factory() as session:
         total = int(session.scalar(select(func.count()).select_from(retained)) or 0)
         binding_rows = (

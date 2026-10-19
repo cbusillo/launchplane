@@ -167,7 +167,9 @@ def prepare_drill_storage(
             operation.idempotency_key, time.time(), {"storage_status": "unconfigured"}
         )
         raise DrillPrerequisite("testing_storage_budget_required")
-    budget = lane.odoo_testing_drill_storage.model_dump(exclude={"retained_copy_bindings"})
+    budget = lane.odoo_testing_drill_storage.model_dump(
+        exclude={"retained_copy_bindings", "retained_candidate_namespaces"}
+    )
     pending = store.list_odoo_testing_disposal_receipts(operation.product, operation.context)
     copies = []
     selected = []
