@@ -57,7 +57,7 @@ def _public_github_account_login(github_id: int, cache_window: int) -> str:
 
 
 def bounded_account_logins(reader: Callable[[int], str]) -> Callable[[int], str]:
-    """Share one small metadata budget across the entire HTTP response."""
+    """Limit lookup starts across the response; socket/DNS time is not a wall deadline."""
     deadline = monotonic() + 1
     logins: dict[int, str] = {}
 
@@ -99,13 +99,22 @@ def _principal(entry: AuthzManagedRuleEntry, login_for_id: Callable[[int], str])
         "github_actions": "Workflow",
     }
     if entry.principal_type == "github_actions":
-        return "GitHub workflow in " + getattr(rule, "repository", "")
+        return (
+            "GitHub workflow in "
+            + getattr(rule, "repository", "")
+            + "; repository ID: "
+            + (getattr(rule, "repository_id", "") or "any")
+            + "; owner ID: "
+            + (getattr(rule, "repository_owner_id", "") or "any")
+        )
     if entry.principal_type == "ordinary_agents":
         return "Agent principal " + getattr(rule, "principal_id", "")
     return (
         labels[entry.principal_type]
         + " "
         + (", ".join(getattr(rule, "subjects", ())) or "(any subject)")
+        + "; token labels: "
+        + (", ".join(getattr(rule, "token_labels", ())) or "any")
     )
 
 
@@ -129,95 +138,84 @@ def _scope(entry: AuthzManagedRuleEntry, schema_version: int) -> str:
     return summary
 
 
+def _role_bounds(
+    policy: LaunchplaneAuthzPolicy,
+    *,
+    github_id: int,
+    login: str,
+) -> tuple[Literal["admin", "read_only"] | None, Literal["admin", "read_only"] | None]:
+    """Use the existing resolver for known facts and an upper bound on missing facts."""
+    known = policy.human_role_for(
+        github_id=github_id, login=login, organizations=frozenset(), teams=frozenset()
+    )
+    # This display-only copy removes unobserved selectors. It is never persisted
+    # or used for authorization. A different result means the role is unknown.
+    possible = policy.model_copy(
+        update={
+            "github_humans": tuple(
+                rule.model_copy(
+                    update={
+                        "github_ids": rule.github_ids if github_id else (),
+                        "logins": rule.logins if login else (),
+                        "organizations": (),
+                        "teams": (),
+                    }
+                )
+                for rule in policy.github_humans
+            )
+        }
+    ).human_role_for(github_id=github_id, login=login, organizations=frozenset(), teams=frozenset())
+    return known, possible
+
+
 def _role_effects(
     rule: GitHubHumanPolicyRule,
     before: LaunchplaneAuthzPolicy,
     after: LaunchplaneAuthzPolicy,
     login_for_id: Callable[[int], str],
 ) -> tuple[AccessPolicyRoleEffect, ...]:
-    # Membership is not an inventory of people. Never turn an empty synthetic
-    # membership into a claim that a person has no other route to sign in.
-    if rule.teams or rule.organizations or (rule.github_ids and len(rule.logins) > 1):
-        return (
-            AccessPolicyRoleEffect(
-                principal=_principal(AuthzManagedRuleEntry("github_humans", rule), login_for_id),
-                state="unknown",
-            ),
-        )
+    # Selectors describe who a rule could match. They are never evidence that
+    # an account ID belongs to a login. Only an ID-bound lookup establishes that.
     principals = (
-        tuple(
-            (github_id, login_for_id(github_id) or (rule.logins[0] if rule.logins else ""))
-            for github_id in rule.github_ids
-        )
+        tuple((github_id, login_for_id(github_id)) for github_id in rule.github_ids)
         if rule.github_ids
         else tuple((0, login) for login in rule.logins)
     )
     effects = []
     for github_id, login in principals:
-        principal = f"GitHub login {login}" if login else f"GitHub account ID {github_id}"
-        # Unobserved ID/login and group membership may satisfy a surviving rule.
-        # Report uncertainty instead of asserting an entire role is lost.
-        uncertain = any(
-            (other.github_ids and not github_id)
-            or (other.logins and not login)
-            or other.teams
-            or other.organizations
-            for other in after.github_humans
-            if other.model_copy(
-                update={
-                    "github_ids": other.github_ids if github_id else (),
-                    "logins": other.logins if login else (),
-                    "teams": (),
-                    "organizations": (),
-                }
-            ).matches_principal(
-                github_id=github_id,
-                login=login,
-                organizations=frozenset(),
-                teams=frozenset(),
-                role="admin",
-            )
-            or other.model_copy(
-                update={
-                    "github_ids": other.github_ids if github_id else (),
-                    "logins": other.logins if login else (),
-                    "teams": (),
-                    "organizations": (),
-                }
-            ).matches_principal(
-                github_id=github_id,
-                login=login,
-                organizations=frozenset(),
-                teams=frozenset(),
-                role="read_only",
-            )
+        principal = (
+            f"GitHub login {login} (account ID {github_id})"
+            if login and github_id
+            else f"GitHub login {login}"
+            if login
+            else f"GitHub account ID {github_id} (login unavailable)"
         )
-        previous_role = before.human_role_for(
-            github_id=github_id, login=login, organizations=frozenset(), teams=frozenset()
-        )
-        candidate_role = after.human_role_for(
-            github_id=github_id, login=login, organizations=frozenset(), teams=frozenset()
-        )
-        state: Literal["lost", "reduced", "retained", "gained", "unknown", "unaffected"] = (
-            "unknown"
-            if uncertain and previous_role != candidate_role
-            else "unaffected"
-            if previous_role is None and candidate_role is None
+        previous, previous_possible = _role_bounds(before, github_id=github_id, login=login)
+        candidate, candidate_possible = _role_bounds(after, github_id=github_id, login=login)
+        if previous != previous_possible or candidate != candidate_possible:
+            effects.append(AccessPolicyRoleEffect(principal=principal, state="unknown"))
+            continue
+        state: Literal["lost", "reduced", "retained", "gained", "unaffected"] = (
+            "unaffected"
+            if previous is None and candidate is None
             else "retained"
-            if previous_role == candidate_role
+            if previous == candidate
             else "lost"
-            if candidate_role is None
+            if candidate is None
             else "gained"
-            if previous_role is None or candidate_role == "admin"
+            if previous is None or candidate == "admin"
             else "reduced"
         )
         effects.append(
             AccessPolicyRoleEffect(
-                principal=principal, before=previous_role, after=candidate_role, state=state
+                principal=principal, before=previous, after=candidate, state=state
             )
         )
     return tuple(effects) or (
-        AccessPolicyRoleEffect(principal="Any signed-in GitHub user", state="unknown"),
+        AccessPolicyRoleEffect(
+            principal=_principal(AuthzManagedRuleEntry("github_humans", rule), login_for_id),
+            state="unknown",
+        ),
     )
 
 

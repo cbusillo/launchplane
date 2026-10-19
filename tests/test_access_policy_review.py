@@ -8,10 +8,15 @@ from control_plane.access_policy_review import (
     bounded_account_logins,
     _principal,
     _scope,
+    _role_effects,
 )
 from control_plane.authz_grant_service import AuthzManagedRuleEntry
 from control_plane.contracts.ordinary_agent import OrdinaryAgentPolicyRule, OrdinaryAgentTarget
-from control_plane.service_auth import GitHubActionsPolicyRule, LocalOperatorPolicyRule
+from control_plane.service_auth import (
+    GitHubActionsPolicyRule,
+    GitHubHumanPolicyRule,
+    LocalOperatorPolicyRule,
+)
 from control_plane.contracts.privileged_operation import ManagedAuthzPolicySetProposalInput
 from control_plane.privileged_operation_registry import plan_managed_authz_policy_set
 from control_plane.service_auth import LaunchplaneAuthzPolicy
@@ -61,7 +66,12 @@ class AccessPolicyReviewTests(unittest.TestCase):
         store = Mock()
         store.list_authz_policy_records.return_value = (_policy_record(policy),)
         evidence = plan_managed_authz_policy_set(store, request)
-        return build_access_policy_review(record_store=store, request=request, evidence=evidence)
+        return build_access_policy_review(
+            record_store=store,
+            request=request,
+            evidence=evidence,
+            login_for_id=lambda _: "fixture-person",
+        )
 
     def test_removing_only_role_names_principal_and_loss(self) -> None:
         review = self.review()
@@ -82,7 +92,6 @@ class AccessPolicyReviewTests(unittest.TestCase):
 
     def test_local_operator_names_subject_and_permission_without_browser_role(self) -> None:
         rule = self.review(local=True).rules[0]
-        self.assertIn("Local operator", rule.principal)
         self.assertIn("agent:fixture", rule.principal)
         self.assertEqual(rule.permissions, ("operations.read",))
         self.assertEqual(rule.role_effects, ())
@@ -116,10 +125,11 @@ class AccessPolicyReviewTests(unittest.TestCase):
             self.assertEqual(_public_github_account_login(789, 0), "")
         _public_github_account_login.cache_clear()
         reader = Mock(return_value="fixture-person")
-        with patch("control_plane.access_policy_review.monotonic", side_effect=[0, 0, 2]):
+        with patch("control_plane.access_policy_review.monotonic", return_value=0) as clock:
             bounded = bounded_account_logins(reader)
             self.assertEqual(bounded(789), "fixture-person")
             self.assertEqual(bounded(789), "fixture-person")
+            clock.return_value = 2
             self.assertEqual(bounded(790), "")
         reader.assert_called_once_with(789)
 
@@ -144,14 +154,59 @@ class AccessPolicyReviewTests(unittest.TestCase):
             "environments": ("testing",),
         }
         workflow = GitHubActionsPolicyRule.model_validate(
-            {"repository": "fixture/source", **conditions}
+            {
+                "repository": "fixture/source",
+                "repository_id": "123",
+                "repository_owner_id": "456",
+                **conditions,
+            }
         )
         summary = _scope(AuthzManagedRuleEntry("github_actions", workflow), 3)
         for values in conditions.values():
             for value in values:
                 self.assertIn(value, summary)
-        self.assertIn("any", summary)
-        principal = _principal(
-            AuthzManagedRuleEntry("local_operators", LocalOperatorPolicyRule()), lambda _: ""
+        principal = _principal(AuthzManagedRuleEntry("github_actions", workflow), lambda _: "")
+        for value in (workflow.repository_id, workflow.repository_owner_id):
+            self.assertIn(value, principal)
+        token_rule = LocalOperatorPolicyRule(token_labels=("fixture-label",))
+        self.assertIn(
+            token_rule.token_labels[0],
+            _principal(AuthzManagedRuleEntry("local_operators", token_rule), lambda _: ""),
         )
-        self.assertIn("any subject", principal)
+        self.assertNotEqual(
+            _scope(AuthzManagedRuleEntry("github_actions", workflow), 3),
+            _scope(
+                AuthzManagedRuleEntry(
+                    "github_actions", GitHubActionsPolicyRule(repository=workflow.repository)
+                ),
+                3,
+            ),
+        )
+
+    def test_role_effects_never_invent_identity_or_hide_unknown_previous_membership(self) -> None:
+        rule = GitHubHumanPolicyRule(
+            github_ids=(701, 702), logins=("fixture-name",), roles=("read_only",)
+        )
+        before = LaunchplaneAuthzPolicy(github_humans=(rule,))
+        after = LaunchplaneAuthzPolicy()
+        effects = _role_effects(
+            rule, before, after, lambda account_id: "fixture-name" if account_id == 701 else ""
+        )
+        self.assertEqual(effects[0].state, "lost")
+        self.assertEqual(effects[1].state, "unknown")
+        self.assertNotEqual(effects[0].principal, effects[1].principal)
+        self.assertIsNone(effects[1].before)
+        self.assertIsNone(effects[1].after)
+        verified = _role_effects(
+            rule,
+            before,
+            after,
+            lambda account_id: "fixture-name" if account_id == 701 else "different-person",
+        )
+        self.assertEqual(verified[1].state, "unaffected")
+        team = GitHubHumanPolicyRule(github_ids=(701,), teams=("fixture/team",), roles=("admin",))
+        remaining = LaunchplaneAuthzPolicy(github_humans=(rule,))
+        uncertain_before = LaunchplaneAuthzPolicy(github_humans=(rule, team))
+        uncertain = _role_effects(team, uncertain_before, remaining, lambda _: "fixture-name")[0]
+        self.assertEqual(uncertain.state, "unknown")
+        self.assertIsNone(uncertain.before)

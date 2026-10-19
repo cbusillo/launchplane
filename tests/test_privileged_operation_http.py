@@ -405,6 +405,7 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
         configured_terminal_identity: TerminalAgentIdentity | None = None,
         configured_local_operator_identity: LocalOperatorIdentity | None = None,
         policy_record_reader: Callable[[], object] | None = None,
+        github_login_reader: Callable[[int], str] = lambda _: "",
     ) -> FastAPI:
         app = FastAPI()
         reader = human_reader or Mock(return_value=_human())
@@ -445,6 +446,7 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                 read_github_human_mutation_identity=read_mutation_human,
                 policy_reader=lambda: policy,
                 policy_record_reader=policy_record_reader or (lambda: _policy_record(policy)),
+                github_login_reader=github_login_reader,
                 read_configured_terminal_identity=lambda: configured_terminal_identity,
                 read_configured_local_operator_identity=(
                     lambda: configured_local_operator_identity
@@ -503,7 +505,13 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
             store.ensure_schema()
             store.seed_authz_policy_if_absent(_policy_record(policy))
             try:
-                async with lifespan_client(self._app(store=store, policy=policy)) as client:
+                async with lifespan_client(
+                    self._app(
+                        store=store,
+                        policy=policy,
+                        github_login_reader=lambda _: "fixture-affected-person",
+                    )
+                ) as client:
                     planned = await client.post(
                         "/v1/privileged-operations/plans",
                         json={
@@ -706,7 +714,10 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(
             "separate administrator approval", review.json()["review"]["change"]["summary"]
         )
-        self.assertNotIn("owner-terminal", review.text)
+        semantic = review.json()["review"]
+        principal_display = semantic.pop("access_policy")
+        self.assertIn(terminal.token_label, json.dumps(principal_display))
+        self.assertNotIn(terminal.token_label, json.dumps(semantic))
 
     async def test_terminal_enrollment_removal_review_keeps_existing_client_state(self) -> None:
         terminal = TerminalAgentIdentity(subject="trusted-terminal", token_label="owner-terminal")
@@ -893,7 +904,11 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(review["title"], "Review agent product setup access")
         self.assertIn("example-docs, example-shop", review["change"]["summary"])
         self.assertIn("cannot change the Client or release review", review["change"]["summary"])
-        self.assertNotIn("operator-agent-token", reviews[0])
+        principal_display = review.pop("access_policy")
+        for rule in rules:
+            for label in rule.token_labels:
+                self.assertIn(label, json.dumps(principal_display))
+                self.assertNotIn(label, json.dumps(review))
 
     async def test_agent_product_setup_candidate_refuses_unsafe_selection_or_missing_operator(
         self,

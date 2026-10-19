@@ -95,9 +95,17 @@ the semantic review; agent and read-only projections omit it. Immutable
 GitHub IDs are labeled with public account logins where available, using
 credential-free, cached GitHub account metadata; an unavailable lookup keeps
 the account ID visible. This lookup provides no membership claims. No secret
-values or request free text enter the display. A shared per-response metadata
-budget bounds lookup work across the full list; IDs remain visible when it is
-spent. Truncated provider replies also fall back to IDs. If the current planner no
+values or request free text enter the display. Token labels and workflow
+repository identity pins are selector identifiers and are displayed; credential
+values are never read. An ID's login is used for role evaluation only when
+observed in the signed-in identity or an ID-bound provider reply; a rule's login
+selector is never substituted for a failed lookup. Unknown effects assert no
+before/after role.
+
+Across one response, at most ten account lookups may start within a one-second
+admission window. Each uses a three-second socket timeout; this is not a hard
+wall deadline for network or DNS work. IDs remain visible when the admission
+budget is spent. Truncated provider replies also fall back to IDs. If the current planner no
 longer matches the saved plan, current role effects are shown as unavailable.
 These are review fields only; approval, cancellation and worker apply rules
 are unchanged.
