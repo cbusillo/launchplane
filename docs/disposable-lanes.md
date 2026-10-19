@@ -2076,7 +2076,12 @@ operation rather than recapturing or replacing it. Recurring lane slots are spre
 deterministically across the day. A late success updates the current evidence
 with `late_completion`; the original deadline failure remains alertable.
 
-Admission requires a completed qualified fresh testing generation. Under Director
+Admission requires a completed qualified fresh testing generation. A native empty
+copy has no completed production-copy generation. Before enabling its drill,
+use the supported native `production_restore` action on the unused lane and
+qualify that copy's original completed witness. This initial qualification belongs
+to #3723; it does not synthesize a generation row or renew bootstrap observations.
+Under Director
 decision Q347, the service reads successful-login history (`res_users_log`) on
 that exact testing database over the preceding 24 hours, starting no earlier
 than preparation of the testing copy, and the existing staff
@@ -2131,6 +2136,17 @@ borrow the accepted historical revision. A fixed receiver's resources-qualified
 UNKNOWN remains UNKNOWN; malformed resource evidence or an unreadable hold
 refuses. Already-dispatched route observation and inverse recovery preserve
 their original fences without a new forward admission.
+
+A native daily slot that refuses after allocating a candidate keeps its first
+reason on the original receipt. Once its original candidate jobs are terminal
+and its forward route writer is excluded, the slot ends with the old copy
+serving and candidate custody retained. A protected-use reason remains a skip;
+a failed prerequisite remains a failure with that prerequisite's reason. If a
+writer or candidate outcome still needs observation, that same operation stays
+pending and blocks the next slot, with its concrete reason preserved. A known
+protected-use skip does not turn into a completion-deadline alert or start a
+delayed forward write after the login or hold clears. An already-applied writer
+still completes its original observation or inverse recovery.
 
 Historical `recreate-in-place` operations retain their original continuation;
 new slots do not enter that orchestration. For those historical receipts,

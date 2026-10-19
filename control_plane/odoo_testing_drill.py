@@ -9,10 +9,10 @@ import logging
 import re
 from threading import Event, Thread
 import time
-from typing import cast
+from typing import Literal, cast
 from uuid import uuid4
 
-from pydantic import JsonValue
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.disposable_lane import DisposableLaneSafety
@@ -86,6 +86,36 @@ class DrillPrerequisite(ValueError):
     def __init__(self, code: str) -> None:
         self.code = code
         super().__init__(code)
+
+
+class NativeDrillRefusal(BaseModel):
+    """A worker's durable decision to stop this slot's new forward effects."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    operation_id: str
+    attempt: int = Field(ge=1)
+    status: Literal["skipped", "fail"]
+    code: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
+
+
+def native_drill_refusal(
+    store: PostgresRecordStore, operation: OdooStableTargetReplacementOperationRecord
+) -> NativeDrillRefusal | None:
+    if operation.idempotency_scope != DRILL_SCOPE or not operation.is_native_testing_rebuild:
+        return None
+    receipt = store.read_idempotency_record(
+        scope=DRILL_SCOPE, route_path=DRILL_ROUTE, idempotency_key=operation.idempotency_key
+    )
+    if receipt is None or receipt.response_payload.get("operation_id") != operation.operation_id:
+        raise DrillPrerequisite("testing_drill_binding_changed")
+    payload = receipt.response_payload.get("native_refusal")
+    if payload is None:
+        return None
+    refusal = NativeDrillRefusal.model_validate(payload)
+    if refusal.operation_id != operation.operation_id or refusal.attempt > operation.attempt:
+        raise DrillPrerequisite("testing_drill_binding_changed")
+    return refusal
 
 
 def native_drill_publication(
@@ -665,12 +695,26 @@ class OdooTestingDrillScheduler:
         self, product: str, context: str, receipt: LaunchplaneIdempotencyRecord, now: float
     ) -> bool:
         payload = dict(receipt.response_payload)
-        if payload["status"] in {"queued", "fail"} and payload.get("operation_id"):
+        if (
+            payload["status"] in {"queued", "fail"} or payload.get("native_refusal")
+        ) and payload.get("operation_id"):
             operation = self.store.read_odoo_stable_target_replacement_operation_record(
                 str(payload["operation_id"])
             )
+            refusal = native_drill_refusal(self.store, operation)
+            refused_before_publication = (
+                refusal is not None
+                and (
+                    operation.status in {"pending", "running", "reconciliation_required"}
+                    or operation.result is not None
+                    and operation.result.error_code == "testing_rebuild_admission_changed"
+                )
+                and native_drill_publication(self.store, product, context, operation.operation_id)
+                is None
+            )
             if (
-                operation.status in {"pending", "running"}
+                not refused_before_publication
+                and operation.status in {"pending", "running"}
                 and now
                 - datetime.fromisoformat(operation.created_at.replace("Z", "+00:00")).timestamp()
                 < DRILL_TIMEOUT_SECONDS
@@ -679,7 +723,10 @@ class OdooTestingDrillScheduler:
             payload.update(
                 step=operation.phase, trace=operation.runner_trace_id or operation.operation_id
             )
-            if (
+            if refused_before_publication:
+                assert refusal is not None
+                payload.update(status=refusal.status, step=refusal.code)
+            elif (
                 operation.status == "pass"
                 and operation.result is not None
                 and operation.result.health_status == "pass"
@@ -784,7 +831,9 @@ class OdooTestingDrillScheduler:
                     },
                 )
         # Never replace an unfinished or held generation with a new snapshot/key.
-        if payload.get("operation_id") and payload["status"] == "fail":
+        if payload.get("operation_id") and (
+            payload["status"] == "fail" or payload.get("native_refusal")
+        ):
             operation = self.store.read_odoo_stable_target_replacement_operation_record(
                 str(payload["operation_id"])
             )
@@ -803,6 +852,11 @@ class OdooTestingDrillScheduler:
             )
         for receipt in pending[-1:]:
             payload = dict(receipt.response_payload)
+            if (
+                payload["status"] == "skipped"
+                and payload.get("native_refusal", {}).get("status") == "skipped"
+            ):
+                continue
             if now < float(str(payload.get("next_alert_at", 0))):
                 continue
             payload["alert_delivered"] = self.notify(product, context, payload)
@@ -904,84 +958,21 @@ def testing_drill_evidence(
     payload["disposal_attention"] = len(
         store.list_odoo_testing_disposal_receipts(product, context, include_retained=True)
     ) - cast(int, payload["disposal_pending"])
-    from control_plane.contracts.testing_candidate import testing_candidate_namespace
-    from control_plane.testing_publication_storage import read_publication
+    from control_plane.storage.testing_drill_custody import native_drill_custody_evidence
 
-    retained: dict[str, tuple[str, str]] = {}
-    native_slots = store.list_native_odoo_testing_drill_receipts(product, context)
-    serving = None
-    if native_slots:
-        try:
-            serving = store.read_dokploy_target_id_record(
-                context_name=context, instance_name="testing"
-            ).target_id
-        except (FileNotFoundError, ValueError):
-            # Missing serving authority is custody attention, not proof that
-            # any original resource was removed or safely stopped.
-            pass
-    for slot in native_slots:
-        operation_id = str(slot.response_payload["operation_id"])
-        publication = read_publication(
-            store,
-            canonical_json_sha256(
-                {
-                    "product": product,
-                    "context": context,
-                    "operation": operation_id,
-                }
-            ),
-        )
-        if publication is not None and publication.state == "applied":
-            previous = publication.plan.before
-            if previous.target_id.target_id != serving:
-                retained[previous.target_id.target_id] = (
-                    generation_binding(previous.generation) if previous.generation else "",
-                    "",
-                )
-        candidate = store.read_testing_candidate(
-            testing_candidate_namespace(product, context, operation_id)
-        )
-        operation = store.read_odoo_stable_target_replacement_operation_record(operation_id)
-        if (
-            candidate is not None
-            and candidate.compose_id != serving
-            and any(
-                (
-                    candidate.effect,
-                    candidate.project_id,
-                    candidate.environment_id,
-                    candidate.compose_id,
-                    candidate.resources_binding_sha256,
-                    candidate.application,
-                )
-            )
-            and (
-                operation.status not in {"pending", "running"}
-                or publication is not None
-                and publication.state in {"applied", "reversed"}
-            )
-        ):
-            completed = (
-                publication.plan.after.generation
-                if publication is not None and publication.state == "applied"
-                else None
-            )
-            retained.setdefault(
-                candidate.compose_id or candidate.namespace,
-                (
-                    generation_binding(completed)
-                    if completed is not None and completed.completed_at
-                    else "",
-                    candidate.namespace,
-                ),
-            )
-    payload["disposal_attention"] = cast(int, payload["disposal_attention"]) + len(retained)
-    payload["retained_copy_bindings"] = [binding for binding, _ in retained.values() if binding][
-        :MAX_DISPOSALS_PER_PASS
-    ]
-    payload["retained_candidate_namespaces"] = [
-        namespace for _, namespace in retained.values() if namespace
-    ][:MAX_DISPOSALS_PER_PASS]
+    try:
+        serving = store.read_dokploy_target_id_record(
+            context_name=context, instance_name="testing"
+        ).target_id
+    except (FileNotFoundError, ValueError):
+        # Missing authority excludes no original custody from attention.
+        serving = None
+    retained = native_drill_custody_evidence(
+        store, product, context, serving, limit=MAX_DISPOSALS_PER_PASS
+    )
+    payload["disposal_attention"] = cast(int, payload["disposal_attention"]) + retained.total
+    payload["retained_copy_bindings"] = list(retained.copy_bindings)
+    payload["retained_candidate_namespaces"] = list(retained.candidate_namespaces)
     return OdooTestingDrillEvidence.model_validate(
         {
             "observed_at": receipt.response_payload.get("observed_at", receipt.recorded_at),

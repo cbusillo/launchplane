@@ -21,6 +21,9 @@ class ScheduledNativePostgresTests(unittest.TestCase):
     def test_original_storage_recovery_precedes_fresh_capacity(self) -> None:
         self.fixture().test_interrupted_original_storage_is_read_before_capacity_without_reallocation()
 
+    def test_custody_history_retains_true_count_with_bounded_reads(self) -> None:
+        self.fixture().test_custody_history_has_truthful_totals_and_bounded_database_reads()
+
     def test_changed_collected_generation_is_refused_by_locked_admission(self) -> None:
         fixture = drills.NativeTestingDrillTests()
         self.addCleanup(fixture.doCleanups)
@@ -43,3 +46,6 @@ class ScheduledNativePostgresTests(unittest.TestCase):
 
     def test_forward_read_after_preparing_prevents_new_login_cutover(self) -> None:
         self.fixture().test_new_login_after_route_preparing_is_checked_before_any_forward_write()
+
+    def test_refusal_excludes_preparing_and_fences_its_stale_writer(self) -> None:
+        self.fixture().test_snapshot_refusal_during_route_preparation_excludes_the_original_parent()

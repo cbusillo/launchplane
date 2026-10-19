@@ -41,16 +41,11 @@ class NativeAllocationCapacityTests(unittest.TestCase):
             },
         }
         self.mounts = ""
-        original = Path.read_text
         self.enterContext(
             patch.object(
                 Path,
                 "read_text",
-                lambda path, *args, **kwargs: (
-                    self.mounts
-                    if str(path) == "/proc/self/mountinfo"
-                    else original(path, *args, **kwargs)
-                ),
+                lambda *_args, **_kwargs: self.mounts,
             )
         )
 

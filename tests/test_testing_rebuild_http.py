@@ -16,6 +16,8 @@ from control_plane.build_provenance import VerifiedBuildArtifact
 from control_plane.contracts.artifact_identity import ArtifactSourceBuild
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.http_routes import testing_rebuild as routes
+from control_plane.odoo_testing_drill import DRILL_SCOPE
+from control_plane.launchplane_reconcile_authorization import build_launchplane_reconcile_authorization
 from control_plane import testing_rebuild_preflight as preflight
 from control_plane import odoo_target_replacement_apply_http as admission
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
@@ -109,8 +111,14 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
     async def test_external_request_cannot_choose_internal_scope_or_service_identity(self) -> None:
         before = self.store.list_odoo_stable_target_replacement_operation_records()
         for extra in (
-            {"idempotency_scope": "launchplane:odoo-testing-drill:v1"},
-            {"authorization": {"grant": "launchplane_reconcile"}},
+            {"idempotency_scope": DRILL_SCOPE},
+            {
+                "authorization": build_launchplane_reconcile_authorization(
+                    product=self.product,
+                    context=self.fixture.operation.context,
+                    authorized_at=self.fixture.operation.created_at,
+                ).model_dump(mode="json")
+            },
         ):
             response = await self.call("POST", {**self.payload, **extra})
             self.assertEqual(response.status_code, 400, response.text)

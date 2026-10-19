@@ -12252,30 +12252,6 @@ class PostgresRecordStore(HumanSessionStore):
             .order_by(LaunchplaneIdempotencyRow.created_at.asc())
         )
 
-    def list_native_odoo_testing_drill_receipts(
-        self, product: str, context: str
-    ) -> list[LaunchplaneIdempotencyRecord]:
-        """Native predecessors keep their original witness and publication custody."""
-        from control_plane.odoo_testing_drill import DRILL_SCOPE, DRILL_ROUTE, lane_key
-
-        payload = LaunchplaneIdempotencyRow.payload["response_payload"]
-        with self._session_factory() as session:
-            return [
-                LaunchplaneIdempotencyRecord.model_validate(row.payload)
-                for row in session.scalars(
-                    select(LaunchplaneIdempotencyRow)
-                    .where(
-                        LaunchplaneIdempotencyRow.scope == DRILL_SCOPE,
-                        LaunchplaneIdempotencyRow.route_path == DRILL_ROUTE,
-                        LaunchplaneIdempotencyRow.idempotency_key.like(
-                            lane_key(product, context) + ":%"
-                        ),
-                        payload["native_rebuild"].as_boolean().is_(True),
-                    )
-                    .order_by(LaunchplaneIdempotencyRow.created_at.desc())
-                )
-            ]
-
     def update_odoo_testing_drill_receipt(
         self,
         key: str,
@@ -12522,6 +12498,80 @@ class PostgresRecordStore(HumanSessionStore):
                 self._idempotency_row(drill_receipt(lane_key(product, context), now, {"key": key}))
             )
             session.commit()
+
+    def record_native_odoo_testing_drill_refusal(
+        self,
+        operation: OdooStableTargetReplacementOperationRecord,
+        *,
+        code: str,
+        skipped: bool,
+        now: float,
+    ) -> dict[str, Any]:
+        """Retain the first refusal under the original worker and lane fence."""
+        from control_plane.odoo_testing_drill import (
+            DRILL_SCOPE,
+            DRILL_ROUTE,
+            DrillPrerequisite,
+            NativeDrillRefusal,
+            timestamp,
+        )
+
+        if operation.idempotency_scope != DRILL_SCOPE or not operation.is_native_testing_rebuild:
+            raise ValueError("Only a native scheduled restore records a drill refusal.")
+        refusal = NativeDrillRefusal(
+            operation_id=operation.operation_id,
+            attempt=operation.attempt,
+            status="skipped" if skipped else "fail",
+            code=code,
+        )
+        with self._session_factory() as session:
+            self._lock_odoo_stable_lane(
+                session, product=operation.product, context=operation.context, instance="testing"
+            )
+            worker = session.get(
+                LaunchplaneOdooStableTargetReplacementOperationRow,
+                operation.operation_id,
+                with_for_update=True,
+            )
+            if (
+                worker is None
+                or worker.status != "running"
+                or worker.attempt != operation.attempt
+                or worker.lease_owner != operation.lease_owner
+                or not operation.lease_owner
+                or parse_launchplane_mutation_timestamp(
+                    worker.lease_expires_at, field_name="lease_expires_at"
+                ).timestamp()
+                <= max(now, datetime.now(timezone.utc).timestamp())
+            ):
+                raise DrillPrerequisite("drill_worker_lease_changed")
+            row = session.scalar(
+                self._idempotency_statement(
+                    scope=DRILL_SCOPE,
+                    route_path=DRILL_ROUTE,
+                    idempotency_key=operation.idempotency_key,
+                    for_update=True,
+                )
+            )
+            if row is None:
+                raise DrillPrerequisite("drill_receipt_missing")
+            receipt = LaunchplaneIdempotencyRecord.model_validate(row.payload)
+            if receipt.response_payload.get("operation_id") != operation.operation_id:
+                raise DrillPrerequisite("drill_operation_changed")
+            original = receipt.response_payload.get("native_refusal")
+            if original is not None:
+                retained = NativeDrillRefusal.model_validate(original)
+                if (
+                    retained.operation_id != operation.operation_id
+                    or retained.attempt > operation.attempt
+                ):
+                    raise DrillPrerequisite("testing_drill_binding_changed")
+                return retained.model_dump(mode="json")
+            receipt.response_payload["native_refusal"] = refusal.model_dump(mode="json")
+            receipt = receipt.model_copy(update={"updated_at": timestamp(now)})
+            self._sync_idempotency_row(row, receipt)
+            session.commit()
+            return refusal.model_dump(mode="json")
 
     def admit_native_odoo_testing_drill(
         self, operation: OdooStableTargetReplacementOperationRecord, now: float

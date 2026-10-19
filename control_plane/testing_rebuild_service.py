@@ -26,6 +26,7 @@ from control_plane.contracts.odoo_stable_target_replacement_operation import (
 from control_plane.contracts.prepared_public_site import FrozenRecord
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
+    ProductLaneProfile,
     is_exclusive_product_context,
     product_context_owner_map,
 )
@@ -62,6 +63,7 @@ from control_plane.dokploy.testing_route import (
     compile_testing_route,
     testing_ingress_entrypoints,
     observe_testing_route,
+    route_document,
     testing_route_id,
 )
 from control_plane.dokploy.testing_route_transport import (
@@ -439,7 +441,33 @@ class NativeTestingRebuildAdapter:
                 raise NativeTestingRebuildPending("The original rebuild still has an executor.")
             executor = NativeTestingRebuildExecution(self, lease, check)
             try:
-                record = executor.run()
+                try:
+                    record = executor.run()
+                except Exception as error:
+                    from control_plane.odoo_testing_drill import (
+                        DRILL_SCOPE,
+                        DrillSkipped,
+                        DrillPrerequisite,
+                    )
+
+                    if self.operation.idempotency_scope != DRILL_SCOPE or not isinstance(
+                        error, (DrillSkipped, DrillPrerequisite)
+                    ):
+                        raise
+                    if (
+                        isinstance(error, DrillPrerequisite)
+                        and error.code == "testing_storage_reconciliation_pending"
+                    ):
+                        raise NativeTestingRebuildPending(
+                            "Continue the original bounded storage reconciliation."
+                        ) from error
+                    self.store.record_native_odoo_testing_drill_refusal(
+                        self.operation,
+                        code=str(error),
+                        skipped=isinstance(error, DrillSkipped),
+                        now=datetime.now(UTC).timestamp(),
+                    )
+                    raise NativeTestingRebuildAdmissionChanged(str(error)) from error
             except NativeTestingRebuildAdmissionChanged as error:
                 result = executor.finish_admission_refusal(error)
             else:
@@ -520,13 +548,28 @@ class NativeTestingRebuildExecution:
         self.check_lock()
         self.lease.assert_current()
         self.adapter.authorize("testing_rebuild_checkpoint")
+        from control_plane.odoo_testing_drill import DRILL_SCOPE
+
+        if (
+            self.operation.idempotency_scope == DRILL_SCOPE
+            and not self.exclude_unstarted_forward_route()
+        ):
+            raise NativeTestingRebuildPending("Complete observation of the original cutover.")
         for copy_id in (self.intent.old.copy_id, self.adapter.namespace):
             route = self.store.read_idempotency_record(
                 scope=REBUILD_SCOPE,
                 route_path=REBUILD_ROUTE + ":effect",
                 idempotency_key=self.operation.operation_id + ":route:" + copy_id,
             )
-            if route is not None and route.provider_effect_started_at:
+            if (
+                route is not None
+                and route.provider_effect_started_at
+                and not (
+                    copy_id == self.adapter.namespace
+                    and hasattr(self, "plan")
+                    and self.route_exclusion(self.plan)
+                )
+            ):
                 raise NativeTestingRebuildPending(str(error)) from error
         checkpoint = None
         if hasattr(self, "plan"):
@@ -658,6 +701,104 @@ class NativeTestingRebuildExecution:
         )
         return result
 
+    def exclude_unstarted_forward_route(self) -> bool:
+        """Fence the original preparer before recording a terminal refusal.
+
+        PREPARING is not itself terminal evidence. The existing retry CAS must
+        invalidate its lease before a no-write outcome can complete the child.
+        Every physical writer checkpoints that same parent to WRITING before
+        send, so an old preparer cannot publish after this completion.
+        """
+        if not hasattr(self, "plan"):
+            return True
+        phase = "route:" + self.plan.new.copy_id
+        prior = self.store.read_idempotency_record(
+            scope=REBUILD_SCOPE,
+            route_path=REBUILD_ROUTE + ":effect",
+            idempotency_key=self.operation.operation_id + ":" + phase,
+        )
+        if prior is None or self.route_exclusion(self.plan):
+            return True
+        original = self.store.read_original_mutation_intent(prior)
+        attempt_number = prior.attempt
+        execution = TestingRouteExecutionIntent.model_validate(original.get("route_execution"))
+        if (
+            execution.operation_id != self.operation.operation_id
+            or execution.server_id != self.intent.server_id
+            or execution.route_id != self.plan.route_id
+            or execution.route_digest != self.route.digest
+            or execution.backend != self.plan.new.private_url
+            or execution.document_sha256
+            != canonical_json_sha256(route_document(self.route, self.plan.new.private_url))
+        ):
+            raise NativeTestingRebuildPending("Observe the original route writer before refusal.")
+        parent = self
+        effects = TestingRouteEffects(
+            controller=TestingRouteFenceController(
+                store=self.store,
+                transport=self.transport,
+                execution=execution,
+                guard=lambda: self.guard(recovery=True),
+                checkpoint=self.lease.checkpoint_effect,
+                lease_owner=lambda: self.operation.lease_owner,
+            ),
+            phase=phase,
+            present=lambda: self.route_backend() == self.plan.new.private_url,
+            publish=lambda *_: None,
+            recovery_guard=lambda: self.guard(recovery=True),
+            inverse=False,
+        )
+
+        class Exclusion:
+            def target_key(self) -> str:
+                return parent.adapter.target_key() + ":" + phase
+
+            def reconciliation_key(self) -> str:
+                return canonical_json_sha256({"intent": parent.intent.digest, "phase": phase})
+
+            def observe(
+                self,
+                provider_operation_key: str,
+                provider_effect_phase: str,
+                reconciliation_key: str,
+            ) -> ProviderObservation:
+                parent.guard(recovery=True)
+                if reconciliation_key != self.reconciliation_key():
+                    return ProviderObservation("unknown")
+                # WRITING uses the existing physical observer. A PREPARING
+                # retry is fenced by the original parent's reservation CAS.
+                return effects.observe(provider_effect_phase, attempt_number)
+
+            def apply(
+                self, provider_operation_key: str, lease: ProviderOperationLease
+            ) -> ProviderMutationOutcome:
+                parent.guard(recovery=True)
+                lease.assert_current()
+                return ProviderMutationOutcome(
+                    200, {"route_write_not_started": True}, provider_effect_performed=False
+                )
+
+        result = run_durable_provider_operation(
+            store=self.store,
+            scope=REBUILD_SCOPE,
+            route_path=REBUILD_ROUTE + ":effect",
+            idempotency_key=self.operation.operation_id + ":" + phase,
+            request_fingerprint=canonical_json_sha256(
+                {"intent": self.intent.digest, "phase": phase}
+            ),
+            lease_owner=self.operation.lease_owner,
+            response_trace_id=self.operation.operation_id,
+            adapter=Exclusion(),
+            original_intent=original,
+        )
+        if result.status not in {"completed", "adopted", "replayed"}:
+            raise NativeTestingRebuildPending("The original route preparer remains fenced.")
+        if self.route_exclusion(self.plan):
+            return True
+        if self.route_backend() == self.plan.new.private_url:
+            return False
+        raise NativeTestingRebuildPending("The original forward route requires observation.")
+
     def guard(self, plan: TestingRebuildPlan | None = None, *, recovery: bool = False) -> None:
         self.check_lock()
         self.lease.assert_current()
@@ -684,13 +825,20 @@ class NativeTestingRebuildExecution:
                     for lane in self.intent.profile.lanes
                     if (lane.context, lane.instance) == (self.operation.context, "testing")
                 )
+
+                def allocation_budget(lane: ProductLaneProfile | None) -> object:
+                    budget = lane.odoo_testing_drill_storage if lane is not None else None
+                    return (
+                        budget.model_dump(exclude={"retained_copy_bindings"})
+                        if budget is not None
+                        else None
+                    )
+
                 if (
                     current_lane is None
                     or not current_lane.odoo_testing_drill_enabled
-                    or any(
-                        getattr(current_lane, field) != getattr(admitted_lane, field)
-                        for field in ("odoo_testing_drill_storage", "odoo_data_policy")
-                    )
+                    or allocation_budget(current_lane) != allocation_budget(admitted_lane)
+                    or current_lane.odoo_data_policy != admitted_lane.odoo_data_policy
                 ):
                     raise NativeTestingRebuildAdmissionChanged(
                         "The scheduled testing restore policy changed."
@@ -723,6 +871,10 @@ class NativeTestingRebuildExecution:
             context_name=self.operation.context, instance_name="testing"
         )
         if not recovery and target.policies.staff_testing_hold is not None:
+            from control_plane.odoo_testing_drill import DRILL_SCOPE, DrillSkipped
+
+            if self.operation.idempotency_scope == DRILL_SCOPE:
+                raise DrillSkipped("staff_testing_hold")
             raise NativeTestingRebuildPending("Staff testing holds this lane.")
         self.old_provider()
         current_target = self.store.read_dokploy_target_id_record(
@@ -1016,7 +1168,17 @@ class NativeTestingRebuildExecution:
             entrypoints=self.intent.public_entrypoints,
             old_runtime_identity=self.intent.old.runtime_identity,
         )
+        from control_plane.odoo_testing_drill import native_drill_refusal
+
         existing_publication = read_publication(self.store, self.publication_key)
+        refusal = native_drill_refusal(self.store, self.operation)
+        if refusal is not None:
+            if existing_publication is not None:
+                self.route = existing_publication.plan.route
+            if self.exclude_unstarted_forward_route():
+                raise NativeTestingRebuildAdmissionChanged(refusal.code)
+            # An applied original writer still finishes observation or its
+            # existing inverse. The refusal never admits a different writer.
         if historical is not None and historical.step == "switching":
             dispatched = self.store.read_idempotency_record(
                 scope=REBUILD_SCOPE,

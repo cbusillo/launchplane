@@ -5,6 +5,8 @@ import unittest
 from typing import Any
 from unittest.mock import Mock, patch
 
+from sqlalchemy import event
+
 from control_plane import testing_candidate_runtime as compiler
 from control_plane import odoo_testing_native_source
 from control_plane.contracts.odoo_testing_drill import (
@@ -20,7 +22,10 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
 )
 from control_plane.contracts.testing_candidate import TestingCandidateAllocation
-from control_plane.testing_candidate_allocation import observe_candidate_storage
+from control_plane.testing_candidate_allocation import (
+    observe_candidate_storage,
+    prepare_candidate_storage,
+)
 from control_plane.odoo_testing_drill import (
     DRILL_INTERVAL_SECONDS,
     OdooTestingDrillScheduler,
@@ -30,6 +35,7 @@ from control_plane.odoo_testing_drill import (
 )
 from control_plane import testing_rebuild_service as service
 from control_plane.odoo_testing_restore import generation_binding
+from control_plane._odoo_testing_storage_program import MAX_DISPOSALS_PER_PASS
 from tests.support.profiles import _odoo_profile_payload_with_prod_lane
 from tests import test_testing_rebuild_worker as workers
 
@@ -199,14 +205,23 @@ class ScheduledNativeRebuildTests(unittest.TestCase):
         with (
             patch.object(service, "prepare_candidate_storage") as prepare,
             patch("control_plane.odoo_testing_storage.execute_maintenance") as legacy,
-            self.assertRaises(service.NativeTestingRebuildPending),
         ):
-            self.worker.complete_second_rebuild(scheduled=True)
+            self.worker.complete_second_rebuild(scheduled=True, expected_status="fail")
         prepare.assert_not_called()
         legacy.assert_not_called()
         self.assertEqual(self.worker.current(), before)
         self.assertEqual(self.evidence().storage_status, "insufficient")
         self.assertEqual(self.worker.fixture.fixture.effects, [])
+        scheduler = OdooTestingDrillScheduler(self.store)
+        receipt = scheduler._read(self.worker.operation.idempotency_key)
+        assert receipt is not None
+        self.assertFalse(
+            scheduler._observe(
+                self.profile.product, self.context, receipt, datetime.now(UTC).timestamp()
+            )
+        )
+        self.assertEqual(self.evidence().status, "fail")
+        self.assertEqual(self.evidence().step, "testing_storage_capacity_insufficient")
 
     def test_interrupted_original_storage_is_read_before_capacity_without_reallocation(
         self,
@@ -231,6 +246,111 @@ class ScheduledNativeRebuildTests(unittest.TestCase):
         ):
             self.worker.complete_second_rebuild(scheduled=True, interrupted_storage=True)
         self.assertEqual(stages, ["original-storage-readback", "capacity"])
+
+    def test_retention_edit_during_preparation_does_not_invalidate_native_admission(self) -> None:
+        prepare = service.NativeTestingRebuildExecution.prepare
+
+        def retain_copy(executor: Any, plan: Any) -> Any:
+            result = prepare(executor, plan)
+            profile = self.store.read_product_profile_record(self.profile.product)
+            self.store.write_product_profile_record(
+                profile.model_copy(
+                    update={
+                        "lanes": tuple(
+                            lane.model_copy(
+                                update={
+                                    "odoo_testing_drill_storage": self.budget.model_copy(
+                                        update={"retained_copy_bindings": ("a" * 64,)}
+                                    )
+                                }
+                            )
+                            if lane.instance == "testing"
+                            else lane
+                            for lane in profile.lanes
+                        )
+                    }
+                )
+            )
+            return result
+
+        with patch.object(service.NativeTestingRebuildExecution, "prepare", retain_copy):
+            self.worker.complete_second_rebuild(scheduled=True)
+        self.assertEqual(self.worker.effects, ["switch-new", "stop-old"] * 2)
+
+    def test_custody_history_has_truthful_totals_and_bounded_database_reads(self) -> None:
+        from control_plane.odoo_testing_drill import drill_receipt, lane_key
+        from control_plane.contracts.testing_candidate import testing_candidate_namespace
+        from control_plane.contracts.odoo_stable_target_replacement_operation import (
+            OdooStableTargetReplacementOperationRecord,
+        )
+
+        self.worker.complete_second_rebuild(scheduled=True)
+        reads: list[object] = []
+
+        def read(*_args: Any) -> None:
+            reads.append(None)
+
+        def observed() -> tuple[OdooTestingDrillEvidence, int]:
+            reads.clear()
+            event.listen(self.store._engine, "before_cursor_execute", read)
+            try:
+                result = self.evidence()
+            finally:
+                event.remove(self.store._engine, "before_cursor_execute", read)
+            return result, len(reads)
+
+        initial, initial_reads = observed()
+        namespaces = set()
+        now = datetime.now(UTC)
+        for number in range(MAX_DISPOSALS_PER_PASS * 5):
+            operation_id = f"custody-query-failed-{number}"
+            key = lane_key(self.profile.product, self.context) + f":custody-query-{number}"
+            operation = OdooStableTargetReplacementOperationRecord.model_validate(
+                self.worker.operation.model_copy(
+                    update={
+                        "operation_id": operation_id,
+                        "idempotency_key": key,
+                        "status": "fail",
+                        "phase": "failed",
+                        "finished_at": now.isoformat(),
+                        "error_message": "Fixture refusal",
+                        "result": None,
+                    }
+                ).model_dump()
+            )
+            self.store.write_odoo_stable_target_replacement_operation_record(operation)
+            namespace = testing_candidate_namespace(
+                self.profile.product, self.context, operation_id
+            )
+            candidate = TestingCandidateAllocation.model_validate(
+                self.worker.fixture.candidate.model_copy(
+                    update={
+                        "operation_id": operation_id,
+                        "namespace": namespace,
+                        "serving_target_id": self.worker.current().target_id.target_id,
+                        "project_id": namespace + "-project",
+                        "environment_id": "",
+                        "compose_id": "",
+                        "resources_binding_sha256": "",
+                        "effect": "project_id",
+                        "application": None,
+                    }
+                ).model_dump()
+            )
+            self.store.compare_and_write_testing_candidate(None, candidate)
+            self.store.write_idempotency_record(
+                drill_receipt(
+                    key,
+                    now.timestamp(),
+                    {"native_rebuild": True, "operation_id": operation_id, "status": "fail"},
+                )
+            )
+            namespaces.add(namespace)
+        evidence, history_reads = observed()
+        self.assertEqual(evidence.disposal_attention, initial.disposal_attention + len(namespaces))
+        self.assertEqual(len(evidence.retained_candidate_namespaces), MAX_DISPOSALS_PER_PASS)
+        self.assertTrue(set(evidence.retained_candidate_namespaces) <= namespaces)
+        self.assertEqual(history_reads, initial_reads)
 
     def test_deadline_alert_and_original_key_recovery_do_not_repeat_old_stop(self) -> None:
         self.worker.fail_after_stop = True
@@ -305,8 +425,230 @@ class ScheduledNativeRebuildTests(unittest.TestCase):
             return fence
 
         self.worker.route_fence_ensure.side_effect = after_preparing
-        with self.assertRaises(service.NativeTestingRebuildPending):
-            self.worker.complete_second_rebuild(scheduled=True)
+        self.worker.complete_second_rebuild(scheduled=True, expected_status="fail")
         self.assertEqual(observed, [self.worker.fixture.candidate.namespace])
         self.assertEqual(self.worker.effects, ["switch-new", "stop-old"])
         self.assertIsNotNone(self.signins.call_args.kwargs["since"])
+        self.assert_skipped_refusal("recent_successful_signin")
+
+    def assert_skipped_refusal(self, code: str) -> None:
+        notifications = Mock()
+        scheduler = OdooTestingDrillScheduler(self.store, notify=notifications)
+        receipt = scheduler._read(self.worker.operation.idempotency_key)
+        assert receipt is not None
+        self.assertFalse(
+            scheduler._observe(
+                self.profile.product,
+                self.context,
+                receipt,
+                datetime.now(UTC).timestamp() + DRILL_TIMEOUT_SECONDS,
+            )
+        )
+        self.assertEqual(self.evidence().status, "skipped")
+        self.assertEqual(self.evidence().step, code)
+        scheduler._deliver_alerts(self.profile.product, self.context, datetime.now(UTC).timestamp())
+        notifications.assert_not_called()
+        effects = list(self.worker.effects)
+        self.signins.return_value = False
+        self.assertEqual(self.worker.execute().deploy_status, "fail")
+        self.assertEqual(self.worker.effects, effects)
+
+    def test_staff_hold_after_allocation_ends_without_a_new_forward_write(self) -> None:
+        def held_after_allocation(**kwargs: Any) -> Any:
+            allocation = prepare_candidate_storage(**kwargs)
+            self.worker.apply_staff_hold(True, "Fixture staff start testing during preparation")
+            return allocation
+
+        with patch.object(service, "prepare_candidate_storage", side_effect=held_after_allocation):
+            self.worker.complete_second_rebuild(scheduled=True, expected_status="fail")
+        self.assert_skipped_refusal("staff_testing_hold")
+        self.assertEqual(self.worker.effects, ["switch-new", "stop-old"])
+
+    def test_bounded_storage_reconciliation_continues_without_a_terminal_refusal(self) -> None:
+        from control_plane.odoo_testing_drill import DrillPrerequisite, native_drill_refusal
+
+        with (
+            patch(
+                "control_plane.odoo_testing_storage.prepare_drill_storage",
+                side_effect=DrillPrerequisite("testing_storage_reconciliation_pending"),
+            ),
+            self.assertRaises(service.NativeTestingRebuildPending),
+        ):
+            self.worker.complete_second_rebuild(scheduled=True)
+        self.assertIsNone(native_drill_refusal(self.store, self.worker.operation))
+        self.assertEqual(self.worker.effects, ["switch-new", "stop-old"])
+
+    def test_staff_hold_during_route_preparing_ends_without_a_forward_write(self) -> None:
+        fence = self.worker.route_fence_ensure.return_value
+
+        def held(_custody: Any) -> Any:
+            self.worker.apply_staff_hold(True, "Fixture staff hold after route preparation")
+            return fence
+
+        self.worker.route_fence_ensure.side_effect = held
+        self.worker.complete_second_rebuild(scheduled=True, expected_status="fail")
+        self.assert_skipped_refusal("staff_testing_hold")
+        self.assertEqual(self.worker.effects, ["switch-new", "stop-old"])
+
+    def test_snapshot_refusal_during_route_preparation_excludes_the_original_parent(self) -> None:
+        from control_plane.odoo_testing_drill import DrillSkipped
+        from control_plane.contracts.testing_rebuild import REBUILD_SCOPE, REBUILD_ROUTE
+
+        preparers = []
+
+        def refused(_custody: Any) -> Any:
+            preparers.append(
+                self.store.read_idempotency_record(
+                    scope=REBUILD_SCOPE,
+                    route_path=REBUILD_ROUTE + ":effect",
+                    idempotency_key=self.worker.operation.operation_id
+                    + ":route:"
+                    + self.worker.fixture.candidate.namespace,
+                )
+            )
+            raise DrillSkipped("drill_admission_snapshot_changed")
+
+        self.worker.route_fence_ensure.side_effect = refused
+        self.worker.complete_second_rebuild(scheduled=True, expected_status="fail")
+        route = self.store.read_idempotency_record(
+            scope=REBUILD_SCOPE,
+            route_path=REBUILD_ROUTE + ":effect",
+            idempotency_key=self.worker.operation.operation_id
+            + ":route:"
+            + self.worker.fixture.candidate.namespace,
+        )
+        assert route is not None
+        self.assertEqual(route.state, "completed")
+        self.assertTrue(route.response_payload["route_write_not_started"])
+        self.assertGreater(route.attempt, 1)
+        assert preparers[0] is not None
+        self.assertNotEqual(
+            self.store.checkpoint_mutation_provider_effect(
+                reservation=preparers[0], effect_phase="late-fixture-writer", lease_seconds=300
+            ).status,
+            "updated",
+        )
+        self.assert_skipped_refusal("drill_admission_snapshot_changed")
+
+    def refuse_after_writer_dispatch(self) -> None:
+        from control_plane.odoo_testing_drill import DrillSkipped
+        from control_plane.dokploy.testing_route_transport import DokployTestingRouteTransport
+
+        def uncertain(*_: Any, **kwargs: Any) -> None:
+            def lost() -> None:
+                raise DrillSkipped("recent_successful_signin")
+
+            kwargs["dispatch_guard"](lost)
+
+        with (
+            patch.object(DokployTestingRouteTransport, "publish", side_effect=uncertain),
+            self.assertRaises(service.NativeTestingRebuildPending),
+        ):
+            self.worker.complete_second_rebuild(scheduled=True)
+
+    def test_refusal_with_a_writing_route_stays_pending_with_its_concrete_skip_reason(
+        self,
+    ) -> None:
+        from control_plane.dokploy.testing_route_transport import DokployTestingRouteTransport
+
+        self.refuse_after_writer_dispatch()
+        notifications = Mock()
+        scheduler = OdooTestingDrillScheduler(self.store, notify=notifications)
+        receipt = scheduler._read(self.worker.operation.idempotency_key)
+        assert receipt is not None
+        later = datetime.now(UTC).timestamp() + DRILL_TIMEOUT_SECONDS
+        self.assertTrue(scheduler._observe(self.profile.product, self.context, receipt, later))
+        self.assertEqual(self.evidence().status, "skipped")
+        self.assertEqual(self.evidence().step, "recent_successful_signin")
+        scheduler._deliver_alerts(self.profile.product, self.context, later)
+        notifications.assert_not_called()
+        effects = list(self.worker.effects)
+        with self.assertRaises(service.NativeTestingRebuildPending):
+            self.worker.execute()
+        self.assertEqual(self.worker.effects, effects)
+        # An eventual physical exclusion is observed on the original writer;
+        # the sticky skip must not prevent that observation or create a retry.
+        with patch.object(DokployTestingRouteTransport, "settle_attempt", return_value="excluded"):
+            result = self.worker.execute()
+        self.assertEqual(result.deploy_status, "fail")
+        self.assertEqual(result.error_message, "recent_successful_signin")
+        self.assertEqual(self.worker.effects, effects)
+
+    def test_refusal_preserves_observation_and_inverse_of_an_applied_original_writer(self) -> None:
+        self.refuse_after_writer_dispatch()
+        route = self.worker.fixture.route
+        self.worker.switch(
+            route,
+            route.new_backend,
+            expected_backend=route.old_backend,
+            dispatch_guard=lambda send: send(),
+            desired_runtime_identity=self.worker.app.plan.runtime_identity,
+        )
+        self.worker.fail_public = True
+        self.signins.return_value = True
+        effects = list(self.worker.effects)
+        result = self.worker.execute()
+        self.assertEqual(result.deploy_status, "fail")
+        self.assertEqual(result.error_code, "candidate_public_health_failed")
+        self.assertEqual(self.worker.effects, effects + ["switch-old"])
+        self.assertEqual(self.worker.current().target_id, self.worker.fixture.before.target_id)
+        from control_plane.workflows.odoo_stable_operation_worker import (
+            _target_replacement_terminal_operation,
+        )
+
+        self.assertTrue(
+            self.store.complete_odoo_stable_target_replacement_operation_record(
+                record=_target_replacement_terminal_operation(
+                    operation=self.worker.operation,
+                    result=result,
+                    lease_owner=self.worker.operation.lease_owner,
+                ),
+                lease_owner=self.worker.operation.lease_owner,
+            )
+        )
+        notifications = Mock(return_value=True)
+        scheduler = OdooTestingDrillScheduler(self.store, notify=notifications)
+        receipt = scheduler._read(self.worker.operation.idempotency_key)
+        assert receipt is not None
+        scheduler._observe(
+            self.profile.product, self.context, receipt, datetime.now(UTC).timestamp()
+        )
+        self.assertEqual(self.evidence().status, "fail")
+        self.assertEqual(self.evidence().step, result.error_code)
+        scheduler._deliver_alerts(self.profile.product, self.context, datetime.now(UTC).timestamp())
+        notifications.assert_called_once()
+
+    def test_recorded_refusal_survives_a_lost_reply_and_cleared_login(self) -> None:
+        finish = service.NativeTestingRebuildExecution.finish_admission_refusal
+        original_read = service.NativeTestingRebuildExecution.current_route
+        reads = []
+
+        def unavailable(executor: Any, plan: Any) -> Any:
+            if self.signins.return_value:
+                reads.append(plan)
+                raise service.NativeTestingRebuildPending("Fixture original route read unavailable")
+            return original_read(executor, plan)
+
+        def denied(_custody: Any) -> Any:
+            from control_plane.odoo_testing_drill import DrillSkipped
+
+            self.signins.return_value = True
+            raise DrillSkipped("recent_successful_signin")
+
+        self.worker.route_fence_ensure.side_effect = denied
+        with (
+            patch.object(service.NativeTestingRebuildExecution, "current_route", unavailable),
+            self.assertRaises(service.NativeTestingRebuildPending),
+        ):
+            self.worker.complete_second_rebuild(scheduled=True)
+        self.assertTrue(reads)
+        self.signins.return_value = False
+        effects = list(self.worker.effects)
+        with patch.object(
+            service.NativeTestingRebuildExecution, "finish_admission_refusal", autospec=True
+        ) as ending:
+            ending.side_effect = finish
+            result = self.worker.execute()
+        self.assertEqual(result.deploy_status, "fail")
+        self.assertEqual(result.error_message, "recent_successful_signin")
+        self.assertEqual(self.worker.effects, effects)
