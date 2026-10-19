@@ -54,7 +54,9 @@ class RealMariaDBRecoveryTests(unittest.TestCase):
         self.assertEqual(list(self.paths[0].iterdir()), [])
         self.assertEqual(list(self.paths[1].iterdir()), [])
 
-    def seed_database(self, engine: str = "InnoDB", *, keep_running: bool = False) -> str:
+    def seed_database(
+        self, engine: str = "InnoDB", *, keep_running: bool = False, tmpfs: bool = False
+    ) -> str:
         name = "lp-recovery-fixture-" + uuid.uuid4().hex
         identifier = self.docker(
             "run",
@@ -65,6 +67,7 @@ class RealMariaDBRecoveryTests(unittest.TestCase):
             "none",
             "--env",
             "MARIADB_ALLOW_EMPTY_ROOT_PASSWORD=1",
+            *(["--tmpfs", "/tmp"] if tmpfs else []),
             "--health-cmd",
             "healthcheck.sh --connect --innodb_initialized",
             "--health-interval",

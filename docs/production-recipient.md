@@ -183,96 +183,102 @@ existing original preparer identity and setup authority. This capability does
 not approve a live capture or grant an agent production setup access.
 
 Published recovery requires the exact currently owned publication and its
-authority, recipient, artifact and storage. It stores a separate proof without
-changing the cold bootstrap proof. Current authority is compared again inside
-the serialized custody transaction. Active execution commits additionally
-require the current provider lease; original-key terminal adoption uses the
-original durable reservation and cannot dispatch another capture.
-An inverse, changed publication or changed authority invalidates the plan and
-cannot acquire a fresh proof from a historical receipt. The plan names the
-capture protocol; the durable proof records publication and authority digests,
-capture/archive and logical-data digests, exact host container/storage identity,
-capture start, completion, and the measured capture duration. Its readback time
-never renews those observations. The later old-recipient retirement consumer
-must require a fresh successful post-window proof; this producer does not
-perform retirement or clear its health, ownership, backup or uncertainty gates.
-The protocol records an immutable `recovery_fresh_until` UTC timestamp, 15 minutes
-after actual completion. A consumer must compare its current clock with this
-timestamp and its own post-window requirement; a stored success boolean cannot
-establish freshness. A valid older original-key terminal witness still completes
-as historical recovery, releasing its target reservation so another reviewed
-generation can capture fresh data. Readback and completed-operation replay
-preserve the actual completion and expiry times. Pre-publication evidence refuses commit;
-an unknown capture without a terminal witness remains held. A completed receipt
-is historical evidence, never a new observation or permission to retire.
+authority, recipient, artifact and storage. It leaves the cold bootstrap proof
+unchanged. Before any provider schedule is written, the current execution lease
+and an atomic authority comparison admit exactly one original operation for the
+reviewed plan. Its immutable operation binding uses the existing execution metadata.
+Another key cannot capture or adopt its witness, even if proof storage failed.
+A new reviewed generation is the supported way to request another observation.
 
-The current published-storage verifier supports MariaDB plus stable config
-storage. It inventories every running and stopped container and permits only
-the exact pinned, running application and database containers to reference the
-allocated volumes. A service-owned MariaDB session acquires `FLUSH TABLES WITH
-READ LOCK` and remains idle while a second connection runs `mariadb-dump
---skip-lock-tables`. This includes nontransactional tables. The idle holder avoids
-leaving the global lock attached to a dump query that can outlive its client.
-Writes wait while this global read lock is held; reads remain allowed after
-acquisition, although acquisition and engine-specific queues can affect latency.
-See the [MariaDB FLUSH contract](https://mariadb.com/docs/server/reference/sql-statements/administrative-sql-statements/flush-commands/flush).
+Active proof commits require the current provider lease. Original-key terminal
+adoption compares the existing reservation's identity and writes only under the
+atomic current-authority check; it does not claim a renewed execution lease or
+start another capture. A custody collision merges unrelated append-only entries
+or accepts the identical original proof. Infrastructure errors preserve
+uncertainty. Only positively changed authority or publication can complete a
+terminal witness without qualification.
 
-One in-container coordinator starts both connections under a nonce-specific
-file lock. Native client deadlines and server statement deadlines constrain
-attempts on a best-effort basis. Only a verified completed capture of at most
-120 seconds qualifies. A killed
-client alone cannot prove server completion or a strict lock-duration bound.
-Before accepting completion, the coordinator closes the holder and positively
-checks that no root sessions remain except its observer. The protocol requires
-exclusive use of the existing root utility credential: preexisting root sessions
-refuse before capture. It does not grant a new credential or terminate unrelated
-sessions. Missing native clients, timeout or file-lock support also refuse.
-The host uses the database container's existing root credential internally;
-credentials are not sent in the schedule or returned as evidence.
+The proof records publication and authority digests, capture and logical-data
+digests, exact host container/storage identity, capture start, completion and
+measured duration. The immutable `recovery_fresh_until` timestamp is 15 minutes
+after actual completion. Current dry-run/readback eligibility requires a fresh
+proof. An original completed receipt remains historical and is never refreshed
+by replay. The later #3711 consumer must also require proof after its observation
+window. This producer performs no retirement and clears no backup, health,
+ownership or uncertain-effect gate. Host/service clock skew fails closed; a
+failed timestamp check does not grant qualification.
 
-Config content, permissions and ownership must remain stable before and after
-archive creation and recovery. The source database stays running. Only scratch
-is initialized/restored, with no application, network, published port, source
-mount, replication, event execution, binary logging or inherited service
-credentials. Integrity checks and a nonempty business table are required.
-A canonical dump from the restored database must match the captured SQL
-artifact exactly. This conservative verifier refuses unsupported or
-nondeterministic roundtrips rather than claiming useful recovery from an empty
-database or startup alone. System/auth databases are initialized independently
-and are not copied. Captures have a 2 GiB source/dump bound and require free
-scratch space before starting; captured data remains in service-owned host
-custody, never in response packets.
+The verifier inventories every running and stopped container. Only the exact
+pinned, running application and database containers may reference the allocated
+MariaDB/config volumes. A service-owned session acquires `FLUSH TABLES WITH READ
+LOCK` and remains idle while a second connection runs `mariadb-dump
+--skip-lock-tables`. This preserves mixed transactional and nontransactional
+tables. Writes wait during the global read lock, potentially for the native
+attempt deadline. Reads remain allowed after acquisition; acquisition and
+engine-specific queues can affect latency. See the
+[MariaDB FLUSH contract](https://mariadb.com/docs/server/reference/sql-statements/administrative-sql-statements/flush-commands/flush).
+Native client and server statement deadlines constrain attempts on a best-effort
+basis; a killed client alone proves neither server completion nor a strict lock
+duration. Only a positively completed capture of at most 120 seconds qualifies.
+Any live capture must account for this write pause; source availability alone is
+not evidence of acceptable live impact.
 
-Each generation retains its value-free proof and original-key binding. The
-shared actual-provider target reservation excludes other recovery, inverse and
-deployment operations. Every proof write requires unchanged authority in the
-custody transaction. Active execution also requires its current lease; original-key
-terminal adoption uses its existing durable reservation and cannot launch another
-capture. Historical terminal adoption releases only the original operation's
-reservation; it does not create a qualifying proof when authority has changed.
+The protocol conservatively requires exclusive use of the existing root utility
+credential. Preexisting root sessions refuse before capture; later sessions may
+keep quiescence unproved. No unrelated session is killed and no credential or
+grant is added. Credentials remain inside the database container. Native source
+launches are fenced as one original attempt, and source closure requires
+positive cancellation and server quiescence rather than elapsed-time inference.
+The native coordinator acquires its nonce lock and announces exact `READY`
+before any SQL. Only its live host parent, still holding the attempt lock, can
+send the matching `GO` over a private pipe after receiving that announcement.
+No permission is prebuffered. EOF, malformed input or a five-second input timeout
+refuses before SQL. A late queued exec after restart cannot receive permission
+from a dead parent, even when `/tmp` cancellation state was lost. Docker exec
+processes end with the container's PID1 and are not restarted with it; see the
+[Docker exec lifecycle contract](https://docs.docker.com/reference/cli/docker/container/exec/).
+This uses no database-volume metadata, image configuration or ownership repair.
 
-An uncertain capture retains its capture and running witness; it cannot be
-repeated under a new key. Original-key reconciliation reads the original host
-journal and verifies any terminal archive. During the capture phase only, it
-can acquire the nonce lock without waiting, permanently cancel that nonce, and
-positively establish that native root sessions have ended. This fences delayed
-launches without inferring safety from elapsed time. Restore phase is journaled
-before scratch creation; missing restore completion remains unknown. The same
-nonce lock is inherited by native children, and generation-specific provider
-schedule identities prevent a delayed old trigger from running a newer script.
+One monotonic host journal and lock own that attempt. A missing journal can be
+permanently tombstoned under the same lock, fencing a queued original worker.
+After native source closure and verification of the stable SQL/config artifact,
+the host durably records `source_closed` before any scratch-create dispatch.
+All subsequent commands affect only its independent scratch. Create intent,
+private name/path and exact isolation specification precede create; exact
+observed container identity/isolation is durable before start or import.
+Generation-specific provider schedule identities prevent delayed old triggers
+from receiving a newer script.
 
-A known published failure completes with `recovered=false` and releases the
-shared target after verified cleanup. Replaying its binding never captures again;
-review a new generation to try again. Cold bootstrap's existing safe same-key
-retry remains supported. Terminal success after authority drift also completes
-without qualification or a custody proof. Missing witnesses, lock contention,
-and timed-out Docker transport preserve uncertainty.
+Scratch has no application, network, published port, source mount, replication,
+event execution, binary logging or inherited service credential. Restore uses
+explicit autocommit control. Integrity checks, useful nonempty business data and
+an exact same-image canonical SQL roundtrip are required. Config content,
+permissions and ownership remain stable across capture. System/auth databases
+are independently initialized. Unsupported or nondeterministic roundtrips
+refuse. The 2 GiB source/dump ceiling is a safety bound, not a promise of recovery
+throughput; time and free-space bounds may refuse a smaller database.
 
-Successful attempts retain only the verified archive and value-free receipt,
-removing loose SQL copies. Known failures remove only their own partial files;
-unknown attempts retain their custody. Service-host maintenance owns retained
-archives and nonce cancellation tombstones for the lifetime of that source
-container; this capability introduces no automatic retention or deletion policy.
+After source closure, a lost restore or cleanup reply may terminalize with
+`recovered=false` and an explicit `retained_scratch` disposition. It identifies
+the originally observed isolated container ID, private name and path as
+`retained_or_cleanup_unconfirmed`; it claims neither presence nor absence.
+This releases the shared production target without resuming, reusing or cleaning
+that uncertain attempt. A new generation uses disjoint names/paths and repeats
+space checks. A lost create reply can also settle as `stopped_create_unconfirmed`, with an
+unknown ID, when the exact source-closed create-only journal is intact. Docker
+create produces a stopped object with restart disabled. Every start is a
+separate ID-only call after isolation is durably observed. Thus any late create
+cannot run code, and the terminal tombstone prevents a later start. This makes
+no claim that an object exists or is absent. Corrupt create intent, unproved
+source closure, or a start phase without durable isolation keeps the target held.
+
+After verified scratch cleanup, success durably records a value-only receipt
+before removing its own SQL/archive copies. It does not create a second backup
+service. Known pre-scratch failures remove only their own partial files. Unknown/retained
+attempts keep their private data and explicit custody; no automatic cleanup
+endpoint, retention service or maintenance promise is introduced. Original-key
+inspection never starts a new capture. Cold bootstrap keeps its existing archive
+and safe same-key retry contract.
 
 After changing either verifier, the implementing agent runs the focused host and
 adapter tests plus the real storage gates before handoff. PostgreSQL uses the

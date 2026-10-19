@@ -17,7 +17,10 @@ from control_plane.production_recipient import (
     qualified_render,
     runtime_values,
 )
-from control_plane.production_recipient_host import RECOVERY_PROGRAM, run_recipient_program
+from control_plane.production_recipient_host import (
+    RECOVERY_PROGRAM,
+    run_recipient_program as run_recipient_program,
+)
 from control_plane.production_recipient_resources import resource_spec
 from control_plane.production_recipient_upstreams import upstream_binding
 from control_plane.provider_operations import (
@@ -156,8 +159,10 @@ class RecipientRecoveryAdapter:
         if self.request.purpose == "published":
             from control_plane.production_recipient_published_recovery import published_mounts
 
+            owner = record.execution.get("published_recovery_owner:" + result.plan_sha256, {})
             spec.update(
                 {
+                    "operation": owner.get("operation", ""),
                     "application_image": record.image_reference,
                     "application_service": record.request.application_service,
                     "database_service": record.request.database_service,
@@ -222,6 +227,10 @@ class RecipientRecoveryAdapter:
     def observe(
         self, provider_operation_key: str, provider_effect_phase: str, reconciliation_key: str
     ) -> ProviderObservation:
+        if self.request.purpose == "published":
+            from control_plane.production_recipient_published_observation import observe_published
+
+            return observe_published(self, provider_operation_key, reconciliation_key)
         try:
             record = custody(self.store, self.product, self.request.context)
             reservation = self.store.read_idempotency_record(
@@ -251,9 +260,6 @@ class RecipientRecoveryAdapter:
             # authority. A completed host effect must not wedge inverse/deploys
             # merely because its historical proof no longer qualifies this lane.
             from control_plane.production_recipient_host import RECOVERY_INSPECT_PROGRAM
-            from control_plane.production_recipient_published_host import (
-                PUBLISHED_RECOVERY_INSPECT_PROGRAM,
-            )
 
             original_placement = (
                 record.namespace,
@@ -283,9 +289,7 @@ class RecipientRecoveryAdapter:
                     "recovery_binding": reconciliation_key,
                     "inspect": True,
                 },
-                PUBLISHED_RECOVERY_INSPECT_PROGRAM
-                if self.request.purpose == "published"
-                else RECOVERY_INSPECT_PROGRAM,
+                RECOVERY_INSPECT_PROGRAM,
                 observe_checkpoint,
             )
             if evidence.get("recipient_recovery_binding") != reconciliation_key:
@@ -307,22 +311,12 @@ class RecipientRecoveryAdapter:
                 plan_sha256=reconciliation_key,
                 purpose=self.request.purpose,
                 generation=self.request.generation,
-                qualification_status="failed" if safe_failure else "not_current",
             )
             try:
                 current_record, current = self.current()
                 if current.plan_sha256 == reconciliation_key:
                     if safe_failure:
-                        if self.request.purpose == "bootstrap":
-                            return ProviderObservation("absent", retry_safe=True)
-                        return ProviderObservation(
-                            "present",
-                            response_payload=provider_operation_response_payload(
-                                trace_id=self.trace_id,
-                                records={},
-                                result=result.model_dump(mode="json"),
-                            ),
-                        )
+                        return ProviderObservation("absent", retry_safe=True)
                     result = (
                         current
                         if current.recovered
@@ -357,6 +351,19 @@ class RecipientRecoveryAdapter:
             if self.request.purpose == "published" and not isinstance(lease, ProviderEvidenceLease):
                 raise ValueError(
                     "Published recovery requires a transactionally fenced evidence lease."
+                )
+            if self.request.purpose == "published":
+                from control_plane.production_recipient_published_recovery import (
+                    own_published_attempt,
+                )
+
+                assert isinstance(lease, ProviderEvidenceLease)
+                record = own_published_attempt(
+                    self,
+                    record,
+                    result,
+                    provider_operation_key,
+                    lease.evidence_reservation(),
                 )
             if result.recovered:
                 return ProviderMutationOutcome(

@@ -36,7 +36,13 @@ def run_recipient_program(
 
     recovery_read = (
         program in {RECOVERY_INSPECT_PROGRAM, PUBLISHED_RECOVERY_INSPECT_PROGRAM}
-        and set(spec) == {"namespace", "binding", "recovery_binding", "inspect"}
+        and set(spec)
+        == {"namespace", "binding", "recovery_binding", "inspect"}
+        | ({"operation"} if program == PUBLISHED_RECOVERY_INSPECT_PROGRAM else set())
+        and (
+            program != PUBLISHED_RECOVERY_INSPECT_PROGRAM
+            or re.fullmatch(r"[a-f0-9]{64}", str(spec.get("operation"))) is not None
+        )
         and spec.get("inspect") is True
         and spec.get("namespace") == record.namespace
         and spec.get("binding") == record.plan_sha256

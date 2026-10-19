@@ -12555,6 +12555,12 @@ class RealPostgresPublishedRecipientRecoveryTests(unittest.TestCase):
     def test_unknown_capture_adopts_only_original_host_witness(self) -> None:
         self.fixture.test_lost_reply_adopts_only_terminal_host_witness_without_recapture()
 
+    def test_failed_proof_persistence_keeps_original_owner_and_refuses_alternate_key(self) -> None:
+        self.fixture.test_failed_proof_persistence_preserves_owner_and_excludes_other_key()
+
+    def test_custody_append_collision_merges_original_proof(self) -> None:
+        self.fixture.test_custody_append_collision_merges_without_discarding_current_proof()
+
 
 class RealPostgresProductionRecipientTests(unittest.TestCase):
     def setUp(self) -> None:

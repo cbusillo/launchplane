@@ -382,7 +382,7 @@ class OdooPostDeployReadbackFailure(click.ClickException):
 
 
 def _safe_odoo_post_deploy_marker(key: str, value: str) -> bool:
-    if key == "rehearsal_result":
+    if key in {"rehearsal_result", "recipient_recovery_retained"}:
         return bool(re.fullmatch(r"(?:[a-f0-9]{2}){1,32768}", value))
     if key == WRITER_ACTION_MARKER:
         return value in WRITER_ACTIONS
@@ -398,6 +398,7 @@ def _safe_odoo_post_deploy_marker(key: str, value: str) -> bool:
         "recipient_recovery_capture",
         "recipient_recovery_source",
         "recipient_recovery_data",
+        "recipient_recovery_operation",
         ODOO_PREVIEW_RESOURCES_BINDING_MARKER,
     }:
         return re.fullmatch(r"[a-f0-9]{64}", value) is not None

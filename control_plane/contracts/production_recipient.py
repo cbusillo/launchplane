@@ -230,7 +230,7 @@ class RecipientRecoveryPlan(BaseModel):
     capture_started_at: str = ""
     capture_duration_ms: int | None = None
     recovery_fresh_until: str = ""
-    qualification_status: Literal["pending", "qualified", "not_current", "failed"] = "pending"
+    retained_scratch: dict[str, str] = Field(default_factory=dict)
     bootstrap_eligible: Literal[False] = False
 
     @model_serializer(mode="wrap")
@@ -248,7 +248,7 @@ class RecipientRecoveryPlan(BaseModel):
                 "capture_started_at",
                 "capture_duration_ms",
                 "recovery_fresh_until",
-                "qualification_status",
+                "retained_scratch",
             ):
                 result.pop(key, None)
         return result

@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+import json
 from typing import Any, cast
 import unittest
 from unittest.mock import patch
@@ -62,6 +63,7 @@ class PublishedRecoveryTests(unittest.TestCase):
             "recipient_recovery_ok": "true",
             "recipient_recovery_empty": "false",
             "recipient_recovery_binding": spec["recovery_binding"],
+            "recipient_recovery_operation": spec.get("operation", ""),
             "recipient_recovery_capture": "a" * 64,
             "recipient_recovery_source": "b" * 64,
             "recipient_recovery_data": "c" * 64,
@@ -163,12 +165,12 @@ class PublishedRecoveryTests(unittest.TestCase):
                 _root: Any, _record: Any, _spec: Any, _program: Any, checkpoint: Any
             ) -> Any:
                 checkpoint("historical_capture")
-                return evidence
+                return evidence | {"recipient_recovery_operation": _spec["operation"]}
 
             host.side_effect = witnessed
             self.assertEqual(self.run_recovery().status, "completed")
             historical = self.adapter.current()[1]
-        self.assertTrue(historical.recovered)
+        self.assertFalse(historical.recovered)
         with patch(
             "control_plane.production_recipient_published_recovery.datetime", wraps=datetime
         ) as clock:
@@ -247,9 +249,14 @@ class PublishedRecoveryTests(unittest.TestCase):
         writer = self.store.write_production_recipient
 
         def racing_write(**kwargs: Any) -> None:
-            self.store.write_environment_inventory(
-                self.publication.publication.inventory.model_copy(update={"updated_at": "raced"})
-            )
+            if any(
+                key.startswith("published_recovery:") for key in kwargs["replacement"]["execution"]
+            ):
+                self.store.write_environment_inventory(
+                    self.publication.publication.inventory.model_copy(
+                        update={"updated_at": "raced"}
+                    )
+                )
             writer(**kwargs)
 
         with (
@@ -262,9 +269,6 @@ class PublishedRecoveryTests(unittest.TestCase):
             terminal = self.run_recovery()
             self.assertEqual(terminal.status, "completed")
             self.assertFalse(terminal.response_payload["result"]["recovered"])
-            self.assertEqual(
-                terminal.response_payload["result"]["qualification_status"], "not_current"
-            )
         saved = custody(self.store, self.record.product, self.record.context)
         assert saved is not None
         self.assertFalse(saved.published_recovery_proofs)
@@ -298,6 +302,7 @@ class PublishedRecoveryTests(unittest.TestCase):
                 raise RuntimeError("insufficient space")
             return {
                 "recipient_recovery_binding": spec["recovery_binding"],
+                "recipient_recovery_operation": spec.get("operation", ""),
                 "recipient_recovery_retry_safe": "true",
             }
 
@@ -307,10 +312,137 @@ class PublishedRecoveryTests(unittest.TestCase):
             result = self.run_recovery()
             self.assertEqual(result.status, "completed")
             self.assertFalse(result.response_payload["result"]["recovered"])
-            self.assertEqual(result.response_payload["result"]["qualification_status"], "failed")
             self.assertEqual(self.store.list_held_provider_target_reservations(), ())
             self.assertEqual(self.run_recovery().status, "replayed")
         self.assertEqual(sum(not call.get("inspect") for call in self.calls), 1)
+
+    def test_first_owner_survives_terminal_failure_and_refuses_another_key(self) -> None:
+        def refused(_root: Any, record: Any, spec: Any, _program: Any, checkpoint: Any) -> Any:
+            owner = record.execution["published_recovery_owner:" + spec["recovery_binding"]]
+            self.assertEqual(owner["original_key"], self.adapter.original_key)
+            self.assertEqual(owner["operation"], spec["operation"])
+            checkpoint("original_attempt")
+            return {
+                "recipient_recovery_binding": spec["recovery_binding"],
+                "recipient_recovery_operation": spec["operation"],
+                "recipient_recovery_retry_safe": "true",
+            }
+
+        with patch(
+            "control_plane.production_recipient_recovery.run_recipient_program", side_effect=refused
+        ) as host:
+            self.assertEqual(self.run_recovery().status, "completed")
+            other = replace(self.adapter, original_key="another-key-same-plan")
+            with self.assertRaises(ValueError):
+                other.current()
+            with self.assertRaises(ValueError):
+                self.run_recovery(other)
+            self.assertEqual(host.call_count, 2)  # apply plus fixed terminal read only
+        saved = custody(self.store, self.record.product, self.record.context)
+        assert saved is not None
+        self.assertFalse(saved.published_recovery_proofs)
+        self.assertEqual(self.store.list_held_provider_target_reservations(), ())
+
+    def test_custody_append_collision_merges_without_discarding_current_proof(self) -> None:
+        writer = self.store.write_production_recipient
+        collided = False
+
+        def collision(**kwargs: Any) -> None:
+            nonlocal collided
+            if not collided and any(
+                key.startswith("published_recovery:") for key in kwargs["replacement"]["execution"]
+            ):
+                collided = True
+                expected = kwargs["expected"]
+                writer(
+                    expected=expected,
+                    replacement={
+                        **expected,
+                        "execution": {**expected["execution"], "unrelated-witness": {"done": True}},
+                    },
+                )
+            writer(**kwargs)
+
+        with (
+            patch(
+                "control_plane.production_recipient_recovery.run_recipient_program",
+                side_effect=self.host,
+            ),
+            patch.object(self.store, "write_production_recipient", side_effect=collision),
+        ):
+            result = self.run_recovery()
+        self.assertEqual(result.status, "completed")
+        self.assertTrue(result.response_payload["result"]["recovered"])
+        saved = custody(self.store, self.record.product, self.record.context)
+        assert saved is not None
+        self.assertTrue(saved.execution["unrelated-witness"]["done"])
+        self.assertTrue(saved.published_recovery_proofs)
+
+    def test_failed_proof_persistence_preserves_owner_and_excludes_other_key(self) -> None:
+        writer = self.store.write_production_recipient
+
+        def broken(**kwargs: Any) -> None:
+            if any(
+                key.startswith("published_recovery:") for key in kwargs["replacement"]["execution"]
+            ):
+                raise RuntimeError("database temporarily unavailable")
+            writer(**kwargs)
+
+        with (
+            patch(
+                "control_plane.production_recipient_recovery.run_recipient_program",
+                side_effect=self.host,
+            ),
+            patch.object(self.store, "write_production_recipient", side_effect=broken),
+        ):
+            result = self.run_recovery()
+        self.assertEqual(result.status, "reconcile_required")
+        self.assertTrue(self.store.list_held_provider_target_reservations())
+        saved = custody(self.store, self.record.product, self.record.context)
+        assert saved is not None
+        self.assertFalse(saved.published_recovery_proofs)
+        other = replace(self.adapter, original_key="other-key-after-storage-failure")
+        with self.assertRaises(ValueError):
+            other.current()
+        with patch("control_plane.production_recipient_recovery.run_recipient_program") as host:
+            self.assertEqual(self.run_recovery(other).status, "target_busy")
+        host.assert_not_called()
+        owner = saved.execution[
+            "published_recovery_owner:" + self.adapter.request.reviewed_plan_sha256
+        ]
+        self.assertEqual(owner["original_key"], self.adapter.original_key)
+
+    def test_stopped_create_custody_completes_and_replays_without_a_new_capture(self) -> None:
+        retained: dict[str, str] = {}
+
+        def stopped(_root: Any, _record: Any, spec: Any, _program: Any, checkpoint: Any) -> Any:
+            checkpoint("create_only_terminal")
+            retained.update(
+                {
+                    "container": "lp-recovery-" + spec["operation"][:32],
+                    "id": "",
+                    "path": "/fixture/private-scratch",
+                    "disposition": "stopped_create_unconfirmed",
+                }
+            )
+            return {
+                "recipient_recovery_binding": spec["recovery_binding"],
+                "recipient_recovery_operation": spec["operation"],
+                "recipient_recovery_retry_safe": "true",
+                "recipient_recovery_retained": json.dumps(retained).encode().hex(),
+            }
+
+        with patch(
+            "control_plane.production_recipient_recovery.run_recipient_program", side_effect=stopped
+        ) as host:
+            first = self.run_recovery()
+            calls = host.call_count
+            self.assertEqual(self.run_recovery().response_payload, first.response_payload)
+            self.assertEqual(host.call_count, calls)
+        self.assertEqual(first.status, "completed")
+        self.assertFalse(first.response_payload["result"]["recovered"])
+        self.assertEqual(first.response_payload["result"]["retained_scratch"], retained)
+        self.assertEqual(self.store.list_held_provider_target_reservations(), ())
 
     def test_second_generation_cannot_dispatch_while_first_target_is_held(self) -> None:
         other = replace(

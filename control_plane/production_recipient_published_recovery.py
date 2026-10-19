@@ -17,6 +17,7 @@ from control_plane.production_recipient import (
     custody,
     qualified_render,
     runtime_values,
+    same_recipient_authority,
 )
 from control_plane.production_recipient_publication import require_owned_publication_rows
 from control_plane.production_recipient_resources import resource_spec
@@ -24,7 +25,7 @@ from control_plane.production_recipient_resources import resource_spec
 if TYPE_CHECKING:
     from control_plane.production_recipient_recovery import RecipientRecoveryAdapter
 
-CAPTURE_PROTOCOL = "mariadb-locked-logical-roundtrip-v1"
+CAPTURE_PROTOCOL = "mariadb-owned-attempt-logical-roundtrip-v2"
 CAPTURE_TIMEOUT_SECONDS = 120
 CAPTURE_WITNESS_MAX_AGE_SECONDS = 15 * 60
 
@@ -127,6 +128,9 @@ def published_current(
             "authority": authority,
         }
     )
+    owner = record.execution.get("published_recovery_owner:" + digest, {})
+    if owner and adapter.original_key and owner.get("original_key") != adapter.original_key:
+        raise ValueError("Retain the published recovery's original actor and key.")
     proof = record.published_recovery_proofs.get(digest, {})
     if proof and (
         proof.get("binding") != digest
@@ -146,14 +150,13 @@ def published_current(
         publication_sha256=record.publication["published_sha256"],
         authority_sha256=authority_sha,
         capture_protocol=CAPTURE_PROTOCOL,
-        recovered=bool(proof),
+        recovered=bool(proof) and published_proof_is_fresh(proof),
         capture_sha256=str(proof.get("capture_sha256", "")),
         recovered_at=str(proof.get("recovered_at", "")),
         captured_database_empty=False if proof else None,
         capture_started_at=str(proof.get("capture_started_at", "")),
         capture_duration_ms=proof.get("capture_duration_ms"),
         recovery_fresh_until=str(proof.get("recovery_fresh_until", "")),
-        qualification_status="qualified" if proof else "pending",
     )
 
 
@@ -197,14 +200,12 @@ def record_published_result(
         or not 0 < duration <= CAPTURE_TIMEOUT_SECONDS * 1000
     ):
         raise ValueError("Recovery must follow publication and use a bounded capture window.")
-    _, current = adapter.current()
-    if current.plan_sha256 != result.plan_sha256:
-        raise ValueError("Published recovery authority changed during capture.")
-    if current.recovered:
-        return current
     authority = authority_snapshot(adapter.store, adapter.product, record.context)
     if canonical_sha256(authority) != result.authority_sha256:
-        raise ValueError("Published recovery authority changed before commit.")
+        raise PublishedAuthorityChanged("Published recovery authority changed before commit.")
+    owner = record.execution.get("published_recovery_owner:" + result.plan_sha256, {})
+    if not owner or evidence.get("recipient_recovery_operation") != owner.get("operation"):
+        raise ValueError("Recovery witness does not belong to the original operation.")
     proof = {
         "binding": result.plan_sha256,
         "actor": adapter.actor,
@@ -230,18 +231,91 @@ def record_published_result(
         "artifact": record.image_reference,
         "storage": resource_spec(record),
     }
-    replacement = record.model_copy(
-        update={
-            "execution": {
-                **record.execution,
-                "published_recovery:" + result.plan_sha256: proof,
-            },
-        }
-    )
-    adapter.store.write_production_recipient(
-        expected=record.model_dump(mode="json"),
-        replacement=replacement.model_dump(mode="json"),
-        reservation=reservation,
-        expected_authority=authority,
+    merge_published_entry(
+        adapter, record, "published_recovery:" + result.plan_sha256, proof, authority, reservation
     )
     return adapter.current()[1]
+
+
+class PublishedAuthorityChanged(ValueError):
+    """An exact authority/publication comparison proved the capture outdated."""
+
+
+def merge_published_entry(
+    adapter: "RecipientRecoveryAdapter",
+    record: ProductionRecipientRecord,
+    key: str,
+    entry: dict[str, Any],
+    authority: dict[str, Any],
+    reservation: LaunchplaneIdempotencyRecord | None,
+) -> ProductionRecipientRecord:
+    """Merge an immutable entry after a custody collision, never an I/O failure."""
+    for attempt in range(3):
+        if not same_recipient_authority(
+            authority_snapshot(adapter.store, adapter.product, record.context), authority
+        ):
+            raise PublishedAuthorityChanged("Published authority changed.")
+        existing = record.execution.get(key)
+        if existing is not None:
+            if existing != entry:
+                raise ValueError("Published operation identity or evidence changed.")
+            return record
+        replacement = record.model_copy(update={"execution": {**record.execution, key: entry}})
+        try:
+            adapter.store.write_production_recipient(
+                expected=record.model_dump(mode="json"),
+                replacement=replacement.model_dump(mode="json"),
+                reservation=reservation,
+                expected_authority=authority,
+            )
+            return replacement
+        except ValueError:
+            observed = custody(adapter.store, adapter.product, record.context)
+            if observed is None:
+                raise
+            if (observed.plan_sha256, observed.publication) != (
+                record.plan_sha256,
+                record.publication,
+            ):
+                raise PublishedAuthorityChanged("Published placement changed.")
+            if not same_recipient_authority(
+                authority_snapshot(adapter.store, adapter.product, record.context), authority
+            ):
+                raise PublishedAuthorityChanged("Published authority changed.")
+            # Only a positively observed custody collision permits a bounded merge.
+            if observed == record or attempt == 2:
+                raise
+            record = observed
+    raise RuntimeError("Published custody merge exhausted.")
+
+
+def own_published_attempt(
+    adapter: "RecipientRecoveryAdapter",
+    record: ProductionRecipientRecord,
+    result: RecipientRecoveryPlan,
+    operation_key: str,
+    reservation: LaunchplaneIdempotencyRecord,
+) -> ProductionRecipientRecord:
+    operation = operation_key.removeprefix("provider-operation:")
+    if not re.fullmatch(r"[a-f0-9]{64}", operation):
+        raise ValueError("Exact durable operation identity required.")
+    authority = authority_snapshot(adapter.store, adapter.product, record.context)
+    if canonical_sha256(authority) != result.authority_sha256:
+        raise PublishedAuthorityChanged("Published authority changed before attempt admission.")
+    entry = {
+        "operation": operation,
+        "original_key": adapter.original_key,
+        "actor": adapter.actor,
+        "scope": adapter.scope,
+        "binding": result.plan_sha256,
+        "publication_sha256": result.publication_sha256,
+        "authority_sha256": result.authority_sha256,
+    }
+    return merge_published_entry(
+        adapter,
+        record,
+        "published_recovery_owner:" + result.plan_sha256,
+        entry,
+        authority,
+        reservation,
+    )
