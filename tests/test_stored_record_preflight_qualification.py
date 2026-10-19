@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+import shlex
 from pathlib import Path
 import subprocess
 import sys
@@ -173,6 +174,15 @@ done
 exit 0
 """)
             docker.chmod(0o755)
+            # Run the step's Python on this interpreter so the test never syncs
+            # or rebuilds the checkout's environment (launchplane#2432).
+            uv = root / "uv"
+            uv.write_text(f"""#!/bin/bash
+while [[ $# -gt 0 && "$1" != python ]]; do shift; done
+shift
+exec {shlex.quote(sys.executable)} "$@"
+""")
+            uv.chmod(0o755)
             (root / "launchplane-stored-record-snapshot.json").write_text("{}")
             result = subprocess.run(
                 ["bash", "-c", step.run],
