@@ -28,7 +28,8 @@ function bindingReview(applied: boolean, stored = false): RouteBindingRepairRevi
     current_domains: stored ? proposedDomains : [], proposed_domains: proposedDomains, findings: [], source_records: [{ identity: "fixture-audit", version: "fixture-version" }] };
 }
 type Scenario = "saved" | "blocked" | "unchanged" | "denied" | "role-only" | "read-only" | "uncertain" | "stale" | "uncertain-stale" | "uncertain-conflict" | "readback-denied" | "readback-failed" |
-  "storage-unavailable" | "missing-request" | "receipt-mismatch" | "receipt-digest-mismatch" | "current-drift" | "refresh" | "readback-refresh" | "edit" | "leave";
+  "storage-unavailable" | "missing-request" | "receipt-mismatch" | "receipt-digest-mismatch" | "current-drift" | "refresh" | "readback-refresh" | "edit" | "leave" |
+  "persistent-refusal" | "changed-confirmation";
 
 async function fixture(page: Page, kind: RepairKind, scenario: Scenario) {
   await page.goto("/ui/products?fixture=empty");
@@ -44,6 +45,7 @@ async function fixture(page: Page, kind: RepairKind, scenario: Scenario) {
   let environmentReads = 0;
   let stored = scenario === "unchanged";
   let activeDigest = planDigest;
+  let activeConfirmation: string | undefined;
   let releaseReview: (() => Promise<void>) | undefined;
   await page.route("**/v1/**", route => route.fulfill({ status: 403, json: { status: "error", trace_id: "unused", error: { code: "fixture_unavailable", message: "Outside this isolated route-record journey." } } }));
   await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", trace_id: "session", csrf_token: "fixture-csrf",
@@ -69,10 +71,22 @@ async function fixture(page: Page, kind: RepairKind, scenario: Scenario) {
       if (scenario === "readback-failed") return route.abort();
     }
     let review = kind === "domain" ? domainReview(applying, !applying && stored) : bindingReview(applying, !applying && stored);
+    if (activeConfirmation) review = { ...review, expected_confirmation: activeConfirmation };
     if (applying || !stored) review = { ...review, plan_sha256: activeDigest };
     if (applying) {
+      if (scenario === "changed-confirmation" && applies.length > 1 && body.confirmation !== review.expected_confirmation) {
+        return route.fulfill({ status: 400, json: { trace_id: "confirmation-refusal", error: { code: "confirmation_required", message: "Review the current confirmation." } } });
+      }
       expect(body.confirmation).toBe(review.expected_confirmation);
       expect(body.browser_review.reviewed_plan_sha256).toBe(activeDigest);
+      if (["persistent-refusal", "changed-confirmation"].includes(scenario) && applies.length === 1) {
+        if (scenario === "changed-confirmation") activeConfirmation = "fixture-confirmation-after-deploy";
+        return route.abort();
+      }
+      if (scenario === "persistent-refusal" && applies.at(-1)!.key === applies[0].key) {
+        return route.fulfill({ status: 409, json: { trace_id: "qualification-refusal", error: {
+          code: kind === "domain" ? "domain_repair_evidence_unqualified" : "route_repair_lane_unqualified", message: "The original evidence is no longer qualified." } } });
+      }
       if (["uncertain-stale", "uncertain-conflict"].includes(scenario) && applies.length === 1) return route.abort();
       if (scenario === "uncertain-conflict" && applies.length === 2) return route.fulfill({ status: 409, json: { trace_id: "in-progress", error: { code: "mutation_in_progress", message: "Original mutation is still in progress." } } });
       if ((scenario === "stale" && applies.length === 1) || (scenario === "uncertain-stale" && applies.length === 2)) {
@@ -101,11 +115,11 @@ async function fixture(page: Page, kind: RepairKind, scenario: Scenario) {
 
 for (const kind of ["domain", "binding"] as const) {
   const title = kind === "domain" ? "Domain authority" : "Route binding";
-  const scenarios: Scenario[] = ["saved", "unchanged", "denied", "uncertain", "stale", "uncertain-stale", "readback-denied", "current-drift", "refresh", "readback-refresh", "edit", "leave"];
-  if (kind === "domain") scenarios.push("role-only", "read-only", "uncertain-conflict", "readback-failed", "storage-unavailable", "missing-request", "receipt-mismatch", "receipt-digest-mismatch");
+  const scenarios: Scenario[] = ["saved", "unchanged", "denied", "uncertain", "stale", "uncertain-stale", "readback-denied", "current-drift", "refresh", "readback-refresh", "edit", "leave", "persistent-refusal"];
+  if (kind === "domain") scenarios.push("role-only", "read-only", "uncertain-conflict", "readback-failed", "storage-unavailable", "missing-request", "receipt-mismatch", "receipt-digest-mismatch", "changed-confirmation");
   if (kind === "binding") scenarios.push("blocked");
   for (const scenario of scenarios) {
-    test(`${kind} repair: ${scenario}`, { tag: ["saved", "blocked", "readback-denied"].includes(scenario) ? "@layout" : [] }, async ({ page }, testInfo) => {
+    test(`${kind} repair: ${scenario}`, { tag: ["saved", "blocked", "readback-denied", "persistent-refusal"].includes(scenario) ? "@layout" : [] }, async ({ page }, testInfo) => {
       const state = await fixture(page, kind, scenario);
       let panel = state.panel;
       const review = panel.getByRole("button", { name: `Review ${title.toLowerCase()}`, exact: true });
@@ -200,13 +214,71 @@ for (const kind of ["domain", "binding"] as const) {
       }
       await expect(panel).toHaveAttribute("data-recovery", "true");
       await expect(review).toBeDisabled();
+      if (["persistent-refusal", "changed-confirmation"].includes(scenario)) {
+        const otherTitle = kind === "domain" ? "Route binding" : "Domain authority";
+        await page.getByLabel(`${otherTitle} reason`, { exact: true }).fill("Review the independent decision while the earlier outcome is unknown.");
+        await expect(page.getByRole("button", { name: `Review ${otherTitle.toLowerCase()}`, exact: true })).toBeEnabled();
+        await panel.getByRole("button", { name: `Resume original ${title.toLowerCase()}` }).click();
+        await waitForState(() => applies().length).toBe(2);
+        await expect(panel).toHaveAttribute("aria-busy", "false");
+        await expect(panel).toHaveAttribute("data-recovery", "true");
+        expect(applies()[1]).toEqual(applies()[0]);
+        await panel.evaluate(element => element.scrollIntoView({ block: "start" }));
+        await page.evaluate(() => window.scrollBy(0, -100));
+        await panel.screenshot({ path: testInfo.outputPath("route-repair-unproven.png") });
+        await panel.getByRole("button", { name: "Start a separate review", exact: true }).click();
+        await expect(panel).toHaveAttribute("data-recovery", "false");
+        await expect(reviewed).toHaveCount(0);
+        expect(applies()).toHaveLength(2);
+        const earlier = panel.locator('[data-earlier-outcome="unknown"]');
+        await earlier.locator("summary").click();
+        await expect(earlier).toContainText(applies()[0].key);
+        await expect(earlier).toContainText(scenario === "persistent-refusal" ? "qualification-refusal" : "confirmation-refusal");
+        await review.click(); await expect(reviewed).toBeVisible();
+        await expect(reviewed.getByRole("checkbox")).not.toBeChecked();
+        await expect(panel.getByRole("button", { name: `Apply reviewed ${title.toLowerCase()}`, exact: true })).toBeDisabled();
+        expect(applies()).toHaveLength(2);
+        await reviewed.getByRole("checkbox").check();
+        await panel.getByRole("button", { name: `Apply reviewed ${title.toLowerCase()}`, exact: true }).click();
+        await expect(panel).toHaveAttribute("data-readback", "verified");
+        expect(applies()).toHaveLength(3);
+        expect(applies()[2].key).not.toBe(applies()[0].key);
+        if (scenario === "changed-confirmation") expect(applies()[2].body).not.toEqual(applies()[0].body);
+        await expect(earlier).toHaveAttribute("data-earlier-outcome", "unknown");
+        await expect(earlier).toContainText(applies()[0].key);
+        await expect(panel.getByText("Current apply receipt", { exact: true })).toBeVisible();
+        await panel.evaluate(element => element.scrollIntoView({ block: "start" }));
+        await page.evaluate(() => window.scrollBy(0, -100));
+        await panel.screenshot({ path: testInfo.outputPath("route-repair-separate-review.png") });
+        return;
+      }
       if (["receipt-mismatch", "receipt-digest-mismatch"].includes(scenario)) { await expect(panel.getByRole("alert")).toBeVisible(); return; }
-      if (scenario === "missing-request") await page.evaluate(key => sessionStorage.removeItem(key), repairStorageKey(repairOperationScope(scope, kind)));
+      if (scenario === "missing-request") {
+        await page.evaluate(async ({ key, otherScope }) => {
+          sessionStorage.removeItem(key);
+          const operations = await import("/ui/src/browser-operation.ts");
+          const prepared = await operations.prepareBrowserOperation(otherScope, { fixture: "independent interrupted request" });
+          const submitting = operations.markBrowserOperationDispatched(operations.beginBrowserOperation(prepared));
+          operations.persistBrowserOperationState(otherScope, submitting);
+        }, { key: repairStorageKey(repairOperationScope(scope, kind)), otherScope: repairOperationScope(scope, "binding") });
+      }
       await page.reload();
       panel = page.getByRole("region", { name: title, exact: true });
       await expect(panel).toHaveAttribute("data-recovery", "true");
       if (scenario === "missing-request") {
-        await expect(panel.getByRole("button", { name: `Resume original ${title.toLowerCase()}` })).toHaveCount(0); expect(applies()).toHaveLength(1); return;
+        const sibling = page.getByRole("region", { name: "Route binding", exact: true });
+        await expect(sibling).toHaveAttribute("data-recovery", "true");
+        await expect(panel.getByRole("button", { name: `Resume original ${title.toLowerCase()}` })).toHaveCount(0);
+        await panel.getByRole("button", { name: "Start a separate review", exact: true }).click();
+        await expect(panel).toHaveAttribute("data-recovery", "false");
+        await panel.getByLabel(`${title} reason`, { exact: true }).fill("Review current records without reconstructing the missing payload.");
+        await panel.getByRole("button", { name: `Review ${title.toLowerCase()}`, exact: true }).click();
+        await expect(panel.getByLabel(`${title} review`, { exact: true })).toBeVisible();
+        expect(applies()).toHaveLength(1);
+        await expect(sibling.getByRole("button", { name: "Start a separate review", exact: true })).toBeEnabled();
+        await sibling.getByRole("button", { name: "Start a separate review", exact: true }).click();
+        await expect(sibling).toHaveAttribute("data-recovery", "false");
+        return;
       }
       await panel.getByRole("button", { name: `Resume original ${title.toLowerCase()}` }).click();
       if (scenario === "uncertain-conflict") {

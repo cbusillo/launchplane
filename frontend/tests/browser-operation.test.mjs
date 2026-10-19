@@ -135,6 +135,26 @@ test("cancellation before dispatch is safe to reset", async () => {
   assert.equal(resetBrowserOperation(cancelled).phase, "idle");
 });
 
+test("explicit uncertain reset starts a separate identity without claiming completion", async () => {
+  const request = { mode: "apply", product: "demo" };
+  const prepared = await prepareBrowserOperation("reviewed-record-cas", request);
+  const queued = beginBrowserOperation(prepared);
+  const submitting = markBrowserOperationDispatched(queued);
+  for (const active of [queued, submitting]) {
+    assert.throws(() => resetBrowserOperation(active, { allowUncertain: true }));
+  }
+  const uncertain = cancelBrowserOperation(submitting);
+  assert.throws(() => resetBrowserOperation(uncertain));
+  const separate = resetBrowserOperation(uncertain, { allowUncertain: true });
+  assert.equal(separate.phase, "idle");
+  assert.equal(separate.receipt, null);
+  assert.equal(separate.requiresIdempotencyContinuity, false);
+  const next = await prepareBrowserOperation("reviewed-record-cas", request, separate);
+  assert.notEqual(next.identity.idempotencyKey, uncertain.identity.idempotencyKey);
+  assert.equal(uncertain.phase, "uncertain");
+  assert.equal(uncertain.receipt, null);
+});
+
 test("replay receipts preserve original trace evidence", async () => {
   const prepared = await prepareBrowserOperation("promotion", { product: "demo" });
   const succeeded = completeBrowserOperation(

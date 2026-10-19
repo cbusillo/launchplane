@@ -2756,8 +2756,15 @@ verified accepted or replayed receipt completes that apply independently of
 current-record readback. The browser then performs a separate inert dry-run,
 using a distinct request identity. Failure, denial or later drift of readback is
 shown as current evidence only and does not retain the completed operation in
-recovery or block either decision. The original payload/key remains required
-while the apply receipt itself is unproved. Neither a later record nor readback
+recovery or block either decision. Resuming an unproved apply requires the exact
+original payload/key. The administrator may instead explicitly start a separate
+review, releasing only browser tracking without canceling or settling the old
+request. A new inert review and decision precede a fresh-key apply, protected
+by the existing record CAS boundary. The earlier identity/failure stays labeled
+unknown in this view; it is not a durable browser history, and a new receipt
+does not establish the earlier outcome. Unknown operations do not lock the
+independent card, although current network work still serializes both cards.
+Administrator, session and CSRF checks remain required. Neither a later record nor readback
 proves current site health. Browser receipts retain the administrator's reason;
 the typed review's required `expected_confirmation` comes from the same
 server-side envelope property that validates apply. Existing machine response

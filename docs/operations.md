@@ -2488,9 +2488,18 @@ replay completes the operation. A separate inert review reads the current
 record afterward. Denied, unavailable or differing current readback is reported
 separately; it does not undo the completed receipt, lock either decision, or
 prevent a fresh review. Current readback does not establish website health.
-Missing or invalid recovery storage still blocks replacing an unproved apply;
-keep the original receipt trace for diagnosis. The controls require the existing
-strict-admin service admission and add no grant or machine authority.
+For an unproved apply, **Start a separate review** releases this tab's recovery
+fence, including when the saved payload is missing or invalid. It does not cancel
+the earlier request or prove whether it changed records; that request may still
+finish. The card keeps its earlier key, fingerprint and last failure in an
+advanced detail for this view only, separately from any later receipt. Browser
+storage cleanup is best-effort, not a durable history or discard guarantee.
+A separate apply requires a fresh inert review and decision, with a new key;
+the service's existing record compare-and-set checks protect the reviewed
+baseline if the earlier request finishes concurrently. Uncertainty in one card
+does not block the other decision; current network work still serializes them.
+The controls require the existing strict-admin service admission and add no
+grant or machine authority.
 
 Each browser apply settles under its caller scope, route and idempotency key.
 A proven prewrite `stale` refusal must first record its completed immutable 409

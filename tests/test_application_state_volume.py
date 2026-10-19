@@ -167,11 +167,18 @@ class ApplicationStateVolumeTests(_DirectorTestingSetupFixture):
 
     async def test_original_plan_without_browser_field_still_applies_and_reads_back(self) -> None:
         from control_plane.application_state_volume import PLAN_ROUTE
-        from control_plane.http_routes.mutation_support import request_fingerprint
+        from control_plane.http_routes.mutation_support import (
+            idempotency_scope,
+            request_fingerprint,
+        )
+        from control_plane.service_auth import configured_local_operator_identity
+        from tests.http_app_test_support import _local_operator_bearer_config
 
         plan = await self.plan()
+        identity = configured_local_operator_identity(_local_operator_bearer_config())
+        assert identity is not None
         original = self.store.read_idempotency_record(
-            scope="local-operator|local-owner-agent|local-owner-read",
+            scope=idempotency_scope(identity),
             route_path=PLAN_ROUTE,
             idempotency_key=plan["state_volume_plan_id"],
         )

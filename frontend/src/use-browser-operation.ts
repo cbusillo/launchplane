@@ -22,6 +22,7 @@ import {
 } from "./browser-operation";
 
 export interface BrowserOperationController<TPayload, TResponse> {
+  abandon: () => boolean;
   cancel: () => void;
   reconcile: (identity: BrowserOperationIdentity, envelope: BrowserOperationEnvelope) => boolean;
   reset: () => boolean;
@@ -41,6 +42,7 @@ interface BrowserOperationControllerOptions<TPayload, TResponse> {
   failureFor: (error: unknown) => BrowserOperationFailure;
   scope: string;
   readOnly?: boolean;
+  allowUncertainAbandon?: boolean;
 }
 
 export function useBrowserOperationController<
@@ -52,6 +54,7 @@ export function useBrowserOperationController<
   failureFor,
   scope,
   readOnly = false,
+  allowUncertainAbandon = false,
 }: BrowserOperationControllerOptions<TPayload, TResponse>): BrowserOperationController<
   TPayload,
   TResponse
@@ -180,7 +183,16 @@ export function useBrowserOperationController<
     } catch { return false; }
   }
 
-  return { cancel, reconcile, reset, run, state };
+  function abandon() {
+    if (!allowUncertainAbandon) return false;
+    try {
+      // This ends local tracking only. It neither cancels nor settles the service request.
+      updateState(resetBrowserOperation(stateRef.current, { allowUncertain: true }));
+      return true;
+    } catch { return false; }
+  }
+
+  return { abandon, cancel, reconcile, reset, run, state };
 }
 
 function recoverControllerState(scope: string, readOnly: boolean): BrowserOperationState {

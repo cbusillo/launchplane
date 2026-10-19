@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { Route } from "lucide-react";
 import { LaunchplaneApiError, readAuthSession, repairDomainAuthority, repairRouteBinding } from "./api";
-import { recoverBrowserOperationState, type BrowserOperationOptions, type BrowserOperationFailureCertainty } from "./browser-operation";
+import { recoverBrowserOperationState, type BrowserOperationOptions, type BrowserOperationFailureCertainty, type BrowserOperationState } from "./browser-operation";
 import { productConfigFailureCertainty, productConfigOperationFailure } from "./product-config-operation";
 import { useBrowserOperationController } from "./use-browser-operation";
 import type { ProductEnvironmentDetail } from "./generated/openapi.ts";
@@ -78,6 +78,7 @@ function RepairDecision({ kind, scope, admin, otherActive, setActive, refreshTok
   const [confirmed, setConfirmed] = useState(false);
   const [message, setMessage] = useState("");
   const [accepted, setAccepted] = useState<RepairResponse | null>(null);
+  const [earlierRequest, setEarlierRequest] = useState<BrowserOperationState | null>(null);
   const [readback, setReadback] = useState<"idle" | "pending" | "verified" | "unavailable" | "different">("idle");
   const revision = useRef(0);
   const plan = useBrowserOperationController<RepairRequest, RepairResponse>({
@@ -85,7 +86,7 @@ function RepairDecision({ kind, scope, admin, otherActive, setActive, refreshTok
     failureCertainty: productConfigFailureCertainty, failureFor: productConfigOperationFailure,
   });
   const apply = useBrowserOperationController<RepairRequest, RepairResponse>({
-    scope: operationScope, failureCertainty: repairFailureCertainty, failureFor: productConfigOperationFailure,
+    scope: operationScope, allowUncertainAbandon: true, failureCertainty: repairFailureCertainty, failureFor: productConfigOperationFailure,
     execute: async (request, options) => {
       const response = await executeRepair(request, { ...options, onDispatch: () => {
         options.onDispatch?.();
@@ -102,7 +103,7 @@ function RepairDecision({ kind, scope, admin, otherActive, setActive, refreshTok
   const recovering = apply.state.requiresIdempotencyContinuity;
   const busy = readback === "pending" || [plan.state.phase, apply.state.phase].some(phase => phase === "queued" || phase === "submitting");
   const locked = !admin || busy || recovering || otherActive;
-  useEffect(() => { setActive(busy || recovering); }, [busy, recovering]);
+  useEffect(() => { setActive(busy); }, [busy]);
   useEffect(() => {
     revision.current += 1;
     if (!recovering) { setReview(null); setConfirmed(false); }
@@ -117,6 +118,15 @@ function RepairDecision({ kind, scope, admin, otherActive, setActive, refreshTok
 
   function edited(value: string) {
     revision.current += 1; setReason(value); setReview(null); setConfirmed(false); setMessage("");
+  }
+  function startSeparateReview() {
+    if (!admin || busy || !recovering) return;
+    const unverified = apply.state;
+    if (!apply.abandon()) return;
+    setEarlierRequest(unverified);
+    revision.current += 1;
+    setReview(null); setConfirmed(false); setPending(null); setAccepted(null); setReadback("idle"); setMessage("");
+    try { sessionStorage.removeItem(storageKey); } catch { /* Local release does not promise durable browser storage cleanup. */ }
   }
   async function inspect() {
     if (locked || !reason.trim() || !apply.reset()) return;
@@ -195,12 +205,20 @@ function RepairDecision({ kind, scope, admin, otherActive, setActive, refreshTok
         <button className="button button-primary" type="button" disabled={locked || !confirmed} onClick={() => void save()}>Apply reviewed {title.toLowerCase()}</button></>}
       <button className="button button-secondary" type="button" disabled={busy || recovering} onClick={() => { revision.current += 1; setReview(null); setConfirmed(false); }}>Leave records unchanged</button>
     </div>}
-    {recovering && <div role="status"><p>The result needs recovery. Keep the original reviewed request and key.</p>
+    {recovering && <div role="status"><p>The earlier request may still finish. Starting a separate review does not cancel it or prove its outcome.</p>
       {pending ? <button className="button button-primary" disabled={!admin || busy || otherActive} onClick={() => void save()}>Resume original {title.toLowerCase()}</button>
-        : <p>The saved request is missing or invalid. Recovery is unavailable here; a fresh apply is locked to avoid duplicating the original operation.</p>}</div>}
+        : <p>The saved request is missing or invalid, so the original request cannot be resumed here.</p>}
+      <button className="button button-secondary" type="button" disabled={!admin || busy} onClick={startSeparateReview}>Start a separate review</button>
+    </div>}
+    {earlierRequest?.identity && <details data-earlier-outcome="unknown"><summary>Earlier request remains unverified</summary>
+      <p>This tab stopped following the earlier request. It may still finish; a later receipt does not prove its outcome. This detail lasts only in this view.</p>
+      <p>Earlier request key: <code>{earlierRequest.identity.idempotencyKey}</code></p>
+      <p>Earlier request fingerprint: <code>{earlierRequest.identity.requestFingerprint}</code></p>
+      {earlierRequest.failure && <p>Last observed failure: {earlierRequest.failure.message}{earlierRequest.failure.traceId && <> Last refusal trace: <code>{earlierRequest.failure.traceId}</code></>}</p>}
+    </details>}
     {message && <p role="status">{message}</p>}
     {failure && <p role="alert">{failure.message}{failure.traceId && <> Trace: <code>{failure.traceId}</code></>}</p>}
-    {accepted && <details><summary>Original apply receipt</summary><p>Trace: <code>{accepted.trace_id}</code></p>
+    {accepted && <details><summary>{earlierRequest ? "Current apply receipt" : "Original apply receipt"}</summary><p>Trace: <code>{accepted.trace_id}</code></p>
       <p>{accepted.replayed ? "Replayed original apply" : "Apply accepted"}{accepted.original_trace_id && <> · Original trace: <code>{accepted.original_trace_id}</code></>}</p>
       {accepted.review?.operation === "repair-domain-authority" ? <p>Target domain record: {accepted.review.target_name} · <code>{accepted.review.target_id}</code>. Its provider-target projection was kept consistent.</p>
         : accepted.review?.operation === "reconcile-route-binding" && <p>Binding record: <code>{accepted.review.proposed_record?.record_sha256}</code></p>}
