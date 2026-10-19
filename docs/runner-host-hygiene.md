@@ -663,3 +663,115 @@ name:
 
 Until those are present for another action, that action remains report-only or
 dry-run planning only.
+
+## Qualify an existing configuration after drift
+
+Weekday green means a report's planned audit was delivered. It does not mean
+retention is working. The workflow summary now separates report delivery,
+report status, retention qualification and accepted terminal maintenance. The
+qualifier uses the audit envelope's single `maintenance_completed` rule.
+The latest existing audit record supplies the report and blockers; terminal
+status and delivery are shown even when a failed action has a healthy report.
+A run-local expected-action manifest also renders missing evidence for later
+Sunday targets when the summary step can run. A job cancellation can prevent
+the summary step itself. Accepted planned delivery, `blocked`, `not_needed` and pending terminal
+delivery never establish completed maintenance. A completed action can still
+leave cache above target or have unknown measurements; completion and retention
+are separate.
+
+Each scheduled report receives the existing default-daemon and named-builder
+budgets through `--buildkit-cache-budget key=bytes`. These are read-only report
+inputs. The workflow's existing runtime budget setting also selects named
+Sunday maintenance targets; adding an entry there remains a maintenance-scope
+change, not a way to suppress a report finding. The report-only CLI flag itself
+grants no prune permission. Target actions still require their existing exact
+allowlist, target, budget, idle evidence, host lock and durable audit/replay
+path. The configuration projection uses the existing executor request contract;
+the record-backed migration can supply that same input without a new store.
+
+Reports measure each configured builder using its own container's read-only
+`buildctl du --format '{{json .}}'`. They retain only aggregate counters, never
+raw cache descriptions. The existing complete Docker container inventory also
+identifies unbudgeted named caches: these remain measured report-only rows with
+an admin recovery assignment, no target and no cleanup permission. Stopped
+unbudgeted containers have an explicit unmeasured report-only state and are
+never probed or counted as zero. Running unbudgeted probe failures are likewise
+explicit unmeasured report-only rows with recovery assignment, never measured
+zero. A configured stopped or missing builder remains unknown. Existing orphan
+findings still apply. Their actual producer/retention responsibility must be
+reviewed independently before any budget or maintenance is proposed. The
+daemon-default cache remains a distinct row from the named builders.
+
+The report's invariant is that every configured builder has measured logical
+budgeted usage within target, or measured in-use/recent-cache evidence
+explaining the excess; otherwise it records a maintenance or measurement
+finding with a recovery assignment. Named-builder age accounting uses the
+selected action's configured retention duration, with the existing seven-day
+minimum for other named rows. Shared bytes remain information only; sharing
+does not protect a record from GC. The daemon and named rows preserve full
+`logical_bytes` and informational `shared_bytes`, but compare the target
+against non-shared `budgeted_bytes`, matching BuildKit GC. Named rows also
+record the effective target after the existing adapter's megabyte rounding. The
+pre-existing Docker reclaimable aggregate remains unchanged and is a separate
+measurement. The default-daemon action has no age filter. Report-only budgets
+never enter interrupted-action recovery identity. Missing, failed, malformed,
+duplicate or truncated measurements are unknown, never zero. Active mutable BuildKit records have unknown size despite
+reporting zero. Qualification deliberately requires complete logical sizes, more
+strictly than GC. Engine omits mutability, so active zero-sized Engine records
+are conservatively unknown in the new daemon qualification row. Empty caches and
+inactive zero records remain measured zero. The legacy aggregate retains its
+Engine-reported size basis and admission behavior; during an active mutable
+record it is a lower bound, with known reclaimable bytes preserved. Thus weekday
+qualification can need attention during a build without changing Sunday prune
+admission or replacing its existing audited idle block.
+[Engine cache records](https://github.com/moby/moby/blob/master/api/types/build/cache.go)
+explain the API limit. Logical targets
+are not physical-volume quotas, and excess is not an expected-reclaim estimate.
+Overlapping protection categories are counted once.
+[BuildKit's accounting implementation](https://github.com/moby/buildkit/blob/master/cmd/buildctl/diskusage.go)
+and [client record format](https://github.com/moby/buildkit/blob/master/client/diskusage.go)
+own the probe format.
+[BuildKit GC accounting](https://github.com/moby/buildkit/blob/master/cache/manager.go)
+owns the non-shared target basis and last-used retention semantics.
+
+Evaluate the existing private audit artifact without contacting a host:
+
+```bash
+uv run launchplane work-graph runner-host-hygiene-qualify \
+  --audit-file /private/evidence/runner-host-hygiene-audit.json \
+  --require-qualified
+```
+
+The default report-only mode prints diagnosis without failing delivery; invalid
+or absent artifacts produce fixed unqualified diagnostics. With `--summary-file`,
+only bounded action/audit identifiers, snapshot time and contract codes are
+rendered. Detailed JSON stays out of that job log. Summary snapshots do not claim
+current-time freshness after a long Sunday batch. The explicit qualification
+mode exits nonzero for stale/missing evidence, report
+findings, unresolved execution/recovery, pending delivery or action blockers other
+than recognized existing not-needed outcomes and the expected
+`mutate_not_requested` dry-run blocker. Legacy artifacts without builder evidence
+remain unqualified. `--maximum-age-seconds` bounds review-artifact age separately
+from the executor's unchanged idle freshness gate. To reproduce historical
+qualification, pin `--as-of YYYY-MM-DDTHH:MM:SS+0000`; this proves only that saved
+instant, never current host state. Terminal completion comes from that artifact's
+own exact audit, without matching today's scheduler key to a prior run.
+
+For a correction, first run the existing report-only path and retain its accepted
+audit plus complete private service/registration and producer readbacks. Compare
+the complete host fleet with the existing GitHub idle bindings; include every
+service rather than weakening exact-set checks. Use the existing image-inspect
+results to qualify retained references, preserving Docker's normal tag/digest
+resolution. A live builder container does not prove a warm image exists. If a
+producer emits run-specific verification tags, an arbitrary current tag is not a
+durable replacement for a fixed retained reference: qualify its production and
+retention lifecycle before proposing the exact setting or producer correction.
+
+Prepare the exact correction through the existing configuration's supported
+path, with the prior settings retained privately for rollback. A live correction
+requires its separately recorded Director decision, including the consequence
+that an existing maintenance schedule can resume once blockers clear. Obtain a
+fresh accepted report-only audit afterward. Source landing, a replayed historical
+qualification and a report-only request authorize no host apply, prune, restart,
+grant or legacy timer change. This report adds no train, deploy or recovery
+admission gate; qualification failure stays with the hygiene recovery assignment.

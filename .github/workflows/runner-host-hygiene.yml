@@ -277,6 +277,7 @@ jobs:
             exit 1
           fi
 
+          report_budget_args=(--buildkit-cache-budget "default=$RUNNER_DEFAULT_CACHE_BUDGET_BYTES")
           allowed_builder_args=()
           buildkit_builder_names=()
           buildkit_builder_budgets=()
@@ -309,6 +310,7 @@ jobs:
             buildkit_builder_names+=("$builder_name")
             buildkit_builder_budgets+=("$budget_bytes")
             allowed_builder_args+=(--allowed-buildkit-builder "$builder_name")
+            report_budget_args+=(--buildkit-cache-budget "$builder_name=$budget_bytes")
           done
           if [ "${#buildkit_builder_names[@]}" -eq 0 ]; then
             echo "At least one BuildKit cache budget is required." >&2
@@ -366,6 +368,7 @@ jobs:
               --repository-scope "$RUNNER_REPOSITORY_SCOPE" \
               --audit-record-key "$audit_key" \
               "${builder_args[@]}" \
+              "${report_budget_args[@]}" \
               "${runner_root_args[@]}" \
               "${github_idle_binding_args[@]}" \
               "${generated_cache_args[@]}" \
@@ -380,6 +383,21 @@ jobs:
               --audit-artifact-file "$audit_artifact_file" \
               | tee "runner-host-hygiene-result-${artifact_suffix}.json"
           }
+
+          expected_suffixes=(manual)
+          if [ "$EVENT_NAME" = "schedule" ]; then
+            expected_suffixes=(report)
+            if [ "$SCHEDULE_EXPRESSION" = "17 10 * * 0" ]; then
+              expected_suffixes=(default-cache dangling-images)
+              for builder_name in "${buildkit_builder_names[@]}"; do
+                expected_suffixes+=("builder-$builder_name")
+              done
+              for generated_cache_key in "${generated_cache_keys[@]}"; do
+                expected_suffixes+=("generated-$generated_cache_key")
+              done
+            fi
+          fi
+          printf '%s\n' "${expected_suffixes[@]}" > "$RUNNER_TEMP/runner-host-hygiene-expected.txt"
 
           if [ "$EVENT_NAME" = "schedule" ]; then
             audit_date="$(date -u +%F)"
@@ -506,6 +524,21 @@ jobs:
             "${volume_args[@]}" \
             "${target_builder_args[@]}" \
             "${target_generated_cache_args[@]}"
+
+      - name: Summarize report delivery and maintenance qualification
+        if: always() && steps.executor.outcome != 'skipped'
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_args=()
+          if [ -f "$RUNNER_TEMP/runner-host-hygiene-expected.txt" ]; then
+            while IFS= read -r suffix; do
+              artifact_args+=(--audit-file "$RUNNER_TEMP/runner-host-hygiene-audit-evidence-$suffix.json")
+            done < "$RUNNER_TEMP/runner-host-hygiene-expected.txt"
+          fi
+          uv run launchplane work-graph runner-host-hygiene-qualify \
+            "${artifact_args[@]}" --report-only \
+            --summary-file "$GITHUB_STEP_SUMMARY"
 
       - name: Upload executor result
         if: always() && steps.executor.outcome != 'skipped'
