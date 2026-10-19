@@ -29059,7 +29059,7 @@ class PostgresRecordStore(HumanSessionStore):
                     "Administrator reconciliation is required; do not retry with a new key."
                 ) from error
 
-    def commit_testing_hold_rehearsal(
+    def commit_testing_hold(
         self,
         *,
         product: str,
@@ -29067,7 +29067,7 @@ class PostgresRecordStore(HumanSessionStore):
         replacement_record: DokployTargetRecord,
         mutation: DbOnlyMutationRequest,
     ) -> tuple[str, LaunchplaneIdempotencyRecord]:
-        """Commit the hold, its reconcile request and replay receipt as one DB change."""
+        """Commit the hold and replay receipt; only a staff lift queues reconciliation."""
         if (expected_record.context, expected_record.instance) != (
             replacement_record.context,
             replacement_record.instance,
@@ -29111,7 +29111,12 @@ class PostgresRecordStore(HumanSessionStore):
             self._protect_testing_hold_non_use(session, replacement_record)
             row.updated_at = replacement_record.updated_at
             row.payload = self._payload_dict(replacement_record)
-            if replacement_record.policies.staff_testing_hold is None:
+            previous_hold = expected_record.policies.staff_testing_hold
+            if (
+                replacement_record.policies.staff_testing_hold is None
+                and previous_hold is not None
+                and previous_hold.purpose == "staff_testing"
+            ):
                 target = ProductReconcileTarget(product=product, target_kind="testing")
                 self._lock_landing_authority(
                     session, f"launchplane:product-reconcile:{target.target_key}"

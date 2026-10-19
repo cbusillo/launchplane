@@ -46,6 +46,35 @@ application testing lanes. Q453 accepted this topology instead of the
 Compose-only upstream binding and its host firewall requirement. It does not
 change the restrictions on the Compose path below or any production record.
 
+### Continue a freshly allocated application
+
+Keep the `isolation_staging` hold through endpoint and private-route preparation.
+After testing inputs are configured, use the existing `testing-hold-dry-run` and
+`testing-hold-apply` helpers with `--lift --purpose isolation_staging` and the same
+product, context, testing instance and audit reason. Save the dry run, review its
+digest, then apply with that evidence and a stable original idempotency key.
+
+The original Director agent can lift only its own staging interlock on the
+fresh conventional application and lane-only volume it already allocated. The
+service resolves that caller's completed allocation receipt itself and checks
+current exclusive ownership, placement, empty source/environment, sole mount and
+absence of deployment, protected use, needed data, aliases and uncertain effects.
+Staff, foreign, legacy and Compose interlocks keep their existing protections.
+
+Dry-run performs metadata and provider reads only. Apply runs a fixed read-only
+inspection through a disabled manual job on the recorded server before clearing
+the hold. The allocated Docker volume and its backing directory must still be
+absent, and no running or stopped container may consume the allocation or overlap
+its storage. Existing volumes, incomplete inspection and drift remain held for
+separate recovery; this path creates or deletes no storage. The hold and replay
+receipt commit atomically. Keep the original key after an uncertain reply.
+
+A staging lift requests no reconcile and performs no workload deployment. The
+normal testing event/sweep then delivers managed inputs and the verified build
+through the existing deployment gates. Standalone runtime sync remains subject
+to its normal qualification; do not bypass a refusal. Actual runtime identity,
+health, monitor cadence and Chris's authenticated receiver proof remain separate.
+
 ### Health probes with public wildcard DNS
 
 An application testing endpoint may retain the existing public wildcard DNS.

@@ -9110,11 +9110,20 @@ def create_launchplane_fastapi_app(
             and hold_request.purpose == "staff_testing"
             and not hold_request.activation_plan_sha256
         )
+        from control_plane.application_testing_hold import (
+            is_application_staging_lift,
+            qualify_application_staging_lift,
+        )
+
+        director_application_lift = director_agent_identity(
+            identity
+        ) and is_application_staging_lift(record_store, hold_request)
         _authorize_lane_product_config(
             identity=identity,
             action=(
                 "product_config.apply"
-                if hold_request.mode == "apply" and not director_staff_hold
+                if hold_request.mode == "apply"
+                and not (director_staff_hold or director_application_lift)
                 else "product_config.plan"
             ),
             product=hold_request.product,
@@ -9177,6 +9186,7 @@ def create_launchplane_fastapi_app(
             and (hold_request.mode == "apply" or not director_agent_identity(identity))
             and not activated_interlock
             and not director_staff_hold
+            and not director_application_lift
         ):
             # Lifting a hold requests a testing reconcile, which can deploy.
             raise _launchplane_http_error(
@@ -9194,6 +9204,173 @@ def create_launchplane_fastapi_app(
         )
         typed_store = cast(control_plane_testing_lane_hold.TestingHoldStore, record_store)
         actor = launchplane_identity_actor(identity)
+        if director_application_lift:
+            assert isinstance(record_store, PostgresRecordStore)
+            if hold_request.mode == "apply":
+                if not idempotency_key.strip():
+                    raise _launchplane_http_error(
+                        status_code=400,
+                        trace_id=trace_id,
+                        code="idempotency_key_required",
+                        message="Testing hold apply requires an Idempotency-Key header.",
+                    )
+                normalized_key, fingerprint, replay = await replay_apply_idempotency(
+                    request=request,
+                    record_store=record_store,
+                    identity=identity,
+                    route_path=route_path,
+                    idempotency_key=idempotency_key,
+                    trace_id=trace_id,
+                    check_replay=True,
+                    request_payload=raw_payload,
+                )
+                if replay is not None:
+                    return replay
+            else:
+                normalized_key, fingerprint = "", ""
+
+            def continue_application() -> AcceptedEvidenceResponse:
+                from control_plane.application_state_volume import LANE_LOCK_PREFIX
+                from control_plane.testing_event_deploy_recovery import (
+                    testing_event_execution_lock_name,
+                )
+                from control_plane.workflows.generic_web_deploy_provider import (
+                    dokploy_generic_web_provider_target_key,
+                )
+                from control_plane.integration_allowances import target_record_sha256
+
+                with ExitStack() as execution:
+                    lane_check = execution.enter_context(
+                        record_store.testing_replacement_execution_lock(
+                            LANE_LOCK_PREFIX + hold_request.context
+                        )
+                    )
+                    provider = record_store.read_provider_target_record(
+                        context_name=hold_request.context, instance_name=hold_request.instance
+                    )
+                    event_check = execution.enter_context(
+                        record_store.testing_replacement_execution_lock(
+                            testing_event_execution_lock_name(
+                                dokploy_generic_web_provider_target_key(provider)
+                            )
+                        )
+                    )
+                    if lane_check is None or event_check is None:
+                        raise ValueError("Testing execution is busy.")
+                    lane_check()
+                    event_check()
+
+                    def qualify(
+                        *,
+                        inspect_provider: bool,
+                        inspect_storage: bool = False,
+                        before_inspection: Callable[[str], None] | None = None,
+                    ) -> str:
+                        return qualify_application_staging_lift(
+                            record_store,
+                            hold_request,
+                            root=resolved_control_plane_root,
+                            actor=actor,
+                            scope=idempotency_scope(identity),
+                            trace=trace_id,
+                            inspect_provider=inspect_provider,
+                            inspect_storage=inspect_storage,
+                            before_inspection=before_inspection,
+                        )
+
+                    binding = qualify(inspect_provider=True)
+                    if hold_request.mode == "dry-run":
+                        plan, _ = control_plane_testing_lane_hold.build_testing_hold_plan(
+                            record_store=typed_store, request=hold_request, actor=actor
+                        )
+                        return accepted_evidence_response(
+                            trace_id=trace_id, records={}, result=plan.model_dump(mode="json")
+                        )
+
+                    def inspection_checkpoint(_phase: str) -> None:
+                        lane_check()
+                        event_check()
+                        if qualify(inspect_provider=False) != binding:
+                            raise ValueError("Testing allocation changed before host inspection.")
+
+                    if (
+                        qualify(
+                            inspect_provider=True,
+                            inspect_storage=True,
+                            before_inspection=inspection_checkpoint,
+                        )
+                        != binding
+                        or qualify(inspect_provider=True) != binding
+                    ):
+                        raise ValueError("Testing allocation changed during host inspection.")
+                    with record_store.serialize_disposable_testing_resources():
+                        lane_check()
+                        event_check()
+                        if qualify(inspect_provider=False) != binding:
+                            raise ValueError(
+                                "Testing allocation changed before its hold was lifted."
+                            )
+                        plan, replacement = control_plane_testing_lane_hold.build_testing_hold_plan(
+                            record_store=typed_store, request=hold_request, actor=actor
+                        )
+                        if plan.plan_sha256 != hold_request.reviewed_plan_sha256:
+                            raise ValueError(
+                                "Reviewed testing hold no longer matches the allocation."
+                            )
+                        expected = record_store.read_dokploy_target_record(
+                            context_name=hold_request.context, instance_name=hold_request.instance
+                        )
+                        replacement = replacement.model_copy(
+                            update={
+                                "updated_at": utc_now_timestamp(),
+                                "source_label": control_plane_testing_lane_hold.TESTING_HOLD_SOURCE_LABEL,
+                            }
+                        )
+                        plan = plan.model_copy(
+                            update={
+                                "applied": True,
+                                "read_back": None,
+                                "read_back_matches": True,
+                                "record_sha256_after": target_record_sha256(replacement),
+                            }
+                        )
+                        response = accepted_evidence_response(
+                            trace_id=trace_id, records={}, result=plan.model_dump(mode="json")
+                        )
+                        status, receipt = record_store.commit_testing_hold(
+                            product=hold_request.product,
+                            expected_record=expected,
+                            replacement_record=replacement,
+                            mutation=DbOnlyMutationRequest(
+                                scope=idempotency_scope(identity),
+                                route_path=route_path,
+                                idempotency_key=normalized_key,
+                                request_fingerprint=fingerprint,
+                                lease_owner=trace_id,
+                                response_status_code=202,
+                                response_trace_id=trace_id,
+                                response_payload=response.model_dump(
+                                    mode="json", exclude_none=True
+                                ),
+                            ),
+                        )
+                        if status == "written":
+                            return response
+                        if status == "replayed":
+                            return replay_idempotent_response(
+                                trace_id=trace_id, stored_record=receipt, route_path=route_path
+                            )
+                        raise ValueError("The original testing hold mutation must be reconciled.")
+
+            try:
+                return await run_in_worker_thread(continue_application)
+            except (ValueError, FileNotFoundError, OSError, click.ClickException) as error:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="application_testing_hold_unqualified",
+                    message="The original testing application is not safe to continue.",
+                ) from error
         from control_plane.testing_hold_rehearsal import (
             qualify_testing_hold_rehearsal,
             prepare_testing_hold_rehearsal_apply,
@@ -9302,7 +9479,7 @@ def create_launchplane_fastapi_app(
                         records=records,
                         result=applied_plan.model_dump(mode="json"),
                     )
-                    write_status, receipt = record_store.commit_testing_hold_rehearsal(
+                    write_status, receipt = record_store.commit_testing_hold(
                         product=hold_request.product,
                         expected_record=expected,
                         replacement_record=replacement,

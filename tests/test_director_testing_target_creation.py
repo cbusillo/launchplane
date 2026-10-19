@@ -45,12 +45,15 @@ from tests.support.profiles import _generic_site_profile_payload
 
 
 class _DirectorTestingSetupFixture(unittest.IsolatedAsyncioTestCase):
+    def database_url(self) -> str:
+        return f"sqlite+pysqlite:///{self.root / 'state.db'}"
+
     def setUp(self) -> None:
         temporary = TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
         self.root = root
-        self.store = PostgresRecordStore(database_url=f"sqlite+pysqlite:///{root / 'state.db'}")
+        self.store = PostgresRecordStore(database_url=self.database_url())
         self.store.ensure_schema()
         self.addCleanup(self.store.close)
         profile = LaunchplaneProductProfileRecord.model_validate(_generic_site_profile_payload())

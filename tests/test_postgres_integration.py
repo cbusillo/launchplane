@@ -23,6 +23,7 @@ from tests import test_testing_runtime_separation as testing_separation
 from tests import test_testing_separation_resources as independent_storage
 from tests import test_testing_activation as testing_activation
 from tests import test_testing_hold_rehearsal as testing_hold_rehearsal
+from tests import test_application_state_volume as application_volume_tests
 from tests import test_testing_rebuild as testing_rebuild_tests
 from control_plane.contracts.testing_rebuild import TestingRebuildRecord
 from tests import test_merge_train_historical_completion_storage as historical_storage_tests
@@ -1342,6 +1343,39 @@ class RealPostgresIntegratedProductRetirementTests(
 class RealPostgresTestingHoldRehearsalTests(testing_hold_rehearsal.DirectorHoldRehearsalTests):
     def database_url(self) -> str:
         return self.enterContext(_head_postgres_database())
+
+
+@unittest.skipUnless(
+    os.environ.get("LAUNCHPLANE_TEST_POSTGRES_URL"), "PostgreSQL integration URL required"
+)
+class RealPostgresApplicationTestingHoldTests(
+    application_volume_tests._ApplicationStateVolumeFixture
+):
+    """Exercise the continuation's actual authority lock and atomic replay writer."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        # Service startup requires a stored policy, even when standing Director
+        # permission needs no grants. SQLite fixtures do not enforce that startup.
+        policy = LaunchplaneAuthzPolicy()
+        self.store.seed_authz_policy_if_absent(
+            LaunchplaneAuthzPolicyRecord(
+                record_id=build_authz_policy_record_id(
+                    revision=1, policy_sha256=authz_policy_sha256(policy)
+                ),
+                source="test:application-testing-hold",
+                updated_at=self.profile.updated_at,
+                policy=policy,
+            )
+        )
+
+    def database_url(self) -> str:
+        return self.enterContext(_head_postgres_database())
+
+    test_original_application_allocation_can_lift_its_own_staging_hold = application_volume_tests.ApplicationStateVolumeTests.test_original_application_allocation_can_lift_its_own_staging_hold
+    test_application_continuation_refuses_live_source_mount_placement_and_execution_drift = application_volume_tests.ApplicationStateVolumeTests.test_application_continuation_refuses_live_source_mount_placement_and_execution_drift
+    test_application_continuation_rechecks_ownership_under_authority_lock = application_volume_tests.ApplicationStateVolumeTests.test_application_continuation_rechecks_ownership_under_authority_lock
+    test_missing_physical_storage_proof_keeps_application_held = application_volume_tests.ApplicationStateVolumeTests.test_missing_physical_storage_proof_keeps_application_held
 
 
 class RealPostgresHistoricalEffectRepositoryFenceTests(
