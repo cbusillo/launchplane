@@ -119,7 +119,6 @@ from control_plane.contracts.outbox_delivery import (
     build_outbox_delivery_id,
 )
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
-from control_plane.contracts.preview_enablement_record import PreviewEnablementRecord
 from control_plane.contracts.preview_generation_record import (
     PreviewGenerationRecord,
     PreviewPullRequestSummary,
@@ -1042,26 +1041,6 @@ def _preview_generation_record(*, generation_id: str, preview_id: str) -> Previe
         deploy_status="pass",
         verify_status="pass",
         overall_health_status="pass",
-    )
-
-
-def _preview_enablement_record(
-    *, record_id: str, updated_at: str, pr_number: int
-) -> PreviewEnablementRecord:
-    return PreviewEnablementRecord(
-        record_id=record_id,
-        context="verireel-testing",
-        anchor_repo="verireel",
-        anchor_pr_number=pr_number,
-        anchor_pr_url=f"https://github.com/every/verireel/pull/{pr_number}",
-        anchor_head_sha="6b3c9d7e8f901234567890abcdef1234567890ab",
-        action="labeled",
-        pr_state="open",
-        updated_at=updated_at,
-        label_enabled=True,
-        action_label="preview",
-        request_metadata_status="valid",
-        request_metadata_baseline_channel="testing",
     )
 
 
@@ -4976,49 +4955,6 @@ class PostgresRecordStoreTests(unittest.TestCase):
             ],
         )
 
-    def test_write_read_and_list_preview_enablement_records(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            store = PostgresRecordStore(
-                database_url=_sqlite_database_url(
-                    Path(temporary_directory_name) / "launchplane.sqlite3"
-                )
-            )
-            store.ensure_schema()
-
-            older_record = _preview_enablement_record(
-                record_id="verireel-testing-verireel-pr-101",
-                updated_at="2026-04-20T10:01:00Z",
-                pr_number=101,
-            )
-            newer_record = _preview_enablement_record(
-                record_id="verireel-testing-verireel-pr-102",
-                updated_at="2026-04-20T10:03:00Z",
-                pr_number=102,
-            )
-            closed_record = _preview_enablement_record(
-                record_id="verireel-testing-verireel-pr-103",
-                updated_at="2026-04-20T10:02:00Z",
-                pr_number=103,
-            ).model_copy(update={"pr_state": "closed"})
-
-            store.write_preview_enablement_record(older_record)
-            store.write_preview_enablement_record(newer_record)
-            store.write_preview_enablement_record(closed_record)
-            read_record = store.read_preview_enablement_record(newer_record.record_id)
-            listed_records = store.list_preview_enablement_records(
-                context_name="verireel-testing",
-                anchor_repo="verireel",
-                pr_state="open",
-                limit=2,
-            )
-            store.close()
-
-        self.assertEqual(read_record.anchor_pr_number, 102)
-        self.assertEqual(
-            [record.record_id for record in listed_records],
-            ["verireel-testing-verireel-pr-102", "verireel-testing-verireel-pr-101"],
-        )
-
     def test_preview_summaries_include_latest_generation(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(
@@ -7399,17 +7335,24 @@ private_key_context = "example_context"
             )
             filesystem_store.write_artifact_manifest(_artifact_manifest())
             filesystem_store.write_odoo_instance_override_record(_odoo_instance_override_record())
+            enablement_dir = filesystem_store.state_dir / "launchplane_preview_enablement"
+            enablement_dir.mkdir(parents=True)
+            enablement_payload = {
+                "schema_version": 1,
+                "record_id": "verireel-testing-verireel-pr-123",
+                "context": "verireel-testing",
+                "anchor_repo": "verireel",
+                "anchor_pr_number": 123,
+                "pr_state": "open",
+                "updated_at": "2026-04-20T10:05:30Z",
+            }
+            (enablement_dir / "verireel-testing-verireel-pr-123.json").write_text(
+                json.dumps(enablement_payload), encoding="utf-8"
+            )
             filesystem_store.write_preview_record(
                 _preview_record(
                     preview_id="preview-verireel-testing-verireel-pr-123",
                     updated_at="2026-04-20T10:05:00Z",
-                    pr_number=123,
-                )
-            )
-            filesystem_store.write_preview_enablement_record(
-                _preview_enablement_record(
-                    record_id="verireel-testing-verireel-pr-123",
-                    updated_at="2026-04-20T10:05:30Z",
                     pr_number=123,
                 )
             )
@@ -7679,10 +7622,7 @@ private_key_context = "example_context"
                 "ready",
             )
             self.assertEqual(
-                store.read_preview_enablement_record(
-                    "verireel-testing-verireel-pr-123"
-                ).request_metadata_baseline_channel,
-                "testing",
+                store.list_retired_preview_enablement_payloads(), (enablement_payload,)
             )
             self.assertEqual(
                 store.list_preview_inventory_scan_records(
