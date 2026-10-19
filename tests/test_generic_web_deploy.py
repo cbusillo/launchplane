@@ -1024,7 +1024,7 @@ class GenericWebDeployTests(unittest.TestCase):
             "control-plane.fake-cloud",
         )
 
-    def test_execute_generic_web_deploy_records_integration_key_readback(self) -> None:
+    def test_non_production_deploy_refuses_unreasoned_shared_key_before_provider(self) -> None:
         store = _IntegrationKeyGenericWebDeployStore(
             _profile(),
             secret_bindings=(
@@ -1036,23 +1036,20 @@ class GenericWebDeployTests(unittest.TestCase):
                 ).model_copy(update={"declared_secret_class": "shared_safe"}),
             ),
         )
+        deploy_provider = _FakeGenericWebDeployProvider()
 
         result = execute_generic_web_deploy(
             control_plane_root=Path("."),
             record_store=store,
             request=_request(),
-            deploy_provider=_FakeGenericWebDeployProvider(),
+            deploy_provider=deploy_provider,
         )
 
-        # Recorded on the deployment after the deploy; the read-back does not refuse it.
-        self.assertEqual(result.deploy_status, "pass")
-        readback = store.deployments[0].integration_key_readback
-        assert readback is not None
-        self.assertEqual(readback.status, "fail")
-        self.assertEqual(
-            [(finding.binding_key, finding.code) for finding in readback.findings],
-            [("REPAIRSHOPR_API_TOKEN", "sharing_reason_missing")],
-        )
+        self.assertEqual(result.deploy_status, "fail")
+        self.assertFalse(result.provider_effect_attempted)
+        self.assertEqual(deploy_provider.runtime_identities, [])
+        self.assertIn("REPAIRSHOPR_API_TOKEN", result.error_message)
+        self.assertIn("sharing_reason_missing", result.error_message)
 
     def test_non_production_deploy_refuses_failing_integration_key_before_provider(
         self,
