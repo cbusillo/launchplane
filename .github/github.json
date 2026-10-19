@@ -187,7 +187,6 @@
     "Reusable Ingress Route Apply",
     "Reusable Ingress Route Dry Run",
     "Live Target Runtime",
-    "Manage Launchplane Authorization",
     "Merge Train Policy Import",
     "Merge Train Runner",
     "Merge Train Stall Alert",

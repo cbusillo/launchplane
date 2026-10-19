@@ -746,7 +746,6 @@
         ],
         "schema_fingerprint_sha256": "9d473f48936f5bdc245a9da6abd292fc8c2e66ed3aee4a8b63d0302b237d1cd4",
         "supported_surfaces": [
-          "protected_workflow",
           "operator_ui",
           "service_api"
         ]
@@ -823,11 +822,6 @@
         "workflow_file": ".github/workflows/detached-application-retirement.yml"
       },
       {
-        "reusable_workflow_file": ".github/workflows/reusable-authz-policy-reconcile.yml",
-        "route": "/v1/authz-policies/managed-rule-sets/reconcile",
-        "workflow_file": ".github/workflows/authz-policy-reconcile.yml"
-      },
-      {
         "reusable_workflow_file": ".github/workflows/reusable-stable-lane-repair.yml",
         "route": "/v1/product-profiles/stable-lane-repair/apply",
         "workflow_file": ".github/workflows/product-onboarding-manifest.yml"
@@ -836,8 +830,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "dc1cff356c561ac36a0fe60a9bc536a2ca16d073"
+    "source_commit_sha": "1630fbd66f597080f746bdb9b78ac536e7c35fba"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "cb9d41b602370f4b71be25aa4fd11ef88328479aeb7d046c76a19e297b9657d0"
+  "semantic_digest_sha256": "a62b7bc5969b92bdaac6a0d8a4a3bf52319d42b80824e7ff27edb8e2d3871386"
 }

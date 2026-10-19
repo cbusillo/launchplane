@@ -33,12 +33,6 @@ PINNED_SELF_REUSABLE_WORKFLOWS: Mapping[Path, frozenset[str]] = {
     Path(".github/workflows/generic-web-preview-authorization.yml"): frozenset(
         {"cbusillo/launchplane/.github/workflows/reusable-generic-web-preview-authz-apply.yml"}
     ),
-    Path(".github/workflows/authz-policy-reconcile.yml"): frozenset(
-        {"cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml"}
-    ),
-    Path(".github/workflows/deploy-launchplane.yml"): frozenset(
-        {"cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml"}
-    ),
     Path(".github/workflows/route-binding-reconcile.yml"): frozenset(
         {"cbusillo/launchplane/.github/workflows/reusable-route-binding-reconcile.yml"}
     ),
@@ -157,9 +151,6 @@ APPROVED_REMOTE_ACTIONS: Mapping[str, ActionClassification] = {
             "First-party cross-repository",
             "bounded legacy generic-web deploy reservation inspection",
         )
-    ),
-    "cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml": (
-        ActionClassification("First-party same-repository", "authorization policy administration")
     ),
     "cbusillo/launchplane/.github/workflows/reusable-generic-web-onboarding-apply.yml": (
         ActionClassification(
