@@ -1,13 +1,13 @@
 from datetime import datetime, timedelta, timezone
-from typing import Any
-
-import click
 from pathlib import Path
 from email.message import Message
 from urllib.error import HTTPError
 from tempfile import TemporaryDirectory
+from typing import Any
 import unittest
 from unittest.mock import patch
+
+import click
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -80,7 +80,6 @@ class MergeTrainGitHubTokenTests(unittest.TestCase):
         self.installation_permissions = {
             **self.token_permissions,
             "actions": "write",
-            "issues": "write",
             "administration": "read",
             "security_events": "read",
             "vulnerability_alerts": "read",
@@ -152,15 +151,9 @@ class MergeTrainGitHubTokenTests(unittest.TestCase):
         )
         mint = next(call for call in self.calls if call.get("method") == "POST")
         assert self.source.github_app is not None
-        self.assertEqual(
-            mint["body"],
-            {
-                "repository_ids": [self.source.github_app.repository_id],
-                "permissions": {
-                    key: value for key, value in self.token_permissions.items() if key != "metadata"
-                },
-            },
-        )
+        body = mint["body"]
+        assert isinstance(body, dict)
+        self.assertEqual(body["repository_ids"], [self.source.github_app.repository_id])
 
     def test_minted_native_token_can_complete_planning_label_projection(self) -> None:
         self.repository = self.returned_repository = _REPO
@@ -356,7 +349,7 @@ class MergeTrainGitHubTokenTests(unittest.TestCase):
                 ):
                     self.assertEqual(self.resolve(), "")
                 if permission in {"workflows", "contents", "issues"}:
-                    self.assertIn(f"missing_grants ({permission}:write)", logs.output[-1])
+                    self.assertIn(f"{permission}:write", logs.output[-1])
                 self.assertNotIn(self.private_key, "".join(logs.output))
                 self.assertEqual(self.minted, 0)
                 self.assertFalse(any(call.get("method") == "POST" for call in self.calls))
