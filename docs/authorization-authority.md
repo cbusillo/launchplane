@@ -37,7 +37,9 @@ access to an invalid policy or silently starting with bootstrap authority.
   credentials, granting access, or changing who can merge (see
   [DIRECTION.md](../DIRECTION.md#stop-boundaries)). Do not create, edit,
   retarget, or dispatch a workflow, secret, or local helper to make a denied
-  operation succeed.
+  operation succeed. Fixing the refusing tool's rule through a reviewed source
+  change, as [Denial Handling](#denial-handling) requires, is not such a
+  workaround.
 
 The [feedback continuation foundation](every-code-feedback-resume.md), which is
 not continued and remains unwired in code, defines
@@ -462,9 +464,15 @@ hint. Record the denied action, scope, and trace ID, then:
   Diagnose authentication, the source effect and the installed revision, then
   fix the tool under the overall direction. Do not prepare a grant or ask for
   read-role approval. Continue independent work while installation is pending.
-- **A refused write, grant, or change** is a stop boundary. Ask the Director
-  once for that specific grant or change and continue with work that does not
-  depend on it.
+- **A refused Director-agent write that hits no stop boundary** is also a tool
+  defect, fixed at the blocked work's priority, not a new operation or a
+  question (see [DIRECTION.md](../DIRECTION.md#stop-boundaries)). Fix the tool
+  so that kind of refusal cannot happen again, and never ask the Director for a
+  grant to get around it. A refusal that rightly protects production, a backup,
+  a live site, Client data or merge safety is met, never removed.
+- **A refused grant or access change, or a write that hits a stop boundary**,
+  is a stop. Ask the Director once for that specific change and continue with
+  work that does not depend on it.
 
 Do not work around a denial by borrowing another identity, adding a workflow or
 secret, running a direct database command, or calling the provider. Manual route
