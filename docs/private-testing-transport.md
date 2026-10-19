@@ -46,6 +46,45 @@ application testing lanes. Q453 accepted this topology instead of the
 Compose-only upstream binding and its host firewall requirement. It does not
 change the restrictions on the Compose path below or any production record.
 
+### Health probes with public wildcard DNS
+
+An application testing endpoint may retain the existing public wildcard DNS.
+The monitor does not follow those public answers or permit arbitrary public
+private-health requests. For a testing hostname it verifies the active endpoint,
+exclusive application and lane ownership, current provider placement and exact
+application domain, an applied private-route receipt, and fresh NPMplus readback.
+The enabled route must still have its reviewed access list, current wildcard
+certificate and unchanged configuration, with no overlapping edge aliases or
+held private-route provider operations. Historical pending receipts from a
+completed replan do not hold a new route's probe. Only the latest applied receipt
+for the current provider host supplies authority, so a later disable cannot be
+overridden by replaying an older enabled receipt. Receipt timestamps preserve
+subsecond ordering. Repeated plans preserve their prior applied receipt under a
+content-addressed history ID before replacing the plan's pending/readback record;
+the history retains its original timestamp. A failed pre-effect retry cannot
+erase a later disable and resurrect older serving authority. If preserving that
+history fails, the replacement and provider effects do not proceed.
+Deleted historical hosts are not queried
+as current candidates. Missing or changed current evidence fails the probe.
+
+The health request connects to the configured NPMplus API origin's machine on
+HTTPS port 443. That origin must resolve exclusively to the existing permitted
+private address ranges (RFC1918 or RFC6598), and must reach the same edge's HTTPS
+listener. Socket addresses are validated and pinned before connecting, while
+Host, SNI and ordinary certificate/name verification use the endpoint hostname.
+Endpoint DNS is never used to select this socket, so wildcard DNS changes cannot
+redirect it; a public or mixed answer for the configured edge origin refuses.
+No DNS record or shared trust store changes. A provider API hosted separately
+from its HTTPS listener does not qualify through this transport.
+
+This continuation sends only an unauthenticated `GET /health`, with no request
+body, query, API credentials, cookies or redirects. It requires the monitor's
+runtime-identity check; HTTP 200 alone cannot qualify an absent or different
+runtime. Non-testing endpoints and the generic private HTTP client retain their
+existing network policy. Actual edge access-list denial, remote tailnet and WSS
+qualification remain separate operational proof; route registration is not
+transport proof.
+
 Planning changes no provider state. Apply uses a dedicated lane-private-ingress
 provider-operation fence, saves its pending receipt before effects, then records
 independent provider readback. Active application-hostname creation also holds
@@ -110,7 +149,11 @@ PostgreSQL name fences is tracked separately in #4005.
 Disable uses a fresh reviewed plan and the same lane's exact receipt-owned route,
 retaining its original endpoint and edge keys. It only toggles that route even
 after the old application or edge record disappears, and leaves the application
-hostname and bot state in place. Disabled routes need no loaded-nginx flag, but
+hostname and bot state in place. For disable only, a historical successful apply
+receipt can establish ownership when its host ID and complete current route hash
+match. This keeps service cleanup available after an out-of-band re-enable;
+it does not authorize probes or create/re-enable, which still require the latest
+applied receipt. Disabled routes need no loaded-nginx flag, but
 retain the same hidden-config checks; enabled routes must be loaded.
 Neither operation deploys a workload
 or proves TLS, WSS, remote tailnet access or healthy runtime identity.
@@ -136,10 +179,9 @@ The HTTP surface is projected into the agent/admin contract. Installed caller
 support must include this operation before operational use; do not call a raw
 provider API or use an arbitrary local CLI as a substitute. After source delivery,
 qualify the actual route through its access list from the service and intended
-clients, including a remote tailnet peer and public denial. Existing private HTTP
-probes still require RFC1918-only DNS answers; a wildcard resolving to the public
-edge needs a supported probe continuation before monitoring can pass. Do not
-change DNS or weaken that check as a workaround.
+clients, including a remote tailnet peer and public denial. For public wildcard
+DNS use the health-only verified-edge continuation above. Do not change DNS,
+use a public probe or weaken the generic private-address check as a workaround.
 
 ## Endpoint and outbound boundary
 
@@ -148,8 +190,8 @@ covered by an existing wildcard certificate. Other lane instances retain the exi
 record rule; their credential-bearing consumers do not gain new DNS authorities.
 Registration validates URL syntax;
 it does not resolve DNS or claim reachability. Existing non-public literal records remain readable, including loopback and
-tailnet addresses; record readback alone does not permit a connection. At every
-check, every product's private HTTP client resolves the host again and accepts
+tailnet addresses; record readback alone does not permit a connection. The generic
+private HTTP client resolves the host at every request and accepts
 only a nonempty answer set entirely within RFC1918 (`10/8`, `172.16/12`,
 `192.168/16`) or RFC6598 shared address space (`100.64.0.0/10`, used by tailnets).
 Answers mixing those allowed ranges are accepted; an answer set containing any
