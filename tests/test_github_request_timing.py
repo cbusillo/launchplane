@@ -20,6 +20,66 @@ class _Clock:
 
 
 class GitHubRequestTimingTests(unittest.TestCase):
+    def test_worker_serializes_receipts_with_traces_and_reports_a_failed_empty_pass(self) -> None:
+        script = textwrap.dedent("""
+            import logging
+            from dataclasses import replace
+            from unittest.mock import patch
+            from control_plane.cli import main
+            from control_plane.merge_train_scheduler import MergeTrainScheduledTargetResult
+            from control_plane.merge_train_wake import (
+                MergeTrainEventReceipt, MergeTrainTargetReceipt, MergeTrainWake,
+            )
+
+            key = "merge-train-controller:example:repo:main"
+            receipt = MergeTrainEventReceipt(
+                delivery_id="completion", request_trace_id="receiver-trace",
+                received_at="2026-10-19T09:00:00Z", event="check_run", action="completed",
+            )
+            wake = MergeTrainWake(
+                frozenset({key}), "event_hints",
+                receipts=(MergeTrainTargetReceipt(key, receipt),),
+                pass_started_at="2026-10-19T09:00:02Z",
+                hint_observed_at="2026-10-19T09:00:01Z",
+            )
+            def run_loop(**kwargs):
+                row = MergeTrainScheduledTargetResult(
+                    repository="example/repo", base_branch="main", runner_mode="controller",
+                    mutate=False, status="ran", trace_id="action-trace",
+                    records={"candidate_id": "candidate-record"}, wake=wake.for_target(key),
+                )
+                kwargs["pass_callback"]((row,), wake)
+                kwargs["pass_callback"]((), replace(wake, pass_error_code="OSError"))
+                logging.getLogger("unrelated_library").info("unrelated INFO")
+                return 2
+
+            with (
+                patch("control_plane.cli_service._store"),
+                patch("control_plane.cli_service.Thread"),
+                patch("control_plane.cli_service.MergeTrainEventListener"),
+                patch("control_plane.cli_service.run_merge_train_scheduler_loop", run_loop),
+            ):
+                main(["service", "merge-train-workers", "run", "--database-url",
+                      "postgresql://unused/test"], standalone_mode=False)
+        """)
+        result = subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True, check=False, timeout=30
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = result.stdout.splitlines()
+        rows, empty = [json.loads(line) for line in lines[:2]]
+        stopped = json.loads("\n".join(lines[2:]))
+        self.assertEqual(rows[0]["trace_id"], "action-trace")
+        self.assertEqual(rows[0]["records"], {"candidate_id": "candidate-record"})
+        self.assertEqual(rows[0]["wake"]["event_receipts"][0]["delivery_id"], "completion")
+        self.assertEqual(rows[0]["wake"]["event_receipts"][0]["request_trace_id"], "receiver-trace")
+        self.assertEqual(empty, [])
+        self.assertEqual(stopped, {"status": "stopped"})
+        diagnostic = json.loads(result.stderr)
+        self.assertEqual(diagnostic["wake"]["pass_error_code"], "OSError")
+        self.assertEqual(diagnostic["wake"]["receipts"][0]["receipt"]["delivery_id"], "completion")
+        self.assertIsInstance(diagnostic["wake"]["target_keys"], list)
+
     def test_worker_commands_emit_short_pass_tallies_to_stderr(self) -> None:
         script = textwrap.dedent("""
             import logging

@@ -38,6 +38,8 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, OperationalError, SQLAlchemyError
 
 from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.merge_train_events import MergeTrainEventListener
+from control_plane.merge_train_wake import MergeTrainEventReceipt
 from control_plane.workflows.dokploy_target_adoption import (
     PROJECT_CREATE_PATH,
     ENVIRONMENT_CREATE_PATH,
@@ -555,6 +557,63 @@ def _store_for_fresh_head_database() -> Iterator[PostgresRecordStore]:
             yield store
         finally:
             store.close()
+
+
+class RealPostgresMergeTrainNotificationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        database_url = self.enterContext(_head_postgres_database())
+        self.store = PostgresRecordStore(database_url=database_url)
+        self.addCleanup(self.store.close)
+        self.store.verify_schema()
+        self.listener = MergeTrainEventListener(database_url)
+        self.addCleanup(self.listener.close)
+        # Establish LISTEN before publishing; a due wait never blocks.
+        self.listener.wait(0, threading.Event())
+        self.receipt = MergeTrainEventReceipt(
+            delivery_id="completion",
+            request_trace_id="receiver-request",
+            received_at="2026-10-19T09:00:00Z",
+            event="check_run",
+            action="completed",
+        )
+
+    def test_committed_keys_and_distinct_observations_coalesce_and_drain(self) -> None:
+        second = replace(self.receipt, request_trace_id="redelivery-request")
+        self.store.notify_merge_train(("alpha", "beta"), receipt=self.receipt)
+        self.store.notify_merge_train(("alpha",), receipt=second)
+        assert self.listener.connection is not None
+        # Let the listening backend process committed notifications before testing its queued drain.
+        self.listener.connection.execute("SELECT 1")
+        wake = self.listener.wait(2, threading.Event())
+        self.assertEqual(wake.target_keys, frozenset({"alpha", "beta"}))
+        self.assertEqual(wake.for_target("alpha").event_receipts, (self.receipt, second))
+        self.assertEqual(wake.for_target("beta").event_receipts, (self.receipt,))
+        assert self.listener.connection is not None
+        self.assertEqual(list(self.listener.connection.notifies(timeout=0)), [])
+
+    def test_rollback_delivers_neither_routing_keys_nor_receipts(self) -> None:
+        begin = self.store._engine.begin
+
+        @contextmanager
+        def abort_transaction() -> Iterator[Any]:
+            with begin() as connection:
+                yield connection
+                raise RuntimeError("rollback fixture")
+
+        with patch.object(self.store._engine, "begin", abort_transaction):
+            with self.assertRaises(RuntimeError):
+                self.store.notify_merge_train(("rolled-back",), receipt=self.receipt)
+        # A committed sentinel establishes observation without a successful-path sleep.
+        self.store.notify_merge_train(("sentinel",))
+        wake = self.listener.wait(2, threading.Event())
+        self.assertEqual(wake.target_keys, frozenset({"sentinel"}))
+        self.assertEqual(wake.receipts, ())
+
+    def test_invalid_optional_metadata_preserves_the_raw_key(self) -> None:
+        self.store.notify_merge_train(("alpha",), receipt=replace(self.receipt, delivery_id=""))
+        wake = self.listener.wait(2, threading.Event())
+        self.assertEqual(wake.target_keys, frozenset({"alpha"}))
+        self.assertEqual(wake.receipts, ())
 
 
 def _tenant_repository_classification_record(

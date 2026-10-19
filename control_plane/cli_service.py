@@ -24,6 +24,7 @@ from control_plane.merge_train_scheduler import (
     run_merge_train_scheduler_pass,
 )
 from control_plane.merge_train_events import MergeTrainEventListener
+from control_plane.merge_train_wake import MergeTrainWake
 from control_plane.merge_train_stall_monitor import run_stall_monitor_loop
 from control_plane.outbox_worker import (
     DEFAULT_OUTBOX_WORKER_ERROR_BACKOFF_SECONDS,
@@ -547,9 +548,20 @@ def service_merge_train_workers_run(
     def _request_stop(_signum: int, _frame: object) -> None:
         stop_event.set()
 
-    def _log_pass(results: tuple[MergeTrainScheduledTargetResult, ...]) -> None:
+    def _log_pass(
+        results: tuple[MergeTrainScheduledTargetResult, ...], wake: MergeTrainWake
+    ) -> None:
         # One line per pass, so the container log shows the train's cadence.
         click.echo(json.dumps([asdict(result) for result in results], sort_keys=True))
+        if not results:
+            observation = asdict(wake)
+            observation["target_keys"] = (
+                None if wake.target_keys is None else sorted(wake.target_keys)
+            )
+            click.echo(
+                json.dumps({"event": "merge_train_pass", "results": [], "wake": observation}),
+                err=True,
+            )
 
     previous_sigterm = signal.signal(signal.SIGTERM, _request_stop)
     previous_sigint = signal.signal(signal.SIGINT, _request_stop)

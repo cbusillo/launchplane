@@ -35,6 +35,7 @@ from control_plane.product_config_authority_events import (
     request_product_config_authority_event,
 )
 from control_plane.repository_inventory import get_repository_inventory_read_model
+from control_plane.merge_train_wake import MergeTrainEventReceipt
 from control_plane.workflows.launchplane import verify_github_webhook_signature
 from control_plane.workflows.ship import utc_now_timestamp
 
@@ -80,10 +81,27 @@ def _resolve_managed_webhook_secret() -> str:
     )
 
 
-def _wake_merge_train(record_store: object, event: str, payload: dict[str, object]) -> bool:
+class MergeTrainWakeCallback(Protocol):
+    def __call__(
+        self,
+        record_store: object,
+        event: str,
+        payload: dict[str, object],
+        *,
+        receipt: MergeTrainEventReceipt | None,
+    ) -> bool: ...
+
+
+def _wake_merge_train(
+    record_store: object,
+    event: str,
+    payload: dict[str, object],
+    *,
+    receipt: MergeTrainEventReceipt | None,
+) -> bool:
     from control_plane.merge_train_events import wake_merge_train_for_event
 
-    return wake_merge_train_for_event(record_store, event, payload)
+    return wake_merge_train_for_event(record_store, event, payload, receipt=receipt)
 
 
 @dataclass(frozen=True)
@@ -91,7 +109,7 @@ class GitHubAppWebhookDependencies:
     webhook_secret: Callable[[], str] = _resolve_managed_webhook_secret
     verify_signature: Callable[..., None] = verify_github_webhook_signature
     now: Callable[[], str] = utc_now_timestamp
-    wake_merge_train: Callable[[object, str, dict[str, object]], bool] = _wake_merge_train
+    wake_merge_train: MergeTrainWakeCallback = _wake_merge_train
     config_authority: Callable[
         [object, RepositoryInventoryRecord, str, dict[str, object]], dict[str, JsonValue]
     ] = request_product_config_authority_event
@@ -164,10 +182,30 @@ def handle_github_app_webhook_request(
 
     normalized_event = event_name.strip().lower()
     action = _string(payload, "action").lower()
+    try:
+        received_at = dependencies.now()
+    except Exception:
+        # Attribution cannot make an otherwise useful routing hint unavailable.
+        received_at = ""
+        logging.getLogger(__name__).warning("Merge train receipt timestamp unavailable.")
+    source_event = _mapping(payload, normalized_event)
+    receipt = MergeTrainEventReceipt.from_payload(
+        {
+            "delivery_id": normalized_delivery_id,
+            "request_trace_id": trace_id,
+            "received_at": received_at,
+            "event": normalized_event,
+            "action": action or (_string(payload, "state") if normalized_event == "status" else ""),
+            "head_sha": _string(source_event, "head_sha") or _string(payload, "sha"),
+            "source_id": _positive_id(source_event, "id"),
+        }
+    )
     # Only verified deliveries can wake a worker. A failed notification never
     # prevents product reconciliation; the train's timed sweep recovers it.
     try:
-        train_woken = dependencies.wake_merge_train(record_store, normalized_event, payload)
+        train_woken = dependencies.wake_merge_train(
+            record_store, normalized_event, payload, receipt=receipt
+        )
     except Exception:
         logging.getLogger(__name__).warning(
             "Merge train event wake failed; timed sweep will retry."
@@ -220,7 +258,7 @@ def handle_github_app_webhook_request(
         if product
     )
     target_keys = tuple(dict.fromkeys(target.target_key for target in targets))
-    received_at = dependencies.now()
+    received_at = received_at or dependencies.now()
     delivery = GitHubAppWebhookDeliveryRecord(
         delivery_id=normalized_delivery_id,
         event=normalized_event,

@@ -54,6 +54,46 @@ managed webhook secret. This source change adds no App subscription, grant or
 credential; enabling missing subscriptions is a separate administrator action.
 Deployment and live delivery are separate from the local notification rehearsal.
 
+## Wake observations
+
+After signature and JSON validation, the receiver captures the delivery header,
+its request trace and receipt time, normalized event/action, and bounded optional
+head and event identifiers. These are correlation fields from a signature-verified
+request; the delivery/event headers are not themselves covered by the payload
+signature. Redelivery may reuse a delivery ID, so the request trace distinguishes
+observations. The fields never replace fresh merge evidence.
+
+Each existing raw controller-key notification remains the routing hint. A bounded
+receipt companion is published on the same channel in the same transaction.
+This preserves routing while separate receiver/worker containers roll forward;
+there is no independently pinned old-worker mode or compatibility service.
+Invalid or oversized optional metadata omits the companion without suppressing
+the raw hint. A failed database notification still relies on the timed sweep.
+
+The listener fully drains queued hints while retaining at most a bounded set of
+receipts. `receipts_truncated` reports lost attribution, not an exact count of
+unique deliveries. Missing, malformed or legacy metadata remains unattributed.
+Receipt data cannot supply a routing key. A due sweep still consumes queued hints
+and rereads all targets, retaining only their observed receipt metadata.
+
+Worker result rows retain their existing controller trace and record identifiers,
+with a `wake` observation containing the actual selection reason, loop-pass start,
+hint observation time and only that target's receipts. Startup, manual passes,
+event hints, timed sweeps, empty hints and listener fallback remain distinguishable.
+A timer sweep can also observe event receipts; other targets do not inherit those
+receipts. A later pass does not reuse old receipts as a new cause. The loop-pass
+start is not every target/action's start: use each controller's recorded times
+and trace for the individual action, including bounded continuations.
+
+The CLI keeps its stdout list shape. A zero-result pass additionally emits a
+bounded JSON diagnostic on stderr, including any whole-pass error code. A receipt
+alone establishes neither an action nor a landing. Join the actual action trace
+and record identifiers through existing admission/landing reads; immutable
+landing outcomes bind their `source` to `service:merge-landing-outcome:{trace_id}`.
+No additional proof store, grant or reader credential is introduced. Retain raw
+timestamps and clock uncertainty when measuring latency; local rehearsals and
+nearby timestamps do not prove a natural event-to-landing chain or saved idle time.
+
 See [merge-train policy](merge-train-policy.md) for admission, leases, policy
 records and the service-worker sweeps and manual GitHub entrypoint.
 
