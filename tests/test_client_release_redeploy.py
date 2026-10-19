@@ -32,6 +32,10 @@ from tests.test_production_backup_provider import BackupHost, setup_memory_files
 
 IMAGE = "example.invalid/launchplane@sha256:" + "a" * 64
 MARKER = "isolated-replacement"
+# Bounds a replacement child that never exits. It is not a latency requirement:
+# the child spends about 2.5 CPU seconds importing and building the app, and a
+# loaded host stretched that past the earlier 30-second deadline (launchplane#2432).
+REPLACEMENT_START_HANG_DEADLINE_SECONDS = 120
 
 
 def _prepare(
@@ -54,8 +58,13 @@ def _replacement_env() -> dict[str, str]:
 class ClientReleaseRedeployTests(unittest.TestCase):
     def setUp(self) -> None:
         setup_memory_files(self)
+        self.active_fixture: Any = None
 
     def fixture(self, family: str) -> Any:
+        # A failed subtest skips its own cleanup; stop its module patches before
+        # the next family's fixture starts, so one failure stays one failure.
+        if self.active_fixture is not None:
+            self.active_fixture.doCleanups()
         fixture = (
             odoo.ClientReleaseTests(methodName="runTest")
             if family == "odoo"
@@ -64,6 +73,7 @@ class ClientReleaseRedeployTests(unittest.TestCase):
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
         fixture.switch("promote_with_rollback_drill")
+        self.active_fixture = fixture
         return fixture
 
     def restart(self, fixture: Any) -> None:
@@ -85,7 +95,7 @@ class ClientReleaseRedeployTests(unittest.TestCase):
             env={"PATH": os.environ["PATH"], "LANG": "C.UTF-8", **_replacement_env()},
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=REPLACEMENT_START_HANG_DEADLINE_SECONDS,
             check=False,
         )
         self.assertEqual(process.returncode, 0, process.stderr)
