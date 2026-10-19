@@ -115,12 +115,12 @@ function IssueInboxContent({ data }: { data: WorkGraphIssueInboxResponse }) {
 
       <section className="engineering-evidence-strip" aria-label="Inbox evidence">
         <div>
-          <span>Inventory</span>
-          <strong>{data.configured ? "Configured" : "Not configured"}</strong>
+          <span>Issue source</span>
+          <strong>{data.configured ? "Available" : "No source"}</strong>
         </div>
         <div>
-          <span>Code Plans Project</span>
-          <strong>{inbox.project_configured ? "Configured" : "Unconfigured"}</strong>
+          <span>Project source</span>
+          <strong>{inbox.project_configured ? "Available" : "No source"}</strong>
         </div>
         <div>
           <span>Generated</span>
@@ -131,13 +131,13 @@ function IssueInboxContent({ data }: { data: WorkGraphIssueInboxResponse }) {
 
       {!data.configured ? (
         <EngineeringEmpty
-          detail="Launchplane has no explicit issue-inbox repository inventory. It will not search repository owners or infer repositories."
+          detail="The deployed service has no GitHub issue-inbox source."
           icon={ShieldAlert}
-          title="Issue inventory not configured"
+          title="No issue source"
         />
       ) : !inbox.repositories.length ? (
         <EngineeringEmpty
-          detail="The configured issue inventory contains no repository groups."
+          detail="The issue source returned no repository groups."
           icon={FolderGit2}
           title="No repositories in the inbox"
         />
@@ -161,7 +161,7 @@ function IssueInboxContent({ data }: { data: WorkGraphIssueInboxResponse }) {
               </header>
               {!repository.issues.length ? (
                 <EngineeringEmpty
-                  detail="GitHub returned no open issues for this configured repository."
+                  detail="The issue source returned no open issues for this repository."
                   icon={Inbox}
                   title="No open issues"
                 />

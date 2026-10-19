@@ -1217,11 +1217,11 @@ at the identity boundary even if a policy grant is too broad, performs no
 storage writes, and does not make Launchplane authoritative for copied GitHub or
 Code Plans state.
 
-`POST /v1/work-graph/github/issues/reconcile` reconciles the configured GitHub
-issue inbox into Code Plans Project state. `dry_run` mode requires
-`work_graph.rank`; `apply` requires `work_graph.issue_inbox.reconcile`. The
-route uses the native FastAPI write identity boundary for GitHub Actions OIDC
-and trusted Director-agent write credentials, then returns reconcile evidence under
+`POST /v1/work-graph/github/issues/reconcile` retains its injected-provider
+contract. The deployed service has no reconcile provider and, after
+authorization, refuses with `400 invalid_request`. `dry_run` requires
+`work_graph.rank`; `apply` requires `work_graph.issue_inbox.reconcile`. When a
+provider is supplied, the route returns its reconcile evidence under
 `result.reconcile`.
 
 `POST /v1/work-graph/merge-train/run-once` executes one policy-backed Level 1
