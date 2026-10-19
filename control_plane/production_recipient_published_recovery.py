@@ -63,8 +63,12 @@ def published_mounts(
 def published_proof_is_fresh(proof: dict[str, object]) -> bool:
     """Historical readback preserves its timestamp; it never renews a proof."""
     try:
-        ended = datetime.fromisoformat(str(proof["recovered_at"]).replace("Z", "+00:00"))
-        until = datetime.fromisoformat(str(proof["recovery_fresh_until"]).replace("Z", "+00:00"))
+        recovered_at = proof["recovered_at"]
+        fresh_until = proof["recovery_fresh_until"]
+        if not isinstance(recovered_at, str) or not isinstance(fresh_until, str):
+            return False
+        ended = datetime.fromisoformat(recovered_at.replace("Z", "+00:00"))
+        until = datetime.fromisoformat(fresh_until.replace("Z", "+00:00"))
         return ended <= datetime.now(timezone.utc) <= until
     except (KeyError, ValueError, TypeError):
         return False
@@ -149,6 +153,7 @@ def published_current(
         capture_started_at=str(proof.get("capture_started_at", "")),
         capture_duration_ms=proof.get("capture_duration_ms"),
         recovery_fresh_until=str(proof.get("recovery_fresh_until", "")),
+        qualification_status="qualified" if proof else "pending",
     )
 
 
@@ -227,9 +232,9 @@ def record_published_result(
     }
     replacement = record.model_copy(
         update={
-            "published_recovery_proofs": {
-                **record.published_recovery_proofs,
-                result.plan_sha256: proof,
+            "execution": {
+                **record.execution,
+                "published_recovery:" + result.plan_sha256: proof,
             },
         }
     )

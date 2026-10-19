@@ -4,6 +4,7 @@ import base64
 import hashlib
 import inspect
 import json
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,17 @@ def run_recipient_program(
     retire_execution: bool = False,
     custodied_read: bool = False,
 ) -> dict[str, str]:
+    from control_plane.production_recipient_published_host import PUBLISHED_RECOVERY_INSPECT_PROGRAM
+
+    recovery_read = (
+        program in {RECOVERY_INSPECT_PROGRAM, PUBLISHED_RECOVERY_INSPECT_PROGRAM}
+        and set(spec) == {"namespace", "binding", "recovery_binding", "inspect"}
+        and spec.get("inspect") is True
+        and spec.get("namespace") == record.namespace
+        and spec.get("binding") == record.plan_sha256
+        and re.fullmatch(r"[a-f0-9]{64}", str(spec.get("recovery_binding"))) is not None
+    )
+    custodied_read = custodied_read or recovery_read
     if retire_execution:
         from control_plane.production_recipient_fence import RETIRE_EXECUTION_PROGRAM
 
@@ -54,9 +66,10 @@ def run_recipient_program(
                 in {"receipt_pause", "receipt_resume", "receipt_resume_retryable", "receipt_fenced"}
                 or program == WRITER_PROGRAM
                 and spec.get("action") == "parked"
+                or recovery_read
             )
         ):
-            raise ValueError("Custodied host access permits only fixed writer reads.")
+            raise ValueError("Custodied host access permits only fixed witness reads.")
     host, token = source.read_dokploy_config(control_plane_root=root)
     payload: api.JsonObject = (
         {
@@ -101,6 +114,7 @@ def run_recipient_program(
                     spec.get("action", ""),
                     spec.get("binding", ""),
                 ]
+                + ([spec["recovery_binding"]] if "recovery_binding" in spec else [])
             ).encode()
         ).hexdigest()[:16]
     )
@@ -387,6 +401,7 @@ def recover(paths,spec,*,base=None):
     with recovery_directory(spec,base) as destination:
         previous=load_outcome(destination,spec)
         if previous and previous['state']=='passed':
+            paths=paths() if callable(paths) else paths
             if manifest_digest(paths)!=previous['source_manifest_sha256']:
                 raise ValueError('captured source changed')
             emit_outcome(previous)
@@ -402,6 +417,7 @@ def recover(paths,spec,*,base=None):
         container='lp-recovery-'+uuid.uuid4().hex
         cleanup_verified=True
         try:
+            paths=paths() if callable(paths) else paths
             before=[manifest(path) for path in paths]
             if before[0] and not (paths[0]/'mysql').is_dir():
                 raise ValueError('storage is neither empty nor cold MariaDB')
@@ -485,9 +501,24 @@ try:
     if spec.get('inspect', False):
         inspect_recovery(spec)
     else:
-        recover(main(),spec)
+        recover(main,spec)
 except Exception:
     print("recipient_recovery_ok=false")
+    sys.exit(1)
+"""
+)
+
+RECOVERY_INSPECT_PROGRAM = (
+    RESOURCE_LIBRARY
+    + RECOVERY_LIBRARY
+    + r"""
+try:
+    spec=json.loads(base64.b64decode(sys.argv[1],validate=True))
+    if set(spec)!={'namespace','binding','recovery_binding','inspect'} or spec['inspect'] is not True:
+        raise ValueError('only terminal recovery inspection is allowed')
+    inspect_recovery(spec)
+except Exception:
+    print('recipient_recovery_ok=false')
     sys.exit(1)
 """
 )

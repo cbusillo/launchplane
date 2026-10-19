@@ -14,6 +14,7 @@ from control_plane.production_recipient_published_recovery import (
     CAPTURE_TIMEOUT_SECONDS,
     published_proof_is_fresh,
 )
+from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.provider_operations import run_durable_provider_operation
 from tests import test_production_recipient_publication as publication_tests
 
@@ -27,7 +28,7 @@ class PublishedRecoveryTests(unittest.TestCase):
         self.publication.setUp()
         self.addCleanup(self.publication.doCleanups)
         self.fixture = self.publication.fixture
-        self.store = self.fixture.store
+        self.store: PostgresRecordStore = self.fixture.store
         self.record = self.publication.publish()
         self.adapter = RecipientRecoveryAdapter(
             self.fixture.root,
@@ -54,7 +55,8 @@ class PublishedRecoveryTests(unittest.TestCase):
         )
         self.calls: list[dict[str, Any]] = []
 
-    def evidence(self, spec: dict[str, Any]) -> dict[str, str]:
+    @staticmethod
+    def evidence(spec: dict[str, Any]) -> dict[str, str]:
         now = str(int(datetime.now(timezone.utc).timestamp() * 1000))
         return {
             "recipient_recovery_ok": "true",
@@ -68,7 +70,7 @@ class PublishedRecoveryTests(unittest.TestCase):
             "recipient_recovery_duration_ms": "25",
         }
 
-    def host(self, root: Any, record: Any, spec: Any, program: Any, checkpoint: Any) -> Any:
+    def host(self, _root: Any, _record: Any, spec: Any, _program: Any, checkpoint: Any) -> Any:
         self.calls.append(spec)
         checkpoint("published_capture")
         return self.evidence(spec)
@@ -145,20 +147,21 @@ class PublishedRecoveryTests(unittest.TestCase):
             seconds=CAPTURE_WITNESS_MAX_AGE_SECONDS + 60
         )
 
-        class LaterClock(datetime):
-            @classmethod
-            def now(cls, tz: Any = None) -> "LaterClock":
-                return cls.fromtimestamp(future.timestamp(), timezone.utc)
-
         with (
-            patch("control_plane.production_recipient_published_recovery.datetime", LaterClock),
+            patch(
+                "control_plane.production_recipient_published_recovery.datetime", wraps=datetime
+            ) as clock,
             patch(
                 "control_plane.production_recipient_recovery.run_recipient_program",
                 return_value=evidence,
             ) as host,
         ):
+            clock.now.return_value = future
+
             # The checkpoint still belongs to this original operation.
-            def witnessed(root: Any, record: Any, spec: Any, program: Any, checkpoint: Any) -> Any:
+            def witnessed(
+                _root: Any, _record: Any, _spec: Any, _program: Any, checkpoint: Any
+            ) -> Any:
                 checkpoint("historical_capture")
                 return evidence
 
@@ -166,7 +169,10 @@ class PublishedRecoveryTests(unittest.TestCase):
             self.assertEqual(self.run_recovery().status, "completed")
             historical = self.adapter.current()[1]
         self.assertTrue(historical.recovered)
-        with patch("control_plane.production_recipient_published_recovery.datetime", LaterClock):
+        with patch(
+            "control_plane.production_recipient_published_recovery.datetime", wraps=datetime
+        ) as clock:
+            clock.now.return_value = future
             self.assertFalse(published_proof_is_fresh(historical.model_dump()))
             replayed = self.run_recovery()
         self.assertEqual(replayed.status, "replayed")
@@ -227,7 +233,13 @@ class PublishedRecoveryTests(unittest.TestCase):
         )
         _, plan = self.adapter.current()
         spec = self.adapter.host_spec(self.record, plan)
-        self.assertEqual(cast(dict[str, Any], spec["mounts"])["config"]["destination"], "/config")
+        expected_mount = self.fixture.document["services"][self.record.request.application_service][
+            "volumes"
+        ][0]
+        self.assertEqual(
+            cast(dict[str, Any], spec["mounts"])["config"]["destination"],
+            expected_mount.split(":")[1],
+        )
         with self.assertRaises(ValueError):
             runtime_values(self.store, self.fixture.root, self.record)
 
@@ -247,17 +259,25 @@ class PublishedRecoveryTests(unittest.TestCase):
             ),
             patch.object(self.store, "write_production_recipient", side_effect=racing_write),
         ):
-            self.assertEqual(self.run_recovery().status, "reconcile_required")
+            terminal = self.run_recovery()
+            self.assertEqual(terminal.status, "completed")
+            self.assertFalse(terminal.response_payload["result"]["recovered"])
+            self.assertEqual(
+                terminal.response_payload["result"]["qualification_status"], "not_current"
+            )
         saved = custody(self.store, self.record.product, self.record.context)
         assert saved is not None
         self.assertFalse(saved.published_recovery_proofs)
+        self.assertEqual(self.store.list_held_provider_target_reservations(), ())
 
     def test_lost_reply_adopts_only_terminal_host_witness_without_recapture(self) -> None:
-        def uncertain(root: Any, record: Any, spec: Any, program: Any, checkpoint: Any) -> Any:
+        def uncertain(_root: Any, _record: Any, spec: Any, _program: Any, checkpoint: Any) -> Any:
             self.calls.append(spec)
             if not spec.get("inspect"):
                 checkpoint("capture_dispatched")
                 raise RuntimeError("reply lost")
+            if sum(bool(call.get("inspect")) for call in self.calls) == 1:
+                raise RuntimeError("host has not finished yet")
             return self.evidence(spec)
 
         with patch(
@@ -269,6 +289,28 @@ class PublishedRecoveryTests(unittest.TestCase):
         self.assertEqual(adopted.status, "adopted")
         self.assertEqual(sum(not call.get("inspect") for call in self.calls), 1)
         self.assertTrue(adopted.response_payload["result"]["recovered"])
+
+    def test_known_terminal_failure_finishes_without_holding_the_production_target(self) -> None:
+        def refused(_root: Any, _record: Any, spec: Any, _program: Any, checkpoint: Any) -> Any:
+            self.calls.append(spec)
+            if not spec.get("inspect"):
+                checkpoint("host_preflight")
+                raise RuntimeError("insufficient space")
+            return {
+                "recipient_recovery_binding": spec["recovery_binding"],
+                "recipient_recovery_retry_safe": "true",
+            }
+
+        with patch(
+            "control_plane.production_recipient_recovery.run_recipient_program", side_effect=refused
+        ):
+            result = self.run_recovery()
+            self.assertEqual(result.status, "completed")
+            self.assertFalse(result.response_payload["result"]["recovered"])
+            self.assertEqual(result.response_payload["result"]["qualification_status"], "failed")
+            self.assertEqual(self.store.list_held_provider_target_reservations(), ())
+            self.assertEqual(self.run_recovery().status, "replayed")
+        self.assertEqual(sum(not call.get("inspect") for call in self.calls), 1)
 
     def test_second_generation_cannot_dispatch_while_first_target_is_held(self) -> None:
         other = replace(

@@ -372,6 +372,37 @@ class HostTransportTests(unittest.TestCase):
         self.assertNotEqual(apply["schedule_name"], readback["schedule_name"])
         self.assertNotEqual(apply["schedule_app_name"], readback["schedule_app_name"])
 
+    def test_recovery_generations_never_share_apply_or_readback_schedules(self) -> None:
+        with (
+            patch(
+                "control_plane.production_recipient_host.api.fetch_dokploy_target_payload",
+                return_value={"serverId": self.record.request.destination_server_id},
+            ),
+            patch(
+                "control_plane.production_recipient_host.post_deploy._resolve_dokploy_schedule_runtime",
+                return_value=("server", "destination", "project", "destination"),
+            ),
+            patch(
+                "control_plane.production_recipient_host.post_deploy.run_manual_data_schedule",
+                return_value={},
+            ) as dispatch,
+        ):
+            for generation in ("a" * 64, "b" * 64):
+                for inspect in (False, True):
+                    run_recipient_program(
+                        self.root,
+                        self.record,
+                        {
+                            "binding": "same-preparation",
+                            "recovery_binding": generation,
+                            "inspect": inspect,
+                        },
+                        "",
+                        lambda phase: None,
+                    )
+        identities = [call.kwargs["schedule_app_name"] for call in dispatch.call_args_list]
+        self.assertEqual(len(set(identities)), len(identities))
+
     def test_foreign_destination_refuses_before_host_dispatch(self) -> None:
         with (
             patch(
@@ -426,6 +457,7 @@ class RecoveryProgramTests(unittest.TestCase):
             return name
         if args[0] == "start":
             return ""
+
         if args[0] == "exec":
             if args[2] == "mariadb":
                 return "1"
@@ -440,6 +472,24 @@ class RecoveryProgramTests(unittest.TestCase):
             self.containers.pop(args[-1])
             return ""
         raise AssertionError(args)
+
+    def test_effect_free_lazy_preflight_refusal_records_a_retry_witness(self) -> None:
+        class Refused(ValueError):
+            pass
+
+        def preflight() -> Any:
+            raise Refused()
+
+        with self.assertRaises(Refused):
+            self.namespace["recover"](preflight, self.spec, base=self.root / "captures")
+        output = io.StringIO()
+        with redirect_stdout(output):
+            self.namespace["inspect_recovery"](self.spec, base=self.root / "captures")
+        evidence = extract_odoo_post_deploy_readback_markers(
+            cast(JsonObject, {"logs": output.getvalue().splitlines()})
+        )
+        self.assertEqual(evidence["recipient_recovery_retry_safe"], "true")
+        self.assertFalse(self.calls)
 
     def recover(self) -> str:
         output = io.StringIO()

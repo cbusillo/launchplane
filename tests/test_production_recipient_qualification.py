@@ -18,7 +18,10 @@ from control_plane.contracts.secret_record import (
 from control_plane.production_recipient import custody, qualified_render
 from control_plane.production_recipient_recovery import RECOVERY_ROUTE, RecipientRecoveryAdapter
 from control_plane.production_recipient_upstreams import upstream_connections, upstream_binding
-from control_plane.provider_operations import run_durable_provider_operation
+from control_plane.provider_operations import (
+    build_provider_operation_key,
+    run_durable_provider_operation,
+)
 from tests import test_production_recipient as preparation_tests
 
 
@@ -202,7 +205,7 @@ class RecipientUpstreamTests(unittest.TestCase):
             update={"mode": "dry-run", "reviewed_plan_sha256": ""}
         )
 
-        def managed_values(store: Any, root: Any, record: Any, **_kwargs: Any) -> dict[str, str]:
+        def managed_values(_store: Any, _root: Any, record: Any, **_kwargs: Any) -> dict[str, str]:
             return {
                 **self.values,
                 **{key: record.volumes[role] for role, key in record.request.volume_keys.items()},
@@ -256,7 +259,7 @@ class RecipientUpstreamTests(unittest.TestCase):
             update={"mode": "dry-run", "reviewed_plan_sha256": ""}
         )
 
-        def managed_values(store: Any, root: Any, record: Any, **_kwargs: Any) -> dict[str, str]:
+        def managed_values(_store: Any, _root: Any, record: Any, **_kwargs: Any) -> dict[str, str]:
             return {
                 **self.values,
                 **{key: record.volumes[role] for role, key in record.request.volume_keys.items()},
@@ -345,18 +348,75 @@ class RecipientRecoveryTests(unittest.TestCase):
             ),
         }
 
-    def run_recovery(self, adapter: Any = None, store: Any = None) -> Any:
+    def run_recovery(
+        self, adapter: Any = None, store: Any = None, *, fingerprint: str = "d" * 64
+    ) -> Any:
         selected = adapter or self.adapter
         return run_durable_provider_operation(
             store=store or self.fixture.store,
             scope=selected.scope,
             route_path=RECOVERY_ROUTE.format(product=self.fixture.product),
             idempotency_key=selected.original_key,
-            request_fingerprint="d" * 64,
+            request_fingerprint=fingerprint,
             lease_owner="recovery-fixture",
             response_trace_id=selected.trace_id,
             adapter=selected,
         )
+
+    def test_legacy_pending_bootstrap_reconciles_after_request_defaults_are_added(self) -> None:
+        from control_plane.http_routes.mutation_support import request_fingerprint
+        from control_plane.production_recipient_recovery import recovery_request_fingerprint
+
+        legacy = {
+            "context": self.fixture.context,
+            "preparation_plan_sha256": self.record.plan_sha256,
+            "reason": self.adapter.request.reason,
+            "mode": "apply",
+            "reviewed_plan_sha256": self.adapter.request.reviewed_plan_sha256,
+        }
+        legacy_fingerprint = request_fingerprint({"product": self.fixture.product, **legacy})
+
+        def interrupted(root: Any, record: Any, spec: Any, program: Any, checkpoint: Any) -> Any:
+            if not spec.get("inspect"):
+                checkpoint("capture")
+                raise TimeoutError("lost reply")
+            return self.host(root, record, spec, program, checkpoint)
+
+        with patch(
+            "control_plane.production_recipient_recovery.run_recipient_program",
+            side_effect=interrupted,
+        ):
+            self.assertEqual(
+                self.run_recovery(fingerprint=legacy_fingerprint).status, "reconcile_required"
+            )
+            current = RecipientRecoveryRequest.model_validate(legacy)
+            result = self.run_recovery(
+                fingerprint=recovery_request_fingerprint(self.fixture.product, current)
+            )
+            self.assertEqual(result.status, "adopted")
+            self.assertTrue(result.response_payload["result"]["recovered"])
+
+    def test_terminal_cold_witness_under_changed_authority_completes_without_qualification(
+        self,
+    ) -> None:
+        def interrupted(root: Any, record: Any, spec: Any, program: Any, checkpoint: Any) -> Any:
+            if not spec.get("inspect"):
+                checkpoint("capture")
+                raise TimeoutError("lost reply")
+            return self.host(root, record, spec, program, checkpoint)
+
+        with patch(
+            "control_plane.production_recipient_recovery.run_recipient_program",
+            side_effect=interrupted,
+        ):
+            self.assertEqual(self.run_recovery().status, "reconcile_required")
+            self.fixture.store.write_dokploy_target_record(
+                self.fixture.old.model_copy(update={"updated_at": "changed"})
+            )
+            result = self.run_recovery()
+        self.assertEqual(result.status, "adopted")
+        self.assertFalse(result.response_payload["result"]["recovered"])
+        self.assertEqual(self.fixture.store.list_held_provider_target_reservations(), ())
 
     def test_completed_recovery_replays_without_repeating_effect_and_keeps_production(self) -> None:
         with patch(
@@ -370,7 +430,24 @@ class RecipientRecoveryTests(unittest.TestCase):
             self.assertEqual(self.run_recovery().response_payload, first.response_payload)
             self.assertEqual(len(self.calls), 1)
             self.assertEqual(
-                self.adapter.observe("", "", self.adapter.reconciliation_key()).outcome, "present"
+                self.adapter.observe("", "", self.adapter.reconciliation_key()).outcome, "unknown"
+            )
+            reservation = self.fixture.store.read_idempotency_record(
+                scope=self.adapter.scope,
+                route_path=RECOVERY_ROUTE.format(product=self.adapter.product),
+                idempotency_key=self.adapter.original_key,
+            )
+            assert reservation is not None
+            operation_key = build_provider_operation_key(
+                scope=reservation.scope,
+                route_path=reservation.route_path,
+                idempotency_key=reservation.idempotency_key,
+                request_fingerprint=reservation.request_fingerprint,
+                reconciliation_key=reservation.reconciliation_key,
+            )
+            self.assertEqual(
+                self.adapter.observe(operation_key, "", self.adapter.reconciliation_key()).outcome,
+                "present",
             )
         self.fixture.assert_old_preserved()
         other = replace(self.adapter, original_key="different-key")

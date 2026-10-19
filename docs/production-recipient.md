@@ -185,7 +185,9 @@ not approve a live capture or grant an agent production setup access.
 Published recovery requires the exact currently owned publication and its
 authority, recipient, artifact and storage. It stores a separate proof without
 changing the cold bootstrap proof. Current authority is compared again inside
-the serialized custody transaction, together with the current provider lease.
+the serialized custody transaction. Active execution commits additionally
+require the current provider lease; original-key terminal adoption uses the
+original durable reservation and cannot dispatch another capture.
 An inverse, changed publication or changed authority invalidates the plan and
 cannot acquire a fresh proof from a historical receipt. The plan names the
 capture protocol; the durable proof records publication and authority digests,
@@ -207,17 +209,26 @@ is historical evidence, never a new observation or permission to retire.
 The current published-storage verifier supports MariaDB plus stable config
 storage. It inventories every running and stopped container and permits only
 the exact pinned, running application and database containers to reference the
-allocated volumes. It captures business databases through `mariadb-dump
---lock-all-tables`, which holds a database-wide read lock for the dump, including
-nontransactional tables, rather than copying changing database files. See the
-[MariaDB dump contract](https://mariadb.com/docs/server/clients-and-utilities/backup-restore-and-import-clients/mariadb-dump#-x---lock-all-tables).
-Writes can wait during this bounded window. An in-container timeout kills the
-dump connection after at most 110 seconds including lock acquisition; the
-measured capture must complete within 120 seconds. Killing only the host Docker
-client is insufficient. Missing native dump/timeout support or the database
-container's existing root credential capability refuses with no credential
-fallback. The host reads that service credential only inside the database
-container; credentials are not sent in the schedule or returned as evidence.
+allocated volumes. A service-owned MariaDB session acquires `FLUSH TABLES WITH
+READ LOCK` and remains idle while a second connection runs `mariadb-dump
+--skip-lock-tables`. This includes nontransactional tables. The idle holder avoids
+leaving the global lock attached to a dump query that can outlive its client.
+Writes wait while this global read lock is held; reads remain allowed after
+acquisition, although acquisition and engine-specific queues can affect latency.
+See the [MariaDB FLUSH contract](https://mariadb.com/docs/server/reference/sql-statements/administrative-sql-statements/flush-commands/flush).
+
+One in-container coordinator starts both connections under a nonce-specific
+file lock. Native client deadlines and server statement deadlines constrain
+attempts on a best-effort basis. Only a verified completed capture of at most
+120 seconds qualifies. A killed
+client alone cannot prove server completion or a strict lock-duration bound.
+Before accepting completion, the coordinator closes the holder and positively
+checks that no root sessions remain except its observer. The protocol requires
+exclusive use of the existing root utility credential: preexisting root sessions
+refuse before capture. It does not grant a new credential or terminate unrelated
+sessions. Missing native clients, timeout or file-lock support also refuse.
+The host uses the database container's existing root credential internally;
+credentials are not sent in the schedule or returned as evidence.
 
 Config content, permissions and ownership must remain stable before and after
 archive creation and recovery. The source database stays running. Only scratch
@@ -234,11 +245,34 @@ custody, never in response packets.
 
 Each generation retains its value-free proof and original-key binding. The
 shared actual-provider target reservation excludes other recovery, inverse and
-deployment operations. An uncertain capture retains its capture and running
-witness; it cannot be repeated under a new key. Original-key reconciliation
-reads only the terminal host witness and verifies the retained archive. A known
-failed attempt permits retry only after verified cleanup. No missing witness
-or timed-out Docker transport proves absence of an effect.
+deployment operations. Every proof write requires unchanged authority in the
+custody transaction. Active execution also requires its current lease; original-key
+terminal adoption uses its existing durable reservation and cannot launch another
+capture. Historical terminal adoption releases only the original operation's
+reservation; it does not create a qualifying proof when authority has changed.
+
+An uncertain capture retains its capture and running witness; it cannot be
+repeated under a new key. Original-key reconciliation reads the original host
+journal and verifies any terminal archive. During the capture phase only, it
+can acquire the nonce lock without waiting, permanently cancel that nonce, and
+positively establish that native root sessions have ended. This fences delayed
+launches without inferring safety from elapsed time. Restore phase is journaled
+before scratch creation; missing restore completion remains unknown. The same
+nonce lock is inherited by native children, and generation-specific provider
+schedule identities prevent a delayed old trigger from running a newer script.
+
+A known published failure completes with `recovered=false` and releases the
+shared target after verified cleanup. Replaying its binding never captures again;
+review a new generation to try again. Cold bootstrap's existing safe same-key
+retry remains supported. Terminal success after authority drift also completes
+without qualification or a custody proof. Missing witnesses, lock contention,
+and timed-out Docker transport preserve uncertainty.
+
+Successful attempts retain only the verified archive and value-free receipt,
+removing loose SQL copies. Known failures remove only their own partial files;
+unknown attempts retain their custody. Service-host maintenance owns retained
+archives and nonce cancellation tombstones for the lifetime of that source
+container; this capability introduces no automatic retention or deletion policy.
 
 After changing either verifier, the implementing agent runs the focused host and
 adapter tests plus the real storage gates before handoff. PostgreSQL uses the

@@ -11649,7 +11649,6 @@ class PostgresRecordStore(HumanSessionStore):
                     "qualified_at",
                     "upstream_proof",
                     "recovery_proof",
-                    "published_recovery_proofs",
                     "activation",
                     "activation_history",
                     "execution",
@@ -11663,11 +11662,6 @@ class PostgresRecordStore(HumanSessionStore):
                     record.execution.get(key) != value for key, value in previous.execution.items()
                 ):
                     raise ValueError("Production execution witnesses are append-only.")
-                if not superseding and any(
-                    record.published_recovery_proofs.get(key) != value
-                    for key, value in previous.published_recovery_proofs.items()
-                ):
-                    raise ValueError("Published recovery witnesses are append-only.")
                 if (
                     not superseding
                     and record.writer_custody[: len(previous.writer_custody)]
@@ -11690,7 +11684,6 @@ class PostgresRecordStore(HumanSessionStore):
                             "execution",
                             "writer_custody",
                             "activation_history",
-                            "published_recovery_proofs",
                         }
                         - ({"activation"} if not previous.execution else set())
                     )

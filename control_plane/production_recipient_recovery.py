@@ -28,11 +28,22 @@ from control_plane.provider_operations import (
     ProviderOperationLease,
     ProviderEvidenceLease,
     provider_operation_response_payload,
+    build_provider_operation_key,
 )
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 
 RECOVERY_ROUTE = "/v1/products/{product}/production-recipient/recovery"
+
+
+def recovery_request_fingerprint(product: str, request: RecipientRecoveryRequest) -> str:
+    from control_plane.http_routes.mutation_support import request_fingerprint
+
+    payload = request.model_dump(mode="json")
+    if request.purpose == "bootstrap":
+        payload.pop("purpose")
+        payload.pop("generation")
+    return request_fingerprint({"product": product, **payload})
 
 
 @dataclass
@@ -212,34 +223,124 @@ class RecipientRecoveryAdapter:
         self, provider_operation_key: str, provider_effect_phase: str, reconciliation_key: str
     ) -> ProviderObservation:
         try:
-            record, result = self.current()
-            if result.plan_sha256 != reconciliation_key or not self.original_key:
+            record = custody(self.store, self.product, self.request.context)
+            reservation = self.store.read_idempotency_record(
+                scope=self.scope,
+                route_path=RECOVERY_ROUTE.format(product=self.product),
+                idempotency_key=self.original_key,
+            )
+            if (
+                record is None
+                or not self.original_key
+                or reservation is None
+                or reservation.reconciliation_key != reconciliation_key
+                or self.request.reviewed_plan_sha256 != reconciliation_key
+                or provider_operation_key
+                != build_provider_operation_key(
+                    scope=reservation.scope,
+                    route_path=reservation.route_path,
+                    idempotency_key=reservation.idempotency_key,
+                    request_fingerprint=reservation.request_fingerprint,
+                    reconciliation_key=reservation.reconciliation_key,
+                )
+                or (record.actor, record.scope, record.plan_sha256)
+                != (self.actor, self.scope, self.request.preparation_plan_sha256)
+            ):
                 return ProviderObservation("unknown")
-            if not result.recovered:
-                # Inspect only the terminal host witness under its own file lock.
-                # No capture/restore is dispatched by reconciliation observation.
-                def observe_checkpoint(phase: str) -> None:
-                    self.current()
+            # This read is bound to the original reservation, not mutable current
+            # authority. A completed host effect must not wedge inverse/deploys
+            # merely because its historical proof no longer qualifies this lane.
+            from control_plane.production_recipient_host import RECOVERY_INSPECT_PROGRAM
+            from control_plane.production_recipient_published_host import (
+                PUBLISHED_RECOVERY_INSPECT_PROGRAM,
+            )
 
-                evidence = run_recipient_program(
-                    self.root,
-                    record,
-                    {**self.host_spec(record, result), "inspect": True},
-                    self.host_program(),
-                    observe_checkpoint,
-                )
-                if evidence.get("recipient_recovery_binding") != reconciliation_key:
-                    return ProviderObservation("unknown")
-                if evidence.get("recipient_recovery_retry_safe") == "true":
-                    return ProviderObservation("absent", retry_safe=True)
-                result = self.record_host_result(record, result, evidence)
-            if result.recovered:
-                return ProviderObservation(
-                    "present",
-                    response_payload=provider_operation_response_payload(
-                        trace_id=self.trace_id, records={}, result=result.model_dump(mode="json")
-                    ),
-                )
+            original_placement = (
+                record.namespace,
+                record.target_id,
+                record.request.destination_server_id,
+            )
+
+            def observe_checkpoint(_phase: str) -> None:
+                observed_record = custody(self.store, self.product, self.request.context)
+                if (
+                    observed_record is None
+                    or (
+                        observed_record.namespace,
+                        observed_record.target_id,
+                        observed_record.request.destination_server_id,
+                    )
+                    != original_placement
+                ):
+                    raise ValueError("Original recovery witness placement changed.")
+
+            evidence = run_recipient_program(
+                self.root,
+                record,
+                {
+                    "namespace": record.namespace,
+                    "binding": record.plan_sha256,
+                    "recovery_binding": reconciliation_key,
+                    "inspect": True,
+                },
+                PUBLISHED_RECOVERY_INSPECT_PROGRAM
+                if self.request.purpose == "published"
+                else RECOVERY_INSPECT_PROGRAM,
+                observe_checkpoint,
+            )
+            if evidence.get("recipient_recovery_binding") != reconciliation_key:
+                return ProviderObservation("unknown")
+            safe_failure = evidence.get("recipient_recovery_retry_safe") == "true"
+            passed = (
+                evidence.get("recipient_recovery_ok") == "true"
+                and re.fullmatch(r"[a-f0-9]{64}", evidence.get("recipient_recovery_capture", ""))
+                is not None
+                and evidence.get("recipient_recovery_empty") in {"true", "false"}
+                and evidence.get("recipient_recovery_epoch", "").isdigit()
+            )
+            if not safe_failure and not passed:
+                return ProviderObservation("unknown")
+            result = RecipientRecoveryPlan(
+                product=self.product,
+                context=self.request.context,
+                preparation_plan_sha256=self.request.preparation_plan_sha256,
+                plan_sha256=reconciliation_key,
+                purpose=self.request.purpose,
+                generation=self.request.generation,
+                qualification_status="failed" if safe_failure else "not_current",
+            )
+            try:
+                current_record, current = self.current()
+                if current.plan_sha256 == reconciliation_key:
+                    if safe_failure:
+                        if self.request.purpose == "bootstrap":
+                            return ProviderObservation("absent", retry_safe=True)
+                        return ProviderObservation(
+                            "present",
+                            response_payload=provider_operation_response_payload(
+                                trace_id=self.trace_id,
+                                records={},
+                                result=result.model_dump(mode="json"),
+                            ),
+                        )
+                    result = (
+                        current
+                        if current.recovered
+                        else self.record_host_result(current_record, current, evidence)
+                    )
+            except (ValueError, RuntimeError, FileNotFoundError):
+                # Terminal host evidence proves no unknown lock/restore remains.
+                # Withhold qualification, complete the historical operation and
+                # permit another reviewed generation under current authority.
+                pass
+            return ProviderObservation(
+                "present",
+                response_payload=provider_operation_response_payload(
+                    trace_id=self.trace_id,
+                    records={},
+                    result=result.model_dump(mode="json"),
+                ),
+            )
         except Exception:
             pass
         # Capture/restore might have happened. Never repeat it on assumed absence.
@@ -298,6 +399,10 @@ class RecipientRecoveryAdapter:
                 raise ProviderMutationRejectedError(
                     ValueError("Recovery refused before effects.")
                 ) from error
+            if self.request.purpose == "published":
+                terminal = self.observe(provider_operation_key, "", self.reconciliation_key())
+                if terminal.outcome == "present":
+                    return ProviderMutationOutcome(202, terminal.response_payload)
             raise ProviderMutationUnknownError(
                 "Retain both recipients, capture and original recovery key."
             ) from error

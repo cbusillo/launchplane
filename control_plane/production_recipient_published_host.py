@@ -13,10 +13,106 @@ DUMP_ARGUMENTS = [
     'mariadb-dump','--no-defaults','--protocol=socket','--user=root',
     '--all-databases','--ignore-database=mysql','--ignore-database=sys',
     '--ignore-database=information_schema','--ignore-database=performance_schema',
-    '--lock-all-tables','--quick','--hex-blob','--routines','--events','--triggers',
+    '--skip-lock-tables','--max-statement-time=90','--quick','--hex-blob','--routines','--events','--triggers',
     '--skip-comments','--skip-dump-date','--skip-add-locks','--skip-disable-keys',
     '--skip-extended-insert','--order-by-primary',
 ]
+
+# All native SQL launches share one nonce lock. A terminal inspector cancels
+# that nonce before proving server quiescence, fencing a delayed Docker exec.
+NATIVE_PREAMBLE = r'''
+set -eu
+directory=/tmp/launchplane-capture-$1
+nonce=$1
+shift
+umask 077
+test ! -L "$directory"
+mkdir -m 700 "$directory" 2>/dev/null || test -d "$directory"
+test ! -L "$directory/lock"
+exec 9>"$directory/lock"
+flock -n 9 || exit 75
+sql() {
+    timeout -s KILL 5 mariadb --no-defaults --protocol=socket --user=root --batch --skip-column-names --init-command="SET SESSION max_statement_time=5" --execute="$1"
+}
+auth() {
+    test -n "${MARIADB_ROOT_PASSWORD:-${MYSQL_ROOT_PASSWORD:-}}" || test "${MARIADB_ALLOW_EMPTY_ROOT_PASSWORD:-${MYSQL_ALLOW_EMPTY_PASSWORD:-}}" = 1
+    export MYSQL_PWD="${MARIADB_ROOT_PASSWORD:-${MYSQL_ROOT_PASSWORD:-}}"
+}
+'''
+
+NATIVE_CAPTURE_SCRIPT = NATIVE_PREAMBLE + r'''
+test ! -e "$directory/cancelled" || exit 76
+holder_timeout=$1
+dump_timeout=$2
+shift 2
+phase=preflight
+trap 'code=$?; if [ "$phase" = preflight ]; then printf "%s:refused:%s\n" "$nonce" "$code" >"$directory/exit"; fi' EXIT
+auth
+command -v timeout >/dev/null
+command -v mariadb-dump >/dev/null
+test "$(sql "SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE USER='root' AND ID<>CONNECTION_ID()")" = 0
+phase=capture
+printf '%s:active\n' "$nonce" >"$directory/state"
+mkfifo -m 600 "$directory/input"
+exec 3<>"$directory/input"
+# The holder is idle after FTWRL; the dump's potentially long queries run on
+# another connection and never own the global read lock themselves.
+timeout -s KILL "$holder_timeout" mariadb --no-defaults --protocol=socket --user=root --batch --skip-column-names --unbuffered <"$directory/input" >"$directory/holder" 2>/dev/null &
+holder=$!
+printf "SET SESSION lock_wait_timeout=5;\nSET SESSION max_statement_time=5;\nSELECT GET_LOCK('lp-capture-%s',0);\nSELECT CONNECTION_ID();\nFLUSH TABLES WITH READ LOCK;\nSELECT '%s:locked';\n" "$nonce" "$nonce" >&3
+locked=false
+while kill -0 "$holder" 2>/dev/null; do
+    if grep -Fx "$nonce:locked" "$directory/holder" >/dev/null; then locked=true; break; fi
+    sleep 0.1
+done
+status=1
+if [ "$locked" = true ] && [ "$(head -n 1 "$directory/holder")" = 1 ]; then
+    connection=$(sed -n '2p' "$directory/holder")
+    printf '%s\n' "$connection" >"$directory/connection"
+    if timeout -s KILL "$dump_timeout" "$@"; then status=0; else status=$?; fi
+    # If the holder deadline expired during the dump, this is not one snapshot.
+    if [ "$(sql "SELECT IS_USED_LOCK('lp-capture-$nonce')")" != "$connection" ]; then status=1; fi
+fi
+printf 'UNLOCK TABLES;\nquit\n' >&3
+exec 3>&-
+holder_status=0
+wait "$holder" || holder_status=$?
+if [ "$holder_status" != 0 ]; then status=1; fi
+# Client exit alone is insufficient: server work can outlive a killed client.
+test "$(sql "SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE USER='root' AND ID<>CONNECTION_ID()")" = 0
+printf '%s:done:%s\n' "$nonce" "$status" >"$directory/exit"
+exit "$status"
+'''
+
+NATIVE_INSPECT_SCRIPT = NATIVE_PREAMBLE + r'''
+# The lock is also inherited by both native clients. Once it can be acquired,
+# cancellation fences every late launcher of this nonce before the SQL read.
+: >"$directory/cancelled"
+if [ -f "$directory/exit" ] && grep -E "^$nonce:refused:[0-9]+$" "$directory/exit" >/dev/null; then
+    cat "$directory/exit"
+    exit 0
+fi
+auth
+test "$(sql "SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE USER='root' AND ID<>CONNECTION_ID()")" = 0
+if [ -f "$directory/exit" ] && grep -E "^$nonce:done:[0-9]+$" "$directory/exit" >/dev/null; then
+    cat "$directory/exit"
+else
+    printf '%s:cancelled:1\n' "$nonce"
+fi
+'''
+
+def native_capture_status(native):
+    nonce=native['nonce']
+    if not re.fullmatch(r'[a-f0-9]{32}',nonce):
+        raise ValueError('invalid native attempt identity')
+    result=subprocess.run(['docker','exec',native['source'],'sh','-ec',NATIVE_INSPECT_SCRIPT,
+        'capture-inspect',nonce],capture_output=True,text=True,timeout=15)
+    if result.returncode or not re.fullmatch(re.escape(nonce)+r':(?:refused|done|cancelled):[0-9]+\n?',result.stdout):
+        raise ValueError('native capture completion remains unknown')
+    return result.stdout.strip().split(':')[1:]
+
+class NativeCaptureFinishedError(ValueError):
+    pass
 
 def digest_json(value):
     return hashlib.sha256(json.dumps(value,sort_keys=True,separators=(',',':')).encode()).hexdigest()
@@ -92,23 +188,27 @@ def published_source(spec):
     identity=digest_json({'volumes':volume_rows,'containers':sorted(source_rows,key=lambda r:r['Id'])})
     return paths,services[spec['database_service']],identity
 
-def logical_dump(identifier,path,*,source):
-    # timeout is INSIDE the database container: killing a transport cannot leave
-    # mariadb-dump's global read lock alive indefinitely. Its connection owns
-    # the lock and is killed after at most 110 seconds including acquisition.
-    auth=(
-        'test -n "${MARIADB_ROOT_PASSWORD:-${MYSQL_ROOT_PASSWORD:-}}" || '
-        'test "${MARIADB_ALLOW_EMPTY_ROOT_PASSWORD:-${MYSQL_ALLOW_EMPTY_PASSWORD:-}}" = 1; '
-        'export MYSQL_PWD="${MARIADB_ROOT_PASSWORD:-${MYSQL_ROOT_PASSWORD:-}}"; '
-    ) if source else ''
-    command=['docker','exec',identifier,'timeout','-s','KILL','110','sh','-ec',auth+'exec "$@"','dump',*DUMP_ARGUMENTS]
-    with path.open('xb') as output:
-        process=subprocess.run(command,stdout=output,stderr=subprocess.DEVNULL,timeout=120,
-            preexec_fn=lambda:resource.setrlimit(resource.RLIMIT_FSIZE,(2*1024**3,2*1024**3)))
-        output.flush()
-        os.fsync(output.fileno())
-    if process.returncode or not 0<path.stat().st_size<=2*1024**3:
-        raise ValueError('logical capture unverified')
+def logical_dump(identifier,path,*,source,native=None):
+    command=(['docker','exec',identifier,'sh','-ec',NATIVE_CAPTURE_SCRIPT,'capture',native['nonce'],'110','90',*DUMP_ARGUMENTS]
+        if source else ['docker','exec',identifier,'timeout','-s','KILL','90',*DUMP_ARGUMENTS])
+    try:
+        with path.open('xb') as output:
+            process=subprocess.run(command,stdout=output,stderr=subprocess.DEVNULL,timeout=120,
+                preexec_fn=lambda:resource.setrlimit(resource.RLIMIT_FSIZE,(2*1024**3,2*1024**3)))
+            output.flush()
+            os.fsync(output.fileno())
+        if source and native_capture_status(native)!=['done','0']:
+            raise ValueError('native capture failed or was cancelled')
+        if process.returncode or not 0<path.stat().st_size<=2*1024**3:
+            raise ValueError('logical capture unverified')
+    except Exception as error:
+        if source:
+            try:
+                native_capture_status(native)
+            except Exception:
+                raise error
+            raise NativeCaptureFinishedError('native capture ended without qualification') from error
+        raise
 
 def populated_rows(identifier):
     names=docker('exec',identifier,'mariadb','--no-defaults','--protocol=socket','--user=root',
@@ -144,37 +244,81 @@ def emit_published(receipt):
         print('recipient_recovery_started='+str(receipt['started']))
         print('recipient_recovery_duration_ms='+str(receipt['duration_ms']))
 
+def remove_attempt_data(attempt):
+    # Only these private exclusive-created files belong to this attempt.
+    # Unknown attempts retain everything; verified failures retain the receipt.
+    for name in ('database.sql','roundtrip.sql','capture.tar'):
+        (attempt/name).unlink(missing_ok=True)
+    for path in attempt.glob('restore-*'):
+        if path.is_symlink() or not path.is_dir():
+            raise ValueError('foreign scratch cleanup entry')
+        shutil.rmtree(path)
+
+def load_published_outcome(destination,spec):
+    pointer=destination/'outcome.json'
+    if pointer.is_symlink():
+        raise ValueError('invalid outcome')
+    if pointer.exists():
+        running=json.loads(pointer.read_text())
+        if running.get('binding')!=spec['recovery_binding']:
+            raise ValueError('outcome binding changed')
+        if running.get('state')=='running':
+            name=running.get('attempt','')
+            if not re.fullmatch(r'attempt-[a-z0-9_]+',name):
+                raise ValueError('invalid attempt custody')
+            attempt=destination/name
+            if attempt.is_symlink() or not attempt.is_dir():
+                raise ValueError('invalid attempt custody')
+            if running.get('phase')=='capture':
+                native_capture_status(running['native'])
+            elif running.get('phase')!='preflight':
+                # Server root absence says nothing about an in-flight scratch
+                # create or restore; never reinterpret those phases as absent.
+                raise ValueError('scratch effects remain uncertain')
+            remove_attempt_data(attempt)
+            save_outcome(destination,attempt,{'state':'failed_safe','binding':spec['recovery_binding']})
+    return load_outcome(destination,spec)
+
 def published_recovery(spec,*,base=None):
     with recovery_directory(spec,base) as destination:
-        previous=load_outcome(destination,spec)
-        if previous and (spec.get('inspect') or previous['state']=='passed'):
+        previous=load_published_outcome(destination,spec)
+        if previous:
             emit_published(previous)
             return
         if spec.get('inspect') or previous is None and any(p.name!='.lock' for p in destination.iterdir()):
             raise ValueError('no terminal published witness')
-        paths,source,identity=published_source(spec)
-        config_manifest=manifest(paths['config'])
-        backing_size=sum(p.stat().st_size for p in paths['database'].rglob('*') if p.is_file())
-        config_size=sum(p.stat().st_size for p in paths['config'].rglob('*') if p.is_file())
-        if backing_size>2*1024**3 or shutil.disk_usage(destination).free<10*1024**3+3*backing_size+2*config_size:
-            raise ValueError('insufficient independent recovery space')
         attempt=Path(tempfile.mkdtemp(prefix='attempt-',dir=destination))
-        write_outcome_pointer(destination,{'state':'running','binding':spec['recovery_binding']})
+        running={'state':'running','binding':spec['recovery_binding'],'attempt':attempt.name,'phase':'preflight'}
+        write_outcome_pointer(destination,running)
         container='lp-recovery-'+uuid.uuid4().hex
         cleanup_verified=True
         scratch=None
         try:
+            paths,source,identity=published_source(spec)
+            docker('exec',source,'sh','-ec','command -v flock >/dev/null; command -v timeout >/dev/null; command -v mariadb >/dev/null; command -v mariadb-dump >/dev/null')
+            config_manifest=manifest(paths['config'])
+            backing_size=sum(p.stat().st_size for p in paths['database'].rglob('*') if p.is_file())
+            config_size=sum(p.stat().st_size for p in paths['config'].rglob('*') if p.is_file())
+            if backing_size>2*1024**3 or shutil.disk_usage(destination).free<10*1024**3+3*backing_size+2*config_size:
+                raise ValueError('insufficient independent recovery space')
             started=int(time.time()*1000)
             clock=time.monotonic()
             # Until this completes, no terminal absence/retry witness is safe:
             # a broken Docker connection can leave the bounded native dump alive.
             cleanup_verified=False
             dump=attempt/'database.sql'
-            logical_dump(source,dump,source=True)
+            native={'nonce':uuid.uuid4().hex,'source':source}
+            running.update(phase='capture',native=native)
+            write_outcome_pointer(destination,running)
+            try:
+                logical_dump(source,dump,source=True,native=native)
+            except NativeCaptureFinishedError:
+                cleanup_verified=True
+                raise
+            cleanup_verified=True
             duration=max(1,int((time.monotonic()-clock)*1000))
             if duration>120000 or published_source(spec)[2]!=identity:
                 raise ValueError('capture window or serving identity changed')
-            cleanup_verified=True
             data_digest=file_digest(dump)
             archive=attempt/'capture.tar'
             with tarfile.open(archive,'x') as output:
@@ -189,6 +333,8 @@ def published_recovery(spec,*,base=None):
             if file_digest(scratch/'database.sql')!=data_digest or manifest(scratch/'config')!=config_manifest:
                 raise ValueError('restored capture differs')
             (scratch/'database').mkdir()
+            running.update(phase='restore')
+            write_outcome_pointer(destination,running)
             cleanup_verified=False
             identifier=docker('create','--name',container,'--network','none',
                 '--label','io.launchplane.recipient-recovery='+spec['recovery_binding'],
@@ -243,6 +389,10 @@ def published_recovery(spec,*,base=None):
                 cleanup_verified=True
             shutil.rmtree(scratch)
             scratch=None
+            if file_digest(archive)!=archive_digest:
+                raise ValueError('retained capture changed')
+            dump.unlink()
+            roundtrip.unlink()
             receipt={'state':'passed','binding':spec['recovery_binding'],
                 'capture_sha256':archive_digest,'archive':str(archive.relative_to(destination)),
                 'source_identity_sha256':identity,'logical_data_sha256':data_digest,
@@ -253,6 +403,7 @@ def published_recovery(spec,*,base=None):
             if cleanup_verified:
                 if scratch is not None:
                     shutil.rmtree(scratch)
+                remove_attempt_data(attempt)
                 save_outcome(destination,attempt,{'state':'failed_safe','binding':spec['recovery_binding']})
             raise
 """
@@ -266,6 +417,22 @@ try:
     spec=json.loads(base64.b64decode(sys.argv[1],validate=True))
     if not re.fullmatch(r'[a-f0-9]{64}',spec['recovery_binding']) or not re.fullmatch(r'[a-zA-Z0-9./:_-]+@sha256:[a-f0-9]{64}',spec['database_image']):
         raise ValueError('invalid published recovery identity')
+    published_recovery(spec)
+except Exception:
+    print('recipient_recovery_ok=false')
+    sys.exit(1)
+"""
+)
+
+PUBLISHED_RECOVERY_INSPECT_PROGRAM = (
+    RESOURCE_LIBRARY
+    + RECOVERY_LIBRARY
+    + PUBLISHED_RECOVERY_LIBRARY
+    + r"""
+try:
+    spec=json.loads(base64.b64decode(sys.argv[1],validate=True))
+    if set(spec)!={'namespace','binding','recovery_binding','inspect'} or spec['inspect'] is not True:
+        raise ValueError('only terminal recovery inspection is allowed')
     published_recovery(spec)
 except Exception:
     print('recipient_recovery_ok=false')

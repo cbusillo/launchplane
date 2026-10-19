@@ -2,7 +2,14 @@
 
 from typing import Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    model_validator,
+    model_serializer,
+    SerializerFunctionWrapHandler,
+)
 
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
@@ -124,7 +131,6 @@ class ProductionRecipientRecord(BaseModel):
     prior_attempts: list[dict[str, Any]] = Field(default_factory=list)
     upstream_proof: dict[str, Any] = Field(default_factory=dict)
     recovery_proof: dict[str, Any] = Field(default_factory=dict)
-    published_recovery_proofs: dict[str, dict[str, Any]] = Field(default_factory=dict)
     publication: dict[str, Any] = Field(default_factory=dict)
     continuation: dict[str, Any] = Field(default_factory=dict)
     activation: dict[str, Any] = Field(default_factory=dict)
@@ -136,6 +142,14 @@ class ProductionRecipientRecord(BaseModel):
     @property
     def volumes(self) -> dict[str, str]:
         return {"database": self.namespace + "-db", "config": self.namespace + "-config"}
+
+    @property
+    def published_recovery_proofs(self) -> dict[str, dict[str, Any]]:
+        return {
+            key.removeprefix("published_recovery:"): value
+            for key, value in self.execution.items()
+            if key.startswith("published_recovery:") and isinstance(value, dict)
+        }
 
 
 class RecipientWriterReference(BaseModel):
@@ -216,4 +230,25 @@ class RecipientRecoveryPlan(BaseModel):
     capture_started_at: str = ""
     capture_duration_ms: int | None = None
     recovery_fresh_until: str = ""
+    qualification_status: Literal["pending", "qualified", "not_current", "failed"] = "pending"
     bootstrap_eligible: Literal[False] = False
+
+    @model_serializer(mode="wrap")
+    def serialize_compatible_bootstrap(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> dict[str, Any]:
+        result: dict[str, Any] = handler(self)
+        if self.purpose == "bootstrap":
+            for key in (
+                "purpose",
+                "generation",
+                "publication_sha256",
+                "authority_sha256",
+                "capture_protocol",
+                "capture_started_at",
+                "capture_duration_ms",
+                "recovery_fresh_until",
+                "qualification_status",
+            ):
+                result.pop(key, None)
+        return result
