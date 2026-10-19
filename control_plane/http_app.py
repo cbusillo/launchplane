@@ -831,6 +831,7 @@ from control_plane.disposable_lane_collection import (
 )
 from control_plane.odoo_testing_usage import read_odoo_testing_usage, OdooTestingUsage
 from control_plane.testing_never_served import read_never_served_testing_usage
+from control_plane.testing_rebuild_service import TestingRebuildRefused
 from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 
 from control_plane.disposable_lanes import (
@@ -10711,6 +10712,13 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 code="authorization_denied",
                 message="The provider refused the native testing preflight read.",
+            ) from error
+        except TestingRebuildRefused as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code=error.code,
+                message=str(error),
             ) from error
         except (ValueError, click.ClickException) as error:
             raise _launchplane_http_error(

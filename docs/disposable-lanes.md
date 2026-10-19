@@ -982,6 +982,29 @@ qualifies the predecessor against its recorded physical port and prepares its
 successor at the desired current port, without reverting the profile or changing
 the public address.
 
+Native route admission derives listeners conservatively from application routes
+that may match the host; non-exact conflicts on another listener still refuse.
+The proxy's canonical internal API/dashboard listeners do not become
+application ingress. Its enabled, canonical high-priority ACME challenge route
+remains outside takeover and above every application winner. A changed internal
+route on an application listener still refuses. Duplicate Docker router families
+may describe one predecessor only when every alias binds the same physically
+verified backend and has equivalent host, listeners, effective priority,
+middleware, TLS and load-balancer behavior. The plan retains every alias for
+subsequent drift checks and emits one owned winner per equivalent group. It
+never deletes a live router or changes proxy configuration to make admission pass.
+
+Inspection and the native plan return fixed, traced HTTP 409 checkpoint codes
+for observation, route compilation and retained-input failures, without exposing
+exception/provider payloads. Authorization denials stay HTTP 403. Transient
+observation failures in an admitted worker stay pending on the same operation;
+only the inspection layer maps them to a diagnostic refusal. The signed-in submit adapter uses
+the stable `testing_rebuild_not_ready` admission code for a refusal proven before
+enqueue, with the safe specific message. Browser recovery can then return a
+first refused submit to inspection without maintaining a copy of checkpoint
+codes. Key collisions and uncertain or previously dispatched requests retain
+their original request and key.
+
 Staff holds and the hold writer's timestamp/source label are excluded from the
 shared serving-target input projection. A hold pauses preparation and cutover;
 lifting it resumes the same candidate rather than changing its input authority.

@@ -518,6 +518,147 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertEqual(self.effects, [])
         self.assertEqual(self.current(), self.fixture.before)
 
+    def test_capture_derives_only_application_ingress_from_the_complete_proxy_frame(self) -> None:
+        frame = self.route_read()
+        route_tests.add_proxy_internal_routes(frame["raw"])
+        frame["raw"]["services"]["alias@docker"] = deepcopy(frame["raw"]["services"]["old@docker"])
+        for name, router in list(frame["raw"]["routers"].items()):
+            if name.endswith("@docker"):
+                frame["raw"]["routers"]["alias-" + name] = {
+                    **deepcopy(router),
+                    "service": "alias@docker",
+                }
+        with patch.object(DokployTestingRouteTransport, "read", return_value=frame):
+            captured = self.capture_function(
+                root=self.root, store=self.store, operation=self.operation
+            )
+        self.assertEqual(captured.public_entrypoints, ("web", "websecure"))
+        self.assertEqual(captured.old.runtime_identity, self.original_identity)
+        self.assertEqual(self.effects, [])
+        self.assertEqual(self.current(), self.fixture.before)
+        host = self.fixture.route.host
+        for provider, rule in (
+            ("docker", f"Host(`{host}`) && PathPrefix(`/x`)"),
+            ("docker", f"Host(`{host.upper()}`)"),
+            ("docker", f"Host(`{host}`) || Host(`other.invalid`)"),
+            ("swarm", f"Host(`{host}`)"),
+            ("futureprovider", f"Host(`{host}`)"),
+        ):
+            conflicting_frame = deepcopy(frame)
+            conflicting_frame["raw"]["routers"][f"conflict@{provider}"] = {
+                **deepcopy(frame["raw"]["routers"]["old-http@docker"]),
+                "rule": rule,
+                "entryPoints": ["another-listener"],
+            }
+            with (
+                self.subTest(provider=provider, rule=rule),
+                patch.object(DokployTestingRouteTransport, "read", return_value=conflicting_frame),
+            ):
+                with self.assertRaises(service.TestingRebuildRefused) as refused:
+                    self.capture_function(
+                        root=self.root, store=self.store, operation=self.operation
+                    )
+                self.assertEqual(refused.exception.code, "testing_route_compilation_failed")
+                self.assertEqual(self.effects, [])
+                self.assertEqual(self.current(), self.fixture.before)
+
+    def test_transient_initial_route_capture_keeps_the_admitted_worker_pending(self) -> None:
+        from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
+
+        self.operation = self.operation.model_copy(
+            update={"operation_id": "fresh-transient-capture"}
+        )
+        self.capture.side_effect = self.capture_function
+        with patch.object(
+            DokployTestingRouteTransport,
+            "read",
+            side_effect=NativeSourceUnavailable("fixture unavailable"),
+        ):
+            with self.assertRaises(service.NativeTestingRebuildPending):
+                self.execute()
+        self.capture.assert_called_once()
+        self.assertEqual(self.effects, [])
+        self.assertEqual(self.current(), self.fixture.before)
+
+    def test_capture_reports_route_checkpoints_without_provider_details_or_writes(self) -> None:
+        from control_plane.dokploy.native_copy_stream import (
+            NativeSourceUnavailable,
+            NativeSourceAuthorizationDenied,
+        )
+
+        for failure in (
+            NativeSourceUnavailable("private-host-message"),
+            NativeSourceAuthorizationDenied("private-denial-message"),
+        ):
+            with patch.object(DokployTestingRouteTransport, "read", side_effect=failure):
+                if isinstance(failure, NativeSourceAuthorizationDenied):
+                    with self.assertRaises(NativeSourceAuthorizationDenied):
+                        self.capture_function(
+                            root=self.root, store=self.store, operation=self.operation
+                        )
+                else:
+                    with self.assertRaises(NativeSourceUnavailable):
+                        self.capture_function(
+                            root=self.root, store=self.store, operation=self.operation
+                        )
+        from control_plane.dokploy.testing_route_transport import TestingRouteObservationRefused
+
+        for observation_failure in (
+            TestingRouteObservationRefused(
+                "testing_route_identity_changed", "Retained identity changed."
+            ),
+            TestingRouteObservationRefused(
+                "testing_route_provider_unverified", "Watched provider unverified."
+            ),
+        ):
+            with patch.object(
+                DokployTestingRouteTransport, "read", side_effect=observation_failure
+            ):
+                with self.assertRaises(service.TestingRebuildRefused) as refused:
+                    self.capture_function(
+                        root=self.root, store=self.store, operation=self.operation
+                    )
+                self.assertEqual(refused.exception.code, observation_failure.code)
+        for owned in ("private-invalid-json", "[]", "null"):
+            frame = {**self.route_read(), "owned_file": owned}
+            with patch.object(DokployTestingRouteTransport, "read", return_value=frame):
+                with self.assertRaises(service.TestingRebuildRefused) as refused:
+                    self.capture_function(
+                        root=self.root, store=self.store, operation=self.operation
+                    )
+                self.assertEqual(refused.exception.code, "testing_route_file_invalid")
+                self.assertNotIn("private-", str(refused.exception))
+        frame = self.route_read()
+        frame["raw"]["routers"]["conflict@docker"] = {
+            **deepcopy(frame["raw"]["routers"]["old-http@docker"]),
+            "priority": 900,
+        }
+        with patch.object(DokployTestingRouteTransport, "read", return_value=frame):
+            with self.assertRaises(service.TestingRebuildRefused) as refused:
+                self.capture_function(root=self.root, store=self.store, operation=self.operation)
+            self.assertEqual(refused.exception.code, "testing_route_compilation_failed")
+        self.assertEqual(self.effects, [])
+        self.assertEqual(self.current(), self.fixture.before)
+
+    def test_capture_refuses_a_removed_lane_with_retained_context_ownership(self) -> None:
+        profile = self.store.read_product_profile_record(self.operation.product)
+        self.store.write_product_profile_record(
+            profile.model_copy(
+                update={
+                    "lanes": tuple(
+                        lane for lane in profile.lanes if lane.context != self.operation.context
+                    ),
+                    "historical_contexts": (*profile.historical_contexts, self.operation.context),
+                }
+            )
+        )
+        with patch.object(DokployTestingRouteTransport, "read") as read:
+            with self.assertRaises(service.TestingRebuildRefused) as refused:
+                self.capture_function(root=self.root, store=self.store, operation=self.operation)
+        self.assertEqual(refused.exception.code, "testing_rebuild_inputs_unverified")
+        read.assert_not_called()
+        self.assertEqual(self.effects, [])
+
     def test_one_action_preserves_address_credentials_and_retires_only_after_publication(
         self,
     ) -> None:
