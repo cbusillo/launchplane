@@ -404,6 +404,13 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
         self.now += timedelta(seconds=1)
         self.reject(reason="promotion_required")
         self.reject("image@" + "c" * 40, reason="deployment_failed")
+        self.now += timedelta(seconds=1)
+        returning_candidate = "image@" + "d" * 40
+        self.reject(returning_candidate, reason="promotion_required")
+        self.now += timedelta(seconds=1)
+        self.reject(returning_candidate, reason="deployment_failed")
+        self.now += timedelta(seconds=1)
+        self.reject(returning_candidate, reason="promotion_required")
         originals = self.store.list_public_ingress_incident_records(status="open")
         self.now += timedelta(seconds=2)
         self.healthy_production()
@@ -415,6 +422,10 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
             },
             {incident.incident_id for incident in originals},
         )
+        for original in originals:
+            observed = self.store.read_public_ingress_incident_record(original.incident_id)
+            self.assertEqual(observed.latest_observed_at, self.timestamp())
+            self.assertGreater(observed.state_version, original.state_version)
 
     def test_scheduled_recheck_preserves_a_concurrent_incident_change(self) -> None:
         self.reject(reason="promotion_required")

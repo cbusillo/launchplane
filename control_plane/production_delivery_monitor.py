@@ -89,6 +89,21 @@ def is_guard_refusal_incident(incident: PublicIngressIncidentRecord) -> bool:
     )
 
 
+def _is_refusal_only_incident(store: Store, incident: PublicIngressIncidentRecord) -> bool:
+    if not is_guard_refusal_incident(incident):
+        return False
+    history = store.list_public_ingress_observation_records(incident_id=incident.incident_id)
+    return bool(history) and all(
+        observation.status == "fail"
+        and observation.targets
+        and all(
+            target.url == _delivery_target_url(ProductionChangeRequiresPromotion.code)
+            for target in observation.targets
+        )
+        for observation in history
+    )
+
+
 def reconcile_refused_production_requests(
     store: Store,
     *,
@@ -203,6 +218,26 @@ def _resolve_guard_refusal(
             raise ValueError(
                 "Production health must pass freshly after the last refusal or retirement."
             )
+    _require_verified_production_runtime(store, profile, lane, now)
+    if not _is_refusal_only_incident(store, incident):
+        raise ValueError("Incident history includes a failure or uncertain outcome beyond refusal.")
+    _observe(
+        store,
+        profile,
+        lane,
+        check_name=incident.check_name,
+        failed=False,
+        retired=True,
+        observed_at=now.isoformat(),
+        summary=summary + "Production health and runtime identity remain verified.",
+        expected_incident_sha256=public_ingress_incident_record_sha256(incident),
+    )
+    return incident.incident_id
+
+
+def _require_verified_production_runtime(
+    store: Store, profile: LaunchplaneProductProfileRecord, lane: ProductLaneProfile, now: datetime
+) -> None:
     verification = read_lane_runtime_verification(
         record_store=store,
         profile=profile,
@@ -218,29 +253,6 @@ def _resolve_guard_refusal(
     )
     if verification.provenance.freshness_status != "verified":
         raise ValueError("Current production runtime identity is not verified.")
-    history = store.list_public_ingress_observation_records(incident_id=incident.incident_id)
-    if not history or any(
-        observation.status != "fail"
-        or not observation.targets
-        or any(
-            target.url != _delivery_target_url(ProductionChangeRequiresPromotion.code)
-            for target in observation.targets
-        )
-        for observation in history
-    ):
-        raise ValueError("Incident history includes a failure or uncertain outcome beyond refusal.")
-    _observe(
-        store,
-        profile,
-        lane,
-        check_name=incident.check_name,
-        failed=False,
-        retired=True,
-        observed_at=now.isoformat(),
-        summary=summary + "Production health and runtime identity remain verified.",
-        expected_incident_sha256=public_ingress_incident_record_sha256(incident),
-    )
-    return incident.incident_id
 
 
 def _recheck_guard_refusals(
@@ -260,9 +272,14 @@ def _recheck_guard_refusals(
                 instance_name="prod",
                 status="open",
             )
-            if is_guard_refusal_incident(incident)
+            if _is_refusal_only_incident(store, incident)
         )
         if not incidents:
+            return
+        try:
+            _require_verified_production_runtime(store, profile, lane, _time(now))
+        except (ValueError, FileNotFoundError):
+            # Do not scan refusal events while health/identity cannot qualify recovery.
             return
         refusals = store.list_public_ingress_observation_records(
             product=profile.product,
@@ -956,7 +973,7 @@ def _recover_delivery_failures(
                 summary="The matching production delivery succeeded.",
                 observed_at=now,
             )
-        elif not is_guard_refusal_incident(incident) and incident.latest_observed_at != now:
+        elif not _is_refusal_only_incident(store, incident) and incident.latest_observed_at != now:
             reason = (
                 incident.material_fingerprint.route_authority.provider_check.rsplit("/", 1)[-1]
                 if incident.material_fingerprint

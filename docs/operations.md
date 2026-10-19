@@ -2023,9 +2023,10 @@ Real delivery failures, mixed or uncertain histories, missing/stale/failed check
 unverified identity and concurrent incident changes stay open. Scheduled rechecks
 and explicit reconciliation share the delivery monitor's lane lock. New refusal
 requests retain their normal nonblocking evidence write. Changed product authority
-also blocks persistence. Rechecks read only the latest refusal event; unresolved
-refusal incidents retain their original history without appending a repeated
-failure on each pass.
+also blocks persistence. Rechecks select only incidents whose full retained history contains refusals.
+Their history stays unchanged without a repeated failure appended on each pass.
+Mixed histories keep the normal failure observations and reminders. The latest
+refusal-event lookup runs only when a refusal-only candidate exists.
 
 Qualified occurrences use the normal atomic incident, event and reminder
 transition. The original observations and traces stay linked, with
