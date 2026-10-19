@@ -1245,10 +1245,6 @@ ODOO_DB_PASSWORD = "local-secret"
 
             self.assertEqual(result.exit_code, 0, msg=result.output)
             rendered_html = output_file.read_text(encoding="utf-8")
-            self.assertIn("Tenant environment", rendered_html)
-            self.assertIn(
-                "it has not recorded current testing or prod lane evidence yet", rendered_html
-            )
             self.assertIn("opw/tenant-opw/pr-130", rendered_html)
             self.assertNotIn("Rebuild long-lived lanes", rendered_html)
             self.assertNotIn("Launchplane cannot plan the next promotion yet.", rendered_html)

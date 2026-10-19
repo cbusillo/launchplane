@@ -7335,6 +7335,20 @@ private_key_context = "example_context"
             )
             filesystem_store.write_artifact_manifest(_artifact_manifest())
             filesystem_store.write_odoo_instance_override_record(_odoo_instance_override_record())
+            enablement_dir = filesystem_store.state_dir / "launchplane_preview_enablement"
+            enablement_dir.mkdir(parents=True)
+            enablement_payload = {
+                "schema_version": 1,
+                "record_id": "verireel-testing-verireel-pr-123",
+                "context": "verireel-testing",
+                "anchor_repo": "verireel",
+                "anchor_pr_number": 123,
+                "pr_state": "open",
+                "updated_at": "2026-04-20T10:05:30Z",
+            }
+            (enablement_dir / "verireel-testing-verireel-pr-123.json").write_text(
+                json.dumps(enablement_payload), encoding="utf-8"
+            )
             filesystem_store.write_preview_record(
                 _preview_record(
                     preview_id="preview-verireel-testing-verireel-pr-123",
@@ -7548,6 +7562,7 @@ private_key_context = "example_context"
                     "product_owner_requirements": 0,
                     "product_owner_routing": 0,
                     "preview_records": 1,
+                    "preview_enablement": 1,
                     "preview_generations": 1,
                     "owner_acceptance_events": 0,
                     "privileged_operation_events": 0,
@@ -7605,6 +7620,9 @@ private_key_context = "example_context"
                     "preview-verireel-testing-verireel-pr-123-generation-0001"
                 ).state,
                 "ready",
+            )
+            self.assertEqual(
+                store.list_retired_preview_enablement_payloads(), (enablement_payload,)
             )
             self.assertEqual(
                 store.list_preview_inventory_scan_records(
