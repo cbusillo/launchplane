@@ -217,25 +217,58 @@ def register_odoo_upgrade_rehearsal_routes(
                                     )
                                 },
                             }
-                        observation = adapter.host(record, "observe", check)
-                        if idempotency_key and observation.get("completed") is False:
-                            observation.update(adapter.operation_readback(record, idempotency_key))
+                        action_journal = None
+                        diagnostics: dict[str, object] = {}
+                        if idempotency_key:
                             try:
-                                observation["failure_events_after_checkpoint"] = (
-                                    adapter.failure_events(
-                                        record, str(observation["provider_effect_started_at"])
+                                action_journal = adapter.operation_readback(record, idempotency_key)
+                            except RehearsalRefused:
+                                # A completed action may already have published a new record.
+                                # Its native receipt remains independently observable.
+                                pass
+                            if (
+                                action_journal
+                                and action_journal["operation_state"] == "reconcile_required"
+                            ):
+                                try:
+                                    events, complete = adapter.failure_events(
+                                        record, str(action_journal["provider_effect_started_at"])
                                     )
-                                )
-                            except api.DokployRequestFailed as error:
-                                if error.status_code in {401, 403}:
-                                    raise
-                                observation["failure_events_unavailable"] = True
-                            except (ValueError, RuntimeError, OSError, click.ClickException):
-                                observation["failure_events_unavailable"] = True
+                                    diagnostics["failure_events_after_checkpoint"] = events
+                                    if not complete:
+                                        diagnostics["failure_events_unavailable"] = True
+                                except api.DokployRequestFailed as error:
+                                    if error.status_code in {401, 403}:
+                                        raise
+                                    diagnostics["failure_events_unavailable"] = True
+                                except (ValueError, RuntimeError, OSError, click.ClickException):
+                                    diagnostics["failure_events_unavailable"] = True
+                        operation_key = (
+                            str(action_journal.pop("_provider_operation_key"))
+                            if action_journal
+                            else ""
+                        )
+                        observation = adapter.host(
+                            record, "observe", check, operation_key=operation_key
+                        )
+                        if idempotency_key and observation.get("completed") is False:
+                            if action_journal is None:
+                                raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
+                            observation.update(action_journal)
+                            observation.update(diagnostics)
+                            terminal_refusal = (
+                                action_journal["operation_state"] == "completed"
+                                and observation.get("refusal_code")
+                                in REHEARSAL_PUBLIC_FAILURE_MESSAGES
+                            )
                             observation.update(
-                                recovery_disposition="hold_unknown",
-                                recovery_reason="incomplete_original_effect",
-                                original_key_required=True,
+                                recovery_disposition="completed_refusal"
+                                if terminal_refusal
+                                else "hold_unknown",
+                                recovery_reason=observation["refusal_code"]
+                                if terminal_refusal
+                                else "incomplete_original_effect",
+                                original_key_required=not terminal_refusal,
                             )
                         return observation
 

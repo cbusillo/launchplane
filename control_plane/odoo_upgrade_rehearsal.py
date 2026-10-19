@@ -36,6 +36,8 @@ from control_plane.provider_operations import (
 )
 from control_plane.contracts.odoo_upgrade_rehearsal import RehearsalHostResult
 
+REHEARSAL_HOST_FILENAME = "<rehearsal>"
+
 REHEARSAL_SHAPE_KEYS = frozenset(
     {
         "ODOO_WORKERS",
@@ -549,6 +551,7 @@ class OdooRehearsalAdapter:
     ) -> dict[str, object]:
         """Read a journal bound to the original request and unchanged partial record."""
         from control_plane.http_routes.mutation_support import request_fingerprint
+        from control_plane.provider_operations import build_provider_operation_key
 
         reservation = self.store.read_idempotency_record(
             scope=record.principal,
@@ -581,6 +584,13 @@ class OdooRehearsalAdapter:
             "operation_state": reservation.state,
             "provider_effect_phase": reservation.provider_effect_phase,
             "provider_effect_started_at": reservation.provider_effect_started_at,
+            "_provider_operation_key": build_provider_operation_key(
+                scope=reservation.scope,
+                route_path=reservation.route_path,
+                idempotency_key=idempotency_key,
+                request_fingerprint=reservation.request_fingerprint,
+                reconciliation_key=reservation.reconciliation_key,
+            ),
         }
 
     def prepare_readback(
@@ -588,6 +598,7 @@ class OdooRehearsalAdapter:
     ) -> dict[str, object]:
         """Read the original journal before a compose/host receipt exists."""
         journal = self.operation_readback(record, idempotency_key)
+        journal.pop("_provider_operation_key")
         disposition = "hold_unknown"
         reason = "operation_not_recoverable"
         if journal["operation_state"] == "reconcile_required" and not record.compose_id:
@@ -617,12 +628,14 @@ class OdooRehearsalAdapter:
 
     def failure_events(
         self, record: OdooUpgradeRehearsalRecord, started_at: str
-    ) -> list[dict[str, object]]:
-        """Project fixed failure indicators from this namespace's post-checkpoint events."""
+    ) -> tuple[list[dict[str, object]], bool]:
+        """Read bounded event candidates without exporting provider prose or source data."""
+        import ast
         from control_plane.dokploy import post_deploy
+        from control_plane._odoo_upgrade_rehearsal_program import ODOO_UPGRADE_REHEARSAL_PROGRAM
 
         if not started_at:
-            return []
+            raise ValueError("Missing original checkpoint")
         checkpoint_time = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
         host, token = source.read_dokploy_config(control_plane_root=self.root)
         payload = api.fetch_dokploy_target_payload(
@@ -648,7 +661,7 @@ class OdooRehearsalAdapter:
             app_name=record.rehearsal_id,
         )
         if schedule is None:
-            return []
+            raise ValueError("Missing original schedule")
         deployments = api.extract_deployments(
             api.dokploy_request(
                 host=host,
@@ -657,34 +670,29 @@ class OdooRehearsalAdapter:
                 query={"id": api.schedule_key(schedule), "type": "schedule"},
             )
         )
-        events: list[dict[str, object]] = []
-        # No provider prose or source data crosses this projection.
-        indicators = {
-            "Incomplete source copy": "source_stream_incomplete",
-            "Source copy exceeds its reviewed storage bound": "source_stream_bound_exceeded",
-            "Existing read-only source identity is unavailable": "source_identity_unavailable",
-            "Rehearsal command failed; preserve its private custody": "host_command_failed",
-            "Source filestore contains a link or special file": "unsafe_source_filestore",
-            "Filestore extraction exceeds its reviewed bound": "filestore_extraction_bound_exceeded",
-        }
         functions = {
-            "bounded_capture",
-            "capture",
-            "sanitize_capture",
-            "copy_runner",
-            "snapshot",
-            "clone",
-            "restore_preserved_snapshot",
-            "before_web",
-            "private_health",
-            "compose",
+            node.name
+            for node in ast.parse(ODOO_UPGRADE_REHEARSAL_PROGRAM).body
+            if isinstance(node, ast.FunctionDef)
         }
-        for deployment in deployments[:32]:
+        events: list[dict[str, object]] = []
+        complete = True
+        candidates = []
+        for deployment in deployments:
             created = api._deployment_created_at(deployment)
-            if created is None or created < checkpoint_time.timestamp():
-                continue
+            if created is None:
+                complete = False
+            elif (
+                created
+                >= checkpoint_time.timestamp() - api._DOKPLOY_SCHEDULE_START_CLOCK_SKEW_SECONDS
+            ):
+                candidates.append((created, deployment))
+        if len(candidates) > 32:
+            complete = False
+        for created, deployment in candidates[:32]:
             identifier = api.deployment_key(deployment)
             if not re.fullmatch(r"[A-Za-z0-9_-]{1,200}", identifier):
+                complete = False
                 continue
             lines = api.fetch_dokploy_deployment_logs(
                 host=host,
@@ -698,25 +706,28 @@ class OdooRehearsalAdapter:
                     name
                     for name in functions
                     if re.search(
-                        r'File "<rehearsal>", line \d+, in ' + re.escape(name) + r"(?:\n|$)", log
+                        r'File "'
+                        + re.escape(REHEARSAL_HOST_FILENAME)
+                        + r'", line \d+, in '
+                        + re.escape(name)
+                        + r"(?:\n|$)",
+                        log,
                     )
                 }
             )
-            if not frames:
-                continue
+            status = api.deployment_status(deployment)
             events.append(
                 {
                     "deployment_id": identifier,
                     "created_at": datetime.fromtimestamp(created, timezone.utc).isoformat(),
+                    "provider_status": status
+                    if status in {"done", "error", "running", "queued", "cancelled"}
+                    else "unknown",
+                    "traceback_present": "Traceback (most recent call last):" in log,
                     "failure_frames": frames,
-                    "failure_codes": sorted(
-                        code for message, code in indicators.items() if message in log
-                    ),
                 }
             )
-            if len(events) == 8:
-                break
-        return events
+        return events, complete
 
     def target_key(self) -> str:
         return self.request.rehearsal_id
@@ -832,7 +843,9 @@ class OdooRehearsalAdapter:
             "#!/usr/bin/env bash\nset -euo pipefail\npython3 - <<'LP_REHEARSAL'\n"
             + "import base64, gzip\nexec(compile(gzip.decompress(base64.b64decode("
             + repr(packed)
-            + ")), '<rehearsal>', 'exec'), {})"
+            + ")), "
+            + repr(REHEARSAL_HOST_FILENAME)
+            + ", 'exec'), {})"
             + "\nLP_REHEARSAL\n"
         )
         return script
@@ -1032,8 +1045,10 @@ class OdooRehearsalAdapter:
                 record, _, _ = self.inputs()
                 require_rehearsal_transition(record, self.request.action)
                 require_unaliased_rehearsal(self.store, record)
-            except RehearsalRefused as error:
-                raise ProviderMutationRejectedError(error) from None
+            except RehearsalRefused:
+                raise ProviderMutationRejectedError(
+                    RehearsalRefused(RehearsalPrerequisite.PRECHECK_REFUSED)
+                ) from None
             recovering_project = bool(self._observed_project_id)
             reviewed_binding = (
                 self.initial_prepare_binding(record)
@@ -1042,7 +1057,7 @@ class OdooRehearsalAdapter:
             )
             if reviewed_binding != self.request.reviewed_plan_sha256:
                 raise ProviderMutationRejectedError(
-                    RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
+                    RehearsalRefused(RehearsalPrerequisite.PRECHECK_REFUSED)
                 )
 
             def checkpoint() -> None:

@@ -2611,16 +2611,19 @@ restore, capture or deletion. Fixed prerequisite codes and the trace identify
 unavailable source, artifact, placement, credentials, state or recovery evidence;
 no provider exception text is returned.
 For an incomplete action, original-key readback also returns the operation's
-state, effect phase and checkpoint time. Its disposition remains `hold_unknown`;
-these observations do not authorize another apply. Value-free `custody` reports
+state, effect phase and checkpoint time. An uncertain effect remains
+`hold_unknown`; a matching completed prerequisite refusal is reported as
+`completed_refusal`. These observations do not authorize another apply. Value-free `custody` reports
 whether an effect marker, capture receipt, pending capture receipt, extracted
 filestore directory and source snapshot directory exist, plus raw dump/archive
 byte counts. Presence and size do not prove a complete or usable copy. Readback
 holds the existing host execution lock while inspecting custody and refuses if
 a host process still owns it. It creates no replacement lock.
 `failure_events_after_checkpoint` projects bounded provider event identities,
-times, fixed failure codes and host function names from this namespace's logs
-after the original effect checkpoint. They are diagnostic candidates, not proof
+times, fixed provider statuses, traceback presence and host function names from
+this namespace's logs within the provider's existing checkpoint clock-skew
+window. Missing or bounded evidence is explicitly unavailable. Events are read
+before launching the observation schedule. They are diagnostic candidates, not proof
 that an event belongs to the original apply. Provider prose and source data are
 withheld. Preserve the original request, key and all partial custody until a
 supported continuation is established.

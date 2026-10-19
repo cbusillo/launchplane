@@ -73,6 +73,7 @@ class RehearsalPrerequisite(StrEnum):
     PLACEMENT_UNAVAILABLE = "rehearsal_placement_unavailable"
     STATE_UNVERIFIED = "rehearsal_state_unverified"
     RECOVERY_REQUIRED = "rehearsal_recovery_required"
+    PRECHECK_REFUSED = "rehearsal_precheck_refused"
 
 
 class OdooUpgradeRehearsalRequest(BaseModel):
