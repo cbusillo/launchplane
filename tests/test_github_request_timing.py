@@ -75,7 +75,12 @@ class GitHubRequestTimingTests(unittest.TestCase):
         self.assertEqual(rows[0]["wake"]["event_receipts"][0]["request_trace_id"], "receiver-trace")
         self.assertEqual(empty, [])
         self.assertEqual(stopped, {"status": "stopped"})
-        diagnostic = json.loads(result.stderr)
+        diagnostic = next(
+            value
+            for line in result.stderr.splitlines()
+            if line.startswith("{")
+            and (value := json.loads(line)).get("event") == "merge_train_pass"
+        )
         self.assertEqual(diagnostic["wake"]["pass_error_code"], "OSError")
         self.assertEqual(diagnostic["wake"]["receipts"][0]["receipt"]["delivery_id"], "completion")
         self.assertIsInstance(diagnostic["wake"]["target_keys"], list)

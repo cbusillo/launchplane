@@ -6,7 +6,7 @@ import json
 from typing import cast
 
 
-_RECEIPT_PREFIX = "merge-train-receipt-v1:"
+_RECEIPT_PREFIX = "merge-train-wake-v1:"
 _MAX_RECEIPT_BYTES = 4096
 MAX_MERGE_TRAIN_WAKE_RECEIPTS = 64
 
@@ -87,9 +87,7 @@ class MergeTrainWake:
         )
 
 
-def encode_merge_train_receipt(
-    target_key: str, receipt: MergeTrainEventReceipt | None
-) -> str | None:
+def encode_merge_train_hint(target_key: str, receipt: MergeTrainEventReceipt | None) -> str | None:
     if receipt is None or MergeTrainEventReceipt.from_payload(asdict(receipt)) is None:
         return None
     payload = _RECEIPT_PREFIX + json.dumps(
@@ -103,44 +101,47 @@ def encode_merge_train_receipt(
 def decode_merge_train_wake(
     payloads: list[str], *, reason: str, hint_observed_at: str = ""
 ) -> MergeTrainWake:
-    """Metadata never supplies a routing key or narrows an existing full sweep."""
+    """Decode advisory routing and bounded observations from atomic notifications."""
     target_keys: set[str] = set()
-    receipts: list[MergeTrainTargetReceipt] = []
-    retained: set[MergeTrainTargetReceipt] = set()
+    receipts: dict[MergeTrainTargetReceipt, None] = {}
     truncated = False
     full_sweep = reason != "event_hints"
     for payload in payloads:
-        if not payload:
+        if not payload.startswith(_RECEIPT_PREFIX):
+            target_key = payload
+            receipt = None
+        else:
+            if len(payload.encode("utf-8")) > _MAX_RECEIPT_BYTES:
+                continue
+            try:
+                value = json.loads(payload.removeprefix(_RECEIPT_PREFIX))
+            except (ValueError, RecursionError):
+                continue
+            if not isinstance(value, dict) or not isinstance(value.get("target_key"), str):
+                continue
+            target_key = cast(str, value["target_key"])
+            receipt = MergeTrainEventReceipt.from_payload(value.get("receipt"))
+        if not target_key:
             full_sweep = True
             if reason == "event_hints":
                 reason = "empty_hint_sweep"
-            continue
-        if not payload.startswith(_RECEIPT_PREFIX):
-            target_keys.add(payload)
-            continue
-        if len(payload.encode("utf-8")) > _MAX_RECEIPT_BYTES:
-            continue
-        try:
-            value = json.loads(payload.removeprefix(_RECEIPT_PREFIX))
-        except (ValueError, RecursionError):
-            continue
-        if not isinstance(value, dict) or not isinstance(value.get("target_key"), str):
-            continue
-        receipt = MergeTrainEventReceipt.from_payload(value.get("receipt"))
+        else:
+            target_keys.add(target_key)
         if receipt is None:
             continue
-        item = MergeTrainTargetReceipt(cast(str, value["target_key"]), receipt)
-        if item in retained:
-            continue
-        if len(receipts) >= MAX_MERGE_TRAIN_WAKE_RECEIPTS:
+        item = MergeTrainTargetReceipt(target_key, receipt)
+        receipts.pop(item, None)
+        receipts[item] = None
+        if len(receipts) > MAX_MERGE_TRAIN_WAKE_RECEIPTS:
             truncated = True
-            continue
-        retained.add(item)
-        receipts.append(item)
+            receipts.pop(next(iter(receipts)))
+    if not target_keys and not full_sweep:
+        full_sweep = True
+        reason = "empty_hint_sweep"
     return MergeTrainWake(
         target_keys=None if full_sweep else frozenset(target_keys),
         reason=reason,
-        receipts=tuple(item for item in receipts if item.target_key in target_keys),
+        receipts=tuple(receipts),
         receipts_truncated=truncated,
         hint_observed_at=hint_observed_at,
     )

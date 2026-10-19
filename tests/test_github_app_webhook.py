@@ -199,6 +199,29 @@ class GitHubAppWebhookTests(unittest.TestCase):
         self.assertEqual(body["error"]["code"], "github_app_webhook_unconfigured")  # type: ignore[index]
         self.assert_nothing_recorded()
 
+    def test_verified_pr_and_status_receipts_keep_their_payload_identifiers(self) -> None:
+        head_sha = "b" * 40
+        cases: tuple[tuple[str, dict[str, object], str], ...] = (
+            (
+                "pull_request",
+                {"action": "labeled", "pull_request": {"id": 123, "head": {"sha": head_sha}}},
+                "123",
+            ),
+            ("status", {"id": 456, "sha": head_sha, "state": "success"}, "456"),
+        )
+        for event, payload, source_id in cases:
+            with (
+                self.subTest(event=event),
+                patch(
+                    "control_plane.merge_train_events.wake_merge_train_for_event",
+                    return_value=False,
+                ) as wake,
+            ):
+                self.deliver(payload, event=event)
+                receipt = wake.call_args.kwargs["receipt"]
+                self.assertEqual(receipt.head_sha, head_sha)
+                self.assertEqual(receipt.source_id, source_id)
+
     def test_push_build_requests_testing_reconcile(self) -> None:
         status, body = self.deliver(_workflow_run(trigger="push"), event="workflow_run")
 

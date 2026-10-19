@@ -188,7 +188,7 @@ def handle_github_app_webhook_request(
         # Attribution cannot make an otherwise useful routing hint unavailable.
         received_at = ""
         logging.getLogger(__name__).warning("Merge train receipt timestamp unavailable.")
-    source_event = _mapping(payload, normalized_event)
+    source_event = payload if normalized_event == "status" else _mapping(payload, normalized_event)
     receipt = MergeTrainEventReceipt.from_payload(
         {
             "delivery_id": normalized_delivery_id,
@@ -196,7 +196,9 @@ def handle_github_app_webhook_request(
             "received_at": received_at,
             "event": normalized_event,
             "action": action or (_string(payload, "state") if normalized_event == "status" else ""),
-            "head_sha": _string(source_event, "head_sha") or _string(payload, "sha"),
+            "head_sha": _string(source_event, "head_sha")
+            or _string(_mapping(source_event, "head"), "sha")
+            or _string(payload, "sha"),
             "source_id": _positive_id(source_event, "id"),
         }
     )

@@ -63,22 +63,28 @@ request; the delivery/event headers are not themselves covered by the payload
 signature. Redelivery may reuse a delivery ID, so the request trace distinguishes
 observations. The fields never replace fresh merge evidence.
 
-Each existing raw controller-key notification remains the routing hint. A bounded
-receipt companion is published on the same channel in the same transaction.
-This preserves routing while separate receiver/worker containers roll forward;
-there is no independently pinned old-worker mode or compatibility service.
-Invalid or oversized optional metadata omits the companion without suppressing
-the raw hint. A failed database notification still relies on the timed sweep.
+Each notification carries one advisory controller key and its bounded receipt
+in a single versioned envelope. PostgreSQL exposes the complete notification,
+so separate client reads cannot detach the receipt from its routing hint.
+Invalid or oversized optional metadata falls back to the original raw key.
+The new listener also accepts raw keys from older publishers. An older worker
+cannot select an envelope's target during a mixed rollout; its independent timed
+sweep remains available. Qualify event latency only after both receiver and
+worker run the new source. No independently pinned old-worker mode or
+compatibility service is introduced. A failed notification relies on the sweep.
 
-The listener fully drains queued hints while retaining at most a bounded set of
+The listener fully drains queued hints while retaining the newest bounded set of
 receipts. `receipts_truncated` reports lost attribution, not an exact count of
-unique deliveries. Missing, malformed or legacy metadata remains unattributed.
-Receipt data cannot supply a routing key. A due sweep still consumes queued hints
-and rereads all targets, retaining only their observed receipt metadata.
+unique deliveries. Missing, malformed or legacy metadata remains unattributed;
+an envelope's routing key remains a hint, independent of its optional receipt.
+Unreadable envelopes with no routing hint fall back to a full sweep. A due sweep
+still consumes queued hints and rereads all targets, retaining observed receipts.
 
 Worker result rows retain their existing controller trace and record identifiers,
 with a `wake` observation containing the actual selection reason, loop-pass start,
-hint observation time and only that target's receipts. Startup, manual passes,
+hint observation time and only that target's receipts on its first result row.
+Continuation rows in the same stdout list and target retain the pass observation
+without repeating receipts. Startup, manual passes,
 event hints, timed sweeps, empty hints and listener fallback remain distinguishable.
 A timer sweep can also observe event receipts; other targets do not inherit those
 receipts. A later pass does not reuse old receipts as a new cause. The loop-pass

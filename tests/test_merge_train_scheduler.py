@@ -305,9 +305,24 @@ class MergeTrainSchedulerPassTests(TestCase):
             MergeTrainControllerRunOnceResult(accepted_result=action, records={})
             for action in actions
         ]
-        results = self._run()
+        key = "merge-train-controller:cbusillo:alpha:main"
+        receipt = MergeTrainEventReceipt(
+            "completion", "receiver-request", "2026-10-19T09:00:00Z", "check_run"
+        )
+        wake = MergeTrainWake(
+            frozenset({key}), "event_hints", receipts=(MergeTrainTargetReceipt(key, receipt),)
+        )
+        results = run_merge_train_scheduler_pass(
+            record_store=self.record_store, control_plane_root=_ROOT, wake=wake
+        )
         self.assertEqual(len(results), len(actions))
         self.assertFalse(results[-1].continue_pass)
+        assert results[0].wake is not None
+        self.assertEqual(results[0].wake.event_receipts, (receipt,))
+        for result in results[1:]:
+            assert result.wake is not None
+            self.assertEqual(result.wake.event_receipts, ())
+            self.assertEqual(result.wake.pass_started_at, results[0].wake.pass_started_at)
 
     def test_an_unfinished_landing_ends_the_pass(self) -> None:
         feedback = patch.object(

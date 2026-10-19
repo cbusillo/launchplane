@@ -39,7 +39,7 @@ from sqlalchemy.exc import IntegrityError, OperationalError, SQLAlchemyError
 
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.merge_train_events import MergeTrainEventListener
-from control_plane.merge_train_wake import MergeTrainEventReceipt
+from control_plane.merge_train_wake import MergeTrainEventReceipt, decode_merge_train_wake
 from control_plane.workflows.dokploy_target_adoption import (
     PROJECT_CREATE_PATH,
     ENVIRONMENT_CREATE_PATH,
@@ -614,6 +614,16 @@ class RealPostgresMergeTrainNotificationTests(unittest.TestCase):
         wake = self.listener.wait(2, threading.Event())
         self.assertEqual(wake.target_keys, frozenset({"alpha"}))
         self.assertEqual(wake.receipts, ())
+
+    def test_routing_and_observation_are_one_indivisible_notification(self) -> None:
+        self.store.notify_merge_train(("alpha",), receipt=self.receipt)
+        assert self.listener.connection is not None
+        self.listener.connection.execute("SELECT 1")
+        notifications = list(self.listener.connection.notifies(timeout=0))
+        self.assertEqual(len(notifications), 1)
+        wake = decode_merge_train_wake([notifications[0].payload], reason="event_hints")
+        self.assertEqual(wake.target_keys, frozenset({"alpha"}))
+        self.assertEqual(wake.for_target("alpha").event_receipts, (self.receipt,))
 
 
 def _tenant_repository_classification_record(

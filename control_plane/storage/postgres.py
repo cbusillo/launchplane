@@ -23942,16 +23942,13 @@ class PostgresRecordStore(HumanSessionStore):
         Each payload names one train's controller key; an empty payload wakes them all.
         """
         from control_plane.merge_train_events import MERGE_TRAIN_EVENT_CHANNEL
-        from control_plane.merge_train_wake import encode_merge_train_receipt
+        from control_plane.merge_train_wake import encode_merge_train_hint
 
         if self.database_dialect_name != "postgresql":
             raise ValueError("Merge train notifications require PostgreSQL.")
         payloads: list[str] = []
         for target_key in target_keys or ("",):
-            payloads.append(target_key)
-            companion = encode_merge_train_receipt(target_key, receipt)
-            if companion is not None:
-                payloads.append(companion)
+            payloads.append(encode_merge_train_hint(target_key, receipt) or target_key)
         with self._engine.begin() as connection:
             for payload in payloads:
                 connection.execute(

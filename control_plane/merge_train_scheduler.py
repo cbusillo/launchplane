@@ -149,6 +149,11 @@ def run_merge_train_scheduler_pass(
         if should_stop():
             break
         repository_policy = listed_policy
+        target_wake = pass_wake.for_target(
+            build_merge_train_controller_key(
+                repository=repository_policy.repository, base_branch=repository_policy.base_branch
+            )
+        )
         # Each train is independent: one failing target never stops the others.
         try:
             # An earlier target can take minutes; act only on the policy as it is now.
@@ -167,17 +172,8 @@ def run_merge_train_scheduler_pass(
                     repository_policy=repository_policy,
                     now=now,
                 )
-                results.append(
-                    replace(
-                        result,
-                        wake=pass_wake.for_target(
-                            build_merge_train_controller_key(
-                                repository=repository_policy.repository,
-                                base_branch=repository_policy.base_branch,
-                            )
-                        ),
-                    )
-                )
+                results.append(replace(result, wake=target_wake))
+                target_wake = replace(target_wake, event_receipts=())
                 if not result.continue_pass or should_stop():
                     break
                 policy_record = resolve_merge_train_policy_record(record_store)
@@ -200,17 +196,7 @@ def run_merge_train_scheduler_pass(
             result = _target_result(
                 repository_policy, status="failed", reason_code=type(error).__name__
             )
-        results.append(
-            replace(
-                result,
-                wake=pass_wake.for_target(
-                    build_merge_train_controller_key(
-                        repository=repository_policy.repository,
-                        base_branch=repository_policy.base_branch,
-                    )
-                ),
-            )
-        )
+        results.append(replace(result, wake=target_wake))
     return tuple(results)
 
 
