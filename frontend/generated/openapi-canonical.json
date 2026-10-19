@@ -61,6 +61,166 @@
         "title": "AcceptedEvidenceResponse",
         "type": "object"
       },
+      "AccessPolicyReview": {
+        "additionalProperties": false,
+        "description": "Director-only display, separate from persisted and agent evidence.",
+        "properties": {
+          "rules": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/AccessPolicyRuleReview"
+            },
+            "title": "Rules",
+            "type": "array"
+          },
+          "state": {
+            "enum": [
+              "available",
+              "unavailable"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "state"
+        ],
+        "title": "AccessPolicyReview",
+        "type": "object"
+      },
+      "AccessPolicyRoleEffect": {
+        "additionalProperties": false,
+        "properties": {
+          "after": {
+            "anyOf": [
+              {
+                "enum": [
+                  "admin",
+                  "read_only"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "After"
+          },
+          "before": {
+            "anyOf": [
+              {
+                "enum": [
+                  "admin",
+                  "read_only"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Before"
+          },
+          "principal": {
+            "title": "Principal",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "lost",
+              "reduced",
+              "retained",
+              "gained",
+              "unknown",
+              "unaffected"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "principal",
+          "state"
+        ],
+        "title": "AccessPolicyRoleEffect",
+        "type": "object"
+      },
+      "AccessPolicyRuleReview": {
+        "additionalProperties": false,
+        "properties": {
+          "change": {
+            "enum": [
+              "added",
+              "removed"
+            ],
+            "title": "Change",
+            "type": "string"
+          },
+          "contexts": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Contexts",
+            "type": "array"
+          },
+          "instances": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Instances",
+            "type": "array"
+          },
+          "managed_rule_id": {
+            "title": "Managed Rule Id",
+            "type": "string"
+          },
+          "permissions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Permissions",
+            "type": "array"
+          },
+          "principal": {
+            "title": "Principal",
+            "type": "string"
+          },
+          "products": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Products",
+            "type": "array"
+          },
+          "role_effects": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/AccessPolicyRoleEffect"
+            },
+            "title": "Role Effects",
+            "type": "array"
+          },
+          "roles": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Roles",
+            "type": "array"
+          }
+        },
+        "required": [
+          "managed_rule_id",
+          "change",
+          "principal",
+          "permissions",
+          "products",
+          "contexts",
+          "instances"
+        ],
+        "title": "AccessPolicyRuleReview",
+        "type": "object"
+      },
       "AgentContextEvidence": {
         "additionalProperties": false,
         "properties": {
@@ -31233,6 +31393,17 @@
         "additionalProperties": false,
         "description": "Redacted read-only human review projection for a persisted operation.",
         "properties": {
+          "access_policy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AccessPolicyReview"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
           "activity": {
             "default": [],
             "items": {

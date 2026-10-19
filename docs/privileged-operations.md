@@ -80,6 +80,26 @@ later proposal and approval.
 
 ## Approval And Execution Boundary
 
+The signed-in Director's access-policy review shows each added or removed
+rule's principal, browser roles, permissions and scope. Updated rules show
+both their removed and added sides. Role effects come from the existing
+managed-set planner's candidate and the policy's sign-in role resolver,
+including rules outside the changed set. The display distinguishes losing
+all browser access, losing administrator access while retaining read-only
+access, and a role retained through another rule. Team or organization
+membership and unresolved overlapping selectors are marked unknown rather
+than treated as proof of losing access.
+
+Only a signed-in immutable-ID policy administrator receives this display in
+the semantic review; agent and read-only projections omit it. Immutable
+GitHub IDs are labeled with public account logins where available, using
+credential-free, cached GitHub account metadata; an unavailable lookup keeps
+the account ID visible. This lookup provides no membership claims. No secret
+values or request free text enter the display. If the current planner no
+longer matches the saved plan, current role effects are shown as unavailable.
+These are review fields only; approval, cancellation and worker apply rules
+are unchanged.
+
 Planning remains typed and dry-run-only. Phase 2 adds a separate finite human
 approval and a supervised service-internal worker; it adds no HTTP execute
 route, execute action, static execution credential, or agent execution path.

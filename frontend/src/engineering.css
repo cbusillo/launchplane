@@ -2048,6 +2048,25 @@
   color: var(--muted-strong);
 }
 
+.privileged-operation-access-review article + article {
+  border-top: 1px solid var(--border);
+  margin-top: 1rem;
+  padding-top: 1rem;
+}
+
+.privileged-operation-access-review h4,
+.privileged-operation-access-review dd {
+  overflow-wrap: anywhere;
+}
+
+.privileged-operation-access-review h4 {
+  padding: 0 0.9rem;
+}
+
+.privileged-operation-access-review p.privileged-operation-warning {
+  display: block;
+}
+
 .privileged-operation-activity {
   display: grid;
   gap: 0.55rem;
