@@ -20,6 +20,46 @@ from tests.test_postgres_integration import _head_postgres_database
 
 
 class RealPostgresTestingPrivateIngressRecoveryTests(private_ingress_tests.PrivateIngressFixture):
+    def test_historical_cleanup_preserves_original_key_recovery(self) -> None:
+        self.create()
+        digest = self.adapter(operation="disable").plan()["plan_sha256"]
+        self.assertEqual(
+            self.run_ingress(
+                self.adapter(operation="disable", reviewed_plan_sha256=digest), "first-disable"
+            ).status,
+            "completed",
+        )
+        host_id = self.client.proxy_hosts[0].id
+        self.client.enable_proxy_host(host_id)
+        digest = self.adapter(operation="disable").plan()["plan_sha256"]
+        adapter = self.adapter(operation="disable", reviewed_plan_sha256=digest)
+        with patch.object(self.client, "disable_proxy_host", side_effect=ValueError("rejected")):
+            self.assertEqual(self.run_ingress(adapter, "cleanup").status, "reconcile_required")
+        self.assertEqual(self.run_ingress(adapter, "different-key").status, "target_busy")
+        self.client.proxy_hosts[0].access_list_id = 0
+        self.assertEqual(self.run_ingress(adapter, "cleanup").status, "reconcile_required")
+        self.client.proxy_hosts[0].access_list_id = self.body.access_list_id
+        with patch.object(self.client, "get_proxy_host", side_effect=RuntimeError("read failed")):
+            self.assertEqual(self.run_ingress(adapter, "cleanup").status, "reconcile_required")
+        self.assertEqual(self.run_ingress(adapter, "cleanup").status, "completed")
+        self.assertTrue(adapter.readback()["applied"])
+
+        self.client.enable_proxy_host(host_id)
+        digest = self.adapter(operation="disable").plan()["plan_sha256"]
+        adapter = self.adapter(operation="disable", reviewed_plan_sha256=digest)
+        toggle = self.client.disable_proxy_host
+
+        def lost_response(host_id: int) -> Any:
+            toggle(host_id)
+            raise TimeoutError("landed before response loss")
+
+        with patch.object(self.client, "disable_proxy_host", side_effect=lost_response):
+            self.assertEqual(self.run_ingress(adapter, "lost-cleanup").status, "reconcile_required")
+        with patch.object(self.client, "disable_proxy_host", wraps=toggle) as repeated:
+            self.assertEqual(self.run_ingress(adapter, "lost-cleanup").status, "adopted")
+            repeated.assert_not_called()
+        self.assertFalse(self.client.proxy_hosts[0].enabled)
+
     def test_late_toggle_response_is_adopted_without_repeating_toggle(self) -> None:
         self.create()
         for operation, method in (

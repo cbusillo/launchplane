@@ -320,9 +320,13 @@ class TestingPrivateIngressAdapter:
         authority: dict[str, object],
         recovery_key: str = "",
     ) -> bool:
-        """Only a previous successful receipt can authorize disabling a route."""
-        latest = latest_testing_private_ingress_receipt(
-            self.store, product=self.product, context=self.request.context, host_id=candidate.id
+        """Separate current serving authority from exact historical cleanup ownership."""
+        latest = (
+            latest_testing_private_ingress_receipt(
+                self.store, product=self.product, context=self.request.context, host_id=candidate.id
+            )
+            if self.request.operation != "disable"
+            else None
         )
         for audit in self.store.list_ingress_route_audit_records(
             product=self.product, context_name=self.request.context
@@ -330,7 +334,16 @@ class TestingPrivateIngressAdapter:
             if (
                 audit.record_id.startswith(_PREFIX)
                 and (
-                    (audit.status == "applied" and audit == latest)
+                    (
+                        audit.status == "applied"
+                        and audit.product == self.product
+                        and audit.context == self.request.context
+                        and audit.provider == "npmplus"
+                        and audit.mode == "apply"
+                        and not audit.dry_run
+                        and audit.provider_host_id == candidate.id
+                        and (self.request.operation == "disable" or audit == latest)
+                    )
                     or (
                         audit.status == "pending"
                         and audit.record_id == _PREFIX + self.request.reviewed_plan_sha256

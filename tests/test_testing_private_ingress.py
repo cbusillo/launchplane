@@ -252,6 +252,35 @@ class PrivateIngressFixture(unittest.IsolatedAsyncioTestCase):
 
 
 class PrivateTestingIngressTests(PrivateIngressFixture):
+    def test_historical_cleanup_receipt_requires_exact_successful_ownership(self) -> None:
+        self.create()
+        receipt = self.store.list_ingress_route_audit_records()[0]
+        invalid: tuple[dict[str, Any], ...] = (
+            {"record_id": "foreign-receipt"},
+            {"product": "other-product"},
+            {"context": "other-context"},
+            {"provider": "other-provider"},
+            {"mode": "dry-run", "dry_run": True},
+            {"status": "planned"},
+            {"status": "pending"},
+            {"provider_host_id": None},
+            {"provider_host_id": self.client.proxy_hosts[0].id + 1},
+            {"requested_domains": ("other.example.test",)},
+            {"edge_endpoint_key": "other-edge"},
+            {"provider_route_sha256": "0" * 64},
+        )
+        for changes in invalid:
+            with (
+                self.subTest(changes=changes),
+                patch.object(
+                    self.store,
+                    "list_ingress_route_audit_records",
+                    return_value=[receipt.model_copy(update=changes)],
+                ),
+                self.assertRaises(ValueError),
+            ):
+                self.adapter(operation="disable").plan()
+
     def test_original_key_recovers_when_domain_create_did_not_land(self) -> None:
         digest = self.adapter().plan()["plan_sha256"]
         adapter = self.adapter(reviewed_plan_sha256=digest)
@@ -387,6 +416,11 @@ class PrivateTestingIngressTests(PrivateIngressFixture):
 
     def test_disable_survives_application_replacement_and_unavailable_old_edge(self) -> None:
         self.create()
+        digest = self.adapter(operation="disable").plan()["plan_sha256"]
+        self.adapter(operation="disable", reviewed_plan_sha256=digest).apply(
+            "first-disable-key", self.lease
+        )
+        self.client.enable_proxy_host(self.client.proxy_hosts[0].id)
         with (
             patch.object(self.store, "read_dokploy_target_record", side_effect=FileNotFoundError),
             patch.object(self.store, "read_provider_target_record", side_effect=FileNotFoundError),

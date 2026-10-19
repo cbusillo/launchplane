@@ -111,7 +111,15 @@ class TestingPrivateHealthTests(PrivateIngressFixture):
         self.client.enable_proxy_host(self.client.proxy_hosts[0].id)
         self.assert_refused()
         with self.assertRaises(ValueError):
-            self.adapter(operation="disable").plan()
+            self.adapter().plan()
+        digest = self.adapter(operation="disable").plan()["plan_sha256"]
+        adapter = self.adapter(operation="disable", reviewed_plan_sha256=digest)
+        adapter.apply("cleanup-key", self.lease)
+        self.assertTrue(adapter.readback()["applied"])
+        self.assertFalse(self.client.proxy_hosts[0].enabled)
+        self.assert_refused()
+        self.create()
+        self.assertEqual(self.fetch().status_code, 200)
 
     def test_deleted_historical_host_does_not_poison_current_route(self) -> None:
         self.create()

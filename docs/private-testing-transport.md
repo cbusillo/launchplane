@@ -144,7 +144,11 @@ PostgreSQL name fences is tracked separately in #4005.
 Disable uses a fresh reviewed plan and the same lane's exact receipt-owned route,
 retaining its original endpoint and edge keys. It only toggles that route even
 after the old application or edge record disappears, and leaves the application
-hostname and bot state in place. Disabled routes need no loaded-nginx flag, but
+hostname and bot state in place. For disable only, a historical successful apply
+receipt can establish ownership when its host ID and complete current route hash
+match. This keeps service cleanup available after an out-of-band re-enable;
+it does not authorize probes or create/re-enable, which still require the latest
+applied receipt. Disabled routes need no loaded-nginx flag, but
 retain the same hidden-config checks; enabled routes must be loaded.
 Neither operation deploys a workload
 or proves TLS, WSS, remote tailnet access or healthy runtime identity.
