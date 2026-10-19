@@ -1896,6 +1896,118 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 ).observe_batch_candidate_checks(candidate=candidate)
                 self.assertEqual(observed.required_checks_status, expected)
 
+    def test_superseded_actions_execution_does_not_veto_current_checks(self) -> None:
+        from control_plane.merge_train_github import _required_checks_status
+
+        for consumer in ("head", "candidate"):
+            for change in (
+                "replacement",
+                "different_workflow",
+                "different_event",
+                "unknown",
+                "running",
+                "rerun",
+                "metadata_incomplete",
+                "metadata_unavailable",
+                "suite_mismatch",
+            ):
+                with self.subTest(consumer=consumer, change=change):
+                    head = "candidate-sha"
+                    old = {
+                        "id": 11,
+                        "workflow_id": 7,
+                        "run_number": 1,
+                        "run_attempt": 1,
+                        "head_sha": head,
+                        "head_branch": "work/feature",
+                        "head_repository": {"id": 9},
+                        "event": "pull_request",
+                        "pull_requests": [
+                            {"number": 14, "base": {"ref": "main", "repo": {"id": 9}}}
+                        ],
+                        "check_suite_id": 10,
+                        "status": "completed",
+                        "conclusion": "cancelled",
+                        "run_started_at": "2026-01-01T10:00:00Z",
+                    }
+                    current = {
+                        **old,
+                        "id": 12,
+                        "run_number": 2,
+                        "check_suite_id": 20,
+                        "conclusion": "success",
+                        "run_started_at": "2026-01-01T10:01:00Z",
+                    }
+                    if change == "different_workflow":
+                        current["workflow_id"] = 8
+                    elif change == "different_event":
+                        current["event"] = "push"
+                    elif change == "unknown":
+                        old.pop("workflow_id")
+                    elif change == "running":
+                        current["status"] = "queued"
+                        current["conclusion"] = None
+                    elif change == "rerun":
+                        old["run_attempt"] = 2
+                        old["run_started_at"] = "2026-01-01T10:02:00Z"
+                    elif change == "suite_mismatch":
+                        old["check_suite_id"] = 30
+                    checks = [
+                        {
+                            **_required_check_run("security-gate", "completed", result),
+                            "app": {"id": 15368, "slug": "github-actions"},
+                            "id": job,
+                            "head_sha": head,
+                            "check_suite": {"id": suite},
+                            "details_url": f"https://github.com/example/tool/actions/runs/{run}/job/{job}",
+                        }
+                        for run, job, suite, result in (
+                            (11, 101, 10, "failure"),
+                            (12, 102, 20, "success"),
+                        )
+                    ]
+                    responses = (
+                        *(
+                            ()
+                            if consumer == "head"
+                            else (_protected_branch_with_checks("security-gate"),)
+                        ),
+                        _combined_status(statuses=()),
+                        {"check_runs": checks},
+                        MergeTrainGitHubError("workflow evidence unavailable")
+                        if change == "metadata_unavailable"
+                        else {
+                            "total_count": 3 if change == "metadata_incomplete" else 2,
+                            "workflow_runs": [current, old],
+                        },
+                    )
+                    transport = RecordingMergeTrainGitHubTransport(responses=responses)
+                    if consumer == "head":
+                        status = _required_checks_status(
+                            transport=transport,
+                            repository_path="example/tool",
+                            encoded_head_sha=head,
+                        )
+                    else:
+                        candidate = _batch_candidate().model_copy(
+                            update={
+                                "repository": "example/tool",
+                                "candidate_sha": head,
+                                "status": "ready_for_checks",
+                            }
+                        )
+                        status = (
+                            GitHubMergeTrainClient(transport=transport)
+                            .observe_batch_candidate_checks(
+                                candidate=candidate,
+                            )
+                            .required_checks_status
+                        )
+                    if change == "replacement":
+                        self.assertEqual(status, "pass")
+                    else:
+                        self.assertNotEqual(status, "pass")
+
     def test_observe_batch_candidate_checks_keeps_latest_duplicate_pending(self) -> None:
         candidate = _batch_candidate().model_copy(
             update={"candidate_sha": "candidate-sha", "status": "ready_for_checks"}

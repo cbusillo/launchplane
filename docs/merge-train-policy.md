@@ -826,6 +826,16 @@ expected-commit comparison; exhaustion still fails closed as stale state.
 
 ### Candidate Validation
 
+The GitHub adapter distinguishes superseded Actions executions from independent
+check suites using the shared workflow execution selector. A failed or pending
+Actions job triggers a bounded, complete exact-head workflow inventory. Only a
+completed superseded execution with matching job link, head and suite can be
+removed, after all current executions have settled successfully. Different
+workflows, events, source repositories and PR targets remain independent; newer
+reruns and incomplete or unavailable metadata retain the existing blockers.
+This applies to original-head, candidate and base check reads without changing
+required-check identities, admission, or landing protection.
+
 Required checks must pass on the candidate commit that includes the queued PRs
 being considered for the batch. Checks on each PR's own head are useful
 screening evidence, but they do not prove the combined tree is safe to land.

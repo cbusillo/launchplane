@@ -5518,10 +5518,111 @@ def _list_check_runs(
         if len(raw_check_runs) < 100:
             break
         page += 1
+    latest = _latest_check_runs(check_runs)
+    latest = _without_superseded_actions_checks(
+        transport=transport,
+        repository_path=repository_path,
+        head_sha=encoded_head_sha,
+        check_runs=latest,
+    )
     return {
         "total_count": total_count if total_count is not None else len(check_runs),
-        "check_runs": _latest_check_runs(check_runs),
+        "check_runs": latest,
     }
+
+
+def _actions_check_identity(
+    check: object, *, repository_path: str, head_sha: str
+) -> tuple[int, int] | None:
+    """Only an Actions job with matching head, suite and provider link is selectable."""
+    if not isinstance(check, dict) or check.get("head_sha") != head_sha:
+        return None
+    app, suite = check.get("app"), check.get("check_suite")
+    if (
+        not isinstance(app, dict)
+        or app.get("slug") != "github-actions"
+        or not isinstance(suite, dict)
+    ):
+        return None
+    suite_id = suite.get("id")
+    if not isinstance(suite_id, int) or isinstance(suite_id, bool) or suite_id <= 0:
+        return None
+    match = re.fullmatch(
+        rf"https://github\.com/{re.escape(repository_path)}/actions/runs/([1-9][0-9]*)/job/([1-9][0-9]*)",
+        str(check.get("details_url") or ""),
+    )
+    if match is None or check.get("id") != int(match[2]):
+        return None
+    return int(match[1]), suite_id
+
+
+def _without_superseded_actions_checks(
+    *,
+    transport: MergeTrainGitHubTransport,
+    repository_path: str,
+    head_sha: str,
+    check_runs: list[object],
+) -> list[object]:
+    """Retain blockers unless complete execution evidence proves they are history."""
+    from github_plan_status.workflow_runs import current_workflow_runs, workflow_execution_identity
+
+    identities = [
+        _actions_check_identity(check, repository_path=repository_path, head_sha=head_sha)
+        for check in check_runs
+    ]
+    if not any(
+        identity is not None and _check_run_status(cast(dict[str, object], check)) != "pass"
+        for check, identity in zip(check_runs, identities, strict=True)
+    ):
+        return check_runs
+    runs: list[dict[str, object]] = []
+    try:
+        for page in range(1, 11):
+            query = urlencode({"head_sha": head_sha, "per_page": "100", "page": str(page)})
+            payload = _json_object(
+                transport.request(
+                    method="GET",
+                    path=f"/repos/{repository_path}/actions/runs?{query}",
+                ),
+                "GitHub workflow runs response",
+            )
+            values, total = payload.get("workflow_runs"), payload.get("total_count")
+            if (
+                not isinstance(values, list)
+                or not isinstance(total, int)
+                or isinstance(total, bool)
+            ):
+                return check_runs
+            runs.extend(_json_object(value, "GitHub workflow run") for value in values)
+            if len(values) < 100:
+                if len(runs) != total:
+                    return check_runs
+                break
+        else:
+            return check_runs
+        selection = current_workflow_runs(runs, head_sha)
+        current = selection["current"]
+        # A new run without jobs must never turn an old failed head green.
+        # Retain its existing blockers until all current executions settle.
+        if not current or any(
+            run.get("status") != "completed"
+            or run.get("conclusion") not in {"success", "neutral", "skipped"}
+            for run in current
+        ):
+            return check_runs
+        current_ids = {run["id"] for run in current}
+        superseded = {
+            (run["id"], run["check_suite_id"])
+            for run in selection["superseded"]
+            if run["id"] not in current_ids and workflow_execution_identity(run) is not None
+        }
+    except (MergeTrainGitHubError, HTTPError, URLError, OSError, ValueError, KeyError, TypeError):
+        return check_runs
+    return [
+        check
+        for check, identity in zip(check_runs, identities, strict=True)
+        if identity not in superseded
+    ]
 
 
 def _latest_check_runs(check_runs: list[object]) -> list[object]:
