@@ -90,7 +90,7 @@ access, and a role retained through another rule. Team or organization
 membership and unresolved overlapping selectors are marked unknown rather
 than treated as proof of losing access.
 
-Only a signed-in immutable-ID policy administrator receives this display in
+Only the signed-in Director with immutable-ID admin permission receives this display in
 the semantic review; agent and read-only projections omit it. Immutable
 GitHub IDs are labeled with public account logins where available, using
 credential-free, cached GitHub account metadata; an unavailable lookup keeps
