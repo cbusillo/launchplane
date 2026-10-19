@@ -22,3 +22,36 @@ except ImportError:  # Some workflows run dependency-free tests without the proj
     pass
 else:
     event.listen(Engine, "connect", _skip_sqlite_disk_writes)
+
+
+def _check_controller_replies() -> None:
+    """Fail any test whose merge-train controller pass replies outside the published schema.
+
+    Every controller reply is built from one result type. Checking each one a
+    test produces keeps `contracts/merge-train-controller-reply.schema.json`
+    complete: a new reply field fails here until its contract declares it.
+    """
+
+    from control_plane import merge_train_controller_run_once as controller
+    from control_plane.contracts.merge_train_controller_reply import (
+        validate_merge_train_controller_reply,
+    )
+    from control_plane.http_routes.mutation_support import accepted_evidence_response
+
+    result_type = controller.MergeTrainControllerRunOnceResult
+    build = result_type.__init__
+
+    def build_checked(self: Any, *args: Any, **kwargs: Any) -> None:
+        build(self, *args, **kwargs)
+        reply = accepted_evidence_response(
+            trace_id="trace-reply-contract", records=self.records, result=self.accepted_result
+        ).model_dump(mode="json", exclude_none=True)
+        validate_merge_train_controller_reply(reply)
+
+    result_type.__init__ = build_checked  # type: ignore[method-assign]
+
+
+try:
+    _check_controller_replies()
+except ImportError:  # Some workflows run dependency-free tests without the project.
+    pass
