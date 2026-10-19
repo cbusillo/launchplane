@@ -59,11 +59,10 @@ job-claim records, have no remaining reader. Their ORM models are deleted, and
 the privileged-operation worker no longer requires them at startup. Prepared
 migration `e7c1d5e9a3b6` drops those sixteen tables, provider-delivery inspections,
 and the five older unmodeled authorization/recovery/requirement-authority tables.
-Hosted startup targets the independent Q533 preview drop, `e8d2f6a0b4c7`, so
-shipping the prepared delivery migration does not drop these shared tables or
-their rows. The candidate runtime accepts the common predecessor, both branches
-and their empty join, as described in the operations migration hold;
-its schema invariants require only tables with retained consumers.
+Shipping this prepared migration does not authorize dropping these shared
+tables or their rows. The [operations procedure](operations.md#prepared-retired-delivery-table-migration)
+owns the current release target and runtime compatibility set. Schema invariants
+require only tables with retained consumers.
 
 Enrollment, authentication/credential claim, session admission, finite-job
 execution, provider inspection, and joined ordinary-controller writes have been
