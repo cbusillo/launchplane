@@ -2,10 +2,31 @@
 
 import unittest
 
+from github_plan_status.client_test_notes import ENGINEERING_RELEASE_TESTS
+
 from control_plane.client_test_notes import change_client_review, client_test_notes
 
 
 class ClientTestNotesTests(unittest.TestCase):
+    def test_release_testing_engineering_marker_keeps_each_sections_review_intent(self) -> None:
+        notes = f"{ENGINEERING_RELEASE_TESTS}\nCheck the imported parts at release."
+        body = "## Client test notes\n" + notes
+        intent = change_client_review(body=body, labels=(), review_label="owner-review")
+        self.assertFalse(intent.review_required)
+        self.assertFalse(intent.error)
+        for held_body, labels in (
+            (body, ("owner-review",)),
+            (body + "\n## Owner test notes\nApprove the wording before merge.", ()),
+            (f"## Client test notes\n### #1\n{notes}\n### #2\nApprove the screen.", ()),
+        ):
+            with self.subTest(body=held_body, labels=labels):
+                self.assertTrue(
+                    change_client_review(
+                        body=held_body, labels=labels, review_label="owner-review"
+                    ).review_required
+                )
+        self.assertTrue(client_test_notes(ENGINEERING_RELEASE_TESTS).error)
+
     def test_director_standing_preserves_note_validation_and_dependency_exemption(self) -> None:
         for notes in (
             "",
