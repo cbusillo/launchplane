@@ -17248,7 +17248,12 @@ def create_launchplane_fastapi_app(
                     profile=expected_product_profile,
                 )
                 control_plane_live_target_runtime.validate_provider_key_retirement(
-                    retired_keys=set(retired_provider_keys), application_keys=application_keys
+                    retired_keys=set(retired_provider_keys),
+                    application_keys=application_keys,
+                    record_store=database_store,
+                    product_name=product_config_request.product,
+                    context_name=product_config_request.context,
+                    instance_name=product_config_request.instance,
                 )
             except (
                 FileNotFoundError,

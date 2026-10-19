@@ -3286,6 +3286,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         external_checkpoint: Callable[[str], None] | None = None,
         fresh_generation: FreshOdooTestingGeneration | None = None,
         revoke_on_pending: bool = False,
+        provider_extra_env: tuple[str, ...] = (),
     ) -> tuple[OdooStableTargetReplacementApplyResult, Mock, Mock, _Store]:
         profile = _opw_profile_with_prelaunch_policy(enabled=True)
         if live:
@@ -3388,6 +3389,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 or "\n".join(
                     (
                         *_DATABASE_ENV_LINES,
+                        *provider_extra_env,
                         "ODOO_DATA_VOLUME=opw_prod_odoo_data",
                         "ODOO_LOG_VOLUME=opw_prod_odoo_logs",
                         "ODOO_DB_VOLUME=opw_prod_odoo_db",
@@ -3400,6 +3402,12 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             persisted_env = env_text
             store.last_provider_env = control_plane_dokploy.parse_dokploy_env_text(env_text)
 
+        self.enterContext(
+            patch(
+                "control_plane.odoo_testing_restore.read_current_testing_generation",
+                return_value=fresh_generation,
+            )
+        )
         with (
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.read_current_testing_generation",
@@ -3716,13 +3724,16 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     side_effect=seed_retirement,
                 ):
                     if selected != fresh:
-                        with self.assertRaises(OdooTargetReplacementStageError):
+                        with self.assertRaises(OdooTargetReplacementStageError) as caught:
                             self._apply_upstream_restore(
                                 override_record=override,
                                 post_deploy_results=(),
                                 test_instance="testing",
                                 fresh_generation=selected,
                             )
+                        self.assertEqual(
+                            caught.exception.code, "plan_not_ready.live_runtime_keys_invalid"
+                        )
                         continue
                     result, post_deploy, _, store = self._apply_upstream_restore(
                         override_record=override,
@@ -3743,27 +3754,12 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                         ),
                         test_instance="testing",
                         fresh_generation=selected,
+                        provider_extra_env=(key + "=obsolete-external-value",),
                     )
                     self.assertEqual(result.deploy_status, "pass")
                     self.assertNotIn(key, store.last_provider_env)
                     self.assertEqual(store.odoo_instance_override_record, override)
                     post_deploy.assert_called_once()
-
-    def test_generation_omissions_do_not_override_required_key_protection(self) -> None:
-        from control_plane.live_target_runtime import LiveTargetRuntimeError
-        from control_plane.workflows.odoo_stable_target_replacement import (
-            _validate_replacement_key_retirement,
-        )
-        from tests.test_odoo_testing_restore import generation
-
-        pointer = "ODOO_OVERRIDE_SECRET__ADDON__SHOPIFY__API_TOKEN"
-        for key, declared in ((pointer, {pointer}), ("ODOO_DB_PASSWORD", set())):
-            with self.subTest(key=key), self.assertRaises(LiveTargetRuntimeError):
-                _validate_replacement_key_retirement(
-                    generation=generation().model_copy(update={"omitted_runtime_keys": (key,)}),
-                    retired_keys={key},
-                    application_keys=declared,
-                )
 
     def test_fresh_restore_finishes_only_with_sanitized_post_deploy_readback(self) -> None:
         from tests.test_odoo_testing_restore import generation

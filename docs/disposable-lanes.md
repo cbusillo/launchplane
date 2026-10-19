@@ -1812,12 +1812,13 @@ instead of an unexpected failure. Completed generations and production keep thei
 ordinary deployment paths.
 
 The qualified generation's omitted secret pointers may remain in the lane's
-retirement record. Replacement planning and execution allow their removal only
+retirement record. The shared retirement check allows their removal only
 when the pointer is in that generation's omissions and no product declaration or
-rendered override requires it. A pointer still used by an override remains a
+override in any phase requires it. A pointer still used by an override remains a
 conflict: sanitize the stored override through its supported service path first.
 Other protected driver, identity and database keys cannot be retired this way.
-This does not change the generic runtime-sync or product-config retirement rules.
+Replacement, runtime sync, product-config and artifact sync use the same check.
+Absent or unverified generation authority keeps the ordinary prefix protection.
 
 The service compares the existing local testing passwords with the supported
 production source's managed versions internally, without returning or retaining
