@@ -43,7 +43,7 @@ EMPTY_TARGET_SETUP_SOURCE_LABELS = frozenset(
 
 class TestingTargetSourceEvidenceUnavailable(ValueError):
     def __init__(self) -> None:
-        super().__init__("Current testing Compose source evidence is unavailable; retry its read.")
+        super().__init__("Current testing Compose source evidence is unavailable.")
 
 
 def require_empty_testing_target_creation(

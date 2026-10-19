@@ -190,6 +190,61 @@ class ApplicationStateVolumeTests(_DirectorTestingSetupFixture):
         self.assertEqual(self.provider.call_count, calls)
         self.assert_production_unchanged()
 
+    async def assert_source_drift_preserves_allocation(self, after_path: str) -> None:
+        provider = self.register_unused_testing_compose(source_type="github")
+        self.payload.update(**self.expected(provider))
+        source: dict[str, Any] = {
+            "composeId": provider.target_id,
+            "environmentId": "old-environment",
+            "sourceType": "github",
+            "composePath": "./docker-compose.yml",
+        }
+
+        def mutate(host: str, token: str, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+            response = self.mutate(host, token, path, payload)
+            if path == after_path:
+                source["repository"] = "configured-during-allocation"
+            return response
+
+        def read(_host: str, _token: str, target_type: str, _target_id: str) -> dict[str, Any]:
+            return deepcopy(source if target_type == "compose" else self.live)
+
+        self.provider.side_effect = mutate
+        with patch(
+            "control_plane.dokploy_target_setup_http.fetch_dokploy_target_payload_for_setup",
+            side_effect=read,
+        ):
+            await self.plan()
+            result = await self.post()
+            self.assertEqual(result.status_code, 409, result.text)
+            self.assertEqual(result.json()["error"]["code"], "mutation_reconciliation_required")
+            paths = [call.args[2] for call in self.provider.call_args_list]
+            self.assertEqual(paths[-1], after_path)
+            self.assertEqual(len(paths), len(set(paths)))
+            self.assertEqual(self.current_testing_target_id(), provider.target_id)
+            self.assertTrue(self.store.list_held_provider_target_reservations())
+            readback = (await self.post(mode="readback")).json()["result"]
+            phase = json.loads(readback["provider_effect_phase"])
+            self.assertEqual(phase["project"], self.placement["project_id"])
+            if self.live:
+                self.assertEqual(phase["application"], self.live["applicationId"])
+            if after_path == MOUNT_CREATE:
+                self.assertEqual(phase["mount_verified"], "true")
+            calls = self.provider.call_count
+            retry = await self.post()
+            self.assertEqual(retry.status_code, 409, retry.text)
+            self.assertEqual(self.provider.call_count, calls)
+        self.assert_production_unchanged()
+
+    async def test_source_drift_after_project_keeps_custody_before_next_create(self) -> None:
+        await self.assert_source_drift_preserves_allocation(PROJECT_CREATE_PATH)
+
+    async def test_source_drift_after_application_keeps_custody_before_mount(self) -> None:
+        await self.assert_source_drift_preserves_allocation(APPLICATION_CREATE_PATH)
+
+    async def test_source_drift_after_mount_keeps_custody_before_adoption(self) -> None:
+        await self.assert_source_drift_preserves_allocation(MOUNT_CREATE)
+
     async def test_production_existing_mount_or_volume_and_host_path_inputs_refuse(self) -> None:
         for changes in (
             {"instance": "prod"},
