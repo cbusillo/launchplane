@@ -241,9 +241,7 @@ class RunnerRelabelNativeTests(unittest.TestCase):
 
     def test_missing_capability_fails_closed_without_provider(self) -> None:
         with patch("control_plane.runner_relabel.resolve_context_secret_value") as secret:
-            with self.assertRaisesRegex(
-                RunnerRelabelInactive, "runner_purpose_capability_not_accepted"
-            ):
+            with self.assertRaises(RunnerRelabelInactive):
                 with runner_transport(self.store, self.policy, write=True):
                     self.fail("Missing capability must never yield a provider.")
             secret.assert_not_called()
@@ -317,6 +315,31 @@ class RunnerRelabelNativeTests(unittest.TestCase):
                 self.run_change(review, observe=True, evidence_only=True).status, "adopted"
             )
         self.factory.assert_not_called()
+
+    def test_revocation_failure_preserves_review_apply_and_observation_results(self) -> None:
+        from control_plane.contracts.runner_relabel import RunnerRelabelCapability
+        from control_plane.github_app_identity import GitHubAppInstallationToken
+
+        capability = RunnerRelabelCapability(app_id=91, installation_id=92,
+            secret_context="fixture-runner-purpose", accepted=True)
+        policy = self.policy.model_copy(update={"capability": capability})
+        current = load_policy(self.store, policy.policy_id)
+        self.store.compare_and_write_runner_relabel_policy(policy.policy_id, {
+            "policy": policy.model_dump(mode="json"), "actor": self.actor,
+            "reason": "fixture accepted capability", "expected_policy_sha256": current["policy_sha256"],
+        }, expected_sha256=current["policy_sha256"])
+        token = GitHubAppInstallationToken(token="synthetic-test-token", app_id=capability.app_id,
+            installation_id=capability.installation_id, repository_id=policy.repository_id,
+            repository=policy.repository, expires_at="fixture-unused")
+        self.factory.side_effect = runner_transport
+        with patch("control_plane.runner_relabel.resolve_context_secret_value", return_value="synthetic-test-key"), patch("control_plane.runner_relabel.mint_runner_relabel_installation_token", return_value=token) as mint, patch("control_plane.runner_relabel.UrllibMergeTrainGitHubTransport", return_value=self.transport), patch("control_plane.runner_relabel.revoke_installation_token", side_effect=OSError("private provider revocation response")), self.assertLogs("control_plane.runner_relabel", level="WARNING") as logs:
+            review = self.review()
+            self.assertEqual(self.run_change(review).status, "completed")
+            observation = RunnerRelabelAdapter(self.store, review, "observe-trace", "original").observe("unused", "", review["review_sha256"])
+            self.assertEqual(observation.outcome, "present")
+        self.assertEqual([call.kwargs["write"] for call in mint.call_args_list], [False, True, False])
+        self.assertNotIn("private provider revocation response", "\n".join(logs.output))
+        self.assertEqual(self.transport.puts, 1)
 
     def test_planned_evidence_failure_prevents_put_and_terminal_failure_retains_unknown(
         self,

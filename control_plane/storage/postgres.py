@@ -5491,49 +5491,55 @@ class PostgresRecordStore(HumanSessionStore):
         """Insert immutable native custody; legacy audit ingestion cannot select it."""
         from control_plane.contracts.canonical_json import canonical_json_sha256
 
+        payload = self._runner_relabel_document_payload(kind, payload)
         fingerprint = canonical_json_sha256(payload)
-        with self._session_factory() as session:
-            self._begin_serialized_write(session)
-            if reservation is not None:
-                self.require_current_provider_execution(session, reservation)
-            payload = self._runner_relabel_document_payload(kind, payload)
-            fingerprint = canonical_json_sha256(payload)
-            existing = session.scalar(
-                self._idempotency_statement(
+        try:
+            with self._session_factory() as session:
+                self._begin_serialized_write(session)
+                if reservation is not None:
+                    self.require_current_provider_execution(session, reservation)
+                existing = session.scalar(
+                    self._idempotency_statement(
+                        scope="runner-relabel-custody",
+                        route_path=kind,
+                        idempotency_key=key,
+                        for_update=True,
+                    )
+                )
+                if existing is not None:
+                    record = LaunchplaneIdempotencyRecord.model_validate(existing.payload)
+                    if (
+                        record.request_fingerprint != fingerprint
+                        or record.response_payload != payload
+                        or record.state != "completed"
+                        or record.scope != "runner-relabel-custody"
+                        or record.route_path != kind
+                        or record.idempotency_key != key
+                        or record.record_id
+                        != canonical_json_sha256(["runner-relabel-custody", kind, key])
+                    ):
+                        raise ValueError("Native runner evidence is immutable.")
+                    return
+                now = self._database_mutation_timestamp(session)
+                record = LaunchplaneIdempotencyRecord(
+                    record_id=canonical_json_sha256(["runner-relabel-custody", kind, key]),
                     scope="runner-relabel-custody",
                     route_path=kind,
                     idempotency_key=key,
-                    for_update=True,
+                    request_fingerprint=fingerprint,
+                    response_status_code=202,
+                    response_trace_id="runner-relabel-custody",
+                    recorded_at=now,
+                    response_payload=payload,
                 )
-            )
-            if existing is not None:
-                record = LaunchplaneIdempotencyRecord.model_validate(existing.payload)
-                if (
-                    record.request_fingerprint != fingerprint
-                    or record.response_payload != payload
-                    or record.state != "completed"
-                    or record.scope != "runner-relabel-custody"
-                    or record.route_path != kind
-                    or record.idempotency_key != key
-                    or record.record_id
-                    != canonical_json_sha256(["runner-relabel-custody", kind, key])
-                ):
-                    raise ValueError("Native runner evidence is immutable.")
-                return
-            now = self._database_mutation_timestamp(session)
-            record = LaunchplaneIdempotencyRecord(
-                record_id=canonical_json_sha256(["runner-relabel-custody", kind, key]),
-                scope="runner-relabel-custody",
-                route_path=kind,
-                idempotency_key=key,
-                request_fingerprint=fingerprint,
-                response_status_code=202,
-                response_trace_id="runner-relabel-custody",
-                recorded_at=now,
-                response_payload=payload,
-            )
-            session.add(self._idempotency_row(record))
-            session.commit()
+                session.add(self._idempotency_row(record))
+                session.commit()
+        except IntegrityError:
+            winner = self.read_runner_relabel_document(kind, key)
+            if winner is None:
+                raise
+            if winner != payload:
+                raise ValueError("Native runner evidence is immutable.") from None
 
     @contextmanager
     def runner_relabel_policy_guard(self, policy_id: str) -> Iterator[Session]:

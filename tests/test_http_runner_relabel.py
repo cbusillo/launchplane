@@ -1,6 +1,7 @@
 """Native runner routes keep browser CSRF and own-actor authority."""
 
 from dataclasses import replace
+from datetime import datetime, timezone
 import unittest
 
 from control_plane.http_app import create_launchplane_fastapi_app
@@ -18,8 +19,19 @@ from tests import test_runner_relabel_native as scenarios
 
 
 class HttpRunnerRelabelTests(unittest.IsolatedAsyncioTestCase):
+    database_url = ""
+
+    @staticmethod
+    def seed_authorization(store: scenarios.PostgresRecordStore, policy: LaunchplaneAuthzPolicy) -> None:
+        from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord, build_authz_policy_record_id, authz_policy_sha256
+        store.seed_authz_policy_if_absent(LaunchplaneAuthzPolicyRecord(
+            record_id=build_authz_policy_record_id(revision=1, policy_sha256=authz_policy_sha256(policy)),
+            revision=1, source="test:native-runner", updated_at=datetime.now(timezone.utc).isoformat(), policy=policy,
+        ))
+
     def setUp(self) -> None:
         fixture = scenarios.RunnerRelabelNativeTests()
+        fixture.database_url = self.database_url
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
         self.fixture = fixture
@@ -37,6 +49,7 @@ class HttpRunnerRelabelTests(unittest.IsolatedAsyncioTestCase):
                 ]
             }
         )
+        self.seed_authorization(self.store, self.policy)
         self.sessions = HumanSessionManager(
             config=_github_oauth_config(), session_store=InMemoryHumanSessionStore()
         )
@@ -125,15 +138,15 @@ class HttpRunnerRelabelTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_missing_capability_returns_precise_activation_code(self) -> None:
         from control_plane.runner_relabel import RunnerRelabelInactive
-
-        self.fixture.factory.side_effect = RunnerRelabelInactive(
-            "runner_purpose_capability_not_accepted"
-        )
+        with self.assertRaises(RunnerRelabelInactive) as missing:
+            with scenarios.runner_transport(self.store, self.fixture.policy, write=False):
+                self.fail("An inactive capability must not yield a transport.")
+        self.fixture.factory.side_effect = missing.exception
         response = await request(
             self.app, "POST", self.path, headers=self.headers(), payload=self.body
         )
         self.assertEqual(response.status_code, 503, response.text)
-        self.assertEqual(response.json()["error"]["code"], "runner_purpose_capability_not_accepted")
+        self.assertEqual(response.json()["error"]["code"], str(missing.exception))
         self.assertEqual(self.fixture.transport.puts, 0)
 
     async def test_callers_cannot_supply_policy_or_token_in_relabel_request(self) -> None:
@@ -149,7 +162,7 @@ class HttpRunnerRelabelTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(response.status_code, 400, response.text)
         self.assertEqual(self.fixture.transport.puts, 0)
 
-    async def test_foreign_actor_cannot_read_original_review(self) -> None:
+    async def test_unscoped_actor_cannot_read_original_review_but_director_agent_can(self) -> None:
         review = await request(
             self.app, "POST", self.path, headers=self.headers(), payload=self.body
         )
@@ -161,7 +174,37 @@ class HttpRunnerRelabelTests(unittest.IsolatedAsyncioTestCase):
             self.path + "/" + review.json()["result"]["review_id"],
             headers={"Cookie": self.sessions.session_cookie_header(session)},
         )
-        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.status_code, 403, response.text)
+        allowed = await request(self.app, "GET", self.path + "/" + review.json()["result"]["review_id"], headers={"Authorization": "Bearer fixture-agent"})
+        self.assertEqual(allowed.status_code, 202, allowed.text)
+        self.assertEqual(allowed.json()["result"]["review"], review.json()["result"])
+
+    async def test_unscoped_missing_foreign_and_disabled_records_are_uniform(self) -> None:
+        session = self.sessions.issue(replace(self.human, github_id=456))
+        headers = {"Cookie": self.sessions.session_cookie_header(session)}
+        replies = []
+        for policy_id in ("missing", self.fixture.policy.policy_id):
+            response = await request(self.app, "GET", f"/v1/runner-relabel/{policy_id}/policy", headers=headers)
+            replies.append((response.status_code, response.json()["error"]["code"]))
+        self.assertEqual(replies[0], replies[1])
+        self.assertEqual(replies[0][0], 403)
+        current = self.store.read_runner_relabel_policy(self.fixture.policy.policy_id)
+        assert current is not None
+        self.store.compare_and_write_runner_relabel_policy(self.fixture.policy.policy_id, {
+            "policy": self.fixture.policy.model_copy(update={"enabled": False}).model_dump(mode="json"),
+            "actor": self.fixture.actor, "reason": "fixture disabled", "expected_policy_sha256": current["policy_sha256"],
+        }, expected_sha256=current["policy_sha256"])
+        response = await request(self.app, "POST", self.path, headers=_browser_mutation_headers(self.sessions, session), payload=self.body)
+        self.assertEqual((response.status_code, response.json()["error"]["code"]), replies[0])
+
+    async def test_provider_read_failures_are_sanitized_service_results(self) -> None:
+        from unittest.mock import patch
+        from control_plane.merge_train_github import MergeTrainGitHubError
+        for error in (MergeTrainGitHubError("private provider response", status_code=404), TimeoutError("private provider response")):
+            with self.subTest(error=type(error).__name__), patch.object(self.fixture.transport, "request", side_effect=error):
+                response = await request(self.app, "POST", self.path, headers=self.headers(), payload=self.body)
+                self.assertEqual(response.status_code, 503, response.text)
+                self.assertNotIn(str(error), response.text)
 
     async def test_workflow_and_read_only_sessions_cannot_apply(self) -> None:
         body = {"review_id": "a" * 32, "expected_review_sha256": "b" * 64}

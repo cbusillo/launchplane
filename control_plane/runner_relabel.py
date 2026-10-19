@@ -3,6 +3,7 @@
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+import logging
 from typing import Any
 from uuid import uuid4
 
@@ -21,11 +22,13 @@ from control_plane.contracts.runner_relabel import (
 )
 from control_plane.github_app_identity import (
     GitHubAppIdentity,
+    GitHubAppIdentityError,
     mint_runner_relabel_installation_token,
     revoke_installation_token,
 )
 from control_plane.merge_train_github import (
     MergeTrainGitHubTransport,
+    MergeTrainGitHubError,
     UrllibMergeTrainGitHubTransport,
 )
 from control_plane.provider_operations import (
@@ -52,10 +55,17 @@ from control_plane.workflows.runner_lane_relabel import _labels, execute_relabel
 ROUTE = "/v1/runner-relabel/{policy_id}/operations"
 RUNNER_SECRET_INTEGRATION = "runner-relabel"
 RUNNER_SECRET_BINDING = "private_key"
+REFUSED_BEFORE_DISPATCH = "runner_relabel_refused_before_dispatch"
+REFUSED_BEFORE_DISPATCH_MESSAGE = "No runner label request was sent. Create a fresh review and operation key."
+_LOGGER = logging.getLogger(__name__)
 
 
 class RunnerRelabelInactive(ValueError):
     """A named service activation prerequisite is absent."""
+
+
+class RunnerRelabelReadUnavailable(RunnerRelabelInactive):
+    """Provider evidence is unavailable, with no raw provider response exposed."""
 
 
 def actor_identity(identity: LaunchplaneIdentity) -> dict[str, object]:
@@ -104,25 +114,34 @@ def runner_transport(
     capability = policy.capability
     if capability is None or not capability.accepted:
         raise RunnerRelabelInactive("runner_purpose_capability_not_accepted")
-    private_key = resolve_context_secret_value(
-        integration=RUNNER_SECRET_INTEGRATION,
-        context_name=capability.secret_context,
-        binding_key=RUNNER_SECRET_BINDING,
-        database_url=store.database_url,
-    )
+    try:
+        private_key = resolve_context_secret_value(
+            integration=RUNNER_SECRET_INTEGRATION,
+            context_name=capability.secret_context,
+            binding_key=RUNNER_SECRET_BINDING,
+            database_url=store.database_url,
+        )
+    except Exception as error:
+        raise RunnerRelabelInactive("runner_purpose_managed_key_unavailable") from error
     if not private_key:
         raise RunnerRelabelInactive("runner_purpose_managed_key_missing")
-    token = mint_runner_relabel_installation_token(
-        identity=GitHubAppIdentity(app_id=capability.app_id, private_key=private_key),
-        installation_id=capability.installation_id,
-        repository=policy.repository,
-        repository_id=str(policy.repository_id),
-        write=write,
-    )
+    try:
+        token = mint_runner_relabel_installation_token(
+            identity=GitHubAppIdentity(app_id=capability.app_id, private_key=private_key),
+            installation_id=capability.installation_id,
+            repository=policy.repository,
+            repository_id=str(policy.repository_id),
+            write=write,
+        )
+    except (GitHubAppIdentityError, MergeTrainGitHubError, OSError) as error:
+        raise RunnerRelabelInactive("runner_purpose_capability_unavailable") from error
     try:
         yield UrllibMergeTrainGitHubTransport(token=token.token)
     finally:
-        revoke_installation_token(installation_token=token)
+        try:
+            revoke_installation_token(installation_token=token)
+        except Exception as error:
+            _LOGGER.warning("Runner-purpose token revocation failed (%s); the short-lived token still expires.", type(error).__name__)
 
 
 def _request(
@@ -154,6 +173,16 @@ def create_review(
     store: PostgresRecordStore,
     policy_id: str,
     body: RunnerRelabelReviewRequest,
+    actor: dict[str, object],
+) -> dict[str, Any]:
+    try:
+        return _create_review(store, policy_id, body, actor)
+    except (MergeTrainGitHubError, OSError) as error:
+        raise RunnerRelabelReadUnavailable("runner_provider_read_unavailable") from error
+
+
+def _create_review(
+    store: PostgresRecordStore, policy_id: str, body: RunnerRelabelReviewRequest,
     actor: dict[str, object],
 ) -> dict[str, Any]:
     saved = load_policy(store, policy_id)
@@ -209,6 +238,7 @@ class RunnerRelabelAdapter:
     operation_key: str
     evidence_only: bool = False
     authorize_effect: Callable[[], None] = lambda: None
+    recovery_actor: dict[str, object] | None = None
 
     @property
     def policy(self) -> RunnerRelabelPolicy:
@@ -226,14 +256,34 @@ class RunnerRelabelAdapter:
             records={"runner_relabel_review_id": self.review["review_id"]},
             result={
                 "actor": self.review["actor"],
+                "original_actor": self.review["actor"],
+                **({"recovery_actor": self.recovery_actor} if self.recovery_actor is not None else {}),
                 "review_sha256": self.review["review_sha256"],
                 **result,
             },
         )
 
+    def refusal(self) -> dict[str, object]:
+        payload = self.response({"status": "refused_before_dispatch", "write_attempted": False,
+            "error_code": REFUSED_BEFORE_DISPATCH, "error_message": REFUSED_BEFORE_DISPATCH_MESSAGE})
+        payload["error"] = {"code": REFUSED_BEFORE_DISPATCH, "message": REFUSED_BEFORE_DISPATCH_MESSAGE}
+        return payload
+
     def observe(
         self, provider_operation_key: str, provider_effect_phase: str, reconciliation_key: str
     ) -> ProviderObservation:
+        original = self.store.read_idempotency_record(
+            scope=actor_scope(self.review["actor"]), route_path=ROUTE.format(policy_id=self.policy.policy_id),
+            idempotency_key=self.operation_key,
+        )
+        intent = {"review": self.review, "actor": self.review["actor"], "operation_key": self.operation_key}
+        if (original is not None and original.state == "reconcile_required"
+            and not original.provider_effect_phase and not original.provider_effect_started_at
+            and original.request_fingerprint == canonical_json_sha256(intent)
+            and self.store.read_original_mutation_intent(original) == intent):
+            # The framework adopts only the exact saved reservation/intent snapshot.
+            # A stale worker cannot checkpoint a reconcile_required reservation.
+            return ProviderObservation("present", response_status_code=409, response_payload=self.refusal())
         terminal = self.store.read_runner_relabel_document("terminal", provider_operation_key)
         if self.evidence_only:
             if (
@@ -249,9 +299,6 @@ class RunnerRelabelAdapter:
                 )
             return ProviderObservation("unknown")
         try:
-            current = load_policy(self.store, self.policy.policy_id)
-            if current["policy_sha256"] != self.review["policy_sha256"]:
-                return ProviderObservation("unknown")
             with runner_transport(self.store, self.policy, write=False) as transport:
                 inventory = GitHubRunnerLaneInventoryReader(
                     transport=transport
@@ -281,8 +328,12 @@ class RunnerRelabelAdapter:
                             }
                         ),
                     )
-        except Exception:
-            pass  # Provider exceptions may contain credentials; unknown is not retry permission.
+        except RunnerRelabelInactive:
+            raise
+        except (MergeTrainGitHubError, OSError) as error:
+            raise RunnerRelabelReadUnavailable("runner_provider_read_unavailable") from error
+        except ValueError:
+            pass  # Incomplete or changed identity/label evidence is never retry permission.
         return ProviderObservation("unknown")
 
     def apply(
@@ -375,11 +426,11 @@ class RunnerRelabelAdapter:
                         reservation=evidence_lease.evidence_reservation(),
                     )
                     return ProviderMutationOutcome(202, self.response(result))
-                if dispatched or result.get("write_attempted"):
+                if dispatched:
                     raise ProviderMutationUnknownError(
                         "Runner outcome requires original-key observation."
                     )
-                raise ProviderMutationRejectedError(ValueError("Runner changed before dispatch."))
+                return ProviderMutationOutcome(409, self.refusal(), provider_effect_performed=False)
         except ProviderMutationUnknownError:
             raise
         except ProviderMutationRejectedError:

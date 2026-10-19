@@ -28,6 +28,7 @@ from control_plane.provider_operations import (
 )
 from control_plane.runner_relabel import (
     ROUTE,
+    REFUSED_BEFORE_DISPATCH, REFUSED_BEFORE_DISPATCH_MESSAGE,
     RunnerRelabelAdapter,
     RunnerRelabelInactive,
     actor_identity,
@@ -102,6 +103,34 @@ def register_runner_relabel_routes(
             message="Runner action requires its own recorded scope, exact review and active runner-purpose capability.",
         )
 
+    def may_read_unscoped(store: PostgresRecordStore, identity: LaunchplaneIdentity) -> bool:
+        return strict_admin(store, identity) or dependencies.authorization_allows(
+            identity=identity, action="runner_relabel.read", product="", context="",
+        )
+
+    def policy_for_caller(
+        store: PostgresRecordStore, identity: LaunchplaneIdentity, policy_id: str, action: str,
+    ) -> dict[str, Any]:
+        saved = store.read_runner_relabel_policy(policy_id)
+        if saved is None:
+            if may_read_unscoped(store, identity):
+                raise RunnerRelabelInactive("runner_policy_missing")
+            raise PermissionError("Runner record is unavailable in the caller's scope.")
+        authorize(store, identity, RunnerRelabelPolicy.model_validate(saved["policy"]), action)
+        return saved
+
+    def review_for_caller(
+        store: PostgresRecordStore, identity: LaunchplaneIdentity, policy_id: str,
+        review_id: str, action: str,
+    ) -> dict[str, Any]:
+        saved = store.read_runner_relabel_document("review", review_id)
+        if saved is None or saved["policy_id"] != policy_id:
+            if may_read_unscoped(store, identity):
+                raise ValueError("Runner review is unavailable.")
+            raise PermissionError("Runner record is unavailable in the caller's scope.")
+        authorize(store, identity, RunnerRelabelPolicy.model_validate(saved["policy"]), action)
+        return saved
+
     async def read_policy(
         policy_id: PolicyId,
         identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_identity)],
@@ -110,11 +139,7 @@ def register_runner_relabel_routes(
         trace = dependencies.next_trace_id()
         try:
             record_store = database(store)
-            saved = record_store.read_runner_relabel_policy(policy_id)
-            if saved is None:
-                raise RunnerRelabelInactive("runner_policy_missing")
-            policy = RunnerRelabelPolicy.model_validate(saved["policy"])
-            authorize(record_store, identity, policy, "runner_relabel.read")
+            saved = policy_for_caller(record_store, identity, policy_id, "runner_relabel.read")
             return accepted_evidence_response(trace_id=trace, records={}, result=saved)
         except (ValueError, PermissionError) as error:
             raise refuse(error, trace) from error
@@ -173,9 +198,8 @@ def register_runner_relabel_routes(
         trace = dependencies.next_trace_id()
         try:
             record_store = database(store)
-            saved = load_policy(record_store, policy_id)
-            policy = RunnerRelabelPolicy.model_validate(saved["policy"])
-            authorize(record_store, identity, policy, "runner_relabel.plan")
+            policy_for_caller(record_store, identity, policy_id, "runner_relabel.plan")
+            load_policy(record_store, policy_id)
             result = await run_in_worker_thread(
                 lambda: create_review(record_store, policy_id, body, actor_identity(identity))
             )
@@ -196,20 +220,20 @@ def register_runner_relabel_routes(
     ) -> AcceptedEvidenceResponse:
         trace = dependencies.next_trace_id()
         try:
-            if isinstance(identity, GitHubActionsIdentity) or (
+            if body.mode == "apply" and (isinstance(identity, GitHubActionsIdentity) or (
                 isinstance(identity, GitHubHumanIdentity) and identity.role != "admin"
-            ):
+            )):
                 raise PermissionError(
                     "Workflow and read-only identities cannot mutate runner state."
                 )
             record_store = database(store)
-            if record_store.database_dialect_name != "postgresql":
-                raise RunnerRelabelInactive("postgresql_runner_fences_required")
-            saved = record_store.read_runner_relabel_document("review", body.review_id)
-            actor = actor_identity(identity)
+            saved = review_for_caller(record_store, identity, policy_id, body.review_id,
+                "runner_relabel.apply" if body.mode == "apply" else "runner_relabel.read")
+            caller = actor_identity(identity)
+            actor = saved["actor"]
             if (
                 saved is None
-                or saved["actor"] != actor
+                or (body.mode == "apply" and actor != caller)
                 or saved["policy_id"] != policy_id
                 or saved["review_sha256"] != body.expected_review_sha256
                 or saved["review_sha256"]
@@ -217,12 +241,8 @@ def register_runner_relabel_routes(
             ):
                 raise ValueError("Original actor/review binding differs.")
             policy = RunnerRelabelPolicy.model_validate(saved["policy"])
-            authorize(
-                record_store,
-                identity,
-                policy,
-                "runner_relabel.apply" if body.mode == "apply" else "runner_relabel.recover",
-            )
+            if record_store.database_dialect_name != "postgresql":
+                raise RunnerRelabelInactive("postgresql_runner_fences_required")
             if not idempotency_key.strip() or len(idempotency_key) > 200:
                 raise ValueError("An original operation key is required.")
             key = idempotency_key.strip()
@@ -245,6 +265,7 @@ def register_runner_relabel_routes(
                 key,
                 body.mode == "recover-evidence",
                 lambda: authorize(record_store, identity, policy, "runner_relabel.apply"),
+                caller if body.mode != "apply" else None,
             )
             route = ROUTE.format(policy_id=policy_id)
             intent: dict[str, object] = RunnerRelabelOriginalIntent.model_validate(
@@ -267,7 +288,7 @@ def register_runner_relabel_routes(
                     active_store,
                     identity,
                     policy,
-                    "runner_relabel.apply" if body.mode == "apply" else "runner_relabel.recover",
+                    "runner_relabel.apply" if body.mode == "apply" else "runner_relabel.read",
                 )
                 return run_durable_provider_operation(
                     store=active_store,
@@ -289,6 +310,7 @@ def register_runner_relabel_routes(
                 operation=operation,
                 in_progress_message="Runner operation is held by its original actor and key.",
                 reconcile_message="Runner outcome is unknown. Reconcile the original operation; do not repeat the label write.",
+                public_failure_messages={REFUSED_BEFORE_DISPATCH: REFUSED_BEFORE_DISPATCH_MESSAGE},
             )
         except (ValueError, PermissionError) as error:
             raise refuse(error, trace) from error
@@ -302,22 +324,13 @@ def register_runner_relabel_routes(
         trace = dependencies.next_trace_id()
         try:
             active_store = database(store)
-            saved = active_store.read_runner_relabel_document("review", review_id)
-            actor = actor_identity(identity)
-            if saved is None or saved["actor"] != actor or saved["policy_id"] != policy_id:
-                raise ValueError("Original review is unavailable to this actor.")
-            authorize(
-                active_store,
-                identity,
-                RunnerRelabelPolicy.model_validate(saved["policy"]),
-                "runner_relabel.read",
-            )
+            saved = review_for_caller(active_store, identity, policy_id, review_id, "runner_relabel.read")
             claim = active_store.read_runner_relabel_document("review-operation", review_id)
             operation = (
                 None
                 if claim is None
                 else active_store.read_idempotency_record(
-                    scope=actor_scope(actor),
+                    scope=actor_scope(saved["actor"]),
                     route_path=ROUTE.format(policy_id=policy_id),
                     idempotency_key=claim["key"],
                 )
