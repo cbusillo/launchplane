@@ -140,6 +140,52 @@ class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+    def test_old_clear_review_cannot_remove_new_preview_protection(self) -> None:
+        from control_plane.disposable_lanes import (
+            resolve_disposable_observation_binding,
+            disposable_lane_observation_sha256,
+            require_disposable_lane,
+            DisposableLaneSafetyUnknown,
+        )
+
+        scope = dict(
+            product=self.profile.product,
+            context=self.preview.context,
+            instance=self.profile.preview.slug_template.format(
+                number=self.preview.anchor_pr_number
+            ),
+        )
+        for existing in (False, True):
+            with self.subTest(existing=existing):
+                self.store.clear_disposable_lane_safety(**scope)
+                if existing:
+                    record_safety(self.store, **scope, preview=self.preview)
+                reviewed = resolve_disposable_observation_binding(
+                    self.store, **scope, preview_id=self.preview.preview_id
+                )
+                previous = disposable_lane_observation_sha256(
+                    self.store.read_disposable_lane_safety(**scope)
+                )
+                record_safety(self.store, **scope, preview=self.preview, usage="in_use")
+                protected = self.store.read_disposable_lane_safety(**scope)
+                with self.assertRaises(ValueError):
+                    self.store.clear_reviewed_disposable_lane_safety(
+                        **scope,
+                        preview_id=self.preview.preview_id,
+                        expected_binding_sha256=reviewed.binding_sha256,
+                        expected_observation_sha256=previous,
+                    )
+                self.assertEqual(self.store.read_disposable_lane_safety(**scope), protected)
+                with self.assertRaises(DisposableLaneSafetyUnknown):
+                    require_disposable_lane(
+                        self.store,
+                        product=self.profile.product,
+                        context=self.preview.context,
+                        instance=scope["instance"],
+                        preview=self.preview,
+                        preview_refresh=True,
+                    )
+
     async def post(self, path: str, payload: dict[str, Any], key: str = "") -> Any:
         return await request(
             self.app,

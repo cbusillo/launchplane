@@ -850,6 +850,8 @@ from control_plane.disposable_lanes import (
     disposable_lane_configuration,
     require_disposable_lane,
     resolve_disposable_preview,
+    resolve_disposable_observation_binding,
+    disposable_lane_observation_sha256,
 )
 
 from control_plane.service_auth import (
@@ -24393,55 +24395,56 @@ def create_launchplane_fastapi_app(
             )
         store = require_provider_operation_store(record_store=record_store, trace_id=trace_id)
         try:
-            profile = store.read_product_profile_record(observation.product)
             if observation.mode == "clear":
-                if observation.instance == "prod":
-                    raise ValueError("Production is outside disposable observation cleanup.")
-                store.clear_disposable_lane_safety(
+                fingerprint = await run_in_threadpool(
+                    store.clear_reviewed_disposable_lane_safety,
+                    product=observation.product,
+                    context=observation.context,
+                    instance=observation.instance,
+                    preview_id=observation.preview_id,
+                    expected_binding_sha256=observation.expected_binding_sha256,
+                    expected_observation_sha256=observation.expected_observation_sha256,
+                )
+                return accepted_evidence_response(
+                    trace_id=trace_id,
+                    records={"product_profile": observation.product},
+                    result={
+                        "mode": "clear",
+                        "observation_sha256": observation.expected_observation_sha256,
+                        "binding_sha256": fingerprint,
+                        "provider_mutation": False,
+                    },
+                )
+            binding = resolve_disposable_observation_binding(
+                store,
+                product=observation.product,
+                context=observation.context,
+                instance=observation.instance,
+                preview_id=observation.preview_id,
+            )
+            profile, target, target_id, preview = (
+                binding.profile,
+                binding.target,
+                binding.target_id,
+                binding.preview,
+            )
+            fingerprint = binding.binding_sha256
+            if observation.mode == "inspect":
+                recorded = store.read_disposable_lane_safety(
                     profile.product, observation.context, observation.instance
                 )
                 return accepted_evidence_response(
                     trace_id=trace_id,
                     records={"product_profile": profile.product},
-                    result={"mode": "clear", "provider_mutation": False},
-                )
-            preview = None
-            if observation.preview_id:
-                preview = resolve_disposable_preview(
-                    store, profile, observation.context, observation.instance
-                )
-                if preview.preview_id != observation.preview_id:
-                    raise ValueError("Observation does not match the owned preview.")
-            elif observation.instance != "testing" or not any(
-                (lane.context, lane.instance) == (observation.context, observation.instance)
-                for lane in profile.lanes
-            ):
-                raise ValueError("Observation requires an exact owned testing lane.")
-            try:
-                target = store.read_dokploy_target_record(
-                    context_name=observation.context, instance_name=observation.instance
-                )
-            except FileNotFoundError:
-                target = None
-            try:
-                target_id = store.read_dokploy_target_id_record(
-                    context_name=observation.context, instance_name=observation.instance
-                )
-            except FileNotFoundError:
-                target_id = None
-            fingerprint = disposable_lane_binding_sha256(
-                profile,
-                target,
-                target_id,
-                preview,
-                disposable_lane_configuration(store, observation.context, observation.instance),
-            )
-            if observation.mode == "inspect":
-                return accepted_evidence_response(
-                    trace_id=trace_id,
-                    records={"product_profile": profile.product},
                     result={
                         "mode": "inspect",
+                        "observation_sha256": disposable_lane_observation_sha256(recorded),
+                        "observation": {
+                            key: getattr(recorded, key)
+                            for key in ("usage", "data", "production_resources")
+                        }
+                        if recorded is not None
+                        else None,
                         "binding_sha256": fingerprint,
                         "usage": "unknown",
                         "data": "unknown",
@@ -24671,6 +24674,7 @@ def create_launchplane_fastapi_app(
                             "product",
                             "preview_id",
                             "expected_binding_sha256",
+                            "expected_observation_sha256",
                             "lifetime_seconds",
                         }
                     ),
