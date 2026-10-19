@@ -642,8 +642,9 @@ decryption key state denies the reveal or resolution.
   Launchplane stores it on the binding with who recorded it and when, and a
   later write of the key needs it again. A product-config write that declares
   `shared_safe` on an integration key without one is refused
-  (`sharing_reason_missing`). A key declared `testing` or `non_prod` is a
-  non-production key and needs none.
+  (`sharing_reason_missing`), and so are deploy-time checks, readiness and the
+  read-back for a key already bound without one. A key declared `testing` or
+  `non_prod` is a non-production key and needs none.
 - Nothing in Launchplane checks what a token can actually do. `read_only_source`
   is a person's statement that they verified the token's permissions in the
   provider and recorded it as evidence; Launchplane records it and shows it.
@@ -651,16 +652,13 @@ decryption key state denies the reveal or resolution.
   allowances read (`GET /v1/product-config/integration-allowances`) lists the
   integration keys stored for that lane with their declared class and reason,
   and the product environment read shows both on each managed secret.
-- Keys declared `shared_safe` before reasons existed keep working for one
-  release: deploy-time checks, readiness and the read-back report them instead
-  of refusing them. Record their reasons with a product-config write; the
-  follow-up that ends the transition makes those paths refuse them too.
 - Generic-web deploys, promotions and rollbacks read the lane's integration keys
   back after the deploy: the runtime key-safety rules run over every managed
   secret delivered to the lane whose key names an integration, and the result
   is stored on the deployment record as `integration_key_readback` (`pass`,
-  `reported`, `fail`, `unavailable` or `skipped`, with key names and finding
-  codes only). It records and does not refuse, because the deploy has already
+  `fail`, `unavailable` or `skipped`, with key names and finding codes only;
+  records written before the sharing-reason transition ended may say
+  `reported`). It records and does not refuse, because the deploy has already
   happened and a refused promotion would roll a live site back. Odoo lanes
   read their integration settings back from the database instead
   (`control_plane/integration_readback.py`).

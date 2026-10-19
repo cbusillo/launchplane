@@ -1044,11 +1044,11 @@ class GenericWebDeployTests(unittest.TestCase):
             deploy_provider=_FakeGenericWebDeployProvider(),
         )
 
-        # Reported on the record without refusing the deploy for one release.
+        # Recorded on the deployment after the deploy; the read-back does not refuse it.
         self.assertEqual(result.deploy_status, "pass")
         readback = store.deployments[0].integration_key_readback
         assert readback is not None
-        self.assertEqual(readback.status, "reported")
+        self.assertEqual(readback.status, "fail")
         self.assertEqual(
             [(finding.binding_key, finding.code) for finding in readback.findings],
             [("REPAIRSHOPR_API_TOKEN", "sharing_reason_missing")],

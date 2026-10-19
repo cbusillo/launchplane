@@ -519,8 +519,10 @@ class RehearsalScenario(unittest.TestCase):
             ),
             patch.object(api, "dokploy_request") as provider,
         ):
-            with self.assertRaises(RehearsalRefused):
+            with self.assertRaises(RehearsalRefused) as refusal:
                 self.run_operation(adapter, "oversize-apply")
+        self.assertEqual(refusal.exception.code, RehearsalPrerequisite.PRECHECK_REFUSED)
+        self.assertEqual(refusal.exception.prerequisite, RehearsalPrerequisite.STATE_UNVERIFIED)
         provider.assert_not_called()
         self.assertEqual(self.store.list_held_provider_target_reservations(), ())
 
@@ -678,6 +680,370 @@ class RehearsalScenario(unittest.TestCase):
             self.assertEqual(self.store.read_odoo_upgrade_rehearsal(self.identifier), prepared)
             # Any later call is observation only; the original apply cannot run.
             self.assertTrue(all(call.args[1] == "observe" for call in host.call_args_list[calls:]))
+
+    def test_input_refusal_before_any_effect_releases_only_its_fresh_reservation(self) -> None:
+        adapter = self.adapter("prepare")
+        with (
+            patch.object(
+                OdooRehearsalAdapter,
+                "inputs",
+                side_effect=RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED),
+            ),
+            patch.object(OdooRehearsalAdapter, "host") as host,
+            self.assertRaises(RehearsalRefused) as refusal,
+        ):
+            self.run_operation(adapter, "fresh-refusal")
+        self.assertEqual(refusal.exception.prerequisite, RehearsalPrerequisite.STATE_UNVERIFIED)
+        self.assertEqual(self.store.list_held_provider_target_reservations(), ())
+        host.assert_not_called()
+        self.assertEqual(self.store.read_odoo_upgrade_rehearsal(self.identifier), self.record)
+
+    def test_fresh_lock_and_existing_placement_refusals_release_without_dispatch(self) -> None:
+        from contextlib import contextmanager, ExitStack
+        from control_plane.dokploy import api
+
+        @contextmanager
+        def busy(*args: Any) -> Any:
+            yield None
+
+        for cause in ("lock", "placement"):
+            with ExitStack() as stack:
+                if cause == "lock":
+                    stack.enter_context(
+                        patch.object(
+                            self.store, "testing_replacement_execution_lock", side_effect=busy
+                        )
+                    )
+                else:
+                    stack.enter_context(
+                        patch(
+                            "control_plane.dokploy.sandbox_placement.created_placement",
+                            return_value=("owned", "", ""),
+                        )
+                    )
+                provider = stack.enter_context(patch.object(api, "dokploy_request"))
+                with self.assertRaises(RehearsalRefused) as refusal:
+                    self.run_operation(self.adapter("prepare"), "fresh-" + cause)
+            self.assertEqual(refusal.exception.code, RehearsalPrerequisite.PRECHECK_REFUSED)
+            self.assertEqual(
+                refusal.exception.prerequisite, RehearsalPrerequisite.RECOVERY_REQUIRED
+            )
+            self.assertEqual(self.store.list_held_provider_target_reservations(), ())
+            self.assertEqual(self.store.read_odoo_upgrade_rehearsal(self.identifier), self.record)
+            provider.assert_not_called()
+
+    def test_partial_execute_journal_is_bound_to_its_original_key_without_writes(self) -> None:
+        prepare_rehearsal_local_credentials(self.store, self.identifier, actor=self.principal)
+        prepared = self.record.model_copy(update={"state": "prepared", "compose_id": "own-compose"})
+        self.store.compare_and_write_odoo_upgrade_rehearsal(self.record, prepared)
+        adapter = self.adapter("execute")
+        with patch.object(OdooRehearsalAdapter, "host", side_effect=TimeoutError("private detail")):
+            with self.assertRaises(TimeoutError):
+                self.run_operation(adapter, "original-execute")
+        before = self.store.list_held_provider_target_reservations()
+        journal = adapter.operation_readback(prepared, "original-execute")
+        self.assertEqual(journal["operation_state"], before[0].state)
+        self.assertEqual(journal["provider_effect_phase"], before[0].provider_effect_phase)
+        self.assertEqual(
+            journal["provider_effect_started_at"], before[0].provider_effect_started_at
+        )
+        with self.assertRaises(RehearsalRefused):
+            adapter.operation_readback(prepared, "different-key")
+        from dataclasses import replace
+
+        changed = replace(adapter, request=adapter.request.model_copy(update={"reason": "changed"}))
+        with self.assertRaises(RehearsalRefused):
+            changed.operation_readback(prepared, "original-execute")
+        with self.assertRaises(RehearsalRefused):
+            adapter.operation_readback(
+                prepared.model_copy(update={"state": "upgraded"}), "original-execute"
+            )
+        self.assertEqual(self.store.list_held_provider_target_reservations(), before)
+        self.assertEqual(self.store.read_odoo_upgrade_rehearsal(self.identifier), prepared)
+
+    def test_failure_events_keep_process_deaths_and_project_actual_host_tracebacks(
+        self,
+    ) -> None:
+        from control_plane.dokploy import api
+
+        record = self.record.model_copy(update={"compose_id": "own-compose"})
+        checkpoint = datetime.now(timezone.utc)
+        current = {"deploymentId": "failed-source-event", "createdAt": checkpoint.isoformat()}
+        older = {"deploymentId": "older-event", "createdAt": "2000-01-01T00:00:00Z"}
+        import io
+        import traceback
+
+        host_fixture = RehearsalHostSafetyTests()
+        host_fixture.setUp()
+        self.addCleanup(host_fixture.doCleanups)
+        process = Mock(stdout=io.BytesIO(b"fixture capture"))
+        process.wait.return_value = 1
+        process.poll.return_value = 0
+        try:
+            with patch("subprocess.Popen", return_value=process):
+                host_fixture.host["bounded_capture"](
+                    ["fixture-command"], host_fixture.fixture.root / "partial.dump", 100
+                )
+        except RuntimeError:
+            log = traceback.format_exc().splitlines()
+        else:
+            self.fail("An incomplete source process must refuse capture")
+        log += ["PRIVATE_VALUE=do-not-export"]
+        current["status"] = "error"
+        killed = {**current, "deploymentId": "killed-event"}
+        with (
+            patch.object(
+                api,
+                "fetch_dokploy_target_payload",
+                return_value={"serverId": record.server_id, "appName": record.rehearsal_id},
+            ),
+            patch(
+                "control_plane.dokploy.post_deploy._resolve_dokploy_schedule_runtime",
+                return_value=("server", record.server_id, "", record.server_id),
+            ),
+            patch.object(
+                api, "find_matching_dokploy_schedule", return_value={"scheduleId": "owned"}
+            ),
+            patch.object(api, "dokploy_request", return_value=[older] * 40 + [current, killed]),
+            patch.object(
+                api, "fetch_dokploy_deployment_logs", side_effect=[log, ["Killed"]]
+            ) as logs,
+        ):
+            events, complete = self.adapter("execute").failure_events(
+                record, checkpoint.isoformat()
+            )
+        self.assertTrue(complete)
+        self.assertEqual(logs.call_count, len(events))
+        self.assertEqual(events[0]["deployment_id"], current["deploymentId"])
+        frames = events[0]["failure_frames"]
+        assert isinstance(frames, list)
+        self.assertIn(host_fixture.host["bounded_capture"].__name__, frames)
+        self.assertTrue(events[0]["traceback_present"])
+        self.assertEqual(events[1]["provider_status"], killed["status"])
+        self.assertFalse(events[1]["traceback_present"])
+        self.assertNotIn("PRIVATE_VALUE", str(events))
+        self.assertNotIn("do-not-export", str(events))
+
+    def test_failure_events_preserve_oldest_metadata_when_one_log_is_unavailable(self) -> None:
+        from control_plane.dokploy import api
+        from datetime import timedelta
+
+        record = self.record.model_copy(update={"compose_id": "own-compose"})
+        checkpoint = datetime.now(timezone.utc)
+        candidates = [
+            {
+                "deploymentId": f"event-{index}",
+                "createdAt": (checkpoint + timedelta(seconds=index)).isoformat(),
+                "status": "error",
+            }
+            for index in range(2)
+        ]
+        unavailable = api.DokployRequestFailed(
+            method="GET", path="/api/deployment.logs", detail="private", status_code=503
+        )
+        with (
+            patch.object(
+                api,
+                "fetch_dokploy_target_payload",
+                return_value={"serverId": record.server_id, "appName": record.rehearsal_id},
+            ),
+            patch(
+                "control_plane.dokploy.post_deploy._resolve_dokploy_schedule_runtime",
+                return_value=("server", record.server_id, "", record.server_id),
+            ),
+            patch.object(
+                api, "find_matching_dokploy_schedule", return_value={"scheduleId": "owned"}
+            ),
+            patch.object(api, "dokploy_request", return_value=list(reversed(candidates))),
+            patch.object(
+                api,
+                "fetch_dokploy_deployment_logs",
+                side_effect=lambda **kwargs: (
+                    (_ for _ in ()).throw(unavailable)
+                    if kwargs["deployment_id"] == candidates[0]["deploymentId"]
+                    else ()
+                ),
+            ),
+        ):
+            events, complete = self.adapter("execute").failure_events(
+                record, checkpoint.isoformat()
+            )
+        self.assertFalse(complete)
+        self.assertEqual(events[0]["deployment_id"], candidates[0]["deploymentId"])
+        self.assertFalse(events[0]["log_available"])
+        self.assertEqual(events[0]["provider_status"], candidates[0]["status"])
+        self.assertTrue(events[1]["log_available"])
+        self.assertGreater(len(events), 1)
+
+    def test_native_readback_preserves_journal_and_events_when_host_is_busy(self) -> None:
+        adapter = self.adapter("execute")
+        journal = {
+            "operation_state": "reconcile_required",
+            "provider_effect_phase": "execute",
+            "provider_effect_started_at": "2026-10-19T00:00:00Z",
+            "_provider_operation_key": "private-key",
+            "_stored_refusal_code": "",
+        }
+        event = {"deployment_id": "original", "provider_status": "running"}
+        with (
+            patch.object(OdooRehearsalAdapter, "operation_readback", return_value=dict(journal)),
+            patch.object(OdooRehearsalAdapter, "failure_events", return_value=([event], True)),
+            patch.object(
+                OdooRehearsalAdapter,
+                "host",
+                return_value={
+                    "completed": False,
+                    "host_observation_unavailable": True,
+                    "host_observation_reason": "host_busy",
+                },
+            ),
+        ):
+            result = adapter.native_readback(self.record, "original", lambda: None)
+        self.assertEqual(result["failure_events_after_checkpoint"], [event])
+        self.assertEqual(result["operation_state"], journal["operation_state"])
+        self.assertTrue(result["host_observation_unavailable"])
+        self.assertTrue(result["original_key_required"])
+        for field in ("state", "copies", "custody", "raw_source_retained", "_stored_refusal_code"):
+            self.assertNotIn(field, result)
+
+        def lost() -> None:
+            raise RuntimeError("fixture exclusion lost")
+
+        with (
+            patch.object(OdooRehearsalAdapter, "operation_readback", return_value=dict(journal)),
+            patch.object(OdooRehearsalAdapter, "failure_events", return_value=([event], True)),
+            patch.object(
+                OdooRehearsalAdapter,
+                "host",
+                side_effect=lambda record, mode, checkpoint, **kwargs: checkpoint(),
+            ),
+            self.assertRaises(RuntimeError),
+        ):
+            adapter.native_readback(self.record, "original", lost)
+
+    def test_prepare_qualification_availability_preserves_evidence_but_integrity_refuses(
+        self,
+    ) -> None:
+        record = self.record.model_copy(
+            update={
+                "project_id": "own-project",
+                "environment_id": "own-environment",
+                "compose_id": "own-compose",
+                "credential_bindings_sha256": "a" * 64,
+            }
+        )
+        journal = {
+            "operation_state": "reconcile_required",
+            "provider_effect_phase": "prepare",
+            "provider_effect_started_at": "2026-10-19T00:00:00Z",
+            "_provider_operation_key": "private-key",
+            "_stored_refusal_code": "",
+        }
+        observation: dict[str, object] = {
+            "state": record.state,
+            "copies": [],
+            "completed": False,
+            "raw_source_retained": False,
+            "prepare_not_started": True,
+        }
+        for code in (
+            RehearsalPrerequisite.ARTIFACT_UNAVAILABLE,
+            RehearsalPrerequisite.CREDENTIALS_UNAVAILABLE,
+            RehearsalPrerequisite.STATE_UNVERIFIED,
+            RehearsalPrerequisite.PLACEMENT_UNAVAILABLE,
+        ):
+            with (
+                patch.object(
+                    OdooRehearsalAdapter, "operation_readback", return_value=dict(journal)
+                ),
+                patch.object(OdooRehearsalAdapter, "failure_events", return_value=([], True)),
+                patch.object(OdooRehearsalAdapter, "host", return_value=dict(observation)),
+                patch.object(OdooRehearsalAdapter, "inputs", side_effect=RehearsalRefused(code)),
+            ):
+                if code in {
+                    RehearsalPrerequisite.STATE_UNVERIFIED,
+                    RehearsalPrerequisite.PLACEMENT_UNAVAILABLE,
+                }:
+                    with self.assertRaises(RehearsalRefused):
+                        self.adapter("prepare").native_readback(record, "original", lambda: None)
+                else:
+                    result = self.adapter("prepare").native_readback(
+                        record, "original", lambda: None
+                    )
+                    self.assertEqual(result["recovery_reason"], code)
+                    self.assertEqual(result["recovery_disposition"], "hold_unknown")
+                    self.assertEqual(
+                        result["provider_effect_phase"], journal["provider_effect_phase"]
+                    )
+                    self.assertTrue(result["original_key_required"])
+
+    def test_host_busy_result_is_typed_and_bound_without_asserting_isolation(self) -> None:
+        import json
+
+        adapter = self.adapter("execute")
+        record = self.record.model_copy(update={"compose_id": "own-compose"})
+        for intent in (record.intent_sha256, "f" * 64):
+            evidence = {
+                "rehearsal_result": json.dumps({"intent_sha256": intent, "host_busy": True})
+                .encode()
+                .hex()
+            }
+            with patch.object(OdooRehearsalAdapter, "run_script", return_value=evidence):
+                if intent != self.record.intent_sha256:
+                    with self.assertRaises(RehearsalRefused):
+                        adapter.host(record, "observe", lambda: None)
+                else:
+                    result = adapter.host(record, "observe", lambda: None)
+                    self.assertTrue(result["host_observation_unavailable"])
+                    for field in ("public_route", "resources_preserved", "business_host_frozen"):
+                        self.assertNotIn(field, result)
+
+    def test_native_readback_distinguishes_missing_unbound_and_no_checkpoint(self) -> None:
+        adapter = self.adapter("execute")
+        bound = {
+            "operation_state": "reconcile_required",
+            "provider_effect_phase": "",
+            "provider_effect_started_at": "",
+            "_provider_operation_key": "private-key",
+            "_stored_refusal_code": "",
+        }
+        for value, reason in (
+            (
+                RehearsalRefused(RehearsalPrerequisite.OPERATION_UNAVAILABLE),
+                "operation_journal_missing",
+            ),
+            (RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED), "operation_journal_unbound"),
+            (bound, "no_effect_checkpoint"),
+        ):
+            with (
+                self.subTest(reason=reason),
+                patch.object(
+                    OdooRehearsalAdapter,
+                    "operation_readback",
+                    side_effect=value if isinstance(value, Exception) else None,
+                    return_value=dict(bound),
+                ),
+                patch.object(OdooRehearsalAdapter, "failure_events") as events,
+                patch.object(OdooRehearsalAdapter, "host", return_value={"completed": False}),
+            ):
+                result = adapter.native_readback(self.record, "original", lambda: None)
+            self.assertEqual(result["recovery_reason"], reason)
+            self.assertEqual(result["recovery_disposition"], "hold_unknown")
+            self.assertTrue(result["original_key_required"])
+            events.assert_not_called()
+
+        with (
+            patch.object(
+                OdooRehearsalAdapter,
+                "operation_readback",
+                side_effect=RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED),
+            ),
+            patch.object(OdooRehearsalAdapter, "host", return_value={"completed": True}),
+        ):
+            result = adapter.native_readback(self.record, "original", lambda: None)
+        self.assertTrue(result["completed"])
+        self.assertNotIn("operation_journal_status", result)
+        self.assertNotIn("operation_state", result)
 
     def run_operation(
         self, adapter: OdooRehearsalAdapter, key: str
@@ -1207,7 +1573,9 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         tree = ast.parse(program)
         tree.body.pop()  # Load the real emitted functions without starting its CLI.
         self.host: dict[str, Any] = {}
-        exec(compile(tree, "<rehearsal-host>", "exec"), self.host)
+        from control_plane.odoo_upgrade_rehearsal import REHEARSAL_HOST_FILENAME
+
+        exec(compile(tree, REHEARSAL_HOST_FILENAME, "exec"), self.host)
 
         def docker(*arguments: str, stdin: bytes | None = None) -> bytes:
             if arguments[:2] == ("inspect", "testing-data"):
@@ -1281,6 +1649,58 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         return cast(
             dict[str, Any], json.loads(bytes.fromhex(output.getvalue().strip().split("=", 1)[1]))
         )
+
+    def test_partial_prepare_and_capture_report_custody_without_replaying(self) -> None:
+        spec, root, _ = self.storage_fixture(
+            {"database_bytes": 40, "filestore_bytes": 80, "staging_bytes": 20, "reserve_bytes": 10}
+        )
+        spec.update(mode="observe", action="prepare")
+        spec["record"]["state"] = "planned"
+        (root / "prepare.started").touch()
+        self.host["docker"] = Mock(
+            side_effect=AssertionError("Custody observation must not execute")
+        )
+        observed = self.run_host(spec)
+        self.assertEqual(
+            observed["custody"],
+            {
+                "effect_started": True,
+                "raw_database_bytes": None,
+                "raw_filestore_bytes": None,
+                "raw_filestore_extracted": False,
+                "capture_receipt_present": False,
+                "capture_pending_present": False,
+                "source_snapshot_directory_present": False,
+            },
+        )
+        self.assertFalse(observed["completed"])
+        self.assertFalse(observed["prepare_not_started"])
+        spec.update(action="execute")
+        spec["record"]["state"] = "prepared"
+        (root / "execute.started").touch()
+        raw = root / "raw-source"
+        raw.mkdir()
+        (raw / "database.dump").write_bytes(b"partial fixture")
+        before = (raw / "database.dump").read_bytes()
+        observed = self.run_host(spec)
+        self.assertTrue(observed["custody"]["effect_started"])
+        self.assertEqual(observed["custody"]["raw_database_bytes"], len(before))
+        self.assertIsNone(observed["custody"]["raw_filestore_bytes"])
+        self.assertTrue(observed["raw_source_retained"])
+        self.assertFalse(observed["completed"])
+        self.assertEqual((raw / "database.dump").read_bytes(), before)
+        self.host["docker"].assert_not_called()
+        import fcntl
+
+        with (root / ".execution.lock").open("w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            busy = self.run_host(spec)
+            self.assertTrue(busy["host_busy"])
+            self.assertNotIn("custody", busy)
+        self.assertEqual((raw / "database.dump").read_bytes(), before)
+        (raw / "filestore").symlink_to(self.fixture.root, target_is_directory=True)
+        with self.assertRaises(RuntimeError):
+            self.run_host(spec)
 
     def test_historical_capture_fits_without_recharging_completed_copies(self) -> None:
         from types import SimpleNamespace
@@ -1932,7 +2352,164 @@ class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
             self.fixture.store.read_odoo_upgrade_rehearsal(self.fixture.identifier), retained
         )
 
-    async def test_read_role_can_plan_without_changing_any_lane_and_cannot_apply(self) -> None:
+    async def test_execute_readback_merges_only_original_journal_and_keeps_unavailable_logs_unknown(
+        self,
+    ) -> None:
+        from control_plane.dokploy import api
+        from control_plane.contracts.odoo_upgrade_rehearsal import ODOO_UPGRADE_REHEARSAL_ROUTE
+        from tests.support.http import request
+
+        app = self.read_only_app()
+        fixture = self.fixture
+        prepare_rehearsal_local_credentials(
+            fixture.store, fixture.identifier, actor=fixture.principal
+        )
+        prepared = fixture.record.model_copy(
+            update={"state": "prepared", "compose_id": "own-compose"}
+        )
+        fixture.store.compare_and_write_odoo_upgrade_rehearsal(fixture.record, prepared)
+        with patch.object(
+            OdooRehearsalAdapter, "host", side_effect=TimeoutError("private failure")
+        ):
+            with self.assertRaises(TimeoutError):
+                fixture.run_operation(fixture.adapter("execute"), "original-execute")
+        before = fixture.store.list_held_provider_target_reservations()
+        custody = {"effect_started": True, "raw_database_bytes": 12}
+        observed: dict[str, object] = {
+            "state": prepared.state,
+            "copies": [],
+            "completed": False,
+            "raw_source_retained": True,
+            "custody": custody,
+        }
+        payload = fixture.request.model_copy(
+            update={"mode": "readback", "action": "execute"}
+        ).model_dump(mode="json")
+        for status in (None, 503, 403):
+            with self.subTest(log_status=status):
+                error = api.DokployRequestFailed(
+                    method="GET",
+                    path="/api/deployment.allByType",
+                    detail="private provider detail",
+                    status_code=status or 503,
+                )
+                with (
+                    patch.object(
+                        OdooRehearsalAdapter, "host", side_effect=lambda *a, **k: dict(observed)
+                    ) as host,
+                    patch.object(
+                        OdooRehearsalAdapter,
+                        "failure_events",
+                        return_value=([], True),
+                        side_effect=error if status else None,
+                    ),
+                ):
+                    response = await request(
+                        app,
+                        "POST",
+                        ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=fixture.product),
+                        payload=payload,
+                        headers={"Idempotency-Key": "original-execute"},
+                    )
+                self.assertEqual(response.status_code, 403 if status == 403 else 202, response.text)
+                self.assertNotIn("private provider detail", response.text)
+                if status == 403:
+                    host.assert_not_called()
+                    continue
+                result = response.json()["result"]
+                self.assertEqual(result["custody"], custody)
+                self.assertEqual(result["operation_state"], before[0].state)
+                self.assertEqual(result["provider_effect_phase"], before[0].provider_effect_phase)
+                self.assertEqual(result.get("failure_events_unavailable", False), status == 503)
+                self.assertTrue(result["original_key_required"])
+                self.assertNotIn("_provider_operation_key", result)
+                self.assertTrue(host.call_args.kwargs["operation_key"])
+        self.assertEqual(fixture.store.list_held_provider_target_reservations(), before)
+        self.assertEqual(fixture.store.read_odoo_upgrade_rehearsal(fixture.identifier), prepared)
+
+        for observation in (
+            {
+                "completed": False,
+                "host_observation_unavailable": True,
+                "host_observation_reason": "host_busy",
+            },
+            RehearsalRefused(RehearsalPrerequisite.PLACEMENT_UNAVAILABLE),
+            RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED),
+        ):
+            with (
+                patch.object(OdooRehearsalAdapter, "failure_events", return_value=([], True)),
+                patch.object(
+                    OdooRehearsalAdapter,
+                    "host",
+                    side_effect=observation if isinstance(observation, Exception) else None,
+                    return_value=observation,
+                ),
+            ):
+                response = await request(
+                    app,
+                    "POST",
+                    ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=fixture.product),
+                    payload=payload,
+                    headers={"Idempotency-Key": "original-execute"},
+                )
+            if isinstance(observation, Exception):
+                self.assertEqual(response.status_code, 409)
+            else:
+                self.assertEqual(response.status_code, 202)
+                result = response.json()["result"]
+                self.assertTrue(result["original_key_required"])
+                self.assertEqual(result["operation_state"], before[0].state)
+                for field in (
+                    "public_route",
+                    "resources_preserved",
+                    "business_host_frozen",
+                    "copies",
+                    "custody",
+                ):
+                    self.assertNotIn(field, result)
+
+        refusal_code = RehearsalPrerequisite.PRECHECK_REFUSED
+        adopted = fixture.store.adopt_reconciled_mutation(
+            reservation=before[0],
+            response_status_code=409,
+            response_trace_id="fixture-refusal",
+            response_payload={"error": {"code": refusal_code}},
+        )
+        self.assertEqual(adopted.status, "adopted")
+        with (
+            patch.object(
+                OdooRehearsalAdapter,
+                "host",
+                return_value={**observed, "refusal_code": refusal_code},
+            ),
+            patch.object(OdooRehearsalAdapter, "failure_events") as events,
+        ):
+            response = await request(
+                app,
+                "POST",
+                ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=fixture.product),
+                payload=payload,
+                headers={"Idempotency-Key": "original-execute"},
+            )
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(response.json()["result"]["recovery_disposition"], "completed_refusal")
+        self.assertFalse(response.json()["result"]["original_key_required"])
+        events.assert_not_called()
+
+        with patch.object(
+            OdooRehearsalAdapter, "host", return_value={**observed, "refusal_code": "different"}
+        ):
+            response = await request(
+                app,
+                "POST",
+                ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=fixture.product),
+                payload=payload,
+                headers={"Idempotency-Key": "original-execute"},
+            )
+        self.assertEqual(response.json()["result"]["recovery_disposition"], "hold_unknown")
+        self.assertTrue(response.json()["result"]["original_key_required"])
+
+    def read_only_app(self) -> Any:
         from fastapi import FastAPI, HTTPException
         from pydantic import BaseModel
         from control_plane.http_routes.odoo_upgrade_rehearsal import (
@@ -1940,8 +2517,6 @@ class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
         )
         from control_plane.http_routes.support import ReadRouteDependencies, ApiRouteRegistrar
         from control_plane.service_auth import LocalOperatorIdentity
-        from tests.support.http import request
-        from control_plane.contracts.odoo_upgrade_rehearsal import ODOO_UPGRADE_REHEARSAL_ROUTE
 
         app = FastAPI()
         identity = LocalOperatorIdentity(subject="fixture-reader", token_label="fixture-read")
@@ -1968,6 +2543,13 @@ class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
             root=self.fixture.root,
             run_provider_mutation=run_mutation,
         )
+        return app
+
+    async def test_read_role_can_plan_without_changing_any_lane_and_cannot_apply(self) -> None:
+        from tests.support.http import request
+        from control_plane.contracts.odoo_upgrade_rehearsal import ODOO_UPGRADE_REHEARSAL_ROUTE
+
+        app = self.read_only_app()
         before = self.fixture.authority()
         response = await request(
             app,
@@ -2056,16 +2638,19 @@ class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
         store.compare_and_write_odoo_upgrade_rehearsal(partial, placed)
         journal = store.list_held_provider_target_reservations()
         for not_started in (False, True):
-            with patch.object(
-                OdooRehearsalAdapter,
-                "host",
-                return_value={
-                    "state": "planned",
-                    "copies": [],
-                    "completed": False,
-                    "raw_source_retained": False,
-                    "prepare_not_started": not_started,
-                },
+            with (
+                patch.object(OdooRehearsalAdapter, "failure_events", return_value=([], False)),
+                patch.object(
+                    OdooRehearsalAdapter,
+                    "host",
+                    return_value={
+                        "state": "planned",
+                        "copies": [],
+                        "completed": False,
+                        "raw_source_retained": False,
+                        "prepare_not_started": not_started,
+                    },
+                ),
             ):
                 read = await request(
                     app,
@@ -2108,7 +2693,11 @@ class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
                 )
             self.assertEqual(read.status_code, 202)
             self.assertTrue(read.json()["result"]["original_key_required"])
-            self.assertNotIn("recovery_disposition", read.json()["result"])
+            self.assertEqual(read.json()["result"]["recovery_disposition"], "hold_unknown")
+            self.assertEqual(
+                read.json()["result"]["operation_journal_status"],
+                "missing" if key else "not_requested",
+            )
             self.assertEqual(store.list_held_provider_target_reservations(), journal)
         from contextlib import contextmanager
 

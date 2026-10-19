@@ -257,7 +257,7 @@ def require_testing_credential_safety(
             instance_name="testing",
             required_binding_keys=tuple(sorted(bindings)),
         )
-        if safety.get("status") not in {"pass", "skipped"} or safety.get("reported"):
+        if safety.get("status") not in {"pass", "skipped"}:
             raise ValueError("Testing credentials lack current non-production safety proof.")
         for binding in bindings.values():
             record = store.read_secret_record(binding.secret_id)
