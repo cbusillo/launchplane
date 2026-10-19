@@ -257,6 +257,11 @@ class GenericWebDeployProviderMutationAdapter:
             return ProviderObservation(
                 outcome=observation.outcome,
                 retry_safe=inspection.retry_safe,
+                preserve_effect_checkpoint=bool(
+                    inspection.retry_safe
+                    and inspection.resolved_deploy_target is not None
+                    and inspection.resolved_deploy_target.testing_runtime_digest
+                ),
             )
         resolved_target = inspection.resolved_deploy_target
         deployment_record_id = self._deployment_record_id(provider_operation_key)
@@ -374,7 +379,8 @@ class GenericWebDeployProviderMutationAdapter:
                     resolved_deploy_target=resolved_target,
                     retry_safe=(
                         observation.outcome == "absent"
-                        and provider_effect_phase in {"", "target_update"}
+                        and provider_effect_phase
+                        in {"", "target_update", "runtime_inputs_verified"}
                     ),
                     provider_evidence=evidence.provider_evidence,
                     provider_read_error_class=evidence.provider_read_error_class,
@@ -598,7 +604,7 @@ class GenericWebDeployProviderMutationAdapter:
         elif observation.outcome == "absent":
             provider_evidence = (
                 "deployment_absent_before_effect"
-                if provider_effect_phase in {"", "target_update"}
+                if provider_effect_phase in {"", "target_update", "runtime_inputs_verified"}
                 else "deployment_absent_after_effect"
             )
         else:
@@ -737,9 +743,17 @@ class GenericWebDeployProviderMutationAdapter:
                 (receipt.state == "restored" and record.deploy.status == "fail")
                 or (
                     receipt.state == "prepared"
-                    and record.deploy.status == "pending"
+                    and (
+                        record.deploy.status == "pending"
+                        or (bool(target.testing_runtime_digest) and record.deploy.status == "fail")
+                    )
                     and phase
-                    in {"", "application_lifecycle_prepared", "application_schedule_quiesce"}
+                    in {
+                        "",
+                        "application_lifecycle_prepared",
+                        "application_schedule_quiesce",
+                        "runtime_inputs_verified",
+                    }
                 )
             )
             and (
@@ -820,6 +834,13 @@ class GenericWebDeployProviderMutationAdapter:
                 resolved_deploy_target=resolved_target,
                 provider_effect_checkpoint=checkpoint,
                 before_records_commit=lambda: checkpoint("records_commit"),
+                # Publishing a refusal checks ownership without inventing a
+                # provider effect or replacing the last recoverable phase.
+                before_failure_records_commit=(
+                    (lambda: checkpoint("provider_dispatch_prepared"))
+                    if resolved_target.testing_runtime_digest
+                    else None
+                ),
                 recorded_artifact=self._recorded_artifact,
                 proved_pre_image_retry=proved_pre_image_retry,
             )

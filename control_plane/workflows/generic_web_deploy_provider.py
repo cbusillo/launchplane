@@ -40,6 +40,7 @@ from control_plane.contracts.ship_request import ShipRequest
 from control_plane.workflows.dokploy_deploy import (
     dokploy_deploy_artifact_reference,
     execute_dokploy_artifact_deploy,
+    require_dokploy_testing_environment_representable,
 )
 from control_plane.dokploy import api as dokploy_api
 from control_plane.dokploy import runtime_evidence as dokploy_runtime_evidence
@@ -289,6 +290,7 @@ def prepare_generic_web_testing_runtime(
             raise TestingInputSafetyRefused(
                 "Application testing input target changed before delivery."
             )
+        require_dokploy_testing_environment_representable(environment.values)
         target.testing_runtime_values = environment.values
         target.testing_runtime_retired_keys = environment.retired_keys
 

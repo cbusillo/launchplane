@@ -104,6 +104,14 @@ explicit provider-key retirements are checked before writing. The existing
 provider operation writes the environment, verifies its readback, then installs
 and deploys the verified image. Platform credentials left in provider-only keys
 must be explicitly retired through product configuration before delivery.
+Input preparation also checks that values survive the provider's environment
+text format before schedules are quiesced. Values containing line breaks or
+trailing whitespace that the provider cannot preserve are refused without a
+write. A later refusal restores or holds schedules using the original lifecycle
+receipt and records the failed attempt. Failure publication retains the last
+provider-effect phase. An interruption after input readback remains retryable
+under the original operation once provider observation proves no deployment;
+a further input refusal retains that operation's fence and original receipts.
 
 A successful deployment retains a keyed, value-free receipt for those captured
 inputs. Missing legacy evidence or changed site inputs makes the same verified
@@ -115,6 +123,10 @@ that receipt can settle, then the next normal sweep repairs its inputs. Removing
 a declaration or binding alone does not delete provider-only values; explicit
 retirement remains the deletion contract. Production, preview and Compose
 delivery paths are unchanged.
+Rotating Launchplane's active master encryption key changes the delivery
+fingerprint, so each managed-input testing lane receives one normal repair
+deployment. An in-flight attempt retains its captured fingerprint and refuses
+changed authority instead of crediting inputs captured under the new key.
 
 ### Health probes with public wildcard DNS
 

@@ -11,7 +11,10 @@ from control_plane.generic_web_testing_inputs import (
     TestingInputSafetyRefused,
     testing_input_authority,
 )
-from control_plane.workflows.generic_web_deploy import record_observed_generic_web_deploy
+from control_plane.workflows.generic_web_deploy import (
+    execute_generic_web_deploy,
+    record_observed_generic_web_deploy,
+)
 from control_plane.workflows.ship import build_deployment_record
 from control_plane.workflows.generic_web_deploy_provider import (
     GenericWebProviderDeploymentObservation,
@@ -36,6 +39,7 @@ from control_plane.workflows.generic_web_deploy_provider import (
 from tests.test_generic_web_deploy import (
     _DokployGenericWebDeployStore,
     _profile,
+    _request,
     _runtime_secret_binding,
     _runtime_secret_record,
     _runtime_secret_version,
@@ -233,6 +237,65 @@ class GenericWebTestingInputsTests(unittest.TestCase):
         self.assertNotIn("deploy", self.events)
         self.assertNotIn("image", self.events)
         self.assertFalse(target.testing_runtime_verified_digest)
+
+    def test_unrepresentable_inputs_refuse_before_provider_effects(self) -> None:
+        for value in ("fixture token\n", "fixture token ", "fixture\nOTHER=injected"):
+            with self.subTest(value=value):
+                store = self.store()
+                store.secret_versions = (
+                    _runtime_secret_version(
+                        secret_id="site-secret", version_id="site-version", plaintext_value=value
+                    ),
+                )
+                with self.assertRaisesRegex(TestingInputSafetyRefused, "represented"):
+                    self.execute(self.resolve(store))
+                self.assertNotIn("env", self.events)
+                self.assertNotIn("image", self.events)
+                self.assertNotIn("target_update", self.events)
+
+    def test_missing_managed_secret_refuses_before_lifecycle_preparation(self) -> None:
+        from control_plane.contracts.generic_web_extensions import (
+            GenericWebApplicationSchedule,
+            GenericWebLaneExtensions,
+        )
+
+        store = self.store(include_secret=False)
+        lane = store.profile.lanes[0].model_copy(
+            update={
+                "generic_web_extensions": GenericWebLaneExtensions(
+                    schedules=(
+                        GenericWebApplicationSchedule(
+                            name="cleanup", command="./cleanup", cron_expression="0 * * * *"
+                        ),
+                    )
+                )
+            }
+        )
+        store.profile = store.profile.model_copy(
+            update={
+                "lanes": (lane,),
+                "expected_config": ProductExpectedConfigProfile(
+                    managed_secret_bindings=(
+                        ProductSecretConfigRequirement(binding_key="APP_TOKEN"),
+                    )
+                ),
+            }
+        )
+        with patch(
+            "control_plane.workflows.generic_web_deploy.application_lifecycle_for_lane",
+            return_value=None,
+        ) as lifecycle:
+            with self.assertRaisesRegex(TestingInputSafetyRefused, "APP_TOKEN"):
+                execute_generic_web_deploy(
+                    control_plane_root=Path("."),
+                    record_store=store,
+                    request=_request(),
+                    deployment_record_id="input-refused",
+                    deploy_provider=DokployGenericWebDeployProvider(),
+                    resolved_deploy_target=self.resolve(store),
+                )
+        self.assertEqual(store.read_deployment_record("input-refused").deploy.status, "fail")
+        lifecycle.assert_not_called()
 
     def test_policy_revocation_after_prepare_stops_provider_effects(self) -> None:
         store = self.store()

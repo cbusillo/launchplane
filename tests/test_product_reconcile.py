@@ -1967,7 +1967,63 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
             tuple(item.record_id for item in held),
         )
 
-    def assert_runtime_policy_revocation(self, *, after_readback: bool) -> None:
+    def application_input_schedule(self) -> dict[str, Any]:
+        from control_plane.contracts.generic_web_extensions import (
+            GenericWebApplicationSchedule,
+            GenericWebLaneExtensions,
+        )
+        from control_plane.workflows.generic_web_application_lifecycle import (
+            DokployApplicationLifecycle,
+            schedule_payload,
+        )
+
+        profile = self.store.read_product_profile_record("site")
+        schedule = GenericWebApplicationSchedule(
+            name="cleanup", command="./cleanup", cron_expression="0 * * * *"
+        )
+        lane = profile.lanes[0].model_copy(
+            update={"generic_web_extensions": GenericWebLaneExtensions(schedules=(schedule,))}
+        )
+        self.store.write_product_profile_record(
+            profile.model_copy(update={"lanes": (lane, *profile.lanes[1:])})
+        )
+        original = schedule_payload(schedule, "target-123", enabled=True)
+        self.input_schedule = dict(original)
+
+        def lifecycle(**kwargs: Any) -> DokployApplicationLifecycle:
+            return DokployApplicationLifecycle(
+                host="fixture",
+                token="unused",
+                application_id="target-123",
+                snapshot=kwargs["snapshot"],
+                checkpoint=kwargs["checkpoint"],
+                effect_started=kwargs["effect_started"],
+            )
+
+        def upsert(**kwargs: Any) -> Any:
+            self.input_schedule = dict(kwargs["schedule_payload"])
+            return {**self.input_schedule, "scheduleId": "cleanup"}
+
+        for patcher in (
+            patch.object(
+                self.application_inputs_provider, "application_lifecycle", side_effect=lifecycle
+            ),
+            patch(
+                "control_plane.dokploy.api.read_dokploy_application_schedule",
+                side_effect=lambda **_: dict(self.input_schedule),
+            ),
+            patch(
+                "control_plane.dokploy.api.upsert_dokploy_application_schedule", side_effect=upsert
+            ),
+            patch("control_plane.dokploy.api.run_dokploy_schedule"),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        return original
+
+    def assert_runtime_policy_revocation(
+        self, *, after_readback: bool, interruption_phase: str = ""
+    ) -> None:
         from tests.test_generic_web_deploy import (
             _runtime_secret_record,
             _runtime_secret_version,
@@ -1975,6 +2031,7 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         )
 
         payload, triggered = self.application_input_provider()
+        original_schedule = self.application_input_schedule() if interruption_phase else None
         self.store.write_secret_record(
             _runtime_secret_record(
                 secret_id="site-secret",
@@ -2013,6 +2070,10 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
             def checkpoint(phase: str) -> None:
                 nonlocal revoked
                 original_checkpoint(phase)
+                if phase == interruption_phase:
+                    from control_plane.provider_operations import ProviderMutationUnknownError
+
+                    raise ProviderMutationUnknownError("interrupted before image write")
                 if phase == (
                     "runtime_inputs_verified" if after_readback else "provider_dispatch_prepared"
                 ):
@@ -2035,15 +2096,103 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         self.assertEqual(refused.state, "failed")
         self.assertFalse(triggered)
         self.assertEqual(bool(self.store.list_held_provider_target_reservations()), after_readback)
-        self.assertEqual("APP_TOKEN" in str(payload["env"]), after_readback)
+        self.assertEqual(
+            "APP_TOKEN" in str(payload["env"]),
+            after_readback and interruption_phase != "provider_dispatch_prepared",
+        )
         if not after_readback:
             self.assertEqual(refused.last_plan["deploy_operation_status"], "refused")
+        else:
+            held = self.store.list_held_provider_target_reservations()
+            self.assertEqual(
+                held[0].provider_effect_phase,
+                "application_schedule_quiesce"
+                if interruption_phase == "provider_dispatch_prepared"
+                else "runtime_inputs_verified",
+            )
+            original = held[0]
+            if interruption_phase:
+                from control_plane.workflows.generic_web_application_snapshot import (
+                    recorded_application_lifecycle,
+                )
+
+                before = self.store.list_deployment_records(
+                    context_name="cm", instance_name="testing"
+                )[0]
+                baseline = recorded_application_lifecycle(before)
+                assert baseline is not None
+                self.assertEqual(baseline.originals["cleanup"], original_schedule)
+                self.assertFalse(self.input_schedule["enabled"])
+                self.request()
+                with (
+                    patch.object(
+                        self.store, "list_runtime_key_safety_policy_records", return_value=()
+                    ),
+                    patch.object(
+                        self.application_inputs_provider,
+                        "observe_artifact_deploy",
+                        return_value=GenericWebProviderDeploymentObservation(outcome="absent"),
+                    ),
+                ):
+                    still_refused = self.run_once()
+                self.assertEqual(still_refused.state, "failed")
+                self.assertEqual(
+                    self.store.list_held_provider_target_reservations()[0].record_id,
+                    original.record_id,
+                )
+                retained = self.store.read_deployment_record(before.record_id)
+                self.assertEqual(retained.runtime_source, before.runtime_source)
+                self.assertEqual(recorded_application_lifecycle(retained), baseline)
+            self.request()
+            with patch.object(
+                self.application_inputs_provider,
+                "observe_artifact_deploy",
+                side_effect=[
+                    GenericWebProviderDeploymentObservation(outcome="absent"),
+                    GenericWebProviderDeploymentObservation(
+                        outcome="present",
+                        deployment_status="success",
+                        deployment_id="provider-input-retry",
+                        started_at="2026-10-19T00:00:00Z",
+                        finished_at="2026-10-19T00:01:00Z",
+                    ),
+                ],
+            ):
+                recovered = self.reconcile()
+            self.assertEqual(recovered["action"], "deploy")
+            self.assertTrue(triggered)
+            self.assertFalse(self.store.list_held_provider_target_reservations())
+            completed = self.store.read_idempotency_record(
+                scope=original.scope,
+                route_path=original.route_path,
+                idempotency_key=original.idempotency_key,
+            )
+            assert completed is not None
+            self.assertEqual(completed.record_id, original.record_id)
+            self.assertEqual(completed.state, "completed")
+            if interruption_phase:
+                record = self.store.read_deployment_record(before.record_id)
+                receipt = recorded_application_lifecycle(record)
+                assert receipt is not None
+                self.assertEqual(receipt.originals["cleanup"], original_schedule)
+                self.assertEqual(receipt.state, "qualified")
+                self.assertTrue(self.input_schedule["enabled"])
 
     def test_runtime_policy_revocation_before_effect_is_a_normal_refusal(self) -> None:
         self.assert_runtime_policy_revocation(after_readback=False)
 
     def test_runtime_policy_revocation_after_env_write_retains_original_fence(self) -> None:
         self.assert_runtime_policy_revocation(after_readback=True)
+
+    def test_readback_interruption_then_input_refusal_retains_original_receipts(self) -> None:
+        self.assert_runtime_policy_revocation(
+            after_readback=True, interruption_phase="runtime_inputs_verified"
+        )
+
+    def test_quiesce_interruption_then_input_refusal_can_resume_original_lifecycle(self) -> None:
+        self.assert_runtime_policy_revocation(
+            after_readback=True, interruption_phase="provider_dispatch_prepared"
+        )
 
     def test_input_change_before_effect_is_a_normal_refusal(self) -> None:
         _payload, triggered = self.application_input_provider()

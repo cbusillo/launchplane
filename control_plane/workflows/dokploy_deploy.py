@@ -19,6 +19,16 @@ from control_plane.contracts.ship_request import ShipRequest
 from control_plane.dokploy import api as dokploy_api
 from control_plane.runtime_environments import merge_provider_environment
 from control_plane import runtime_platform_credentials
+from control_plane.generic_web_testing_inputs import TestingInputSafetyRefused
+
+
+def require_dokploy_testing_environment_representable(values: dict[str, str]) -> str:
+    env_text = dokploy_api.serialize_dokploy_env_text(values)
+    if dokploy_api.parse_dokploy_env_text(env_text) != values:
+        raise TestingInputSafetyRefused(
+            "Application testing runtime inputs cannot be represented by the provider environment format."
+        )
+    return env_text
 
 
 def dokploy_deploy_artifact_reference(
@@ -79,12 +89,16 @@ def update_dokploy_target_artifact(
             if runtime_environment is not None:
                 findings = runtime_platform_credentials.find_platform_credentials(merged)
                 if findings:
-                    raise ValueError(
+                    raise TestingInputSafetyRefused(
                         "Application testing provider environment contains platform credentials: "
                         + ", ".join(sorted({finding.key for finding in findings}))
                         + ". Retire these provider keys through product configuration first."
                     )
-            env_text = dokploy_api.serialize_dokploy_env_text(merged)
+            env_text = (
+                require_dokploy_testing_environment_representable(merged)
+                if runtime_environment is not None
+                else dokploy_api.serialize_dokploy_env_text(merged)
+            )
         if runtime_environment is not None and target_payload.get("registryId"):
             if before_provider_mutation is not None:
                 before_provider_mutation("target_update")
@@ -118,7 +132,9 @@ def update_dokploy_target_artifact(
                     any(values.get(key) != value for key, value in desired.items())
                     or retired_runtime_keys & values.keys()
                 ):
-                    raise ValueError("Application testing runtime environment readback failed.")
+                    raise TestingInputSafetyRefused(
+                        "Application testing runtime environment readback failed."
+                    )
                 if runtime_verified is not None:
                     runtime_verified()
         if before_provider_mutation is not None:
