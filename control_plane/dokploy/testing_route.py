@@ -143,26 +143,10 @@ def testing_ingress_entrypoints(raw: dict[str, Any], host: str) -> tuple[str, ..
     return tuple(sorted(points))
 
 
-def proxy_internal_router(
-    name: str, router: dict[str, Any], application_points: tuple[str, ...]
-) -> bool:
-    """Recognize only Traefik's canonical challenge and isolated admin routers.
-
-    The reserved priorities keep ACME above every admitted application winner.
-    An admin listener overlapping the application is a conflict, never exempt.
-    """
-    kind = name.removesuffix("@internal")
-    if name != kind + "@internal" or kind not in {"acme-http", "api", "dashboard"}:
+def canonical_acme_challenge(name: str, router: dict[str, Any]) -> bool:
+    """Keep the canonical challenge above every admitted application winner."""
+    if name != "acme-http@internal":
         return False
-    rule, offset, middlewares = {
-        "acme-http": ("PathPrefix(`/.well-known/acme-challenge/`)", 0, []),
-        "api": ("PathPrefix(`/api`)", 1, []),
-        "dashboard": (
-            "PathPrefix(`/`)",
-            2,
-            ["dashboard_redirect@internal", "dashboard_stripprefix@internal"],
-        ),
-    }[kind]
     configuration = router_configuration(router)
     syntax = configuration.pop("ruleSyntax", None)
     points = configuration.get("entryPoints")
@@ -174,18 +158,15 @@ def proxy_internal_router(
         or not points
         or any(not isinstance(point, str) or not point for point in points)
         or type(priority) is not int
-        or priority not in {2**31 - 1 - offset, 2**63 - 1 - offset}
-        or (
-            kind != "acme-http" and (points != ["traefik"] or set(points) & set(application_points))
-        )
+        or priority not in {2**31 - 1, 2**63 - 1}
     ):
         return False
     return configuration == {
-        "rule": rule,
+        "rule": "PathPrefix(`/.well-known/acme-challenge/`)",
         "service": name,
         "entryPoints": points,
         "priority": priority,
-        "middlewares": middlewares,
+        "middlewares": [],
     }
 
 
@@ -203,7 +184,7 @@ def possible_lane_routers(
             or not isinstance(router.get("entryPoints"), list)
         ):
             raise ValueError("Applied testing router inventory is incomplete.")
-        if proxy_internal_router(name, router, entrypoints):
+        if canonical_acme_challenge(name, router):
             continue
         if set(router["entryPoints"]) & set(entrypoints) and host_rule_may_match(
             str(router.get("rule") or ""), host

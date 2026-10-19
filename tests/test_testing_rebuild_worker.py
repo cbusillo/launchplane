@@ -560,6 +560,33 @@ class NativeTestingWorkerTests(unittest.TestCase):
                         )
                     self.assertEqual(refused.exception.code, "testing_route_read_unavailable")
                     self.assertNotIn("private-", str(refused.exception))
+        from control_plane.dokploy.testing_route_transport import TestingRouteObservationRefused
+
+        for observation_failure in (
+            TestingRouteObservationRefused(
+                "testing_route_identity_changed", "Retained identity changed."
+            ),
+            TestingRouteObservationRefused(
+                "testing_route_provider_unverified", "Watched provider unverified."
+            ),
+        ):
+            with patch.object(
+                DokployTestingRouteTransport, "read", side_effect=observation_failure
+            ):
+                with self.assertRaises(service.TestingRebuildRefused) as refused:
+                    self.capture_function(
+                        root=self.root, store=self.store, operation=self.operation
+                    )
+                self.assertEqual(refused.exception.code, observation_failure.code)
+        for owned in ("private-invalid-json", "[]", "null"):
+            frame = {**self.route_read(), "owned_file": owned}
+            with patch.object(DokployTestingRouteTransport, "read", return_value=frame):
+                with self.assertRaises(service.TestingRebuildRefused) as refused:
+                    self.capture_function(
+                        root=self.root, store=self.store, operation=self.operation
+                    )
+                self.assertEqual(refused.exception.code, "testing_route_file_invalid")
+                self.assertNotIn("private-", str(refused.exception))
         frame = self.route_read()
         frame["raw"]["routers"]["conflict@docker"] = {
             **deepcopy(frame["raw"]["routers"]["old-http@docker"]),

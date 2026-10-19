@@ -997,6 +997,11 @@ The native plan API returns fixed, traced prerequisite codes for route-read,
 private-backend, application-entrypoint and compiler failures:
 `testing_route_read_unavailable`, `testing_route_backend_unavailable`,
 `testing_route_entrypoints_unavailable`, and `testing_route_compilation_failed`.
+Runtime-identity drift, an unverified watched provider and an invalid owned file
+carry `testing_route_identity_changed`, `testing_route_provider_unverified` and
+`testing_route_file_invalid` respectively. Other retained-input/protection
+verification failures carry `testing_rebuild_inputs_unverified`; an unfinished
+rebuild carries `testing_rebuild_active`.
 These are preflight conflicts (HTTP 409), not request-schema errors. Provider
 authorization denials remain denials; exception/provider payloads are not exposed.
 

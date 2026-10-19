@@ -92,7 +92,17 @@ def inspect_testing_rebuild(
             raise NativeSourceAuthorizationDenied(
                 "The provider refused the native preflight read."
             ) from error
+        raise TestingRebuildRefused(
+            "testing_rebuild_inputs_unverified",
+            "The retained testing inputs could not be verified.",
+        ) from error
+    except (NativeSourceAuthorizationDenied, TestingRebuildRefused):
         raise
+    except (ValueError, click.ClickException, FileNotFoundError) as error:
+        raise TestingRebuildRefused(
+            "testing_rebuild_inputs_unverified",
+            "The retained testing inputs could not be verified.",
+        ) from error
     try:
         candidate_credential_authority(store, lane.context)
     except NativeSourceAuthorizationDenied:
@@ -110,7 +120,9 @@ def inspect_testing_rebuild(
         limit=1,
     )
     if active:
-        raise ValueError("The testing lane already has an unfinished rebuild.")
+        raise TestingRebuildRefused(
+            "testing_rebuild_active", "The testing lane already has an unfinished rebuild."
+        )
     try:
         if apply.data_source_mode == "production_restore":
             native_testing_source_authority(

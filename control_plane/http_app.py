@@ -309,7 +309,6 @@ from control_plane.http_routes.testing_rebuild import (
     TestingRebuildRouteDependencies,
     register_testing_rebuild_routes,
 )
-from control_plane.testing_rebuild_service import TestingRebuildRefused
 from control_plane.http_routes.production_backup_credentials import (
     register_production_backup_credential_routes,
 )
@@ -832,6 +831,7 @@ from control_plane.disposable_lane_collection import (
 )
 from control_plane.odoo_testing_usage import read_odoo_testing_usage, OdooTestingUsage
 from control_plane.testing_never_served import read_never_served_testing_usage
+from control_plane.testing_rebuild_service import TestingRebuildRefused
 from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 
 from control_plane.disposable_lanes import (

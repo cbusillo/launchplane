@@ -834,6 +834,32 @@ class TestingRouteTransportTests(unittest.TestCase):
         self.assertFalse(self.route_file.exists())
         self.containers["old"]["Config"]["Env"] = environment
 
+    def test_identity_and_watched_provider_fences_keep_distinct_read_checkpoints(self) -> None:
+        original = self.client.read()
+        for change, expected in (
+            (
+                {
+                    "old_identity": self.identity.model_copy(
+                        update={"artifact_id": "different-build"}
+                    ).model_dump(mode="json")
+                },
+                "testing_route_identity_changed",
+            ),
+            (
+                {"static_configuration": "providers: {file: {watch: false}}"},
+                "testing_route_provider_unverified",
+            ),
+        ):
+            with (
+                self.subTest(expected=expected),
+                patch.object(self.client, "_run", return_value={**original, **change}),
+            ):
+                with self.assertRaises(transport.TestingRouteObservationRefused) as refused:
+                    self.client.read()
+                self.assertEqual(refused.exception.code, expected)
+        self.assertEqual(self.effect_count, 0)
+        self.assertFalse(self.route_file.exists())
+
     def test_cross_lane_plan_refuses_before_provider_reads(self) -> None:
         different = self.plan.model_copy(update={"host": "other.invalid"})
         execution = self.client.execution_intent(

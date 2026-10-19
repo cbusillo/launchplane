@@ -190,6 +190,8 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
                 409,
             ),
             (click.ClickException("private-bootstrap-message"), 409),
+            (ValueError("private-retained-identity-message"), 409),
+            (FileNotFoundError("private-retained-record"), 409),
         ):
             for method in ("GET", "POST"):
                 with (
@@ -205,7 +207,9 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
                     self.assertTrue(response.json()["trace_id"])
                     self.assertEqual(
                         response.json()["error"]["code"],
-                        "authorization_denied" if status == 403 else "testing_rebuild_not_ready",
+                        "authorization_denied"
+                        if status == 403
+                        else "testing_rebuild_inputs_unverified",
                     )
                     self.assertNotIn("private-", response.text)
         self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), before)

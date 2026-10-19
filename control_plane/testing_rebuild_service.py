@@ -66,6 +66,7 @@ from control_plane.dokploy.testing_route import (
 )
 from control_plane.dokploy.testing_route_transport import (
     DokployTestingRouteTransport,
+    TestingRouteObservationRefused,
 )
 from control_plane.dokploy.testing_route_execution import (
     TestingRouteExecutionIntent,
@@ -251,6 +252,8 @@ def capture_rebuild_intent(
         frame = transport.read()
     except NativeSourceAuthorizationDenied:
         raise
+    except TestingRouteObservationRefused as error:
+        raise TestingRebuildRefused(error.code, str(error)) from error
     except (ValueError, click.ClickException) as error:
         raise TestingRebuildRefused(
             "testing_route_read_unavailable", "The applied testing ingress could not be read."
@@ -273,7 +276,14 @@ def capture_rebuild_intent(
             "testing_route_entrypoints_unavailable", "The testing application's ingress is unbound."
         ) from error
     # Bind the actual selected backend, not an arbitrary address on the old process.
-    owned = json.loads(frame["owned_file"]) if frame["owned_file"] is not None else None
+    try:
+        owned = json.loads(frame["owned_file"]) if frame["owned_file"] is not None else None
+        if frame["owned_file"] is not None and not isinstance(owned, dict):
+            raise ValueError("The owned route is not a document.")
+    except ValueError as error:
+        raise TestingRebuildRefused(
+            "testing_route_file_invalid", "The owned testing route file is invalid."
+        ) from error
     namespace = testing_candidate_namespace(
         operation.product, operation.context, operation.operation_id
     )
