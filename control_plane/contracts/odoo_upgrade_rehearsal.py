@@ -73,6 +73,8 @@ class RehearsalPrerequisite(StrEnum):
     PLACEMENT_UNAVAILABLE = "rehearsal_placement_unavailable"
     STATE_UNVERIFIED = "rehearsal_state_unverified"
     RECOVERY_REQUIRED = "rehearsal_recovery_required"
+    PRECHECK_REFUSED = "rehearsal_precheck_refused"
+    OPERATION_UNAVAILABLE = "rehearsal_operation_unavailable"
 
 
 class OdooUpgradeRehearsalRequest(BaseModel):
@@ -143,6 +145,23 @@ class OdooUpgradeRehearsalRecord(BaseModel):
         return canonical_json_sha256(self.model_dump(mode="json", exclude={"elapsed_seconds"}))
 
 
+class RehearsalCustodyObservation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    effect_started: bool
+    raw_database_bytes: int | None = Field(default=None, ge=0)
+    raw_filestore_bytes: int | None = Field(default=None, ge=0)
+    raw_filestore_extracted: bool
+    capture_receipt_present: bool
+    capture_pending_present: bool
+    source_snapshot_directory_present: bool
+
+
+class RehearsalHostBusy(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    intent_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    host_busy: Literal[True]
+
+
 class RehearsalHostResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
     intent_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
@@ -155,6 +174,7 @@ class RehearsalHostResult(BaseModel):
     completed: bool = True
     raw_source_retained: bool = False
     prepare_not_started: bool = False
+    custody: RehearsalCustodyObservation | None = None
     refusal_code: Literal[
         "", "rehearsal_storage_capacity_insufficient", "rehearsal_precheck_refused"
     ] = ""

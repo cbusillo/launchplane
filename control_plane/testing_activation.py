@@ -262,7 +262,7 @@ def runtime_values(
             "Carried-key safety remains unproved.",
             code=TestingActivationRefusalCode.CARRIED_KEYS_UNVERIFIED,
         ) from error
-    if safety.get("status") not in {"pass", "skipped"} or safety.get("reported"):
+    if safety.get("status") not in {"pass", "skipped"}:
         raise TestingActivationRefusal(
             "Carried-key safety remains unproved.",
             code=TestingActivationRefusalCode.CARRIED_KEYS_UNVERIFIED,

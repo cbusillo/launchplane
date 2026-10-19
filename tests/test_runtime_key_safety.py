@@ -10,7 +10,6 @@ from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeSecretClass,
     RuntimeSecretSafetyRule,
     RuntimeSecretSafetyTargetScope,
-    UnreasonedSharedIntegrationKeyMode,
 )
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.contracts.secret_record import SecretSharingReason
@@ -651,29 +650,21 @@ class RuntimeKeySafetyTests(unittest.TestCase):
             }
         )
 
-        def evaluate(
-            binding: SecretBinding, mode: UnreasonedSharedIntegrationKeyMode = "refuse"
-        ) -> RuntimeKeySafetyEvaluation:
+        def evaluate(binding: SecretBinding) -> RuntimeKeySafetyEvaluation:
             return evaluate_runtime_key_safety(
                 target=target,
                 required_binding_keys=(binding.binding_key,),
                 secret_bindings=(binding,),
                 secret_rules=(),
-                unreasoned_shared_integration_keys=mode,
             )
 
         refused = evaluate(unreasoned)
         self.assertEqual(refused.status, "fail")
         self.assertEqual(refused.findings[0].code, "sharing_reason_missing")
 
-        # Deploy and read-back paths report a key bound before reasons existed.
-        reported = evaluate(unreasoned, mode="report")
-        self.assertEqual(reported.status, "pass")
-        self.assertEqual(reported.reported[0].code, "sharing_reason_missing")
-
         accepted = evaluate(reasoned)
         self.assertEqual(accepted.status, "pass")
-        self.assertEqual(accepted.reported, ())
+        self.assertEqual(accepted.findings, ())
 
     def test_a_policy_rule_does_not_excuse_a_declared_shared_key_from_its_reason(self) -> None:
         evaluation = evaluate_runtime_key_safety(
@@ -719,7 +710,7 @@ class RuntimeKeySafetyTests(unittest.TestCase):
                 )
 
                 self.assertEqual(evaluation.status, "pass")
-                self.assertEqual(evaluation.reported, ())
+                self.assertEqual(evaluation.findings, ())
 
     def test_sharing_reason_requires_a_declared_class_and_evidence(self) -> None:
         with self.assertRaises(ValueError):

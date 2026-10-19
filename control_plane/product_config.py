@@ -1211,7 +1211,6 @@ def _evaluate_product_config_runtime_key_safety(
         ),
         secret_rules=policy_record.rules,
         integration_key_markers=policy_record.integration_key_markers,
-        unreasoned_shared_integration_keys="refuse",
     )
     summary: dict[str, object] = {
         "required": True,

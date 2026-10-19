@@ -36,6 +36,8 @@ from control_plane.provider_operations import (
 )
 from control_plane.contracts.odoo_upgrade_rehearsal import RehearsalHostResult
 
+REHEARSAL_HOST_FILENAME = "<rehearsal>"
+
 REHEARSAL_SHAPE_KEYS = frozenset(
     {
         "ODOO_WORKERS",
@@ -63,8 +65,11 @@ REHEARSAL_SHAPE_KEYS = frozenset(
 
 
 class RehearsalRefused(ValueError):
-    def __init__(self, code: RehearsalPrerequisite) -> None:
+    def __init__(
+        self, code: RehearsalPrerequisite, *, prerequisite: RehearsalPrerequisite | None = None
+    ) -> None:
         self.code = code
+        self.prerequisite = prerequisite
         super().__init__(code.value)
 
 
@@ -544,27 +549,30 @@ class OdooRehearsalAdapter:
             raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
         return identifier
 
-    def prepare_readback(
+    def operation_readback(
         self, record: OdooUpgradeRehearsalRecord, idempotency_key: str
     ) -> dict[str, object]:
-        """Read the original journal before a compose/host receipt exists."""
+        """Read a journal bound to the original request and unchanged partial record."""
         from control_plane.http_routes.mutation_support import request_fingerprint
+        from control_plane.provider_operations import build_provider_operation_key
 
         reservation = self.store.read_idempotency_record(
             scope=record.principal,
             route_path=ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=record.product),
             idempotency_key=idempotency_key,
         )
+        if not idempotency_key or reservation is None:
+            raise RehearsalRefused(RehearsalPrerequisite.OPERATION_UNAVAILABLE)
         original = self.request.model_copy(
             update={
                 "mode": "apply",
-                "reviewed_plan_sha256": self.initial_prepare_binding(record),
+                "reviewed_plan_sha256": self.initial_prepare_binding(record)
+                if self.request.action == "prepare"
+                else record.binding_sha256,
             }
         )
         if (
-            not idempotency_key
-            or reservation is None
-            or reservation.provider_target_key != record.rehearsal_id
+            reservation.provider_target_key != record.rehearsal_id
             or reservation.reconciliation_key != self.reconciliation_key()
             or reservation.request_fingerprint
             != request_fingerprint(
@@ -575,11 +583,40 @@ class OdooRehearsalAdapter:
             )
         ):
             raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
+        return {
+            "operation_state": reservation.state,
+            "provider_effect_phase": reservation.provider_effect_phase,
+            "provider_effect_started_at": reservation.provider_effect_started_at,
+            "_stored_refusal_code": self.stored_refusal_code(reservation.response_payload),
+            "_provider_operation_key": build_provider_operation_key(
+                scope=reservation.scope,
+                route_path=reservation.route_path,
+                idempotency_key=idempotency_key,
+                request_fingerprint=reservation.request_fingerprint,
+                reconciliation_key=reservation.reconciliation_key,
+            ),
+        }
+
+    @staticmethod
+    def stored_refusal_code(payload: dict[str, object]) -> str:
+        from control_plane.contracts.odoo_upgrade_rehearsal import REHEARSAL_PUBLIC_FAILURE_MESSAGES
+
+        error = payload.get("error")
+        code = error.get("code") if isinstance(error, dict) else None
+        return code if isinstance(code, str) and code in REHEARSAL_PUBLIC_FAILURE_MESSAGES else ""
+
+    def prepare_readback(
+        self, record: OdooUpgradeRehearsalRecord, idempotency_key: str
+    ) -> dict[str, object]:
+        """Read the original journal before a compose/host receipt exists."""
+        journal = self.operation_readback(record, idempotency_key)
+        journal.pop("_provider_operation_key")
+        journal.pop("_stored_refusal_code")
         disposition = "hold_unknown"
         reason = "operation_not_recoverable"
-        if reservation.state == "reconcile_required" and not record.compose_id:
+        if journal["operation_state"] == "reconcile_required" and not record.compose_id:
             try:
-                self.partial_prepare_project(record, reservation.provider_effect_phase)
+                self.partial_prepare_project(record, str(journal["provider_effect_phase"]))
                 disposition = "continue_original_prepare"
                 reason = "empty_original_project_observed"
             except api.DokployRequestFailed as error:
@@ -597,12 +634,246 @@ class OdooRehearsalAdapter:
             "copies": [],
             "completed": False,
             "raw_source_retained": False,
-            "operation_state": reservation.state,
-            "provider_effect_phase": reservation.provider_effect_phase,
-            "provider_effect_started_at": reservation.provider_effect_started_at,
+            **journal,
             "recovery_disposition": disposition,
             "recovery_reason": reason,
         }
+
+    def failure_events(
+        self, record: OdooUpgradeRehearsalRecord, started_at: str
+    ) -> tuple[list[dict[str, object]], bool]:
+        """Read bounded event candidates without exporting provider prose or source data."""
+        import ast
+        from control_plane.dokploy import post_deploy
+        from control_plane._odoo_upgrade_rehearsal_program import ODOO_UPGRADE_REHEARSAL_PROGRAM
+
+        if not started_at:
+            raise ValueError("Missing original checkpoint")
+        checkpoint_time = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+        host, token = source.read_dokploy_config(control_plane_root=self.root)
+        payload = api.fetch_dokploy_target_payload(
+            host=host, token=token, target_type="compose", target_id=record.compose_id
+        )
+        if payload.get("serverId") != record.server_id or not re.fullmatch(
+            re.escape(record.rehearsal_id) + r"(?:-[a-z0-9]{6})?", str(payload.get("appName") or "")
+        ):
+            raise RehearsalRefused(RehearsalPrerequisite.PLACEMENT_UNAVAILABLE)
+        kind, lookup_id, _, _ = post_deploy._resolve_dokploy_schedule_runtime(
+            host=host,
+            token=token,
+            compose_id=record.compose_id,
+            compose_name=record.rehearsal_id,
+            target_payload=payload,
+        )
+        schedule = api.find_matching_dokploy_schedule(
+            host=host,
+            token=token,
+            target_id=lookup_id,
+            schedule_type=kind,
+            schedule_name="Launchplane Odoo upgrade rehearsal",
+            app_name=record.rehearsal_id,
+        )
+        if schedule is None:
+            raise ValueError("Missing original schedule")
+        deployments = api.extract_deployments(
+            api.dokploy_request(
+                host=host,
+                token=token,
+                path="/api/deployment.allByType",
+                query={"id": api.schedule_key(schedule), "type": "schedule"},
+            )
+        )
+        functions = {
+            node.name
+            for node in ast.parse(ODOO_UPGRADE_REHEARSAL_PROGRAM).body
+            if isinstance(node, ast.FunctionDef)
+        }
+        events: list[dict[str, object]] = []
+        complete = True
+        candidates = []
+        for deployment in deployments:
+            created = api._deployment_created_at(deployment)
+            if created is None:
+                complete = False
+            elif (
+                created
+                >= checkpoint_time.timestamp() - api._DOKPLOY_SCHEDULE_START_CLOCK_SKEW_SECONDS
+            ):
+                candidates.append((created, deployment))
+        if len(candidates) > 32:
+            complete = False
+        for created, deployment in sorted(candidates, key=lambda item: item[0])[:32]:
+            identifier = api.deployment_key(deployment)
+            if not re.fullmatch(r"[A-Za-z0-9_-]{1,200}", identifier):
+                complete = False
+                continue
+            log_available = True
+            try:
+                lines = api.fetch_dokploy_deployment_logs(
+                    host=host,
+                    token=token,
+                    deployment_id=identifier,
+                    line_count=100,
+                )
+            except api.DokployRequestFailed as error:
+                if error.status_code in {401, 403}:
+                    raise
+                lines = ()
+                log_available = complete = False
+            except (ValueError, OSError, click.ClickException):
+                lines = ()
+                log_available = complete = False
+            log = "\n".join(lines)
+            frames = sorted(
+                {
+                    name
+                    for name in functions
+                    if re.search(
+                        r'File "'
+                        + re.escape(REHEARSAL_HOST_FILENAME)
+                        + r'", line \d+, in '
+                        + re.escape(name)
+                        + r"(?:\n|$)",
+                        log,
+                    )
+                }
+            )
+            status = api.deployment_status(deployment)
+            events.append(
+                {
+                    "deployment_id": identifier,
+                    "created_at": datetime.fromtimestamp(created, timezone.utc).isoformat(),
+                    "provider_status": status
+                    if status in {"done", "error", "running", "queued", "cancelled"}
+                    else "unknown",
+                    "log_available": log_available,
+                    "traceback_present": "Traceback (most recent call last):" in log,
+                    "failure_frames": frames,
+                }
+            )
+        return events, complete
+
+    def native_readback(
+        self,
+        record: OdooUpgradeRehearsalRecord,
+        idempotency_key: str,
+        checkpoint: Callable[[], None],
+    ) -> dict[str, object]:
+        """Assemble independent evidence; no observation grants mutation authority."""
+        journal: dict[str, object] = {}
+        diagnostics: dict[str, object] = {}
+        operation_key = ""
+        journal_status = "not_requested"
+        if idempotency_key:
+            try:
+                journal = self.operation_readback(record, idempotency_key)
+                operation_key = str(journal.pop("_provider_operation_key"))
+                journal_status = "bound"
+            except RehearsalRefused as error:
+                journal_status = (
+                    "missing"
+                    if error.code == RehearsalPrerequisite.OPERATION_UNAVAILABLE
+                    else "unbound"
+                )
+            if journal.get("operation_state") == "reconcile_required" and journal.get(
+                "provider_effect_started_at"
+            ):
+                try:
+                    events, complete = self.failure_events(
+                        record, str(journal["provider_effect_started_at"])
+                    )
+                    diagnostics["failure_events_after_checkpoint"] = events
+                    if not complete:
+                        diagnostics["failure_events_unavailable"] = True
+                except api.DokployRequestFailed as error:
+                    if error.status_code in {401, 403}:
+                        raise
+                    diagnostics["failure_events_unavailable"] = True
+                except RehearsalRefused:
+                    raise
+                except (ValueError, OSError, click.ClickException):
+                    diagnostics["failure_events_unavailable"] = True
+        try:
+            observation = self.host(record, "observe", checkpoint, operation_key=operation_key)
+        except api.DokployRequestFailed as error:
+            if error.status_code in {401, 403}:
+                raise
+            observation = {
+                "completed": False,
+                "host_observation_unavailable": True,
+                "host_observation_reason": "provider_transport_unavailable",
+            }
+        except RehearsalRefused as error:
+            if error.code != RehearsalPrerequisite.RECOVERY_REQUIRED:
+                raise
+            observation = {
+                "completed": False,
+                "host_observation_unavailable": True,
+                "host_observation_reason": error.code.value,
+            }
+        except OSError:
+            observation = {
+                "completed": False,
+                "host_observation_unavailable": True,
+                "host_observation_reason": "host_io_unavailable",
+            }
+        result = {
+            **observation,
+            **journal,
+            **diagnostics,
+            "operation_journal_status": journal_status,
+        }
+        stored_refusal = result.pop("_stored_refusal_code", "")
+        if observation.get("completed") is not True:
+            terminal = (
+                journal.get("operation_state") == "completed"
+                and bool(stored_refusal)
+                and stored_refusal == observation.get("refusal_code")
+            )
+            reason = (
+                str(stored_refusal)
+                if terminal
+                else "host_observation_unavailable"
+                if observation.get("host_observation_unavailable")
+                else "operation_journal_" + journal_status
+                if journal_status != "bound"
+                else "no_effect_checkpoint"
+                if not journal["provider_effect_phase"]
+                and not journal["provider_effect_started_at"]
+                else "incomplete_original_effect"
+            )
+            result.update(
+                recovery_disposition="completed_refusal" if terminal else "hold_unknown",
+                recovery_reason=reason,
+                original_key_required=not terminal,
+            )
+        if (
+            self.request.action == "prepare"
+            and record.state == "planned"
+            and journal.get("operation_state") == "reconcile_required"
+            and not observation.get("host_observation_unavailable")
+        ):
+            try:
+                eligible = self.can_continue_prepare_host(
+                    record, observation, str(journal["provider_effect_phase"])
+                )
+            except RehearsalRefused as error:
+                if error.code not in {
+                    RehearsalPrerequisite.SOURCE_UNAVAILABLE,
+                    RehearsalPrerequisite.ARTIFACT_UNAVAILABLE,
+                    RehearsalPrerequisite.CREDENTIALS_UNAVAILABLE,
+                }:
+                    raise
+                result["recovery_reason"] = error.code.value
+            else:
+                if eligible:
+                    result.update(
+                        recovery_disposition="continue_original_prepare",
+                        recovery_reason="prepare_host_not_started",
+                    )
+        if observation.get("completed") is True and journal_status == "unbound":
+            result.pop("operation_journal_status")
+        return result
 
     def target_key(self) -> str:
         return self.request.rehearsal_id
@@ -718,7 +989,9 @@ class OdooRehearsalAdapter:
             "#!/usr/bin/env bash\nset -euo pipefail\npython3 - <<'LP_REHEARSAL'\n"
             + "import base64, gzip\nexec(compile(gzip.decompress(base64.b64decode("
             + repr(packed)
-            + ")), '<rehearsal>', 'exec'), {})"
+            + ")), "
+            + repr(REHEARSAL_HOST_FILENAME)
+            + ", 'exec'), {})"
             + "\nLP_REHEARSAL\n"
         )
         return script
@@ -731,7 +1004,10 @@ class OdooRehearsalAdapter:
             api.validate_dokploy_schedule_script({"script": script, "appName": record.rehearsal_id})
         except click.ClickException:
             raise ProviderMutationRejectedError(
-                RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
+                RehearsalRefused(
+                    RehearsalPrerequisite.PRECHECK_REFUSED,
+                    prerequisite=RehearsalPrerequisite.STATE_UNVERIFIED,
+                )
             ) from None
 
     def host(
@@ -750,9 +1026,19 @@ class OdooRehearsalAdapter:
         )
         evidence = self.run_script(record, script, checkpoint)
         try:
-            result = RehearsalHostResult.model_validate_json(
-                bytes.fromhex(evidence["rehearsal_result"])
-            ).model_dump(mode="json")
+            payload = json.loads(bytes.fromhex(evidence["rehearsal_result"]))
+            if mode == "observe" and isinstance(payload, dict) and payload.get("host_busy") is True:
+                from control_plane.contracts.odoo_upgrade_rehearsal import RehearsalHostBusy
+
+                busy = RehearsalHostBusy.model_validate(payload)
+                if busy.intent_sha256 != record.intent_sha256:
+                    raise ValueError("Unbound observation")
+                return {
+                    "completed": False,
+                    "host_observation_unavailable": True,
+                    "host_observation_reason": "host_busy",
+                }
+            result = RehearsalHostResult.model_validate(payload).model_dump(mode="json")
         except (KeyError, ValueError):
             raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED) from None
         if (
@@ -912,11 +1198,21 @@ class OdooRehearsalAdapter:
         with self.store.testing_replacement_execution_lock(self.request.rehearsal_id) as check:
             if check is None:
                 raise ProviderMutationRejectedError(
-                    RehearsalRefused(RehearsalPrerequisite.RECOVERY_REQUIRED)
+                    RehearsalRefused(
+                        RehearsalPrerequisite.PRECHECK_REFUSED,
+                        prerequisite=RehearsalPrerequisite.RECOVERY_REQUIRED,
+                    )
                 )
-            record, _, _ = self.inputs()
-            require_rehearsal_transition(record, self.request.action)
-            require_unaliased_rehearsal(self.store, record)
+            try:
+                record, _, _ = self.inputs()
+                require_rehearsal_transition(record, self.request.action)
+                require_unaliased_rehearsal(self.store, record)
+            except RehearsalRefused as error:
+                raise ProviderMutationRejectedError(
+                    RehearsalRefused(
+                        RehearsalPrerequisite.PRECHECK_REFUSED, prerequisite=error.code
+                    )
+                ) from None
             recovering_project = bool(self._observed_project_id)
             reviewed_binding = (
                 self.initial_prepare_binding(record)
@@ -925,7 +1221,10 @@ class OdooRehearsalAdapter:
             )
             if reviewed_binding != self.request.reviewed_plan_sha256:
                 raise ProviderMutationRejectedError(
-                    RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
+                    RehearsalRefused(
+                        RehearsalPrerequisite.PRECHECK_REFUSED,
+                        prerequisite=RehearsalPrerequisite.STATE_UNVERIFIED,
+                    )
                 )
 
             def checkpoint() -> None:
@@ -949,7 +1248,10 @@ class OdooRehearsalAdapter:
                     record = updated
                 elif any(created_placement(self.root, record.rehearsal_id)):
                     raise ProviderMutationRejectedError(
-                        RehearsalRefused(RehearsalPrerequisite.RECOVERY_REQUIRED)
+                        RehearsalRefused(
+                            RehearsalPrerequisite.PRECHECK_REFUSED,
+                            prerequisite=RehearsalPrerequisite.RECOVERY_REQUIRED,
+                        )
                     )
                 # The built-in local-password writer is scoped to the new record;
                 # it creates no key that can reach a live system or person grant.
