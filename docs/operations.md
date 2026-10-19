@@ -2021,9 +2021,11 @@ needed for scheduled recovery.
 
 Real delivery failures, mixed or uncertain histories, missing/stale/failed checks,
 unverified identity and concurrent incident changes stay open. Scheduled rechecks
-and explicit reconciliation share the delivery monitor's lane lock; incoming
-promotion-guard refusal evidence waits for that lock rather than racing a closure
-or being dropped. Changed product authority also blocks persistence.
+and explicit reconciliation share the delivery monitor's lane lock. New refusal
+requests retain their normal nonblocking evidence write. Changed product authority
+also blocks persistence. Rechecks read only the latest refusal event; unresolved
+refusal incidents retain their original history without appending a repeated
+failure on each pass.
 
 Qualified occurrences use the normal atomic incident, event and reminder
 transition. The original observations and traces stay linked, with

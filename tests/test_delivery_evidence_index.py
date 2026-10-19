@@ -25,6 +25,8 @@ from control_plane.production_delivery_monitor import (
     _ROUTE,
     monitor_production_delivery_once,
     record_production_delivery_failure,
+    _observe,
+    REFUSED_REQUEST_CHECK_PREFIX,
 )
 from control_plane.storage.delivery_evidence import sources
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -361,27 +363,38 @@ class DeliveryEvidenceIndexTests(unittest.TestCase):
                         first.result(timeout=10)
                 self.assertEqual(len(self.incidents()), 1)
 
-    def test_waiting_lane_writer_acquires_after_monitor_releases(self) -> None:
+    def test_latest_refusal_query_excludes_newer_unrelated_provider_evidence(self) -> None:
         for backend in ("filesystem", "sqlite"):
             with self.subTest(backend=backend):
                 self.setup_store(backend)
-                attempted = Event()
-
-                def writer() -> bool:
-                    with self.store.delivery_evidence_index() as other:
-                        attempted.set()
-                        with other.lane_lock(
-                            self.lane.context, self.profile.product, wait=True
-                        ) as acquired:
-                            return acquired
-
-                with ThreadPoolExecutor(max_workers=1) as executor:
-                    with self.store.delivery_evidence_index() as index:
-                        with index.lane_lock(self.lane.context, self.profile.product) as acquired:
-                            self.assertTrue(acquired)
-                            pending = executor.submit(writer)
-                            self.assertTrue(attempted.wait(10))
-                    self.assertTrue(pending.result(timeout=10))
+                for name in (
+                    REFUSED_REQUEST_CHECK_PREFIX + "old",
+                    REFUSED_REQUEST_CHECK_PREFIX + "new",
+                    "other-provider",
+                ):
+                    _observe(
+                        self.store,
+                        self.profile,
+                        self.lane,
+                        check_name=name,
+                        failed=False,
+                        refused=True,
+                        summary="Evidence",
+                        observed_at=self.now.isoformat(),
+                    )
+                    self.now += timedelta(seconds=1)
+                records = self.store.list_public_ingress_observation_records(
+                    product=self.profile.product,
+                    context_name=self.lane.context,
+                    instance_name="prod",
+                    check_kind="provider",
+                    check_name_prefix=REFUSED_REQUEST_CHECK_PREFIX,
+                    limit=1,
+                )
+                self.assertEqual(
+                    [record.check_name for record in records],
+                    [REFUSED_REQUEST_CHECK_PREFIX + "new"],
+                )
 
     def test_interrupted_file_publication_cannot_create_a_failure_or_fake_recovery(self) -> None:
         self.setup_store("filesystem")

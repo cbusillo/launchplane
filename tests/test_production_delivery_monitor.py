@@ -319,6 +319,13 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
             resolved = self.store.read_public_ingress_incident_record(original.incident_id)
             self.assertEqual(resolved.resolution_reason, PRODUCTION_REQUEST_REFUSED)
             self.assertEqual(resolved.opened_observation_id, original.opened_observation_id)
+            self.assertEqual(
+                self.store.read_public_ingress_observation_record(
+                    original.opened_observation_id
+                ).status,
+                "fail",
+            )
+            self.assertNotEqual(resolved.resolved_observation_id, original.opened_observation_id)
             self.assertIn(original.summary, resolved.summary)
             self.assertTrue(
                 self.store.list_public_ingress_observation_records(incident_id=original.incident_id)
@@ -333,12 +340,19 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
     def test_scheduled_recheck_waits_for_health_identity_and_no_newer_refusal(self) -> None:
         self.reject(reason="promotion_required")
         incident = self.store.list_public_ingress_incident_records(status="open")[0]
+        original_history = self.store.list_public_ingress_observation_records(
+            incident_id=incident.incident_id
+        )
         self.now += timedelta(seconds=2)
         self.monitor()
         self.assertEqual(
+            self.store.list_public_ingress_observation_records(incident_id=incident.incident_id),
+            original_history,
+        )
+        self.assertEqual(
             self.store.read_public_ingress_incident_record(incident.incident_id).status, "open"
         )
-        for case in ("failed", "stale", "identity_mismatch", "newer_refusal"):
+        for case in ("failed", "stale", "identity_mismatch", "same_time_refusal", "newer_refusal"):
             with self.subTest(case=case):
                 record = self.healthy_production()
                 if case == "failed":
@@ -359,11 +373,13 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
                 elif case == "identity_mismatch":
                     record = record.model_copy(update={"expected_runtime_identity": None})
                 else:
+                    if case == "newer_refusal":
+                        self.now += timedelta(seconds=1)
                     _observe(
                         self.store,
                         self.profile,
                         self.lane,
-                        check_name=REFUSED_REQUEST_CHECK_PREFIX + "retrying",
+                        check_name=REFUSED_REQUEST_CHECK_PREFIX + case,
                         failed=False,
                         refused=True,
                         summary="New refusal after the passing health check.",
@@ -608,7 +624,6 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
         legacy = self.store.list_public_ingress_incident_records(status="open")[0]
         self.reject()
         before = self.store.list_outbox_delivery_records()
-        self.now += timedelta(seconds=1)
         self.monitor()
         incidents = self.store.list_public_ingress_incident_records(status="open")
         self.assertEqual(len(incidents), 1)
@@ -617,6 +632,10 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
         retired = self.store.list_public_ingress_incident_records(status="resolved")
         self.assertEqual(retired[0].check_name, RETIRED_PRODUCTION_DELIVERY_LAG_CHECK)
         self.assertIn(legacy.summary, retired[0].summary)
+        self.assertEqual(
+            self.store.read_public_ingress_observation_record(legacy.opened_observation_id).status,
+            "fail",
+        )
         self.now += timedelta(days=1)
         self.monitor()
         self.assertEqual(

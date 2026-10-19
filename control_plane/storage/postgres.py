@@ -28091,6 +28091,7 @@ class PostgresRecordStore(HumanSessionStore):
         instance_name: str = "",
         check_name: str = "",
         check_kind: str = "",
+        check_name_prefix: str = "",
         incident_id: str = "",
         limit: int | None = None,
     ) -> tuple[PublicIngressObservationRecord, ...]:
@@ -28105,6 +28106,12 @@ class PostgresRecordStore(HumanSessionStore):
             filters.append(
                 LaunchplanePublicIngressObservationRow.check_token
                 == canonical_health_check_record_token(check_name)
+            )
+        if check_name_prefix:
+            filters.append(
+                LaunchplanePublicIngressObservationRow.payload["check_name"]
+                .as_string()
+                .startswith(check_name_prefix, autoescape=True)
             )
         if check_kind:
             filters.append(LaunchplanePublicIngressObservationRow.check_kind == check_kind)
