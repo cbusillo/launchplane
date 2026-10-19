@@ -1,4 +1,5 @@
 import unittest
+import json
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.github_app_identity import ADVISORY_GITHUB_APP_ID_ENV_KEY
@@ -1895,6 +1896,195 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                     transport=transport
                 ).observe_batch_candidate_checks(candidate=candidate)
                 self.assertEqual(observed.required_checks_status, expected)
+
+    def test_superseded_actions_execution_does_not_veto_current_checks(self) -> None:
+        from control_plane.merge_train_github import _required_checks_status
+
+        for consumer in ("head", "candidate"):
+            for change in (
+                "replacement",
+                "different_workflow",
+                "different_event",
+                "unknown",
+                "running",
+                "rerun",
+                "metadata_incomplete",
+                "metadata_unavailable",
+                "suite_mismatch",
+                "old_failed",
+                "canonical_case",
+                "pending_non_actions",
+            ):
+                with self.subTest(consumer=consumer, change=change):
+                    head = "candidate-sha"
+                    old = {
+                        "id": 11,
+                        "workflow_id": 7,
+                        "run_number": 1,
+                        "run_attempt": 1,
+                        "head_sha": head,
+                        "head_branch": "work/feature",
+                        "head_repository": {"id": 9},
+                        "event": "pull_request",
+                        "pull_requests": [
+                            {"number": 14, "base": {"ref": "main", "repo": {"id": 9}}}
+                        ],
+                        "check_suite_id": 10,
+                        "status": "completed",
+                        "conclusion": "cancelled",
+                        "run_started_at": "2026-01-01T10:00:00Z",
+                    }
+                    current = {
+                        **old,
+                        "id": 12,
+                        "run_number": 2,
+                        "check_suite_id": 20,
+                        "conclusion": "success",
+                        "run_started_at": "2026-01-01T10:01:00Z",
+                    }
+                    if change == "different_workflow":
+                        current["workflow_id"] = 8
+                    elif change == "different_event":
+                        current["event"] = "push"
+                    elif change == "unknown":
+                        old.pop("workflow_id")
+                    elif change == "running":
+                        current["status"] = "queued"
+                        current["conclusion"] = None
+                    elif change == "rerun":
+                        old["run_attempt"] = 2
+                        old["run_started_at"] = "2026-01-01T10:02:00Z"
+                    elif change == "suite_mismatch":
+                        old["check_suite_id"] = 30
+                    elif change == "old_failed":
+                        old["conclusion"] = "failure"
+                    checks = [
+                        {
+                            **_required_check_run("security-gate", "completed", result),
+                            "app": {"id": 15368, "slug": "github-actions"},
+                            "id": job,
+                            "head_sha": head,
+                            "check_suite": {"id": suite},
+                            "details_url": f"https://github.com/example/tool/actions/runs/{run}/job/{job}",
+                        }
+                        for run, job, suite, result in (
+                            (11, 101, 10, "failure"),
+                            (12, 102, 20, "success"),
+                        )
+                    ]
+                    if change == "canonical_case":
+                        for check in checks:
+                            check["details_url"] = str(check["details_url"]).replace(
+                                "example/tool", "Example/Tool"
+                            )
+                    elif change == "pending_non_actions":
+                        checks.append(
+                            _required_check_run("external-job", "queued", None, app_id=99)
+                        )
+                    responses = (
+                        *(
+                            ()
+                            if consumer == "head"
+                            else (_protected_branch_with_checks("security-gate"),)
+                        ),
+                        _combined_status(statuses=()),
+                        {"check_runs": checks},
+                        MergeTrainGitHubError("workflow evidence unavailable", status_code=403)
+                        if change == "metadata_unavailable"
+                        else {
+                            "total_count": 3 if change == "metadata_incomplete" else 2,
+                            "workflow_runs": [current, old],
+                        },
+                    )
+                    transport = RecordingMergeTrainGitHubTransport(responses=responses)
+                    if consumer == "head":
+                        status = _required_checks_status(
+                            transport=transport,
+                            repository_path="example/tool",
+                            encoded_head_sha=head,
+                        )
+                    else:
+                        candidate = _batch_candidate().model_copy(
+                            update={
+                                "repository": "example/tool",
+                                "candidate_sha": head,
+                                "status": "ready_for_checks",
+                            }
+                        )
+                        status = (
+                            GitHubMergeTrainClient(transport=transport)
+                            .observe_batch_candidate_checks(
+                                candidate=candidate,
+                            )
+                            .required_checks_status
+                        )
+                    if change in {"replacement", "canonical_case"}:
+                        self.assertEqual(status, "pass")
+                    elif change == "pending_non_actions":
+                        self.assertEqual(status, "pending")
+                    else:
+                        self.assertNotEqual(status, "pass")
+
+    def test_workflow_read_retries_preserve_provider_evidence_and_pending_reads_stay_cheap(
+        self,
+    ) -> None:
+        from control_plane.merge_train_github import _list_check_runs
+
+        check = {
+            **_required_check_run("security-gate", "completed", "failure"),
+            "app": {"id": 15368, "slug": "github-actions"},
+            "id": 101,
+            "head_sha": "head",
+            "check_suite": {"id": 10},
+            "details_url": "https://github.com/example/tool/actions/runs/11/job/101",
+        }
+        pending = {**check, "status": "queued", "conclusion": None}
+        transport = RecordingMergeTrainGitHubTransport(responses=({"check_runs": [pending]},))
+        self.assertEqual(
+            _list_check_runs(
+                transport=transport,
+                repository_path="example/tool",
+                encoded_head_sha="head",
+            )["check_runs"],
+            [pending],
+        )
+        self.assertEqual(len(transport.requests), 1)
+        for status, limited in ((429, True), (503, False), (None, False)):
+            with self.subTest(status=status, limited=limited):
+                error = MergeTrainGitHubError(
+                    "provider unavailable",
+                    status_code=status,
+                    rate_limited=limited,
+                    rate_limit_reset=123,
+                    retry_after_seconds=10,
+                    primary_quota_exhausted=limited,
+                )
+                transport = RecordingMergeTrainGitHubTransport(
+                    responses=({"check_runs": [check]}, error)
+                )
+                with self.assertRaises(MergeTrainGitHubError) as raised:
+                    _list_check_runs(
+                        transport=transport, repository_path="example/tool", encoded_head_sha="head"
+                    )
+                self.assertIs(raised.exception, error)
+        invalid_json = MergeTrainGitHubError("private provider response")
+        invalid_json.__cause__ = json.JSONDecodeError("invalid", "", 0)
+        for metadata in (
+            {},
+            {"workflow_runs": "invalid", "total_count": 1},
+            MergeTrainGitHubError("private provider response", status_code=403),
+            invalid_json,
+        ):
+            with self.subTest(metadata=type(metadata).__name__):
+                transport = RecordingMergeTrainGitHubTransport(
+                    responses=({"check_runs": [check]}, metadata)
+                )
+                with self.assertLogs("control_plane.merge_train_github", level="WARNING") as logs:
+                    result = _list_check_runs(
+                        transport=transport, repository_path="example/tool", encoded_head_sha="head"
+                    )
+                self.assertEqual(result["check_runs"], [check])
+                self.assertNotIn("private provider response", "\n".join(logs.output))
 
     def test_observe_batch_candidate_checks_keeps_latest_duplicate_pending(self) -> None:
         candidate = _batch_candidate().model_copy(
