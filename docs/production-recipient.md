@@ -208,6 +208,12 @@ source description; an identity-only response is not enough. These minimum
 readability checks do not claim to validate a complete provider schema.
 Unreadable observations retain the original operation so a later valid read can
 adopt its existing proof without another capture.
+Provider source comparisons accept equivalent JSON or YAML documents. After
+proof persistence returns successfully, the operation receipt projects that
+committed evidence and its freshness without another provider read. A lost
+commit acknowledgement retains uncertainty. Later observations may settle
+historically while preserving already committed evidence. A later authority
+change affects current eligibility; it cannot rewrite a completed receipt.
 
 The proof records publication and authority digests, capture and logical-data
 digests, exact host container/storage identity, capture start, completion and

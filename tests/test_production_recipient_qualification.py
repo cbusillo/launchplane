@@ -30,6 +30,8 @@ from tests.support.recipient_recovery_observation import (
     PROVIDER_DRIFT,
     UNREADABLE_OBSERVATIONS,
     assert_observation_scenarios,
+    assert_equivalent_yaml_source_qualifies,
+    assert_committed_receipt_survives_later_drift,
     assert_optional_provider_fields_remain_qualified,
 )
 
@@ -436,6 +438,12 @@ class RecipientRecoveryTests(unittest.TestCase):
 
     def test_unreadable_observations_retry_the_original_proof(self) -> None:
         assert_observation_scenarios(self, UNREADABLE_OBSERVATIONS, qualifies=True)
+
+    def test_equivalent_yaml_provider_source_qualifies(self) -> None:
+        assert_equivalent_yaml_source_qualifies(self)
+
+    def test_committed_receipt_survives_later_provider_drift(self) -> None:
+        assert_committed_receipt_survives_later_drift(self)
 
     def test_optional_provider_fields_preserve_qualification(self) -> None:
         assert_optional_provider_fields_remain_qualified(self)

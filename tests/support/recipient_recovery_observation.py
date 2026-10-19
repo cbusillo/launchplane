@@ -6,10 +6,17 @@ from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timezone
 import json
+
 from typing import Any
 from unittest.mock import patch
 
-from control_plane.production_recipient import authority_snapshot, custody
+import yaml
+
+from control_plane.production_recipient import (
+    RecipientAuthorityChanged,
+    authority_snapshot,
+    custody,
+)
 from control_plane.production_recipient_recovery import RECOVERY_ROUTE
 
 
@@ -18,6 +25,7 @@ PROVIDER_DRIFT = (
     "recipient_identity",
     "recipient_isolation",
     "provider_source",
+    "provider_yaml_source",
     "provider_environment",
     "provider_labels",
     "provider_label_identity",
@@ -43,6 +51,9 @@ UNREADABLE_OBSERVATIONS = (
     "missing_recipient_source_type",
     "missing_recipient_auto_deploy",
     "malformed_source",
+    "malformed_yaml_source",
+    "malformed_yaml_converted",
+    "converted_read_error",
     "malformed_converted",
     "malformed_services",
     "malformed_labels",
@@ -86,12 +97,32 @@ def observation_change(fixture: Any, scenario: str) -> Iterator[None]:
             payload["autoDeploy"] = True
         elif scenario == "recipient_isolation":
             payload["domains"] = [{"host": "changed.invalid"}]
-        elif scenario == "provider_source":
+        elif scenario in {"provider_source", "provider_yaml_source"}:
             document = json.loads(payload["composeFile"])
             document["services"][record.request.application_service]["command"] = ["changed"]
-            payload["composeFile"] = json.dumps(document)
+            payload["composeFile"] = (
+                yaml.safe_dump(document)
+                if scenario == "provider_yaml_source"
+                else json.dumps(document)
+            )
         elif scenario == "provider_environment":
             payload["env"] += "\nCHANGED=observed"
+        elif scenario == "malformed_yaml_source":
+            payload["composeFile"] = "services: ["
+        elif scenario == "malformed_yaml_converted":
+            changes.enter_context(
+                patch(
+                    "control_plane.production_recipient.compose.fetch_dokploy_converted_compose_file",
+                    return_value="services: [",
+                )
+            )
+        elif scenario == "converted_read_error":
+            changes.enter_context(
+                patch(
+                    "control_plane.production_recipient.compose.fetch_dokploy_converted_compose_file",
+                    side_effect=TimeoutError("Conversion read unavailable"),
+                )
+            )
         elif scenario == "malformed_source":
             payload["composeFile"] = "{"
         elif scenario == "malformed_environment":
@@ -336,8 +367,7 @@ def _assert_observation(fixture: Any, scenario: str, *, qualifies: bool) -> None
         original_reservation = reservation()
         original = custody(store, adapter.product, adapter.request.context)
         assert original is not None
-        owner_key = "published_recovery_owner:" + binding
-        original_owner = original.execution.get(owner_key)
+        owner = original_attempt_owner(fixture, original, binding)
         observable = True
         with observation_change(fixture, scenario):
             result = fixture.run_recovery()
@@ -375,7 +405,8 @@ def _assert_observation(fixture: Any, scenario: str, *, qualifies: bool) -> None
             fixture.assertEqual(result.response_payload["result"]["plan_sha256"], binding)
         saved = custody(store, adapter.product, adapter.request.context)
         assert saved is not None
-        fixture.assertEqual(saved.execution.get(owner_key), original_owner)
+        if owner is not None:
+            fixture.assertEqual(saved.execution[owner[0]], owner[1])
         completed = reservation()
         fixture.assertEqual(completed.created_at, original_reservation.created_at)
         fixture.assertEqual(
@@ -389,4 +420,113 @@ def _assert_observation(fixture: Any, scenario: str, *, qualifies: bool) -> None
             replay = fixture.run_recovery()
         fixture.assertEqual(replay.status, "replayed")
         fixture.assertEqual(replay.response_payload, result.response_payload)
+    fixture.assertEqual(calls.count("apply"), 1)
+
+
+def assert_equivalent_yaml_source_qualifies(fixture: Any) -> None:
+    payload = fixture.fixture.provider[fixture.record.target_id]
+    payload["composeFile"] = yaml.safe_dump(json.loads(payload["composeFile"]))
+    with patch(
+        "control_plane.production_recipient_recovery.run_recipient_program",
+        side_effect=fixture.host,
+    ):
+        completed = fixture.run_recovery()
+    fixture.assertTrue(completed.response_payload["result"]["recovered"])
+    fixture.assertTrue(fixture.adapter.current()[1].recovered)
+
+
+def original_attempt_owner(
+    fixture: Any, record: Any, binding: str
+) -> tuple[str, dict[str, Any]] | None:
+    if fixture.adapter.request.purpose != "published":
+        return None
+    entries = [
+        (key, value)
+        for key, value in record.execution.items()
+        if isinstance(value, dict)
+        and value.get("binding") == binding
+        and value.get("original_key") == fixture.adapter.original_key
+        and value.get("operation")
+    ]
+    fixture.assertEqual(len(entries), 1)
+    return entries[0]
+
+
+def assert_committed_receipt_survives_later_drift(fixture: Any, *, recovered: bool = True) -> None:
+    adapter = fixture.adapter
+    store = fixture.fixture.store
+    binding = adapter.request.reviewed_plan_sha256
+    provider = fixture.fixture.provider
+    retained = fixture.record.retained_target_id.target_id
+    original_retained = deepcopy(provider[retained])
+    terminal: dict[str, str] = {}
+    observable = False
+    calls: list[str] = []
+    committed = False
+    writer = store.write_production_recipient
+
+    def host(root: Any, record: Any, spec: Any, program: Any, checkpoint: Any) -> Any:
+        calls.append("inspect" if spec.get("inspect") else "apply")
+        if not spec.get("inspect"):
+            terminal.update(fixture.host(root, record, spec, program, checkpoint))
+            raise TimeoutError("Original completed reply lost")
+        if not observable:
+            raise TimeoutError("Original witness not observable yet")
+        checkpoint("original_terminal_witness")
+        return dict(terminal)
+
+    def write_then_drift(**kwargs: Any) -> None:
+        nonlocal committed
+        writer(**kwargs)
+        record = custody(store, adapter.product, adapter.request.context)
+        assert record is not None
+        proof = (
+            record.recovery_proof
+            if adapter.request.purpose == "bootstrap"
+            else record.published_recovery_proofs.get(binding)
+        )
+        if proof:
+            committed = True
+            provider[retained]["env"] += "\nAFTER_COMMIT=changed"
+
+    with patch(
+        "control_plane.production_recipient_recovery.run_recipient_program", side_effect=host
+    ):
+        fixture.assertEqual(fixture.run_recovery().status, "reconcile_required")
+        original = custody(store, adapter.product, adapter.request.context)
+        assert original is not None
+        owner = original_attempt_owner(fixture, original, binding)
+        observable = True
+        try:
+            with patch.object(store, "write_production_recipient", side_effect=write_then_drift):
+                completed = fixture.run_recovery()
+            fixture.assertTrue(committed)
+            fixture.assertEqual(completed.status, "adopted")
+            result = completed.response_payload["result"]
+            fixture.assertEqual(result["recovered"], recovered)
+            fixture.assertEqual(result["plan_sha256"], binding)
+            saved = custody(store, adapter.product, adapter.request.context)
+            assert saved is not None
+            proof = (
+                saved.recovery_proof
+                if adapter.request.purpose == "bootstrap"
+                else saved.published_recovery_proofs[binding]
+            )
+            fixture.assertEqual(result["capture_sha256"], proof["capture_sha256"])
+            fixture.assertEqual(result["recovered_at"], proof["recovered_at"])
+            if owner is not None:
+                fixture.assertEqual(saved.execution[owner[0]], owner[1])
+            with fixture.assertRaises(RecipientAuthorityChanged):
+                adapter.current()
+            with patch(
+                "control_plane.production_recipient_recovery.run_recipient_program",
+                side_effect=AssertionError("Receipt replay must not read the provider"),
+            ):
+                replay = fixture.run_recovery()
+            fixture.assertEqual(replay.status, "replayed")
+            fixture.assertEqual(replay.response_payload, completed.response_payload)
+        finally:
+            provider[retained] = original_retained
+        fixture.assertEqual(adapter.current()[1].recovered, recovered)
+        fixture.assertEqual(store.list_held_provider_target_reservations(), ())
     fixture.assertEqual(calls.count("apply"), 1)

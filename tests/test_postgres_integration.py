@@ -12553,6 +12553,12 @@ class RealPostgresRecipientRecoveryTests(unittest.TestCase):
     def test_unreadable_observations_retry_the_original_proof(self) -> None:
         self.fixture.test_unreadable_observations_retry_the_original_proof()
 
+    def test_equivalent_yaml_provider_source_qualifies(self) -> None:
+        self.fixture.test_equivalent_yaml_provider_source_qualifies()
+
+    def test_committed_receipt_survives_later_provider_drift(self) -> None:
+        self.fixture.test_committed_receipt_survives_later_provider_drift()
+
 
 class RealPostgresPublishedRecipientRecoveryTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -12604,6 +12610,15 @@ class RealPostgresPublishedRecipientRecoveryTests(unittest.TestCase):
 
     def test_owned_authority_race_completes_the_original_witness(self) -> None:
         self.fixture.test_owned_authority_race_completes_the_original_witness()
+
+    def test_equivalent_yaml_provider_source_qualifies(self) -> None:
+        self.fixture.test_equivalent_yaml_provider_source_qualifies()
+
+    def test_committed_receipt_survives_later_provider_drift(self) -> None:
+        self.fixture.test_committed_receipt_survives_later_provider_drift()
+
+    def test_stale_committed_receipt_remains_nonqualifying_after_drift(self) -> None:
+        self.fixture.test_stale_committed_receipt_remains_nonqualifying_after_drift()
 
 
 class RealPostgresProductionRecipientTests(unittest.TestCase):

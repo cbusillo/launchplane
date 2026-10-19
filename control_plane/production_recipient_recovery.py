@@ -50,6 +50,23 @@ def recovery_request_fingerprint(product: str, request: RecipientRecoveryRequest
     return request_fingerprint({"product": product, **payload})
 
 
+def bootstrap_recovery_plan(
+    record: ProductionRecipientRecord, binding: str
+) -> RecipientRecoveryPlan:
+    """Project committed evidence without another authority or provider read."""
+    proof = record.recovery_proof
+    return RecipientRecoveryPlan(
+        product=record.product,
+        context=record.context,
+        preparation_plan_sha256=record.plan_sha256,
+        plan_sha256=binding,
+        recovered=bool(proof),
+        capture_sha256=str(proof.get("capture_sha256", "")),
+        recovered_at=str(proof.get("recovered_at", "")),
+        captured_database_empty=proof.get("captured_database_empty"),
+    )
+
+
 @dataclass
 class RecipientRecoveryAdapter:
     root: Path
@@ -130,16 +147,7 @@ class RecipientRecoveryAdapter:
             or (self.original_key and proof.get("original_key") != self.original_key)
         ):
             raise ValueError("Retain the recovery's exact binding and original key.")
-        return record, RecipientRecoveryPlan(
-            product=self.product,
-            context=record.context,
-            preparation_plan_sha256=record.plan_sha256,
-            plan_sha256=digest,
-            recovered=bool(proof),
-            capture_sha256=str(proof.get("capture_sha256", "")),
-            recovered_at=str(proof.get("recovered_at", "")),
-            captured_database_empty=proof.get("captured_database_empty"),
-        )
+        return record, bootstrap_recovery_plan(record, digest)
 
     def host_spec(
         self, record: ProductionRecipientRecord, result: RecipientRecoveryPlan
@@ -223,7 +231,7 @@ class RecipientRecoveryAdapter:
         self.store.write_production_recipient(
             expected=record.model_dump(mode="json"), replacement=replacement.model_dump(mode="json")
         )
-        return self.current()[1]
+        return bootstrap_recovery_plan(replacement, result.plan_sha256)
 
     def observe(
         self, provider_operation_key: str, provider_effect_phase: str, reconciliation_key: str

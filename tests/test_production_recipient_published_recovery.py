@@ -25,6 +25,8 @@ from tests.support.recipient_recovery_observation import (
     PROVIDER_DRIFT,
     UNREADABLE_OBSERVATIONS,
     assert_observation_scenarios,
+    assert_equivalent_yaml_source_qualifies,
+    assert_committed_receipt_survives_later_drift,
     assert_optional_provider_fields_remain_qualified,
 )
 
@@ -188,6 +190,20 @@ class PublishedRecoveryTests(unittest.TestCase):
 
     def test_unreadable_observations_retry_the_original_proof(self) -> None:
         assert_observation_scenarios(self, UNREADABLE_OBSERVATIONS, qualifies=True)
+
+    def test_equivalent_yaml_provider_source_qualifies(self) -> None:
+        assert_equivalent_yaml_source_qualifies(self)
+
+    def test_committed_receipt_survives_later_provider_drift(self) -> None:
+        assert_committed_receipt_survives_later_drift(self)
+
+    def test_stale_committed_receipt_remains_nonqualifying_after_drift(self) -> None:
+        future = datetime.now(timezone.utc) + timedelta(seconds=CAPTURE_WITNESS_MAX_AGE_SECONDS + 1)
+        with patch(
+            "control_plane.production_recipient_published_recovery.datetime", wraps=datetime
+        ) as clock:
+            clock.now.return_value = future
+            assert_committed_receipt_survives_later_drift(self, recovered=False)
 
     def test_optional_provider_fields_preserve_qualification(self) -> None:
         assert_optional_provider_fields_remain_qualified(self)

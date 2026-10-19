@@ -141,15 +141,25 @@ def published_current(
         and proof.get("original_key") != adapter.original_key
     ):
         raise ValueError("Retain the published recovery's original actor and key.")
-    return record, RecipientRecoveryPlan(
-        product=adapter.product,
+    return record, published_recovery_plan(
+        record, digest, authority_sha, adapter.request.generation
+    )
+
+
+def published_recovery_plan(
+    record: ProductionRecipientRecord, binding: str, authority_sha256: str, generation: str
+) -> RecipientRecoveryPlan:
+    """Project stored evidence and freshness without re-verifying current authority."""
+    proof = record.published_recovery_proofs.get(binding, {})
+    return RecipientRecoveryPlan(
+        product=record.product,
         context=record.context,
         preparation_plan_sha256=record.plan_sha256,
-        plan_sha256=digest,
+        plan_sha256=binding,
         purpose="published",
-        generation=adapter.request.generation,
+        generation=generation,
         publication_sha256=record.publication["published_sha256"],
-        authority_sha256=authority_sha,
+        authority_sha256=authority_sha256,
         capture_protocol=CAPTURE_PROTOCOL,
         recovered=bool(proof) and published_proof_is_fresh(proof),
         capture_sha256=str(proof.get("capture_sha256", "")),
@@ -234,10 +244,12 @@ def record_published_result(
         "artifact": record.image_reference,
         "storage": resource_spec(record),
     }
-    merge_published_entry(
+    committed = merge_published_entry(
         adapter, record, "published_recovery:" + result.plan_sha256, proof, authority, reservation
     )
-    return adapter.current()[1]
+    return published_recovery_plan(
+        committed, result.plan_sha256, result.authority_sha256, result.generation
+    )
 
 
 class PublishedAuthorityChanged(RecipientAuthorityChanged):

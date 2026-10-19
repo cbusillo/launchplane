@@ -136,6 +136,14 @@ def readable_provider_compose(document: Any) -> dict[str, Any]:
     return document
 
 
+def read_provider_compose(raw: str) -> dict[str, Any]:
+    """Dokploy accepts YAML; malformed text remains an unreadable observation."""
+    try:
+        return readable_provider_compose(yaml.safe_load(raw))
+    except yaml.YAMLError as error:
+        raise ValueError("Provider Compose observation is unreadable.") from error
+
+
 def authority_snapshot(store: PostgresRecordStore, product: str, context: str) -> dict[str, Any]:
     from control_plane.product_config_service import (
         ProductConfigOwnershipMismatchError,
@@ -653,10 +661,7 @@ class ProductionRecipientAdapter:
             raise RecipientAuthorityChanged(
                 "Recipient identity, isolation or configuration changed."
             )
-        if (
-            readable_provider_compose(json.loads(str(payload.get("composeFile") or "null")))
-            != expected
-        ):
+        if read_provider_compose(str(payload.get("composeFile") or "null")) != expected:
             raise RecipientAuthorityChanged(
                 "The provider source differs from the reviewed immutable source."
             )
@@ -681,11 +686,9 @@ class ProductionRecipientAdapter:
             raise RecipientAuthorityChanged(
                 "The provider environment differs from managed production inputs."
             )
-        actual = readable_provider_compose(
-            yaml.safe_load(
-                compose.fetch_dokploy_converted_compose_file(
-                    host=host, token=token, compose_id=record.target_id
-                )
+        actual = read_provider_compose(
+            compose.fetch_dokploy_converted_compose_file(
+                host=host, token=token, compose_id=record.target_id
             )
         )
         actual.pop("name", None)
