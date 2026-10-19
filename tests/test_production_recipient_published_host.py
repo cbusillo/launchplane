@@ -48,6 +48,7 @@ class PublishedHostTests(unittest.TestCase):
         }
         self.network = "none"
         self.mount = ""
+        self.containers: set[str] = set()
         self.roundtrip = (
             b"CREATE DATABASE fixture; INSERT INTO fixture.items VALUES ('business-row');\n"
         )
@@ -77,7 +78,13 @@ class PublishedHostTests(unittest.TestCase):
         self.calls.append(args)
         if args[0] == "create":
             self.mount = next(value for value in args if value.startswith("type=bind,src="))
+            self.containers.add("e" * 64)
             return "e" * 64
+        if args[0] == "rm":
+            self.containers.remove(args[2])
+            return ""
+        if args[0] == "ps":
+            return "\n".join(sorted(self.containers))
         if args[:2] == ("image", "inspect"):
             return json.dumps([{"Config": {"Env": []}}])
         if args[0] == "inspect":
@@ -152,7 +159,74 @@ class PublishedHostTests(unittest.TestCase):
                         self.root / "captures" / self.spec["recovery_binding"] / "outcome.json"
                     ).read_text()
                 )
-                self.assertEqual(outcome["state"], "failed_retained")
+                self.assertEqual(outcome["state"], "failed_safe")
+                self.assertIn(("rm", "-f", "e" * 64), self.calls)
+                self.assertFalse(self.containers)
+                attempt = (
+                    self.root / "captures" / self.spec["recovery_binding"] / outcome["attempt"]
+                )
+                for name in ("database.sql", "roundtrip.sql", "capture.tar", "restore"):
+                    self.assertFalse((attempt / name).exists())
+
+    def test_cleanup_uncertainty_retains_known_scratch_without_repeating_removal(self) -> None:
+        for fault in ("reply_lost", "still_listed", "inventory_unavailable"):
+            for verifier_failed in (False, True):
+                with self.subTest(fault=fault, verifier_failed=verifier_failed):
+                    self.setUp()
+                    if verifier_failed:
+                        self.roundtrip = b"substituted business data"
+                    docker = self.namespace["docker"]
+                    removals: list[str] = []
+
+                    def uncertain(*args: str) -> str:
+                        if args[0] == "rm":
+                            removals.append(args[2])
+                            if fault == "still_listed":
+                                return ""
+                            result = str(docker(*args))
+                            if fault == "reply_lost":
+                                raise TimeoutError("fixture lost cleanup response")
+                            return result
+                        if args[0] == "ps" and fault == "inventory_unavailable":
+                            raise OSError("fixture inventory unavailable")
+                        return str(docker(*args))
+
+                    self.namespace["docker"] = uncertain
+                    with self.assertRaises(Exception):
+                        self.recover()
+                    pointer = (
+                        self.root / "captures" / self.spec["recovery_binding"] / "outcome.json"
+                    )
+                    receipt = json.loads(pointer.read_text())
+                    self.assertEqual(receipt["state"], "failed_retained")
+                    self.assertEqual(removals, [receipt["retained"]["id"]])
+                    self.assertTrue(Path(receipt["retained"]["path"]).exists())
+                    self.assertTrue(
+                        (Path(receipt["retained"]["path"]).parent / "capture.tar").exists()
+                    )
+                    self.namespace["docker"] = lambda *_args: self.fail("repeated Docker effect")
+                    self.assertIn("recipient_recovery_retained=", self.recover(inspect=True))
+                    self.assertIn("recipient_recovery_retained=", self.recover())
+
+    def test_restore_failure_removes_its_known_scratch_and_private_data(self) -> None:
+        def failing_restore(arguments: list[str], **_kwargs: Any) -> Any:
+            return SimpleNamespace(
+                returncode=1 if arguments[:3] == ["docker", "exec", "-i"] else 0,
+                stdout="",
+                stderr="",
+            )
+
+        with patch("subprocess.run", side_effect=failing_restore):
+            with self.assertRaises(ValueError):
+                self.recover()
+        pointer = self.root / "captures" / self.spec["recovery_binding"] / "outcome.json"
+        receipt = json.loads(pointer.read_text())
+        self.assertEqual(receipt["state"], "failed_safe")
+        self.assertFalse(self.containers)
+        self.assertTrue(any(call[0] == "rm" for call in self.calls))
+        attempt = pointer.parent / receipt["attempt"]
+        for name in ("database.sql", "capture.tar", "restore"):
+            self.assertFalse((attempt / name).exists())
 
     def test_uncertain_native_dump_never_emits_a_retry_witness(self) -> None:
         def interrupted(*_args: Any, **_kwargs: Any) -> None:
@@ -325,6 +399,12 @@ class PublishedHostTests(unittest.TestCase):
         self.namespace["populated_rows"] = empty
         with self.assertRaises(ValueError):
             self.recover()
+        pointer = self.root / "captures" / self.spec["recovery_binding"] / "outcome.json"
+        receipt = json.loads(pointer.read_text())
+        self.assertEqual(receipt["state"], "failed_safe")
+        self.assertFalse(self.containers)
+        self.assertTrue(any(call[0] == "rm" for call in self.calls))
+        self.assertFalse((pointer.parent / receipt["attempt"] / "restore").exists())
 
     def test_config_changes_or_source_container_replacement_refuse(self) -> None:
         original = self.dump
@@ -346,6 +426,64 @@ class PublishedHostTests(unittest.TestCase):
         self.namespace["published_source"] = replacement
         with self.assertRaises(ValueError):
             self.recover()
+
+
+class ContainerAbsenceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.namespace: dict[str, Any] = {}
+        exec(RESOURCE_LIBRARY + RECOVERY_LIBRARY + PUBLISHED_RECOVERY_LIBRARY, self.namespace)
+        self.identifier = "f" * 64
+        self.native = {
+            "source": self.identifier,
+            "operation": "d" * 64,
+            "nonce": "a" * 32,
+        }
+
+    def test_complete_inventory_distinguishes_absence_from_present_stopped_objects(self) -> None:
+        for identifiers, absent in (([], True), ([self.identifier], False), (["b" * 64], True)):
+            with self.subTest(identifiers=identifiers):
+                self.namespace["docker"] = lambda *_args: "\n".join(identifiers)
+                self.assertEqual(self.namespace["container_is_absent"](self.identifier), absent)
+
+    def test_invalid_identity_or_inventory_never_proves_absence(self) -> None:
+        def forbidden(*_args: str) -> str:
+            self.fail("invalid identity reached Docker")
+
+        self.namespace["docker"] = forbidden
+        for identifier in ("short-name", self.identifier[:12]):
+            with self.subTest(identifier=identifier), self.assertRaises(ValueError):
+                self.namespace["container_is_absent"](identifier)
+        for inventory in (self.identifier[:12], "unavailable", self.identifier + "\n\n"):
+            with self.subTest(inventory=inventory):
+                self.namespace["docker"] = lambda *_args: inventory
+                with self.assertRaises(ValueError):
+                    self.namespace["container_is_absent"](self.identifier)
+
+    def test_removed_source_cancels_but_exec_errors_and_listed_sources_stay_unknown(self) -> None:
+        failed = SimpleNamespace(returncode=1, stdout="", stderr="fixture transport refusal")
+        with patch("subprocess.run", return_value=failed):
+            self.namespace["docker"] = lambda *_args: ""
+            self.assertEqual(
+                self.namespace["native_capture_status"](self.native), ["cancelled", "1"]
+            )
+            for inventory in (self.identifier, self.identifier[:12]):
+                with self.subTest(inventory=inventory):
+                    self.namespace["docker"] = lambda *_args: inventory
+                    with self.assertRaises(ValueError):
+                        self.namespace["native_capture_status"](self.native)
+
+            def unavailable(*_args: str) -> str:
+                raise OSError("fixture daemon unavailable")
+
+            self.namespace["docker"] = unavailable
+            with self.assertRaises(OSError):
+                self.namespace["native_capture_status"](self.native)
+
+    def test_successful_native_witness_does_not_need_an_absence_inference(self) -> None:
+        passed = SimpleNamespace(returncode=0, stdout=self.native["nonce"] + ":done:0\n", stderr="")
+        self.namespace["docker"] = lambda *_args: self.fail("unnecessary absence inference")
+        with patch("subprocess.run", return_value=passed):
+            self.assertEqual(self.namespace["native_capture_status"](self.native), ["done", "0"])
 
 
 class NativeHandshakeTests(unittest.TestCase):
@@ -503,6 +641,90 @@ class PublishedSourceTests(unittest.TestCase):
     os.environ.get("LAUNCHPLANE_TEST_MARIADB_IMAGE"), "explicit local MariaDB image required"
 )
 class RealPublishedMariaDBTests(unittest.TestCase):
+    def test_removed_source_settles_original_capture_but_stopped_source_stays_unknown(self) -> None:
+        fixture = mariadb_tests.RealMariaDBRecoveryTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        namespace: dict[str, Any] = {}
+        exec(RESOURCE_LIBRARY + RECOVERY_LIBRARY + PUBLISHED_RECOVERY_LIBRARY, namespace)
+        source = fixture.docker(
+            "run",
+            "-d",
+            "--name",
+            "lp-recovery-removed-" + uuid.uuid4().hex,
+            "--network",
+            "none",
+            "--entrypoint",
+            "sh",
+            fixture.image,
+            "-ec",
+            "exec sleep 60",
+        )
+
+        def cleanup_source() -> None:
+            if not namespace["container_is_absent"](source):
+                fixture.docker("rm", "-f", source)
+
+        self.addCleanup(cleanup_source)
+        operation = fixture.spec["recovery_binding"]
+        native = {"source": source, "operation": operation, "nonce": uuid.uuid4().hex}
+        spec = {"operation": operation, "recovery_binding": fixture.spec["recovery_binding"]}
+        base = fixture.root / "captures"
+        with namespace["recovery_directory"](spec, base) as destination:
+            attempt = destination / ("attempt-" + operation[:32])
+            attempt.mkdir()
+            namespace["write_outcome_pointer"](
+                destination,
+                {
+                    "state": "running",
+                    "phase": "capture",
+                    "operation": operation,
+                    "binding": spec["recovery_binding"],
+                    "attempt": attempt.name,
+                    "native": native,
+                },
+            )
+        waiting = subprocess.Popen(
+            [
+                "docker",
+                "exec",
+                "-i",
+                source,
+                "sh",
+                "-ec",
+                namespace["NATIVE_CAPTURE_SCRIPT"],
+                "capture",
+                operation,
+                native["nonce"],
+                "6",
+                "2",
+                "mariadb",
+                "--user=root",
+                "--execute=SELECT 1",
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.addCleanup(lambda: waiting.communicate(timeout=15))
+        namespace["read_native_ready"](waiting, native["nonce"])
+        fixture.docker("stop", "--time", "1", source)
+        waiting.communicate(timeout=10)
+        with self.assertRaises(ValueError):
+            namespace["native_capture_status"](native)
+        fixture.docker("rm", source)
+        output = io.StringIO()
+        with redirect_stdout(output):
+            namespace["published_recovery"](spec | {"inspect": True}, base=base)
+        receipt = json.loads((base / spec["recovery_binding"] / "receipt.json").read_text())
+        self.assertEqual(receipt["state"], "failed_safe")
+        self.assertFalse((attempt / "restore").exists())
+        with patch("subprocess.run", side_effect=AssertionError("terminal replay touched Docker")):
+            replay = io.StringIO()
+            with redirect_stdout(replay):
+                namespace["published_recovery"](spec | {"inspect": True}, base=base)
+        self.assertEqual(replay.getvalue(), output.getvalue())
+
     def test_native_timeout_unlocks_writer_and_cancelled_nonce_never_launches(self) -> None:
         fixture = mariadb_tests.RealMariaDBRecoveryTests()
         fixture.setUp()

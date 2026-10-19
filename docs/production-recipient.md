@@ -195,8 +195,10 @@ adoption compares the existing reservation's identity and writes only under the
 atomic current-authority check; it does not claim a renewed execution lease or
 start another capture. A custody collision merges unrelated append-only entries
 or accepts the identical original proof. Infrastructure errors preserve
-uncertainty. Only positively changed authority or publication can complete a
-terminal witness without qualification.
+uncertainty. Positively changed authority or publication, a successfully resolved
+different current plan, or authenticated terminal capture-time ineligibility can
+complete the original terminal witness without qualification. Unclassified
+validation, read and persistence errors remain unknown.
 
 The proof records publication and authority digests, capture and logical-data
 digests, exact host container/storage identity, capture start, completion and
@@ -232,6 +234,10 @@ keep quiescence unproved. No unrelated session is killed and no credential or
 grant is added. Credentials remain inside the database container. Native source
 launches are fenced as one original attempt, and source closure requires
 positive cancellation and server quiescence rather than elapsed-time inference.
+If native inspection fails, only a successful complete Docker inventory proving
+the recorded full container ID was removed can establish cancelled closure.
+A stopped or listed source, malformed inventory or unavailable Docker service
+remains unknown. Removal never provides successful capture evidence.
 The native coordinator acquires its nonce lock and announces exact `READY`
 before any SQL. Only its live host parent, still holding the attempt lock, can
 send the matching `GO` over a private pipe after receiving that announcement.
@@ -277,8 +283,13 @@ source closure, or a start phase without durable isolation keeps the target held
 
 After verified scratch cleanup, success durably records a value-only receipt
 before removing its own SQL/archive copies. It does not create a second backup
-service. Known pre-scratch failures remove only their own partial files. Unknown/retained
-attempts keep their private data and explicit custody; no automatic cleanup
+service. Known pre-scratch failures remove only their own partial files. While
+the original host worker is still running, a later failure also attempts to
+remove only the exact container ID its successful create returned. Private
+files are removed only after successful removal and a complete inventory
+positively confirms that ID is absent. A lost removal reply is never retried
+by that worker or by inspection. Unknown/retained attempts keep their private
+data and explicit custody; no automatic cleanup
 endpoint, retention service or maintenance promise is introduced. Original-key
 inspection never starts a new capture. Cold bootstrap keeps its existing archive
 and safe same-key retry contract.

@@ -75,6 +75,10 @@ def custody(
     return ProductionRecipientRecord.model_validate(payload) if payload else None
 
 
+class RecipientAuthorityChanged(ValueError):
+    """Successful authority or provider comparisons proved the review outdated."""
+
+
 def authority_snapshot(store: PostgresRecordStore, product: str, context: str) -> dict[str, Any]:
     from control_plane.product_config_service import resolve_product_config_profile
 
@@ -525,7 +529,7 @@ class ProductionRecipientAdapter:
         if not same_recipient_authority(
             authority_snapshot(self.store, self.product, record.context), record.authority_snapshot
         ):
-            raise ValueError("Production authority changed after review.")
+            raise RecipientAuthorityChanged("Production authority changed after review.")
         host, token = source.read_dokploy_config(control_plane_root=self.root)
         old = api.fetch_dokploy_target_payload(
             host=host,
@@ -534,7 +538,9 @@ class ProductionRecipientAdapter:
             target_id=record.retained_target_id.target_id,
         )
         if provider_binding_digest(old) != record.retained_provider_sha256:
-            raise ValueError("The retained production recipient changed after review.")
+            raise RecipientAuthorityChanged(
+                "The retained production recipient changed after review."
+            )
 
     def save(self, record: ProductionRecipientRecord, **updates: Any) -> ProductionRecipientRecord:
         replacement = record.model_copy(update=updates)

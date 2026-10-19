@@ -122,6 +122,54 @@ class PublishedRecoveryTests(unittest.TestCase):
         self.assertFalse(next_adapter.current()[1].recovered)
         self.assertIn(self.record.retained_target_id.target_id, self.fixture.provider)
 
+    def test_terminal_passed_witness_with_new_current_plan_completes_historically(self) -> None:
+        from control_plane.production_recipient_published_recovery import CAPTURE_PROTOCOL
+
+        original_binding = self.adapter.request.reviewed_plan_sha256
+        terminal: dict[str, str] = {}
+        calls: list[str] = []
+        observable = False
+
+        def host(root: Any, record: Any, spec: Any, program: Any, checkpoint: Any) -> Any:
+            calls.append("inspect" if spec.get("inspect") else "apply")
+            checkpoint("original_capture")
+            if not spec.get("inspect"):
+                terminal.update(self.evidence(spec))
+                raise TimeoutError("Original host reply was lost")
+            if not observable:
+                raise TimeoutError("Terminal receipt is not observable yet")
+            return dict(terminal)
+
+        with patch(
+            "control_plane.production_recipient_recovery.run_recipient_program", side_effect=host
+        ):
+            self.assertEqual(self.run_recovery().status, "reconcile_required")
+            saved = custody(self.store, self.record.product, self.record.context)
+            assert saved is not None
+            owner = saved.execution["published_recovery_owner:" + original_binding]
+            observable = True
+            with patch(
+                "control_plane.production_recipient_published_recovery.CAPTURE_PROTOCOL",
+                CAPTURE_PROTOCOL + "-next",
+            ):
+                _, current = self.adapter.current()
+                self.assertNotEqual(current.plan_sha256, original_binding)
+                settled = self.run_recovery()
+                self.assertEqual(settled.status, "adopted")
+                self.assertFalse(settled.response_payload["result"]["recovered"])
+                self.assertEqual(
+                    settled.response_payload["result"]["plan_sha256"], original_binding
+                )
+                count = len(calls)
+                self.assertEqual(self.run_recovery().status, "replayed")
+                self.assertEqual(len(calls), count)
+        saved = custody(self.store, self.record.product, self.record.context)
+        assert saved is not None
+        self.assertFalse(saved.published_recovery_proofs)
+        self.assertEqual(saved.execution["published_recovery_owner:" + original_binding], owner)
+        self.assertEqual(self.store.list_held_provider_target_reservations(), ())
+        self.assertEqual(calls.count("apply"), 1)
+
     def test_capture_only_empty_or_stale_evidence_never_qualifies(self) -> None:
         _, plan = self.adapter.current()
         spec = self.adapter.host_spec(self.record, plan)

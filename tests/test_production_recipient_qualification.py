@@ -418,6 +418,71 @@ class RecipientRecoveryTests(unittest.TestCase):
         self.assertFalse(result.response_payload["result"]["recovered"])
         self.assertEqual(self.fixture.store.list_held_provider_target_reservations(), ())
 
+    def _assert_passed_witness_failure_stays_recoverable(
+        self, error: Exception, *, fail_current: bool = False
+    ) -> None:
+        original_binding = self.adapter.request.reviewed_plan_sha256
+        terminal: dict[str, str] = {}
+        calls: list[str] = []
+        writer = self.fixture.store.write_production_recipient
+
+        def host(root: Any, record: Any, spec: Any, program: Any, checkpoint: Any) -> Any:
+            calls.append("inspect" if spec.get("inspect") else "apply")
+            if not spec.get("inspect"):
+                terminal.update(self.host(root, record, spec, program, checkpoint))
+                raise TimeoutError("Original host reply was lost")
+            checkpoint("original_witness_read")
+            return dict(terminal)
+
+        def fail_proof(**kwargs: Any) -> None:
+            if kwargs["replacement"].get("recovery_proof"):
+                raise error
+            writer(**kwargs)
+
+        failure = (
+            patch.object(self.adapter, "current", side_effect=error)
+            if fail_current
+            else patch.object(
+                self.fixture.store, "write_production_recipient", side_effect=fail_proof
+            )
+        )
+        with patch(
+            "control_plane.production_recipient_recovery.run_recipient_program", side_effect=host
+        ):
+            self.assertEqual(self.run_recovery().status, "reconcile_required")
+            with failure:
+                self.assertEqual(self.run_recovery().status, "reconcile_required")
+            saved = custody(self.fixture.store, self.record.product, self.record.context)
+            assert saved is not None
+            self.assertFalse(saved.recovery_proof)
+            held = self.fixture.store.list_held_provider_target_reservations()
+            self.assertEqual(len(held), 1)
+            self.assertEqual(held[0].idempotency_key, self.adapter.original_key)
+            self.assertEqual(calls.count("apply"), 1)
+            settled = self.run_recovery()
+            self.assertEqual(settled.status, "adopted")
+            self.assertTrue(settled.response_payload["result"]["recovered"])
+            self.assertEqual(settled.response_payload["result"]["plan_sha256"], original_binding)
+            count = len(calls)
+            self.assertEqual(self.run_recovery().status, "replayed")
+            self.assertEqual(len(calls), count)
+        saved = custody(self.fixture.store, self.record.product, self.record.context)
+        assert saved is not None
+        self.assertEqual(saved.recovery_proof["binding"], original_binding)
+        self.assertEqual(self.fixture.store.list_held_provider_target_reservations(), ())
+        self.assertEqual(calls.count("apply"), 1)
+
+    def test_passed_cold_witness_retries_proof_after_io_failure(self) -> None:
+        self._assert_passed_witness_failure_stays_recoverable(RuntimeError("Store unavailable"))
+
+    def test_passed_cold_witness_retries_proof_after_cas_collision(self) -> None:
+        self._assert_passed_witness_failure_stays_recoverable(ValueError("Custody collision"))
+
+    def test_passed_cold_witness_keeps_unclassified_current_refusal_unknown(self) -> None:
+        self._assert_passed_witness_failure_stays_recoverable(
+            ValueError("Unclassified current validation refusal"), fail_current=True
+        )
+
     def test_completed_recovery_replays_without_repeating_effect_and_keeps_production(self) -> None:
         with patch(
             "control_plane.production_recipient_recovery.run_recipient_program",

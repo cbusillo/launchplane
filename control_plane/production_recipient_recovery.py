@@ -13,6 +13,7 @@ from control_plane.contracts.production_recipient import (
 from control_plane.integration_allowances import canonical_sha256
 from control_plane.production_recipient import (
     ProductionRecipientAdapter,
+    RecipientAuthorityChanged,
     custody,
     qualified_render,
     runtime_values,
@@ -322,10 +323,9 @@ class RecipientRecoveryAdapter:
                         if current.recovered
                         else self.record_host_result(current_record, current, evidence)
                     )
-            except (ValueError, RuntimeError, FileNotFoundError):
-                # Terminal host evidence proves no unknown lock/restore remains.
-                # Withhold qualification, complete the historical operation and
-                # permit another reviewed generation under current authority.
+            except RecipientAuthorityChanged:
+                # Only a successful comparison proving drift permits historical
+                # completion. Read, validation and proof-write errors stay unknown.
                 pass
             return ProviderObservation(
                 "present",

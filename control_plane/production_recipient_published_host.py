@@ -114,14 +114,38 @@ else
 fi
 '''
 
+def container_is_absent(identifier):
+    if not re.fullmatch(r'[a-f0-9]{64}',identifier):
+        raise ValueError('immutable container identity required')
+    identifiers=docker('ps','-aq','--no-trunc').splitlines()
+    if any(not re.fullmatch(r'[a-f0-9]{64}',value) for value in identifiers):
+        raise ValueError('complete container inventory unverified')
+    return identifier not in identifiers
+
+def remove_scratch_container(identifier):
+    if not re.fullmatch(r'[a-f0-9]{64}',identifier):
+        raise ValueError('immutable scratch identity required')
+    docker('rm','-f',identifier)
+    if not container_is_absent(identifier):
+        raise ValueError('scratch removal remains unverified')
+
 def native_capture_status(native):
     nonce=native['nonce']
-    if not re.fullmatch(r'[a-f0-9]{32}',nonce) or not re.fullmatch(r'[a-f0-9]{64}',native.get('operation','')):
+    if (not re.fullmatch(r'[a-f0-9]{32}',nonce)
+        or not re.fullmatch(r'[a-f0-9]{64}',native.get('operation',''))):
         raise ValueError('invalid native attempt identity')
-    result=subprocess.run(['docker','exec',native['source'],'sh','-ec',NATIVE_INSPECT_SCRIPT,
-        'capture-inspect',native['operation'],nonce],capture_output=True,text=True,timeout=15)
-    if result.returncode or not re.fullmatch(re.escape(nonce)+r':(?:refused|done|cancelled):[0-9]+\n?',result.stdout):
-        raise ValueError('native capture completion remains unknown')
+    try:
+        result=subprocess.run(['docker','exec',native['source'],'sh','-ec',NATIVE_INSPECT_SCRIPT,
+            'capture-inspect',native['operation'],nonce],capture_output=True,text=True,timeout=15)
+        if result.returncode or not re.fullmatch(re.escape(nonce)+r':(?:refused|done|cancelled):[0-9]+\n?',result.stdout):
+            raise ValueError('native capture completion remains unknown')
+    except Exception as error:
+        # A successful all-state inventory can prove this immutable container
+        # was removed. Its exec cannot survive removal or run in a replacement.
+        # An exec error, stopped container or unavailable daemon proves nothing.
+        if container_is_absent(native['source']):
+            return ['cancelled','1']
+        raise ValueError('native capture completion remains unknown') from error
     return result.stdout.strip().split(':')[1:]
 
 class NativeCaptureFinishedError(ValueError):
@@ -450,6 +474,8 @@ def published_recovery(spec,*,base=None):
         write_outcome_pointer(destination,journal)
         attempt.mkdir(mode=0o700)
         container='lp-recovery-'+spec['operation'][:32]
+        identifier=None
+        cleanup_attempted=False
         try:
             paths,source,identity=published_source(spec)
             docker('exec',source,'sh','-ec','command -v flock >/dev/null; command -v timeout >/dev/null; command -v sync >/dev/null; command -v stat >/dev/null; command -v mariadb >/dev/null; command -v mariadb-dump >/dev/null')
@@ -502,7 +528,10 @@ def published_recovery(spec,*,base=None):
                 database_image=spec['database_image'])
             journal['create_arguments']=scratch_create_arguments(journal,spec)
             write_outcome_pointer(destination,journal)
-            identifier=docker(*journal['create_arguments']).strip()
+            created=docker(*journal['create_arguments']).strip()
+            if not re.fullmatch(r'[a-f0-9]{64}',created):
+                raise ValueError('create response identity unverified')
+            identifier=created
             isolated=scratch_isolation(journal,spec)
             if isolated['id']!=identifier:
                 raise ValueError('create response identity changed')
@@ -540,13 +569,25 @@ def published_recovery(spec,*,base=None):
                 'started':started,'duration_ms':duration,'empty':False,'epoch':int(time.time()*1000)}
             # Durable success does not depend on retaining a second backup.
             # Keep isolation custody until cleanup, so a crash can settle safely.
-            docker('rm','-f',identifier)
+            cleanup_attempted=True
+            remove_scratch_container(identifier)
             shutil.rmtree(scratch)
             finish_published(destination,receipt)
             emit_published(receipt)
         except Exception:
-            # The same original lock is held here. Settlement never starts work,
-            # and may preserve unknown rather than disguise a failed source fence.
+            # A live owner can remove the exact object its successful CREATE
+            # returned. Never retry an uncertain removal or delete by name.
+            if identifier is not None and not cleanup_attempted:
+                try:
+                    cleanup_attempted=True
+                    remove_scratch_container(identifier)
+                    finish_published(destination,{'state':'failed_safe',
+                        'binding':spec['recovery_binding'],'operation':spec['operation'],
+                        'attempt':attempt.name})
+                except Exception:
+                    pass
+            # A crash or uncertain cleanup retains the prior durable custody.
+            # Inspection never starts or repeats a Docker mutation.
             try:
                 settle_published(destination,spec)
             except Exception:

@@ -125,9 +125,10 @@ def observe_published(
             if not changed:
                 try:
                     current_record, current = adapter.current()
-                    if current.plan_sha256 != binding:
-                        return ProviderObservation("unknown")
-                    result = adapter.record_host_result(current_record, current, evidence)
+                    if current.plan_sha256 == binding:
+                        result = adapter.record_host_result(current_record, current, evidence)
+                    # A successfully resolved different plan cannot qualify this
+                    # terminal witness. Complete its original binding historically.
                 except (PublishedAuthorityChanged, PublishedWitnessUnqualified):
                     pass
         return ProviderObservation(

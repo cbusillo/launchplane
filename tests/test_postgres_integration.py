@@ -12531,6 +12531,18 @@ class RealPostgresRecipientRecoveryTests(unittest.TestCase):
     def test_terminal_host_failure_retries_only_original_key_on_postgres(self) -> None:
         self.fixture.test_terminal_clean_failure_retries_original_key_with_host_witness()
 
+    def test_terminal_cold_authority_drift_completes_historically(self) -> None:
+        self.fixture.test_terminal_cold_witness_under_changed_authority_completes_without_qualification()
+
+    def test_cold_proof_io_failure_retries_without_recapture(self) -> None:
+        self.fixture.test_passed_cold_witness_retries_proof_after_io_failure()
+
+    def test_cold_proof_cas_collision_retries_without_recapture(self) -> None:
+        self.fixture.test_passed_cold_witness_retries_proof_after_cas_collision()
+
+    def test_cold_current_validation_refusal_remains_unknown(self) -> None:
+        self.fixture.test_passed_cold_witness_keeps_unclassified_current_refusal_unknown()
+
 
 class RealPostgresPublishedRecipientRecoveryTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -12545,6 +12557,9 @@ class RealPostgresPublishedRecipientRecoveryTests(unittest.TestCase):
 
     def test_completed_proof_and_original_key_replay(self) -> None:
         self.fixture.test_published_capture_is_fresh_separate_and_replays_only_its_original_key()
+
+    def test_terminal_protocol_drift_completes_original_binding_historically(self) -> None:
+        self.fixture.test_terminal_passed_witness_with_new_current_plan_completes_historically()
 
     def test_two_reservations_exclude_competing_generations(self) -> None:
         self.fixture.test_second_generation_cannot_dispatch_while_first_target_is_held()
