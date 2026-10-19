@@ -11,7 +11,6 @@ from control_plane.cli_shared import (
     direct_db_mutation_acknowledgement_option as _direct_db_mutation_acknowledgement_option,
     require_direct_db_mutation_acknowledgement as _require_direct_db_mutation_acknowledgement,
 )
-from control_plane.contracts.preview_enablement_record import PreviewEnablementRecord
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
 from control_plane.contracts.preview_mutation_request import (
     PreviewDestroyMutationRequest,
@@ -123,13 +122,11 @@ def _require_launchplane_preview_status_payload(
 
 def _build_launchplane_tenant_payload(
     *,
-    control_plane_root: Path,
     record_store: LaunchplanePreviewRecordStore,
     context_name: str,
     anchor_repo: str = "",
 ) -> dict[str, object] | None:
     return _preview_callbacks().build_tenant_payload(
-        control_plane_root=control_plane_root,
         record_store=record_store,
         context_name=context_name,
         anchor_repo=anchor_repo,
@@ -254,33 +251,6 @@ def launchplane_previews_write_generation(
     )
     record_path = record_store.write_preview_generation_record(record)
     click.echo(_record_locator(record_path, record.generation_id))
-
-
-@launchplane_previews.command("write-enablement")
-@click.option(
-    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
-)
-@click.option("--database-url", default="", show_default=False)
-@click.option("--local-rehearsal", is_flag=True, default=False)
-@_direct_db_mutation_acknowledgement_option
-@click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
-def launchplane_previews_write_enablement(
-    state_dir: Path,
-    database_url: str,
-    local_rehearsal: bool,
-    allow_direct_db_mutation: bool,
-    input_file: Path,
-) -> None:
-    execution_database_url = _resolve_preview_mutation_database_url(
-        database_url=database_url,
-        local_rehearsal=local_rehearsal,
-        allow_direct_db_mutation=allow_direct_db_mutation,
-        command_label="launchplane-previews write-enablement",
-    )
-    record_store = _store(state_dir, database_url=execution_database_url)
-    record = PreviewEnablementRecord.model_validate(_load_json_file(input_file))
-    record_path = record_store.write_preview_enablement_record(record)
-    click.echo(_record_locator(record_path, record.record_id))
 
 
 @launchplane_previews.command("request-generation")
@@ -566,7 +536,6 @@ def launchplane_previews_show_tenant(
     anchor_repo: str,
 ) -> None:
     payload = _build_launchplane_tenant_payload(
-        control_plane_root=_control_plane_root(),
         record_store=_store(state_dir),
         context_name=context_name,
         anchor_repo=anchor_repo,
@@ -595,7 +564,6 @@ def launchplane_previews_render_index_page(
         context_name=context_name,
     )
     tenant_payload = _build_launchplane_tenant_payload(
-        control_plane_root=_control_plane_root(),
         record_store=record_store,
         context_name=context_name,
     )

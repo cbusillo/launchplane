@@ -148,7 +148,6 @@ from control_plane.odoo_stable_lane import (
     odoo_stable_lane_cancellation_is_allowed,
     odoo_stable_lane_operation_priority,
 )
-from control_plane.contracts.preview_enablement_record import PreviewEnablementRecord
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
 from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord
@@ -7260,37 +7259,21 @@ class FilesystemRecordStore:
             records = records[:limit]
         return tuple(records)
 
-    def write_preview_enablement_record(self, record: PreviewEnablementRecord) -> Path:
-        return self._write_model("launchplane_preview_enablement", record.record_id, record)
+    def list_retired_preview_enablement_payloads(self) -> tuple[dict[str, object], ...]:
+        """Return stored payloads of the retired preview enablement record type.
 
-    def read_preview_enablement_record(self, record_id: str) -> PreviewEnablementRecord:
-        return PreviewEnablementRecord.model_validate(
-            self._read_model(
-                PreviewEnablementRecord, "launchplane_preview_enablement", record_id
-            ).model_dump(mode="json")
-        )
-
-    def list_preview_enablement_records(
-        self,
-        *,
-        context_name: str = "",
-        anchor_repo: str = "",
-        pr_state: str = "",
-        limit: int | None = None,
-    ) -> tuple[PreviewEnablementRecord, ...]:
-        records = [
-            record
-            for record in self._list_models(
-                PreviewEnablementRecord, "launchplane_preview_enablement"
+        Nothing writes these records any more. Detached application retirement
+        still scans existing payloads as an authority source, so they are read
+        as raw JSON without a record model.
+        """
+        with self._product_authority_bundle_lock():
+            record_dir = self._record_dir("launchplane_preview_enablement")
+            if not record_dir.exists():
+                return ()
+            return tuple(
+                json.loads(record_path.read_text(encoding="utf-8"))
+                for record_path in sorted(record_dir.glob("*.json"))
             )
-            if (not context_name or record.context == context_name)
-            and (not anchor_repo or record.anchor_repo == anchor_repo)
-            and (not pr_state or record.pr_state == pr_state)
-        ]
-        records.sort(key=lambda record: (record.updated_at, record.record_id), reverse=True)
-        if limit is not None:
-            records = records[:limit]
-        return tuple(records)
 
     def write_preview_generation_record(self, record: PreviewGenerationRecord) -> Path:
         return self._write_model("launchplane_preview_generations", record.generation_id, record)
