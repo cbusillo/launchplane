@@ -543,16 +543,149 @@ class RehearsalScenario(unittest.TestCase):
     def run_operation(
         self, adapter: OdooRehearsalAdapter, key: str
     ) -> DurableProviderOperationResult:
+        from control_plane.contracts.odoo_upgrade_rehearsal import ODOO_UPGRADE_REHEARSAL_ROUTE
+        from control_plane.http_routes.mutation_support import request_fingerprint
+
         return run_durable_provider_operation(
             store=self.store,
             scope=self.principal,
-            route_path="fixture-route",
+            route_path=ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=self.product),
             idempotency_key=key,
-            request_fingerprint="fixture-intent",
+            request_fingerprint=request_fingerprint(
+                {
+                    "product": self.product,
+                    **adapter.request.model_dump(mode="json"),
+                }
+            ),
             lease_owner="fixture-worker",
             response_trace_id="fixture-trace",
             adapter=adapter,
         )
+
+    def test_prepare_partial_project_continues_only_original_effect_without_duplicate_create(
+        self,
+    ) -> None:
+        from control_plane.dokploy import api
+        from control_plane.dokploy.sandbox_placement import created_placement
+
+        before = self.authority()
+        projects: list[dict[str, Any]] = []
+        calls: list[str] = []
+
+        def provider(**kwargs: Any) -> dict[str, object]:
+            path = kwargs["path"]
+            calls.append(path)
+            if path == "/api/project.create":
+                projects.append(
+                    {
+                        "name": self.identifier,
+                        "description": "Isolated Odoo rehearsal",
+                        "projectId": "partial-project",
+                        "environments": [
+                            {
+                                "name": "production",
+                                "environmentId": "default-environment",
+                                "isDefault": True,
+                                **{
+                                    key: []
+                                    for key in (
+                                        "applications",
+                                        "postgres",
+                                        "mysql",
+                                        "mariadb",
+                                        "mongo",
+                                        "redis",
+                                        "libsql",
+                                        "compose",
+                                    )
+                                },
+                            }
+                        ],
+                    }
+                )
+                # A successful provider effect whose identity was not decoded.
+                return {}
+            if path == "/api/environment.create":
+                self.assertEqual(kwargs["payload"]["projectId"], "partial-project")
+                projects[0]["environments"].append(
+                    {"name": self.identifier, "environmentId": "own-environment", "compose": []}
+                )
+                return {"environmentId": "own-environment"}
+            self.assertEqual(path, "/api/compose.create")
+            return {"composeId": "own-compose"}
+
+        adapter = self.adapter("prepare")
+        with (
+            patch.object(api, "fetch_dokploy_projects", side_effect=lambda **_: tuple(projects)),
+            patch.object(api, "dokploy_request", side_effect=provider),
+            patch.object(
+                OdooRehearsalAdapter,
+                "run_script",
+                side_effect=lambda record, *_: {
+                    "testing_resources_ok": "true",
+                    "testing_resources_binding_sha256": rehearsal_resource(record).binding_sha256,
+                },
+            ),
+            patch.object(
+                OdooRehearsalAdapter,
+                "host",
+                return_value={
+                    "state": "prepared",
+                    "copies": [],
+                    "elapsed_seconds": {},
+                },
+            ) as host,
+        ):
+            with self.assertRaises(RehearsalRefused):
+                self.run_operation(adapter, "original-prepare")
+            partial = self.store.read_odoo_upgrade_rehearsal(self.identifier)
+            assert partial is not None
+            self.assertFalse(partial.project_id)
+            self.assertEqual(
+                created_placement(self.root, self.identifier), ("partial-project", "", "")
+            )
+            credentials = rehearsal_credentials(self.store, self.identifier)
+            host.assert_not_called()
+            journal_before = self.store.list_held_provider_target_reservations()
+            observed = adapter.prepare_readback(partial, "original-prepare")
+            self.assertEqual(observed["recovery_disposition"], "continue_original_prepare")
+            self.assertEqual(observed["provider_effect_phase"], "project_id")
+            self.assertFalse(observed["completed"])
+            self.assertEqual(self.store.list_held_provider_target_reservations(), journal_before)
+            self.assertEqual(self.store.read_odoo_upgrade_rehearsal(self.identifier), partial)
+            host.assert_not_called()
+            with self.assertRaises(RehearsalRefused):
+                adapter.prepare_readback(partial, "replacement-key")
+            default_environment = projects[0]["environments"][0]
+            for broken in (
+                {"applications": [{"applicationId": "foreign"}]},
+                {"libsql": [{"libsqlId": "foreign"}]},
+                {"compose": [{"composeId": "foreign"}]},
+                {"postgres": None},
+                {"isDefault": False},
+            ):
+                with self.subTest(broken=broken):
+                    projects[0]["environments"][0] = {**default_environment, **broken}
+                    held = self.run_operation(adapter, "original-prepare")
+                    self.assertEqual(held.status, "reconcile_required")
+                    self.assertEqual(calls, ["/api/project.create"])
+                    self.assertEqual(
+                        self.store.read_odoo_upgrade_rehearsal(self.identifier), partial
+                    )
+            projects[0]["environments"][0] = default_environment
+            # A different operation cannot adopt or duplicate this effect.
+            other = self.run_operation(adapter, "replacement-key")
+            self.assertEqual(other.status, "target_busy")
+            result = self.run_operation(adapter, "original-prepare")
+            self.assertEqual((result.status, result.response_status_code), ("completed", 202))
+            self.assertEqual(calls.count("/api/project.create"), 1)
+            self.assertEqual(calls.count("/api/environment.create"), 1)
+            self.assertEqual(calls.count("/api/compose.create"), 1)
+            self.assertEqual(rehearsal_credentials(self.store, self.identifier), credentials)
+            self.assertEqual(self.authority(), before)
+            prepared = self.store.read_odoo_upgrade_rehearsal(self.identifier)
+            assert prepared is not None
+            self.assertEqual(prepared.state, "prepared")
 
     def test_terminal_refusal_releases_the_operation_target_for_a_new_key(self) -> None:
         retained = self.record.model_copy(
@@ -1469,6 +1602,46 @@ class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(denied.status_code, 403)
         self.assertEqual(self.fixture.authority(), before)
+
+        # A failed prepare has no compose on which to schedule host readback.
+        # The read role can inspect the exact journal without adopting custody.
+        with (
+            patch(
+                "control_plane.dokploy.sandbox_placement.created_placement",
+                return_value=("", "", ""),
+            ),
+            patch("control_plane.dokploy.api.dokploy_request", return_value={}),
+            self.assertRaises(RehearsalRefused),
+        ):
+            self.fixture.run_operation(self.fixture.adapter("prepare"), "original-prepare")
+        partial = self.fixture.store.read_odoo_upgrade_rehearsal(self.fixture.identifier)
+        assert partial is not None
+        with (
+            patch(
+                "control_plane.dokploy.sandbox_placement.observe_empty_isolated_project",
+                return_value="partial-project",
+            ),
+            patch.object(OdooRehearsalAdapter, "host") as host,
+        ):
+            read = await request(
+                app,
+                "POST",
+                ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=self.fixture.product),
+                payload=self.fixture.request.model_copy(update={"mode": "readback"}).model_dump(
+                    mode="json"
+                ),
+                headers={"Idempotency-Key": "original-prepare"},
+            )
+            self.assertEqual(read.status_code, 202)
+            self.assertEqual(
+                read.json()["result"]["recovery_disposition"], "continue_original_prepare"
+            )
+            self.assertFalse(read.json()["result"]["completed"])
+            host.assert_not_called()
+        self.assertEqual(
+            self.fixture.store.read_odoo_upgrade_rehearsal(self.fixture.identifier), partial
+        )
+        self.fixture.record = partial
         from contextlib import contextmanager
 
         @contextmanager

@@ -67,6 +67,19 @@ class IsolatedPlacementTests(unittest.TestCase):
             all("env" not in p and "composeFile" not in p and "host" not in p for p in self.created)
         )
 
+    def test_nested_provider_create_receipts_keep_parent_custody(self) -> None:
+        provider = self.provider
+
+        def wrapped(**kwargs: object) -> dict[str, object]:
+            response = provider(**kwargs)
+            key = next(iter(response))
+            return {key.removesuffix("Id"): response}
+
+        self.request.side_effect = wrapped
+        self.create()
+        self.assertEqual(tuple(self.identities.values()), self.inventory)
+        self.assertEqual(self.created[-1]["environmentId"], self.identities["environment_id"])
+
     def test_uncertain_create_cannot_be_repeated_as_an_empty_new_placement(self) -> None:
         real_provider = self.provider
 

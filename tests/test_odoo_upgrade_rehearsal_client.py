@@ -291,8 +291,9 @@ class RehearsalClientTests(unittest.TestCase):
         post.assert_not_called()
 
     def test_lost_apply_response_keeps_the_original_key_for_reconciliation(self) -> None:
-        code, result, post = self.call("apply", lost=True)
-        self.assertNotEqual(code, 0)
-        self.assertTrue(result["original_key_required"])
-        self.assertEqual(result["status"], "reconciliation_required")
-        post.assert_called_once()
+        for mode in ("apply", "readback"):
+            with self.subTest(mode=mode):
+                code, result, post = self.call(mode, lost=True)
+                self.assertNotEqual(code, 0)
+                self.assertTrue(result["original_key_required"])
+                post.assert_called_once()

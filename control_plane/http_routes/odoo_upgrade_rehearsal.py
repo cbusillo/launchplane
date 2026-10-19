@@ -177,11 +177,27 @@ def register_odoo_upgrade_rehearsal_routes(
                         fresh = record_store.read_odoo_upgrade_rehearsal(record.rehearsal_id)
                         if fresh != record:
                             raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
+                        if (
+                            body.action == "prepare"
+                            and record.state == "planned"
+                            and not record.compose_id
+                        ):
+                            return adapter.prepare_readback(record, idempotency_key)
                         return adapter.host(record, "observe", check)
 
                 result = await run_in_worker_thread(observe)
                 result = {
                     **adapter.public(record),
+                    **{
+                        key: result[key]
+                        for key in (
+                            "operation_state",
+                            "provider_effect_phase",
+                            "provider_effect_started_at",
+                            "recovery_disposition",
+                        )
+                        if key in result
+                    },
                     "observed_state": result["state"],
                     "copies": result["copies"],
                     "completed": result["completed"],
