@@ -247,6 +247,13 @@ class RehearsalScenario(unittest.TestCase):
         self.assertEqual(
             cast(dict[str, str], spec["environment"])["ODOO_WORKERS"], self.shape["ODOO_WORKERS"]
         )
+        from control_plane.dokploy import post_deploy
+
+        comparison_limit = cast(int, spec["capture_comparison_timeout_seconds"])
+        self.assertGreater(comparison_limit, 0)
+        self.assertLess(
+            comparison_limit, post_deploy.DEFAULT_ODOO_UPSTREAM_RESTORE_EXECUTION_TIMEOUT_SECONDS
+        )
 
     def test_artifact_from_another_product_cannot_receive_copied_data(self) -> None:
         assert self.manifests[1].source_build is not None
@@ -1545,13 +1552,174 @@ class RehearsalScenario(unittest.TestCase):
 
 
 class RehearsalHostSafetyTests(unittest.TestCase):
+    def test_retained_archive_comparison_preserves_custody_and_requires_its_receipt(self) -> None:
+        import io
+        import json
+        import tarfile
+
+        spec, root, _ = self.storage_fixture(
+            {
+                "database_bytes": 40,
+                "filestore_bytes": 102400,
+                "staging_bytes": 20,
+                "reserve_bytes": 10,
+            }
+        )
+        binding = hashlib.sha256(b"source fixture").hexdigest()
+        spec["record"]["source_binding_sha256"] = binding
+        raw = root / "raw-source"
+        raw.mkdir()
+        content = b"original attachment fixture"
+        checksum = hashlib.sha1(content).hexdigest()
+        name = checksum[:2] + "/" + checksum
+        reference = {
+            "name": name,
+            "checksum": checksum,
+            "size": len(content),
+            "copied_size": 3,
+            "copied_sha1": hashlib.sha1(b"bad").hexdigest(),
+        }
+
+        def archive(rows: list[tuple[str, bytes]], *, extended: bool = False) -> None:
+            with tarfile.open(
+                raw / "filestore.tar",
+                "w",
+                format=tarfile.PAX_FORMAT if extended else tarfile.USTAR_FORMAT,
+            ) as output:
+                for member_name, data in rows:
+                    member = tarfile.TarInfo(member_name)
+                    member.size = len(data)
+                    if extended:
+                        member.pax_headers = {"comment": "fixture metadata"}
+                    output.addfile(member, io.BytesIO(data))
+            (root / "capture.json").write_text(
+                json.dumps(
+                    {
+                        "source_binding_sha256": binding,
+                        "database_sha256": hashlib.sha256(b"dump fixture").hexdigest(),
+                        "filestore_sha256": hashlib.sha256(
+                            (raw / "filestore.tar").read_bytes()
+                        ).hexdigest(),
+                    }
+                )
+            )
+
+        compare = self.host["compare_retained_attachment"]
+        limit = spec["capture_comparison_timeout_seconds"]
+        budget = self.host["capture_comparison_budget"]
+        self.assertGreater(budget(100 * 1024**3, 10**9), budget(1024, 10**9))
+        self.assertLessEqual(budget(100 * 1024**3, limit), limit)
+        for data, expected in (
+            (content, "capture_attachment_matches_reference_copy_differs"),
+            (b"bad", "capture_attachment_matches_copy_reference_differs"),
+            (b"different damaged bytes", "capture_attachment_differs_from_copy_and_reference"),
+        ):
+            archive([("./" + name, data)])
+            before = {p: p.read_bytes() for p in (root / "capture.json", raw / "filestore.tar")}
+            self.assertEqual(compare(spec, root, reference), expected)
+            self.assertEqual({p: p.read_bytes() for p in before}, before)
+        archive([("./" + name, content)])
+        archive([("./" + name, content)], extended=True)
+        self.assertEqual(
+            compare(spec, root, reference), "capture_attachment_matches_reference_copy_differs"
+        )
+        archive([(name, content)])
+        truncated = (raw / "filestore.tar").read_bytes()[: tarfile.BLOCKSIZE * 3]
+        (raw / "filestore.tar").write_bytes(truncated)
+        receipt_value = json.loads((root / "capture.json").read_text())
+        receipt_value["filestore_sha256"] = hashlib.sha256(truncated).hexdigest()
+        (root / "capture.json").write_text(json.dumps(receipt_value))
+        self.assertEqual(compare(spec, root, reference), "capture_comparison_unavailable")
+        archive([(name, content)])
+        stale = {**reference, "size": len(content) + 1}
+        self.assertEqual(
+            compare(spec, root, stale), "capture_attachment_checksum_matches_size_metadata_differs"
+        )
+        archive([("./" + name, content), (name, content)])
+        self.assertEqual(compare(spec, root, reference), "capture_comparison_unavailable")
+        archive([("../" + name, content)])
+        self.assertEqual(compare(spec, root, reference), "capture_comparison_unavailable")
+        archive([("unrelated", b"fixture")])
+        self.assertEqual(compare(spec, root, reference), "capture_attachment_not_present")
+        first_archive = (raw / "filestore.tar").read_bytes()
+        archive([(name, content)])
+        concatenated = first_archive + (raw / "filestore.tar").read_bytes()
+        (raw / "filestore.tar").write_bytes(concatenated)
+        concatenated_receipt = json.loads((root / "capture.json").read_text())
+        concatenated_receipt["filestore_sha256"] = hashlib.sha256(concatenated).hexdigest()
+        (root / "capture.json").write_text(json.dumps(concatenated_receipt))
+        self.assertEqual(compare(spec, root, reference), "capture_comparison_unavailable")
+        archive([(name, content)])
+        (raw / "filestore.tar").write_bytes((raw / "filestore.tar").read_bytes() + b"changed")
+        self.assertEqual(compare(spec, root, reference), "capture_comparison_unavailable")
+        archive([(name, content)])
+        tampered_archive = bytearray((raw / "filestore.tar").read_bytes())
+        tampered_archive[tampered_archive.index(content)] ^= 1
+        (raw / "filestore.tar").write_bytes(tampered_archive)
+        self.assertEqual(compare(spec, root, reference), "capture_comparison_unavailable")
+        archive([(name, content)])
+        expired = budget((raw / "filestore.tar").stat().st_size, limit) + 1
+        ticks = iter([0])
+        with patch.object(self.host["time"], "monotonic", side_effect=lambda: next(ticks, expired)):
+            self.assertEqual(compare(spec, root, reference), "capture_comparison_incomplete")
+        receipt = root / "capture.json"
+        receipt.rename(root / "saved-capture.json")
+        receipt.symlink_to(root / "saved-capture.json")
+        self.assertEqual(compare(spec, root, reference), "capture_comparison_unavailable")
+        receipt.unlink()
+        (root / "saved-capture.json").rename(receipt)
+        with self.assertRaises(ValueError):
+            with self.host["capture_comparison_file"](raw / "filestore.tar") as (_, metadata):
+                os.utime(raw / "filestore.tar", ns=(metadata.st_atime_ns, metadata.st_mtime_ns + 1))
+        archive([(name, content)])
+        # Exercise the real private runner-result parser and original-bound
+        # observe path: no attachment reference may reach public host output.
+        containers = self.inspect()
+        containers["web"][1]["State"]["Running"] = False
+        spec.update(mode="observe", action="execute", inspect_capture=True)
+        spec["record"]["state"] = "prepared"
+        spec["source_image"] = self.spec["image_reference"]
+        self.host["inspection"] = Mock(return_value=containers)
+        private = {"reason": "attachment_size_and_hash_mismatch", "reference": reference}
+        self.host["docker"] = Mock(
+            return_value=("attachment_validation=" + json.dumps(private).encode().hex()).encode()
+        )
+        (raw / "database.dump").write_bytes(b"dump fixture")
+        (raw / "filestore").mkdir()
+        (root / "execute.started").touch()
+        (root / ".execution.lock").touch()
+        observed = self.run_host(spec)
+        from control_plane.contracts.odoo_upgrade_rehearsal import RehearsalHostResult
+
+        RehearsalHostResult.model_validate(observed)
+        self.assertEqual(
+            observed["capture_attachment_validation"],
+            "capture_attachment_matches_reference_copy_differs",
+        )
+        self.assertFalse(observed["completed"])
+        self.assertTrue(observed["raw_source_retained"])
+        for value in (name, checksum, reference["copied_sha1"]):
+            self.assertNotIn(value, json.dumps(observed))
+        private["reference"] = {**reference, "name": "../private-fixture"}
+        self.host["docker"].return_value = (
+            "attachment_validation=" + json.dumps(private).encode().hex()
+        ).encode()
+        archive_comparison = Mock(wraps=compare)
+        with patch.dict(self.host, {"compare_retained_attachment": archive_comparison}):
+            with self.assertRaises(RuntimeError):
+                self.run_host(spec)
+        archive_comparison.assert_not_called()
+        archive([(name, content)])
+        spec["record"]["source_binding_sha256"] = hashlib.sha256(b"other fixture").hexdigest()
+        self.assertEqual(compare(spec, root, reference), "capture_comparison_unavailable")
+
     def test_capture_attachment_probe_refuses_a_running_writer_before_exec(self) -> None:
         import json
         from control_plane._odoo_rehearsal_attachment_validation import (
             ATTACHMENT_VALIDATION_PROGRAM,
         )
 
-        spec, _, containers = self.storage_fixture(
+        spec, root, containers = self.storage_fixture(
             {"database_bytes": 40, "filestore_bytes": 80, "staging_bytes": 20, "reserve_bytes": 10}
         )
         spec["source_image"] = self.spec["image_reference"]
@@ -1563,10 +1731,12 @@ class RehearsalHostSafetyTests(unittest.TestCase):
             ).encode()
         )
         containers["web"][1]["State"]["Running"] = True
-        self.assertEqual(self.host["capture_attachment_observation"](spec), "writer_active")
+        self.assertEqual(self.host["capture_attachment_observation"](spec, root), "writer_active")
         self.host["docker"].assert_not_called()
         containers["web"][1]["State"]["Running"] = False
-        self.assertEqual(self.host["capture_attachment_observation"](spec), "database_unavailable")
+        self.assertEqual(
+            self.host["capture_attachment_observation"](spec, root), "database_unavailable"
+        )
         self.assertEqual(
             self.host["docker"].call_args.kwargs["stdin"], ATTACHMENT_VALIDATION_PROGRAM.encode()
         )
@@ -1678,6 +1848,16 @@ class RehearsalHostSafetyTests(unittest.TestCase):
                 self.assertEqual(
                     program["attachment_validation_main"](), "attachment_size_mismatch"
                 )
+            path.write_bytes(b"bad")
+            private_row: dict[str, object] = {}
+            with patch.object(sys, "argv", ["validator", "compare"]):
+                self.assertEqual(
+                    program["attachment_validation_main"](failure_reference=private_row),
+                    "attachment_size_and_hash_mismatch",
+                )
+            self.assertEqual(private_row["name"], name)
+            self.assertEqual(private_row["copied_sha1"], hashlib.sha1(b"bad").hexdigest())
+            path.write_bytes(content)
             rows[0] = (name, checksum, len(content))
             missing = hashlib.sha1(b"missing fixture").hexdigest()
             rows.append((missing[:2] + "/" + missing, missing, 1))
@@ -1720,9 +1900,20 @@ class RehearsalHostSafetyTests(unittest.TestCase):
             )
         self.assertEqual(path.read_bytes(), content)
         path.write_bytes(b"damaged copy fixture")
+        private_reference: dict[str, object] = {}
         self.assertEqual(
-            validate(mismatch, root, None, classify_size=True),
+            validate(mismatch, root, None, classify_size=True, failure_reference=private_reference),
             "attachment_size_and_hash_mismatch",
+        )
+        self.assertEqual(
+            private_reference,
+            {
+                "name": name,
+                "checksum": checksum,
+                "size": len(content) + 1,
+                "copied_size": len(b"damaged copy fixture"),
+                "copied_sha1": hashlib.sha1(b"damaged copy fixture").hexdigest(),
+            },
         )
         self.assertEqual(path.read_bytes(), b"damaged copy fixture")
         path.write_bytes(content)
@@ -1853,6 +2044,7 @@ class RehearsalHostSafetyTests(unittest.TestCase):
             "record_binding_sha256": hashlib.sha256(b"fixture-record").hexdigest(),
             "mode": "apply",
             "action": "verify",
+            "capture_comparison_timeout_seconds": 1200,
             "target_image": self.spec["image_reference"],
         }
         return spec, root, containers
@@ -2660,9 +2852,12 @@ class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
             (None, "verified"),
             (503, "attachment_content_matches_checksum_size_mismatch"),
             (None, "attachment_size_and_hash_mismatch"),
+            (None, "capture_attachment_matches_reference_copy_differs"),
+            (None, "capture_attachment_matches_copy_reference_differs"),
+            (None, "capture_comparison_incomplete"),
             (403, "verified"),
         ):
-            with self.subTest(log_status=status):
+            with self.subTest(log_status=status, attachment_reason=attachment_reason):
                 observed["capture_attachment_validation"] = attachment_reason
                 error = api.DokployRequestFailed(
                     method="GET",

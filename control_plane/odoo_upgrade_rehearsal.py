@@ -396,6 +396,7 @@ def rehearsal_host_spec(
     credentials: dict[str, str],
 ) -> dict[str, object]:
     import yaml
+    from control_plane.dokploy import post_deploy
     from control_plane.dokploy.compose import (
         render_odoo_raw_compose_file,
         ODOO_DATABASE_DATA_DIRECTORY,
@@ -452,6 +453,9 @@ def rehearsal_host_spec(
         "record": host_record,
         "action": action,
         "mode": mode,
+        "capture_comparison_timeout_seconds": (
+            post_deploy.DEFAULT_ODOO_UPSTREAM_RESTORE_EXECUTION_TIMEOUT_SECONDS * 3 // 4
+        ),
         "source": source_values,
         "resources_binding_sha256": resources.binding_sha256,
         "compose": rendered,
