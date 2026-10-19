@@ -1,6 +1,7 @@
 """One exact private HTTP application origin, without provider routing overrides."""
 
 from collections.abc import Iterable
+from urllib.parse import urlsplit
 
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.public_hosts import normalize_public_hosts
@@ -91,7 +92,11 @@ def require_exclusive_testing_application_hostname(
             *other.public_hosts,
             *(effect.host for effect in other.pending_public_host_effects),
         ):
-            normalized = claim.strip().rstrip(".").lower()
+            raw_claim = claim.strip()
+            parsed = urlsplit(raw_claim if "://" in raw_claim else f"//{raw_claim}")
+            normalized = (parsed.hostname or "").rstrip(".").lower()
+            if not normalized:
+                raise ValueError("A lane's hostname claim cannot be parsed.")
             if (
                 normalized == hostname
                 or normalized.startswith("~")

@@ -404,10 +404,24 @@ class ApplicationStateVolumeTests(_ApplicationStateVolumeFixture):
         self.live["domains"] = [self.private_domain()]
         plan = await self._testing_hold()
         targets = self.store.list_dokploy_target_records()
+        unrelated = self.production.model_copy(
+            update={"domains": ("https://unrelated.example.invalid/path",)}
+        )
+        with patch.object(
+            self.store, "list_dokploy_target_records", return_value=(*targets, unrelated)
+        ):
+            allowed = await self._testing_hold()
+        self.assertEqual(allowed.status_code, 202, allowed.text)
         for changes in (
             {"domains": (hostname,)},
             {"domains": ("TESTING.EXAMPLE.INVALID.",)},
+            {"domains": (f"https://{hostname}/",)},
+            {"domains": (f"https://{hostname}/path",)},
             {"domains": ("*.example.invalid",)},
+            {"domains": ("https://*.example.invalid/",)},
+            {"domains": ("~^testing[.]example[.]invalid$",)},
+            {"domains": ("https://",)},
+            {"domains": ("https://[invalid",)},
             {"public_hosts": (hostname,)},
             {
                 "pending_public_host_effects": (

@@ -516,10 +516,23 @@ class PrivateTestingIngressTests(PrivateIngressFixture):
 
     def test_refuses_foreign_target_hostname_claims(self) -> None:
         hostname = "bridge-testing.example.test"
+        unrelated = self.target.model_copy(
+            update={"instance": "prod", "domains": ("https://unrelated.example.test/path",)}
+        )
+        with patch.object(
+            self.store, "list_dokploy_target_records", return_value=(self.target, unrelated)
+        ):
+            self.adapter().plan()
         for update in (
             {"domains": (hostname,)},
             {"domains": ("BRIDGE-TESTING.EXAMPLE.TEST.",)},
+            {"domains": (f"https://{hostname}/",)},
+            {"domains": (f"https://{hostname}/path",)},
             {"domains": ("*.example.test",)},
+            {"domains": ("https://*.example.test/",)},
+            {"domains": ("~^bridge-testing[.]example[.]test$",)},
+            {"domains": ("https://",)},
+            {"domains": ("https://[invalid",)},
             {"public_hosts": (hostname,)},
             {
                 "pending_public_host_effects": (
