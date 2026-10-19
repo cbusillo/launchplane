@@ -713,13 +713,12 @@ measurement. The default-daemon action has no age filter. Report-only budgets
 never enter interrupted-action recovery identity. Missing, failed, malformed,
 duplicate or truncated measurements are unknown, never zero. Logical targets
 are not physical-volume quotas, and excess is not an expected-reclaim estimate.
-Overlapping protection categories are counted once. [BuildKit's accounting impl
-ementation](https://github.com/moby/buildkit/blob/master/cmd/buildctl/diskusage
-.go) and [client record
-format](https://github.com/moby/buildkit/blob/master/client/diskusage.go) own
-the probe format. [BuildKit GC
-accounting](https://github.com/moby/buildkit/blob/master/cache/manager.go) owns
-the non-shared target basis and last-used retention semantics.
+Overlapping protection categories are counted once.
+[BuildKit's accounting implementation](https://github.com/moby/buildkit/blob/master/cmd/buildctl/diskusage.go)
+and [client record format](https://github.com/moby/buildkit/blob/master/client/diskusage.go)
+own the probe format.
+[BuildKit GC accounting](https://github.com/moby/buildkit/blob/master/cache/manager.go)
+owns the non-shared target basis and last-used retention semantics.
 
 Evaluate the existing private audit artifact without contacting a host:
 
