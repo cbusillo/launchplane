@@ -15,7 +15,6 @@ from control_plane.contracts.odoo_upgrade_rehearsal import (
     REHEARSAL_PUBLIC_FAILURE_MESSAGES,
     OdooUpgradeRehearsalRequest,
     RehearsalPreflightResult,
-    RehearsalPrerequisite,
 )
 
 
@@ -192,15 +191,7 @@ def main() -> int:
                     "error_code": code if code.isidentifier() else "rehearsal_unavailable",
                     "original_key_required": (args.mode == "apply" and not refused)
                     or (
-                        args.mode == "readback"
-                        and draft is not None
-                        and bool(args.idempotency_key)
-                        and error.code == 409
-                        and code
-                        in {
-                            RehearsalPrerequisite.RECOVERY_REQUIRED,
-                            RehearsalPrerequisite.STATE_UNVERIFIED,
-                        }
+                        args.mode == "readback" and draft is not None and bool(args.idempotency_key)
                     ),
                 }
             )
@@ -219,7 +210,8 @@ def main() -> int:
                 {
                     "status": "reconciliation_required" if args.mode == "apply" else "unavailable",
                     "mode": args.mode,
-                    "original_key_required": args.mode == "apply",
+                    "original_key_required": args.mode == "apply"
+                    or (args.mode == "readback" and bool(args.idempotency_key)),
                 }
             )
         )

@@ -798,7 +798,11 @@ class OdooRehearsalAdapter:
         except api.DokployRequestFailed as error:
             if error.status_code in {401, 403}:
                 raise
-            observation = {"completed": False, "host_observation_unavailable": True}
+            observation = {
+                "completed": False,
+                "host_observation_unavailable": True,
+                "host_observation_reason": "provider_transport_unavailable",
+            }
         except RehearsalRefused as error:
             if error.code != RehearsalPrerequisite.RECOVERY_REQUIRED:
                 raise
@@ -807,8 +811,12 @@ class OdooRehearsalAdapter:
                 "host_observation_unavailable": True,
                 "host_observation_reason": error.code.value,
             }
-        except (ValueError, RuntimeError, OSError):
-            observation = {"completed": False, "host_observation_unavailable": True}
+        except OSError:
+            observation = {
+                "completed": False,
+                "host_observation_unavailable": True,
+                "host_observation_reason": "host_io_unavailable",
+            }
         result = {
             **observation,
             **journal,
@@ -844,14 +852,27 @@ class OdooRehearsalAdapter:
             and record.state == "planned"
             and journal.get("operation_state") == "reconcile_required"
             and not observation.get("host_observation_unavailable")
-            and self.can_continue_prepare_host(
-                record, observation, str(journal["provider_effect_phase"])
-            )
         ):
-            result.update(
-                recovery_disposition="continue_original_prepare",
-                recovery_reason="prepare_host_not_started",
-            )
+            try:
+                eligible = self.can_continue_prepare_host(
+                    record, observation, str(journal["provider_effect_phase"])
+                )
+            except RehearsalRefused as error:
+                if error.code not in {
+                    RehearsalPrerequisite.SOURCE_UNAVAILABLE,
+                    RehearsalPrerequisite.ARTIFACT_UNAVAILABLE,
+                    RehearsalPrerequisite.CREDENTIALS_UNAVAILABLE,
+                }:
+                    raise
+                result["recovery_reason"] = error.code.value
+            else:
+                if eligible:
+                    result.update(
+                        recovery_disposition="continue_original_prepare",
+                        recovery_reason="prepare_host_not_started",
+                    )
+        if observation.get("completed") is True and journal_status == "unbound":
+            result.pop("operation_journal_status")
         return result
 
     def target_key(self) -> str:
@@ -983,7 +1004,10 @@ class OdooRehearsalAdapter:
             api.validate_dokploy_schedule_script({"script": script, "appName": record.rehearsal_id})
         except click.ClickException:
             raise ProviderMutationRejectedError(
-                RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
+                RehearsalRefused(
+                    RehearsalPrerequisite.PRECHECK_REFUSED,
+                    prerequisite=RehearsalPrerequisite.STATE_UNVERIFIED,
+                )
             ) from None
 
     def host(
@@ -1174,7 +1198,10 @@ class OdooRehearsalAdapter:
         with self.store.testing_replacement_execution_lock(self.request.rehearsal_id) as check:
             if check is None:
                 raise ProviderMutationRejectedError(
-                    RehearsalRefused(RehearsalPrerequisite.RECOVERY_REQUIRED)
+                    RehearsalRefused(
+                        RehearsalPrerequisite.PRECHECK_REFUSED,
+                        prerequisite=RehearsalPrerequisite.RECOVERY_REQUIRED,
+                    )
                 )
             try:
                 record, _, _ = self.inputs()
@@ -1221,7 +1248,10 @@ class OdooRehearsalAdapter:
                     record = updated
                 elif any(created_placement(self.root, record.rehearsal_id)):
                     raise ProviderMutationRejectedError(
-                        RehearsalRefused(RehearsalPrerequisite.RECOVERY_REQUIRED)
+                        RehearsalRefused(
+                            RehearsalPrerequisite.PRECHECK_REFUSED,
+                            prerequisite=RehearsalPrerequisite.RECOVERY_REQUIRED,
+                        )
                     )
                 # The built-in local-password writer is scoped to the new record;
                 # it creates no key that can reach a live system or person grant.

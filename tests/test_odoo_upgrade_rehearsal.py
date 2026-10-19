@@ -519,8 +519,10 @@ class RehearsalScenario(unittest.TestCase):
             ),
             patch.object(api, "dokploy_request") as provider,
         ):
-            with self.assertRaises(RehearsalRefused):
+            with self.assertRaises(RehearsalRefused) as refusal:
                 self.run_operation(adapter, "oversize-apply")
+        self.assertEqual(refusal.exception.code, RehearsalPrerequisite.PRECHECK_REFUSED)
+        self.assertEqual(refusal.exception.prerequisite, RehearsalPrerequisite.STATE_UNVERIFIED)
         provider.assert_not_called()
         self.assertEqual(self.store.list_held_provider_target_reservations(), ())
 
@@ -696,6 +698,40 @@ class RehearsalScenario(unittest.TestCase):
         host.assert_not_called()
         self.assertEqual(self.store.read_odoo_upgrade_rehearsal(self.identifier), self.record)
 
+    def test_fresh_lock_and_existing_placement_refusals_release_without_dispatch(self) -> None:
+        from contextlib import contextmanager, ExitStack
+        from control_plane.dokploy import api
+
+        @contextmanager
+        def busy(*args: Any) -> Any:
+            yield None
+
+        for cause in ("lock", "placement"):
+            with ExitStack() as stack:
+                if cause == "lock":
+                    stack.enter_context(
+                        patch.object(
+                            self.store, "testing_replacement_execution_lock", side_effect=busy
+                        )
+                    )
+                else:
+                    stack.enter_context(
+                        patch(
+                            "control_plane.dokploy.sandbox_placement.created_placement",
+                            return_value=("owned", "", ""),
+                        )
+                    )
+                provider = stack.enter_context(patch.object(api, "dokploy_request"))
+                with self.assertRaises(RehearsalRefused) as refusal:
+                    self.run_operation(self.adapter("prepare"), "fresh-" + cause)
+            self.assertEqual(refusal.exception.code, RehearsalPrerequisite.PRECHECK_REFUSED)
+            self.assertEqual(
+                refusal.exception.prerequisite, RehearsalPrerequisite.RECOVERY_REQUIRED
+            )
+            self.assertEqual(self.store.list_held_provider_target_reservations(), ())
+            self.assertEqual(self.store.read_odoo_upgrade_rehearsal(self.identifier), self.record)
+            provider.assert_not_called()
+
     def test_partial_execute_journal_is_bound_to_its_original_key_without_writes(self) -> None:
         prepare_rehearsal_local_credentials(self.store, self.identifier, actor=self.principal)
         prepared = self.record.model_copy(update={"state": "prepared", "compose_id": "own-compose"})
@@ -870,6 +906,77 @@ class RehearsalScenario(unittest.TestCase):
         for field in ("state", "copies", "custody", "raw_source_retained", "_stored_refusal_code"):
             self.assertNotIn(field, result)
 
+        def lost() -> None:
+            raise RuntimeError("fixture exclusion lost")
+
+        with (
+            patch.object(OdooRehearsalAdapter, "operation_readback", return_value=dict(journal)),
+            patch.object(OdooRehearsalAdapter, "failure_events", return_value=([event], True)),
+            patch.object(
+                OdooRehearsalAdapter,
+                "host",
+                side_effect=lambda record, mode, checkpoint, **kwargs: checkpoint(),
+            ),
+            self.assertRaises(RuntimeError),
+        ):
+            adapter.native_readback(self.record, "original", lost)
+
+    def test_prepare_qualification_availability_preserves_evidence_but_integrity_refuses(
+        self,
+    ) -> None:
+        record = self.record.model_copy(
+            update={
+                "project_id": "own-project",
+                "environment_id": "own-environment",
+                "compose_id": "own-compose",
+                "credential_bindings_sha256": "a" * 64,
+            }
+        )
+        journal = {
+            "operation_state": "reconcile_required",
+            "provider_effect_phase": "prepare",
+            "provider_effect_started_at": "2026-10-19T00:00:00Z",
+            "_provider_operation_key": "private-key",
+            "_stored_refusal_code": "",
+        }
+        observation: dict[str, object] = {
+            "state": record.state,
+            "copies": [],
+            "completed": False,
+            "raw_source_retained": False,
+            "prepare_not_started": True,
+        }
+        for code in (
+            RehearsalPrerequisite.ARTIFACT_UNAVAILABLE,
+            RehearsalPrerequisite.CREDENTIALS_UNAVAILABLE,
+            RehearsalPrerequisite.STATE_UNVERIFIED,
+            RehearsalPrerequisite.PLACEMENT_UNAVAILABLE,
+        ):
+            with (
+                patch.object(
+                    OdooRehearsalAdapter, "operation_readback", return_value=dict(journal)
+                ),
+                patch.object(OdooRehearsalAdapter, "failure_events", return_value=([], True)),
+                patch.object(OdooRehearsalAdapter, "host", return_value=dict(observation)),
+                patch.object(OdooRehearsalAdapter, "inputs", side_effect=RehearsalRefused(code)),
+            ):
+                if code in {
+                    RehearsalPrerequisite.STATE_UNVERIFIED,
+                    RehearsalPrerequisite.PLACEMENT_UNAVAILABLE,
+                }:
+                    with self.assertRaises(RehearsalRefused):
+                        self.adapter("prepare").native_readback(record, "original", lambda: None)
+                else:
+                    result = self.adapter("prepare").native_readback(
+                        record, "original", lambda: None
+                    )
+                    self.assertEqual(result["recovery_reason"], code)
+                    self.assertEqual(result["recovery_disposition"], "hold_unknown")
+                    self.assertEqual(
+                        result["provider_effect_phase"], journal["provider_effect_phase"]
+                    )
+                    self.assertTrue(result["original_key_required"])
+
     def test_host_busy_result_is_typed_and_bound_without_asserting_isolation(self) -> None:
         import json
 
@@ -924,6 +1031,19 @@ class RehearsalScenario(unittest.TestCase):
             self.assertEqual(result["recovery_disposition"], "hold_unknown")
             self.assertTrue(result["original_key_required"])
             events.assert_not_called()
+
+        with (
+            patch.object(
+                OdooRehearsalAdapter,
+                "operation_readback",
+                side_effect=RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED),
+            ),
+            patch.object(OdooRehearsalAdapter, "host", return_value={"completed": True}),
+        ):
+            result = adapter.native_readback(self.record, "original", lambda: None)
+        self.assertTrue(result["completed"])
+        self.assertNotIn("operation_journal_status", result)
+        self.assertNotIn("operation_state", result)
 
     def run_operation(
         self, adapter: OdooRehearsalAdapter, key: str

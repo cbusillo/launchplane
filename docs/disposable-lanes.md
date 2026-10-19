@@ -2633,7 +2633,12 @@ Events are read
 before launching the observation schedule. They are diagnostic candidates, not proof
 that an event belongs to the original apply. Provider prose and source data are
 withheld. Preserve the original request, key and all partial custody until a
-supported continuation is established.
+supported continuation is established. Any failed readback preserves a supplied
+original key, including authorization and transport refusals. A read failure
+cannot establish release. Lock loss and integrity contradictions remain
+refusals; a fresh pre-effect rejection is determinate only after its reservation
+is released. A completed native receipt makes no claim that a journal bound to
+a pre-publication record matches the published record.
 Before a compose exists, prepare readback uses the original intent and key to
 read its exact journal instead of trying to run a host schedule. It returns
 `completed: false`, the operation state, effect phase and checkpoint time, and
