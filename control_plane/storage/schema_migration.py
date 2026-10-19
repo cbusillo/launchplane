@@ -13,6 +13,10 @@ from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 
 from control_plane.storage.postgres import _build_engine
+from control_plane.storage.migrations.versions import (
+    e7c1d5e9a3b6_drop_retired_delivery_tables as retired_delivery,
+    e8d2f6a0b4c7_drop_preview_enablement as retired_preview,
+)
 from control_plane.storage.schema_adoption import schema_stamp_revision_for_engine
 from control_plane.storage.schema_invariants import (
     AUTHZ_COMPATIBILITY_FLOOR_REVISION,
@@ -20,12 +24,13 @@ from control_plane.storage.schema_invariants import (
     PRE_RETIREMENT_ALEMBIC_REVISION,
 )
 
-# #2437 prepares a destructive migration; activation needs separate shared-data
-# and release authority. Keep hosted startup on the installed schema meanwhile.
-SCHEMA_MIGRATION_TARGET_REVISION = PRE_RETIREMENT_ALEMBIC_REVISION
+# Q533 approves only preview enablement. #2437's sibling migration stays held.
+SCHEMA_MIGRATION_TARGET_REVISION = retired_preview.revision
 SCHEMA_MIGRATION_SUPPORTED_REVISIONS = (
     AUTHZ_COMPATIBILITY_FLOOR_REVISION,
     PRE_RETIREMENT_ALEMBIC_REVISION,
+    retired_preview.revision,
+    retired_delivery.revision,
     EXPECTED_ALEMBIC_HEAD_REVISION,
 )
 _SCHEMA_MIGRATION_LOCK_KEY = "launchplane:schema-migration"
@@ -42,14 +47,23 @@ def schema_migration_action(
     if current_revision == target_revision:
         return "current"
     if current_revision in SCHEMA_MIGRATION_SUPPORTED_REVISIONS:
-        current_index = SCHEMA_MIGRATION_SUPPORTED_REVISIONS.index(current_revision)
-        target_index = SCHEMA_MIGRATION_SUPPORTED_REVISIONS.index(target_revision)
-        if current_index > target_index:
+        if target_revision in _alembic_predecessor_revisions(current_revision):
             return "compatible_ahead"
-        return "upgrade"
-    if current_revision in _alembic_predecessor_revisions(target_revision):
+    effective_target = schema_migration_target(
+        current_revision=current_revision, target_revision=target_revision
+    )
+    if current_revision in _alembic_predecessor_revisions(effective_target):
         return "upgrade"
     raise ValueError(f"Unsupported Launchplane database revision {current_revision!r}.")
+
+
+def schema_migration_target(*, current_revision: str, target_revision: str) -> str:
+    # Only a database that has ALREADY applied the held delivery branch may
+    # auto-join it. Explicitly requesting that branch remains the approved-host
+    # application path; when preview has applied, join both on that request.
+    if {current_revision, target_revision} == {retired_delivery.revision, retired_preview.revision}:
+        return EXPECTED_ALEMBIC_HEAD_REVISION
+    return target_revision
 
 
 def _alembic_predecessor_revisions(target_revision: str) -> frozenset[str]:
@@ -88,7 +102,12 @@ def migrate_schema(
                         target_revision=target_revision,
                     )
                     if action == "upgrade":
-                        command.upgrade(alembic_config(database_url), target_revision)
+                        command.upgrade(
+                            alembic_config(database_url),
+                            schema_migration_target(
+                                current_revision=current_revision, target_revision=target_revision
+                            ),
+                        )
                 final_revision = _current_revision(engine)
                 if not final_revision:
                     raise RuntimeError("Launchplane schema migration did not record a revision.")

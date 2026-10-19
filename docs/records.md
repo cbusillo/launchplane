@@ -59,9 +59,10 @@ job-claim records, have no remaining reader. Their ORM models are deleted, and
 the privileged-operation worker no longer requires them at startup. Prepared
 migration `e7c1d5e9a3b6` drops those sixteen tables, provider-delivery inspections,
 and the five older unmodeled authorization/recovery/requirement-authority tables.
-Hosted startup remains on `e6b0c4d8f2a5`, so shipping this migration does not drop
-the shared tables or their rows. The candidate runtime accepts both revisions;
-its schema invariants require only tables with retained consumers.
+Shipping this prepared migration does not authorize dropping these shared
+tables or their rows. The [operations procedure](operations.md#prepared-retired-delivery-table-migration)
+owns the current release target and runtime compatibility set. Schema invariants
+require only tables with retained consumers.
 
 Enrollment, authentication/credential claim, session admission, finite-job
 execution, provider inspection, and joined ordinary-controller writes have been
@@ -153,14 +154,8 @@ LAUNCHPLANE_DATABASE_URL=postgresql+psycopg://... uv run python -m control_plane
 ```
 
 Do not run `alembic upgrade head` directly against the shared service database
-during a staged rollout. The release's migration target is
-`SCHEMA_MIGRATION_TARGET_REVISION` in `control_plane/storage/schema_migration.py`,
-currently held at the revision before the prepared retired-delivery table drop.
-The runtime compatibility set (`RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS`) accepts
-both that revision and the prepared migration head. Applying the drop requires
-the separate approval and backup qualification in the
-[prepared-retirement procedure](operations.md#prepared-retired-delivery-table-migration).
-Other older revisions are accepted only as serialized migration sources.
+during a staged rollout. The [prepared-retirement procedure](operations.md#prepared-retired-delivery-table-migration)
+owns the release target, compatible revisions and separate application authority.
 Rollback requires an image that understands the installed schema. The runtime
 status route reports the observed database
 revision, the image's runtime compatibility set, and its migration target so
@@ -2784,10 +2779,17 @@ credential, runtime grant, or stored record is changed by this code retirement.
 - Retired in #2875. Every open pull request gets a preview (#2735), so opt-in
   enablement has nothing left to decide. No command writes the record and
   tenant renders no longer show enablement rows or request recipes.
-- The `launchplane_preview_enablement` table and its existing rows stay in
-  place; dropping the table would delete data. Detached application retirement
-  still scans those stored payloads, and any `launchplane_preview_enablement/`
-  files left in filesystem state, as an authority source.
+- Director decision Q533 authorizes deletion of Launchplane's own retired
+  enablement rows. Migration `e8d2f6a0b4c7` drops the table on normal service
+  startup, independently of the held delivery-history drop in #2437.
+- Detached application retirement no longer treats enablement as authority,
+  and filesystem import skips it. Existing `launchplane_preview_enablement/`
+  JSON files stay in place; no reader or importer consumes them.
+- Schema adoption trusts an existing Alembic revision. Only unversioned
+  databases are matched against complete supported historical schema shapes;
+  the retired table's presence never advances a stamped database's revision.
+  Downgrade cannot recover deleted rows; recovery uses the pre-migration
+  database backup and matching image.
 
 ## Launchplane Preview Inventory Scan Record
 

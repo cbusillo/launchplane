@@ -16,6 +16,8 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane.storage.migrations.versions import (
     e7c1d5e9a3b6_drop_retired_delivery_tables as retired_delivery,
+    e8d2f6a0b4c7_drop_preview_enablement as retired_preview,
+    e9e3a7b1c5d8_join_retirement_paths as retirement_join,
 )
 
 AUTHZ_COMPATIBILITY_FLOOR_REVISION = "f3b5d7e9a1c2"
@@ -25,7 +27,7 @@ def _migration_head() -> str:
     head = ScriptDirectory(str(Path(__file__).parent / "migrations")).get_current_head()
     if head is None:
         raise ValueError("Launchplane migration graph has no head.")
-    if head != retired_delivery.revision:
+    if head != retirement_join.revision:
         raise ValueError(
             "The prepared retired-delivery migration hold must be reconciled before "
             "advancing the migration head. See docs/operations.md#prepared-retired-"
@@ -39,6 +41,8 @@ EXPECTED_ALEMBIC_HEAD_REVISION = _migration_head()
 PRE_RETIREMENT_ALEMBIC_REVISION = retired_delivery.down_revision
 RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS = (
     PRE_RETIREMENT_ALEMBIC_REVISION,
+    retired_preview.revision,
+    retired_delivery.revision,
     EXPECTED_ALEMBIC_HEAD_REVISION,
 )
 ORDINARY_AGENT_DELIVERY_ACTIVATION_TABLE = "launchplane_ordinary_agent_delivery_activations"

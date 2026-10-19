@@ -200,129 +200,13 @@ fi
                 captured_args = capture_file.read_text(encoding="utf-8").splitlines()
 
             self.assertEqual(result.returncode, 0, msg=result.stderr)
+            self.assertLess(
+                captured_args.index("control_plane.storage.schema_migration"),
+                captured_args.index("serve"),
+            )
             self.assertNotIn("stamp", captured_args)
             self.assertNotIn("--database-url", captured_args)
             self.assertNotIn("postgresql+psycopg://launchplane:test@db/launchplane", captured_args)
-        finally:
-            policy_path.unlink(missing_ok=True)
-
-    def test_stamps_legacy_head_for_unversioned_current_schema(self) -> None:
-        policy_path = Path("/tmp/launchplane-authz.toml")
-        policy_path.unlink(missing_ok=True)
-
-        try:
-            with TemporaryDirectory() as temporary_directory_name:
-                temporary_directory = Path(temporary_directory_name)
-                app_root = temporary_directory / "app"
-                bin_dir = temporary_directory / "bin"
-                capture_file = temporary_directory / "uv-args.txt"
-                app_root.mkdir()
-                bin_dir.mkdir()
-                self._write_fake_uv(bin_dir)
-
-                result = subprocess.run(
-                    [str(self.script_path)],
-                    capture_output=True,
-                    text=True,
-                    env={
-                        **os.environ,
-                        "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
-                        "UV_CAPTURE_FILE": str(capture_file),
-                        "UV_SCHEMA_STATUS": "1",
-                        "UV_LEGACY_REVISION": "b1c3d5e7f9a1",
-                        "LAUNCHPLANE_APP_ROOT": str(app_root),
-                        "LAUNCHPLANE_STATE_DIR": str(temporary_directory / "state"),
-                        "LAUNCHPLANE_POLICY_TOML": "schema_version = 1\n",
-                        "LAUNCHPLANE_SERVICE_HOST": "0.0.0.0",
-                        "LAUNCHPLANE_DATABASE_URL": "postgresql+psycopg://launchplane:test@db/launchplane",
-                    },
-                    check=False,
-                )
-
-                captured_lines = capture_file.read_text(encoding="utf-8").splitlines()
-
-            self.assertEqual(result.returncode, 0, msg=result.stderr)
-            self.assertIn("control_plane.storage.schema_migration", captured_lines)
-        finally:
-            policy_path.unlink(missing_ok=True)
-
-    def test_stamps_legacy_head_for_baseline_stamped_current_schema(self) -> None:
-        policy_path = Path("/tmp/launchplane-authz.toml")
-        policy_path.unlink(missing_ok=True)
-
-        try:
-            with TemporaryDirectory() as temporary_directory_name:
-                temporary_directory = Path(temporary_directory_name)
-                app_root = temporary_directory / "app"
-                bin_dir = temporary_directory / "bin"
-                capture_file = temporary_directory / "uv-args.txt"
-                app_root.mkdir()
-                bin_dir.mkdir()
-                self._write_fake_uv(bin_dir)
-
-                result = subprocess.run(
-                    [str(self.script_path)],
-                    capture_output=True,
-                    text=True,
-                    env={
-                        **os.environ,
-                        "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
-                        "UV_CAPTURE_FILE": str(capture_file),
-                        "UV_SCHEMA_STATUS": "0",
-                        "UV_LEGACY_REVISION": "b1c3d5e7f9a1",
-                        "LAUNCHPLANE_APP_ROOT": str(app_root),
-                        "LAUNCHPLANE_STATE_DIR": str(temporary_directory / "state"),
-                        "LAUNCHPLANE_POLICY_TOML": "schema_version = 1\n",
-                        "LAUNCHPLANE_SERVICE_HOST": "0.0.0.0",
-                        "LAUNCHPLANE_DATABASE_URL": "postgresql+psycopg://launchplane:test@db/launchplane",
-                    },
-                    check=False,
-                )
-
-                captured_lines = capture_file.read_text(encoding="utf-8").splitlines()
-
-            self.assertEqual(result.returncode, 0, msg=result.stderr)
-            self.assertIn("control_plane.storage.schema_migration", captured_lines)
-        finally:
-            policy_path.unlink(missing_ok=True)
-
-    def test_stamps_baseline_for_unversioned_baseline_schema(self) -> None:
-        policy_path = Path("/tmp/launchplane-authz.toml")
-        policy_path.unlink(missing_ok=True)
-
-        try:
-            with TemporaryDirectory() as temporary_directory_name:
-                temporary_directory = Path(temporary_directory_name)
-                app_root = temporary_directory / "app"
-                bin_dir = temporary_directory / "bin"
-                capture_file = temporary_directory / "uv-args.txt"
-                app_root.mkdir()
-                bin_dir.mkdir()
-                self._write_fake_uv(bin_dir)
-
-                result = subprocess.run(
-                    [str(self.script_path)],
-                    capture_output=True,
-                    text=True,
-                    env={
-                        **os.environ,
-                        "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
-                        "UV_CAPTURE_FILE": str(capture_file),
-                        "UV_SCHEMA_STATUS": "1",
-                        "UV_LEGACY_REVISION": "fe94a0486977",
-                        "LAUNCHPLANE_APP_ROOT": str(app_root),
-                        "LAUNCHPLANE_STATE_DIR": str(temporary_directory / "state"),
-                        "LAUNCHPLANE_POLICY_TOML": "schema_version = 1\n",
-                        "LAUNCHPLANE_SERVICE_HOST": "0.0.0.0",
-                        "LAUNCHPLANE_DATABASE_URL": "postgresql+psycopg://launchplane:test@db/launchplane",
-                    },
-                    check=False,
-                )
-
-                captured_lines = capture_file.read_text(encoding="utf-8").splitlines()
-
-            self.assertEqual(result.returncode, 0, msg=result.stderr)
-            self.assertIn("control_plane.storage.schema_migration", captured_lines)
         finally:
             policy_path.unlink(missing_ok=True)
 
