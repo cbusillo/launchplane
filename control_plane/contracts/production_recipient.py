@@ -124,6 +124,7 @@ class ProductionRecipientRecord(BaseModel):
     prior_attempts: list[dict[str, Any]] = Field(default_factory=list)
     upstream_proof: dict[str, Any] = Field(default_factory=dict)
     recovery_proof: dict[str, Any] = Field(default_factory=dict)
+    published_recovery_proofs: dict[str, dict[str, Any]] = Field(default_factory=dict)
     publication: dict[str, Any] = Field(default_factory=dict)
     continuation: dict[str, Any] = Field(default_factory=dict)
     activation: dict[str, Any] = Field(default_factory=dict)
@@ -183,9 +184,17 @@ class RecipientRecoveryRequest(BaseModel):
 
     context: str = Field(min_length=1)
     preparation_plan_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    purpose: Literal["bootstrap", "published"] = "bootstrap"
+    generation: str = Field(default="", max_length=128, pattern=r"^[A-Za-z0-9_-]*$")
     mode: Literal["dry-run", "apply", "readback", "receipt"] = "dry-run"
     reason: str = Field(min_length=1)
     reviewed_plan_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
+
+    @model_validator(mode="after")
+    def validate_generation(self) -> Self:
+        if (self.purpose == "published") != bool(self.generation):
+            raise ValueError("Only published recovery requires an explicit capture generation.")
+        return self
 
 
 class RecipientRecoveryPlan(BaseModel):
@@ -199,4 +208,12 @@ class RecipientRecoveryPlan(BaseModel):
     capture_sha256: str = ""
     recovered_at: str = ""
     captured_database_empty: bool | None = None
+    purpose: Literal["bootstrap", "published"] = "bootstrap"
+    publication_sha256: str = ""
+    generation: str = ""
+    authority_sha256: str = ""
+    capture_protocol: str = ""
+    capture_started_at: str = ""
+    capture_duration_ms: int | None = None
+    recovery_fresh_until: str = ""
     bootstrap_eligible: Literal[False] = False

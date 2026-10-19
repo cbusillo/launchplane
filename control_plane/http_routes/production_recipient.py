@@ -230,10 +230,18 @@ def register_production_recipient_routes(
                 if not idempotency_key.strip() or row is None or row.state != "completed":
                     raise ValueError("The completed original recovery receipt is required.")
                 result = RecipientRecoveryPlan.model_validate(row.response_payload.get("result"))
-                if (result.product, result.context, result.preparation_plan_sha256) != (
+                if (
+                    result.product,
+                    result.context,
+                    result.preparation_plan_sha256,
+                    result.purpose,
+                    result.generation,
+                ) != (
                     product,
                     body.context,
                     body.preparation_plan_sha256,
+                    body.purpose,
+                    body.generation,
                 ):
                     raise ValueError("The receipt belongs to another preparation.")
                 return accepted_evidence_response(

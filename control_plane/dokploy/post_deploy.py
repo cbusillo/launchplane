@@ -216,6 +216,8 @@ ODOO_POST_DEPLOY_NUMERIC_READBACK_MARKERS = frozenset(
         "website_bootstrap_website_id",
         INTEGRATION_READBACK_CHECKED_MARKER,
         "recipient_recovery_epoch",
+        "recipient_recovery_started",
+        "recipient_recovery_duration_ms",
     }
 )
 ODOO_POST_DEPLOY_READBACK_MARKERS = (
@@ -394,6 +396,8 @@ def _safe_odoo_post_deploy_marker(key: str, value: str) -> bool:
         "recipient_upstreams_binding",
         "recipient_recovery_binding",
         "recipient_recovery_capture",
+        "recipient_recovery_source",
+        "recipient_recovery_data",
         ODOO_PREVIEW_RESOURCES_BINDING_MARKER,
     }:
         return re.fullmatch(r"[a-f0-9]{64}", value) is not None

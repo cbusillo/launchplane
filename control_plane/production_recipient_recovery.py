@@ -26,9 +26,11 @@ from control_plane.provider_operations import (
     ProviderMutationUnknownError,
     ProviderObservation,
     ProviderOperationLease,
+    ProviderEvidenceLease,
     provider_operation_response_payload,
 )
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 
 RECOVERY_ROUTE = "/v1/products/{product}/production-recipient/recovery"
 
@@ -45,12 +47,31 @@ class RecipientRecoveryAdapter:
     original_key: str = ""
 
     def target_key(self) -> str:
+        if self.request.purpose == "published":
+            from control_plane.workflows.generic_web_deploy_provider import (
+                generic_web_provider_target_key,
+            )
+
+            record = custody(self.store, self.product, self.request.context)
+            if record is None:
+                raise ValueError("Published recipient custody is required.")
+            return generic_web_provider_target_key(
+                provider_id="dokploy",
+                context=record.context,
+                instance="prod",
+                target_type="compose",
+                target_id=record.target_id,
+            )
         return "production-recipient:" + self.product + ":" + self.request.context
 
     def reconciliation_key(self) -> str:
         return self.request.reviewed_plan_sha256
 
     def current(self) -> tuple[ProductionRecipientRecord, RecipientRecoveryPlan]:
+        if self.request.purpose == "published":
+            from control_plane.production_recipient_published_recovery import published_current
+
+            return published_current(self)
         record = custody(self.store, self.product, self.request.context)
         if (
             record is None
@@ -108,21 +129,52 @@ class RecipientRecoveryAdapter:
     def host_spec(
         self, record: ProductionRecipientRecord, result: RecipientRecoveryPlan
     ) -> dict[str, object]:
-        rendered = qualified_render(record, runtime_values(self.store, self.root, record))
-        return {
+        rendered = qualified_render(
+            record,
+            runtime_values(
+                self.store, self.root, record, published=self.request.purpose == "published"
+            ),
+        )
+        spec = {
             **resource_spec(record),
             "prepare": False,
             "recover": True,
             "recovery_binding": result.plan_sha256,
             "database_image": rendered["services"][record.request.database_service]["image"],
         }
+        if self.request.purpose == "published":
+            from control_plane.production_recipient_published_recovery import published_mounts
+
+            spec.update(
+                {
+                    "application_image": record.image_reference,
+                    "application_service": record.request.application_service,
+                    "database_service": record.request.database_service,
+                    "mounts": published_mounts(record, rendered),
+                }
+            )
+        return spec
+
+    def host_program(self) -> str:
+        if self.request.purpose == "published":
+            from control_plane.production_recipient_published_host import PUBLISHED_RECOVERY_PROGRAM
+
+            return PUBLISHED_RECOVERY_PROGRAM
+        return RECOVERY_PROGRAM
 
     def record_host_result(
         self,
         record: ProductionRecipientRecord,
         result: RecipientRecoveryPlan,
         evidence: dict[str, str],
+        reservation: LaunchplaneIdempotencyRecord | None = None,
     ) -> RecipientRecoveryPlan:
+        if self.request.purpose == "published":
+            from control_plane.production_recipient_published_recovery import (
+                record_published_result,
+            )
+
+            return record_published_result(self, record, result, evidence, reservation)
         if (
             evidence.get("recipient_recovery_ok") != "true"
             or evidence.get("recipient_recovery_binding") != result.plan_sha256
@@ -173,7 +225,7 @@ class RecipientRecoveryAdapter:
                     self.root,
                     record,
                     {**self.host_spec(record, result), "inspect": True},
-                    RECOVERY_PROGRAM,
+                    self.host_program(),
                     observe_checkpoint,
                 )
                 if evidence.get("recipient_recovery_binding") != reconciliation_key:
@@ -201,7 +253,11 @@ class RecipientRecoveryAdapter:
             record, result = self.current()
             if not self.original_key or result.plan_sha256 != self.request.reviewed_plan_sha256:
                 raise ValueError("Review the current recovery plan and retain its original key.")
-            if record.recovery_proof:
+            if self.request.purpose == "published" and not isinstance(lease, ProviderEvidenceLease):
+                raise ValueError(
+                    "Published recovery requires a transactionally fenced evidence lease."
+                )
+            if result.recovered:
                 return ProviderMutationOutcome(
                     202,
                     provider_operation_response_payload(
@@ -221,11 +277,16 @@ class RecipientRecoveryAdapter:
                 self.root,
                 record,
                 self.host_spec(record, result),
-                RECOVERY_PROGRAM,
+                self.host_program(),
                 checkpoint,
             )
             lease.assert_current()
-            completed = self.record_host_result(record, result, evidence)
+            completed = self.record_host_result(
+                record,
+                result,
+                evidence,
+                lease.evidence_reservation() if isinstance(lease, ProviderEvidenceLease) else None,
+            )
             return ProviderMutationOutcome(
                 202,
                 provider_operation_response_payload(

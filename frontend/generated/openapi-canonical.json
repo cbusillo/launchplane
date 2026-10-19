@@ -42608,6 +42608,13 @@
             "title": "Context",
             "type": "string"
           },
+          "generation": {
+            "default": "",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9_-]*$",
+            "title": "Generation",
+            "type": "string"
+          },
           "mode": {
             "default": "dry-run",
             "enum": [
@@ -42622,6 +42629,15 @@
           "preparation_plan_sha256": {
             "pattern": "^[a-f0-9]{64}$",
             "title": "Preparation Plan Sha256",
+            "type": "string"
+          },
+          "purpose": {
+            "default": "bootstrap",
+            "enum": [
+              "bootstrap",
+              "published"
+            ],
+            "title": "Purpose",
             "type": "string"
           },
           "reason": {

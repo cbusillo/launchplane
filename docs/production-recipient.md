@@ -172,6 +172,74 @@ After the move's recovery obligations end, the maintaining session reviews that 
 archive directory for retirement. This scoped capture does not replace Gate C's
 independent destination backup qualification on shiny-infra-ops#528.
 
+### Recovery after publication
+
+The same recovery route and `--recovery` terminal consumer support
+`"purpose": "published"` with an explicit `"generation": "post-window-1"` in the
+planning request. The default purpose remains `bootstrap`. Use a new generation
+for a genuinely new observation; changing the generation does not establish
+freshness. Dry-run, reviewed apply, readback and original-key receipt retain the
+existing original preparer identity and setup authority. This capability does
+not approve a live capture or grant an agent production setup access.
+
+Published recovery requires the exact currently owned publication and its
+authority, recipient, artifact and storage. It stores a separate proof without
+changing the cold bootstrap proof. Current authority is compared again inside
+the serialized custody transaction, together with the current provider lease.
+An inverse, changed publication or changed authority invalidates the plan and
+cannot acquire a fresh proof from a historical receipt. The plan names the
+capture protocol; the durable proof records publication and authority digests,
+capture/archive and logical-data digests, exact host container/storage identity,
+capture start, completion, and the measured capture duration. Its readback time
+never renews those observations. The later old-recipient retirement consumer
+must require a fresh successful post-window proof; this producer does not
+perform retirement or clear its health, ownership, backup or uncertainty gates.
+The protocol records an immutable `recovery_fresh_until` UTC timestamp, 15 minutes
+after actual completion. A consumer must compare its current clock with this
+timestamp and its own post-window requirement; a stored success boolean cannot
+establish freshness. A valid older original-key terminal witness still completes
+as historical recovery, releasing its target reservation so another reviewed
+generation can capture fresh data. Readback and completed-operation replay
+preserve the actual completion and expiry times. Pre-publication evidence refuses commit;
+an unknown capture without a terminal witness remains held. A completed receipt
+is historical evidence, never a new observation or permission to retire.
+
+The current published-storage verifier supports MariaDB plus stable config
+storage. It inventories every running and stopped container and permits only
+the exact pinned, running application and database containers to reference the
+allocated volumes. It captures business databases through `mariadb-dump
+--lock-all-tables`, which holds a database-wide read lock for the dump, including
+nontransactional tables, rather than copying changing database files. See the
+[MariaDB dump contract](https://mariadb.com/docs/server/clients-and-utilities/backup-restore-and-import-clients/mariadb-dump#-x---lock-all-tables).
+Writes can wait during this bounded window. An in-container timeout kills the
+dump connection after at most 110 seconds including lock acquisition; the
+measured capture must complete within 120 seconds. Killing only the host Docker
+client is insufficient. Missing native dump/timeout support or the database
+container's existing root credential capability refuses with no credential
+fallback. The host reads that service credential only inside the database
+container; credentials are not sent in the schedule or returned as evidence.
+
+Config content, permissions and ownership must remain stable before and after
+archive creation and recovery. The source database stays running. Only scratch
+is initialized/restored, with no application, network, published port, source
+mount, replication, event execution, binary logging or inherited service
+credentials. Integrity checks and a nonempty business table are required.
+A canonical dump from the restored database must match the captured SQL
+artifact exactly. This conservative verifier refuses unsupported or
+nondeterministic roundtrips rather than claiming useful recovery from an empty
+database or startup alone. System/auth databases are initialized independently
+and are not copied. Captures have a 2 GiB source/dump bound and require free
+scratch space before starting; captured data remains in service-owned host
+custody, never in response packets.
+
+Each generation retains its value-free proof and original-key binding. The
+shared actual-provider target reservation excludes other recovery, inverse and
+deployment operations. An uncertain capture retains its capture and running
+witness; it cannot be repeated under a new key. Original-key reconciliation
+reads only the terminal host witness and verifies the retained archive. A known
+failed attempt permits retry only after verified cleanup. No missing witness
+or timed-out Docker transport proves absence of an effect.
+
 After changing either verifier, the implementing agent runs the focused host and
 adapter tests plus the real storage gates before handoff. PostgreSQL uses the
 repository's normal integration gate. The explicit disposable MariaDB proof is:
@@ -181,6 +249,10 @@ LAUNCHPLANE_TEST_MARIADB_IMAGE=<reviewed-immutable-mariadb-image> \
 LAUNCHPLANE_TEST_MARIADB_DIRECTORY=<task-local-docker-accessible-directory> \
 uv run --extra dev python -m unittest tests.test_production_recipient_mariadb
 ```
+
+Run `tests.test_production_recipient_published_host.RealPublishedMariaDBTests`
+with the same explicit local-image variables to prove populated InnoDB and
+nontransactional Aria recovery while their original databases remain running.
 
 This gate proves empty restoration, populated restoration with a recovered-row
 query, rejection of a real corrupt Aria table, and partial-initialization refusal.

@@ -169,8 +169,14 @@ def same_recipient_authority(actual: dict[str, Any], expected: dict[str, Any]) -
 
 
 def runtime_values(
-    store: PostgresRecordStore, root: Path, record: ProductionRecipientRecord
+    store: PostgresRecordStore,
+    root: Path,
+    record: ProductionRecipientRecord,
+    *,
+    published: bool = False,
 ) -> dict[str, str]:
+    if published and (record.phase != "published" or not record.publication):
+        raise ValueError("Published rendering requires a current recorded publication.")
     environment = runtime_environments.resolve_site_runtime_environment(
         control_plane_root=root,
         context_name=record.context,
@@ -188,7 +194,9 @@ def runtime_values(
     for role, key in record.request.volume_keys.items():
         values[key] = record.volumes[role]
     for key, value in record.request.ports.items():
-        if values.get(key) == str(value) or record.retained_target.env.get(key) == str(value):
+        if not published and (
+            values.get(key) == str(value) or record.retained_target.env.get(key) == str(value)
+        ):
             raise ValueError("Candidate ports must differ from production ports.")
         values[key] = str(value)
     values["DOCKER_IMAGE_REFERENCE"] = record.image_reference
@@ -535,7 +543,7 @@ class ProductionRecipientAdapter:
         )
         return replacement
 
-    def verify(self, record: ProductionRecipientRecord) -> None:
+    def verify(self, record: ProductionRecipientRecord, *, published: bool = False) -> None:
         self.require_unchanged(record)
         host, token = source.read_dokploy_config(control_plane_root=self.root)
         payload = api.fetch_dokploy_target_payload(
@@ -565,7 +573,7 @@ class ProductionRecipientAdapter:
             raise ValueError("Recipient identity, isolation or configuration changed.")
         if json.loads(str(payload.get("composeFile") or "null")) != expected:
             raise ValueError("The provider source differs from the reviewed immutable source.")
-        values = runtime_values(self.store, self.root, record)
+        values = runtime_values(self.store, self.root, record, published=published)
         allowed_environments = [values]
         if record.execution.get("runtime_identity"):
             from control_plane.contracts.runtime_identity import (

@@ -12532,6 +12532,30 @@ class RealPostgresRecipientRecoveryTests(unittest.TestCase):
         self.fixture.test_terminal_clean_failure_retries_original_key_with_host_witness()
 
 
+class RealPostgresPublishedRecipientRecoveryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from tests import test_production_recipient_published_recovery as recovery
+
+        self.fixture = recovery.PublishedRecoveryTests()
+        database = _head_postgres_database()
+        self.fixture.database_url = database.__enter__()
+        self.addCleanup(database.__exit__, None, None, None)
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+
+    def test_completed_proof_and_original_key_replay(self) -> None:
+        self.fixture.test_published_capture_is_fresh_separate_and_replays_only_its_original_key()
+
+    def test_two_reservations_exclude_competing_generations(self) -> None:
+        self.fixture.test_second_generation_cannot_dispatch_while_first_target_is_held()
+
+    def test_authority_race_cannot_commit_a_proof(self) -> None:
+        self.fixture.test_authority_changes_between_last_read_and_atomic_write_are_refused()
+
+    def test_unknown_capture_adopts_only_original_host_witness(self) -> None:
+        self.fixture.test_lost_reply_adopts_only_terminal_host_witness_without_recapture()
+
+
 class RealPostgresProductionRecipientTests(unittest.TestCase):
     def setUp(self) -> None:
         from tests import test_production_recipient as recipients

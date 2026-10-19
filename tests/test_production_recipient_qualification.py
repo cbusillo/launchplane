@@ -202,7 +202,7 @@ class RecipientUpstreamTests(unittest.TestCase):
             update={"mode": "dry-run", "reviewed_plan_sha256": ""}
         )
 
-        def managed_values(store: Any, root: Any, record: Any) -> dict[str, str]:
+        def managed_values(store: Any, root: Any, record: Any, **_kwargs: Any) -> dict[str, str]:
             return {
                 **self.values,
                 **{key: record.volumes[role] for role, key in record.request.volume_keys.items()},
@@ -256,7 +256,7 @@ class RecipientUpstreamTests(unittest.TestCase):
             update={"mode": "dry-run", "reviewed_plan_sha256": ""}
         )
 
-        def managed_values(store: Any, root: Any, record: Any) -> dict[str, str]:
+        def managed_values(store: Any, root: Any, record: Any, **_kwargs: Any) -> dict[str, str]:
             return {
                 **self.values,
                 **{key: record.volumes[role] for role, key in record.request.volume_keys.items()},
