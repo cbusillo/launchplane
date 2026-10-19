@@ -37,7 +37,11 @@ from control_plane.http_routes.odoo_runtime import (
     register_odoo_runtime_read_routes,
 )
 from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
-from control_plane.odoo_instance_overrides import config_parameter_secret_env_key
+from control_plane.odoo_instance_overrides import (
+    ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY,
+    config_parameter_secret_env_key,
+    render_post_deploy_payload,
+)
 from tests.support.auth import _identity
 from tests.support.http import request
 from tests.test_odoo_import_diagnostics import DiagnosticFixture, PRIVATE
@@ -351,6 +355,45 @@ class PrerequisiteTests(unittest.TestCase):
     def test_runtime_source_layout_does_not_require_importable_odoo(self) -> None:
         with patch("importlib.util.find_spec", return_value=None):
             self.assertEqual(self.read().runtime, "verified")
+
+    def test_override_literal_and_real_delivery_payload_are_explicit_authority(self) -> None:
+        verify_key = SOURCE_PREFIXES["cm_data"] + ".ssl_verify"
+        literals: dict[str, Any] = {**self.values, verify_key: False}
+        parameters = []
+        for key, value in literals.items():
+            source = next(
+                name for name, prefix in SOURCE_PREFIXES.items() if key.startswith(prefix + ".")
+            )
+            parameters.append(
+                OdooConfigParameterOverride(
+                    key=key,
+                    value=OdooOverrideValue(source="secret_binding", secret_binding_id=source)
+                    if key.endswith(".password")
+                    else OdooOverrideValue(source="literal", value=value),
+                )
+            )
+        record = OdooInstanceOverrideRecord(
+            context=self.fixture.context,
+            instance="testing",
+            config_parameters=tuple(parameters),
+            updated_at=self.fixture.runtime.updated_at,
+        )
+        self.fixture.store.read_odoo_instance_override_record.side_effect = None
+        self.fixture.store.read_odoo_instance_override_record.return_value = record
+        payload = render_post_deploy_payload(
+            record, record_store=self.fixture.store, clear_undeclared_shopify=False
+        )
+        self.env[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY] = base64.b64encode(
+            payload.model_dump_json().encode()
+        ).decode()
+        self.values[verify_key] = str(False)
+        source_result = self.read().sources[0]
+        option = next(option for option in source_result.options if option.field == "ssl_verify")
+        self.assertEqual(option.authority, "explicit")
+        self.assertEqual(option.delivered, "explicit")
+        self.assertEqual(option.authority_applied, "match")
+        self.assertEqual(option.delivered_applied, "match")
+        self.assertEqual(source_result.applied_tls_configuration, "verification_disabled")
 
     def test_password_reference_metadata_is_separate_from_local_password_agreement(self) -> None:
         record = OdooInstanceOverrideRecord(
