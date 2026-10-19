@@ -8,8 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from control_plane.contracts.product_reconcile import ProductReconcileRequestRecord
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.storage.postgres import PostgresRecordStore
-
-TESTING_RETRY_ROUTE = "/v1/products/{product}/testing-retry"
+from control_plane.contracts.testing_retry import TESTING_RETRY_ROUTE as TESTING_RETRY_ROUTE
 
 
 class TestingRetryRefused(ValueError):
@@ -66,6 +65,7 @@ def build_testing_retry_plan(
     )
     from control_plane.odoo_testing_restore import read_current_testing_generation
     from control_plane.testing_lane_hold import read_staff_testing_hold
+    from control_plane.testing_restore_prerequisite import incomplete_testing_restore
 
     profile = store.read_product_profile_record(product)
     lane = resolve_odoo_target_replacement_apply_lane(
@@ -77,6 +77,13 @@ def build_testing_retry_plan(
         store, product=product, context=lane.context, instance="testing", bootstrap_preparation=True
     )
     if generation is not None and not generation.completed_at:
+        raise TestingRetryRefused("testing_retry_restore_incomplete")
+    if (
+        incomplete_testing_restore(
+            store, context=lane.context, instance="testing", generation=generation
+        )
+        is not None
+    ):
         raise TestingRetryRefused("testing_retry_restore_incomplete")
     binding = testing_retry_binding(store, product, lane.context)
     recorded = store.read_product_reconcile_request(f"{product}:testing")

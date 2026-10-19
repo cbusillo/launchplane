@@ -44,20 +44,6 @@ class ProductReconcileTarget(BaseModel):
         )
 
 
-class TestingRetryRearm(BaseModel):
-    """A reviewed recovery boundary, never a replacement for operation history."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    artifact_id: str = Field(min_length=1)
-    context: str = Field(min_length=1)
-    after_operation_id: str = Field(min_length=1)
-    lane_binding_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    recorded_at: str = Field(min_length=1)
-    recorded_by: str = Field(min_length=1)
-    reason: str = Field(min_length=1)
-
-
 class ProductReconcileRequestRecord(BaseModel):
     """At most one per target; new requests fold into it instead of queueing more."""
 
@@ -78,9 +64,6 @@ class ProductReconcileRequestRecord(BaseModel):
     attempt: int = Field(default=0, ge=0)
     last_error: str = ""
     last_plan: dict[str, JsonValue] = Field(default_factory=dict)
-    testing_retry_rearm: TestingRetryRearm | None = Field(
-        default=None, exclude_if=lambda value: value is None
-    )
 
     @model_validator(mode="after")
     def validate_target(self) -> "ProductReconcileRequestRecord":

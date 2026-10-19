@@ -99,6 +99,15 @@ class OperationSpec:
 
 OPERATION_SPECS = (
     OperationSpec(
+        "GET",
+        TESTING_RETRY_ROUTE,
+        "Review recovery of an exhausted Odoo testing artifact using read authority; queue no work.",
+        ("service_api",),
+        ("read",),
+        "none",
+        (),
+    ),
+    OperationSpec(
         "POST",
         TESTING_RETRY_ROUTE,
         "Review and re-arm the exhausted attempt budget for the exact verified Odoo testing artifact, retaining existing data and all operation history; the reconciler performs deployment.",

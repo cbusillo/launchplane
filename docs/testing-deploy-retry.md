@@ -5,16 +5,18 @@ control-plane failure, use `POST /v1/products/{product}/testing-retry` on the
 deployed Launchplane service. This control re-arms the reconciler for the exact
 desired artifact, retaining existing data. It does not rebuild the product.
 Use the current service contract's `rearm_testing_retry` operation with an
-authenticated operator that already has `odoo_target_replacement_apply.execute`
+authenticated caller that already has `odoo_target_replacement_apply.execute`
 for that product's testing lane. No new grant is part of this operation.
 
 1. Read the product's reconcile requests and take `desired_artifact_id` and
    `desired_commit` from its testing plan. Fix the underlying failure first.
-2. POST a review request with `mode: "dry-run"`, `instance: "testing"`,
-   `artifact_id`, `source_git_ref` (the desired commit), and a concrete `reason`.
+2. GET that route with query parameters `artifact_id`, `source_git_ref` (the
+   desired commit), and a concrete `reason`. Review uses `product_environment.read`
+   and needs no write grant or CSRF token. A write-capable caller may also POST
+   these inputs with `mode: "dry-run"` and `instance: "testing"`.
    Review the returned artifact, source, last failed operation and `plan_sha256`.
    This step writes no record and queues nothing.
-3. POST the same inputs with `mode: "apply"` and
+3. POST those artifact/source/reason inputs with `mode: "apply"`, `instance: "testing"` and
    `reviewed_plan_sha256` equal to that digest. Supply one unique
    `Idempotency-Key` header. Retain this exact request and key.
 4. Read the testing reconcile request and its queued operation, then the
@@ -46,5 +48,6 @@ testing restore must finish through its own supported recovery first.
 
 This route accepts only testing lanes. It neither promotes to production nor
 clears old operations, restores data, changes access, or lifts a staff hold.
-The service and its worker must both run this version before use. A stored
-re-arm is forward-only record state; use a compatible service image for recovery.
+The service and its worker must both run this version before use. Re-arm metadata
+lives in a separate record; the queue payload keeps its existing format so an
+older Launchplane image can still read and claim work after emergency rollback.

@@ -447,8 +447,12 @@ from control_plane.contracts.product_retirement import (
     product_retirement_secret_authority,
 )
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
-from control_plane.contracts.product_reconcile import (
+from control_plane.contracts.testing_retry import (
     TestingRetryRearm,
+    TESTING_RETRY_REARM_SCOPE,
+    TESTING_RETRY_REARM_ROUTE,
+)
+from control_plane.contracts.product_reconcile import (
     PRODUCT_RECONCILE_REQUEST_STATES,
     GitHubAppWebhookDeliveryRecord,
     ProductReconcileLeaseLostError,
@@ -24127,6 +24131,14 @@ class PostgresRecordStore(HumanSessionStore):
         with self._session_factory() as session:
             return self._testing_retry_binding_in_session(session, product=product, context=context)
 
+    def read_testing_retry_rearm(self, product: str) -> TestingRetryRearm | None:
+        record = self.read_idempotency_record(
+            scope=TESTING_RETRY_REARM_SCOPE,
+            route_path=TESTING_RETRY_REARM_ROUTE,
+            idempotency_key=product,
+        )
+        return TestingRetryRearm.model_validate(record.response_payload) if record else None
+
     def commit_testing_retry_rearm(
         self,
         *,
@@ -24189,9 +24201,25 @@ class PostgresRecordStore(HumanSessionStore):
                 is not None
             ):
                 raise TestingRetryRefused("testing_retry_busy")
-            rearmed = expected.model_copy(update={"testing_retry_rearm": rearm})
-            self._merge_product_reconcile_request_row(session, rearmed)
-            session.flush()
+            # An isolated metadata record is invisible to older workers. Never add
+            # fields to their strict queue payload: emergency image rollback must
+            # still be able to claim and list every product's requests.
+            marker = LaunchplaneIdempotencyRecord(
+                record_id=build_launchplane_mutation_reservation_id(
+                    scope=TESTING_RETRY_REARM_SCOPE,
+                    route_path=TESTING_RETRY_REARM_ROUTE,
+                    idempotency_key=expected.product,
+                ),
+                scope=TESTING_RETRY_REARM_SCOPE,
+                route_path=TESTING_RETRY_REARM_ROUTE,
+                idempotency_key=expected.product,
+                request_fingerprint=canonical_json_sha256(rearm.model_dump(mode="json")),
+                response_status_code=202,
+                response_trace_id=mutation.response_trace_id,
+                recorded_at=self._database_mutation_timestamp(session),
+                response_payload=rearm.model_dump(mode="json"),
+            )
+            session.merge(self._idempotency_row(marker))
             self._fold_product_reconcile_request(
                 session,
                 target=ProductReconcileTarget(product=expected.product, target_kind="testing"),

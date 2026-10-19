@@ -11985,7 +11985,7 @@ class RealPostgresTestingRetryTests(testing_retry_tests.TestingRetryTests):
         super().setUp()
 
     def test_concurrent_same_key_commits_one_rearm_and_one_wakeup(self) -> None:
-        from control_plane.contracts.product_reconcile import TestingRetryRearm
+        from control_plane.contracts.testing_retry import TestingRetryRearm
         from control_plane.testing_retry import TestingRetryRequest, build_testing_retry_plan
 
         body = self.reviewed()

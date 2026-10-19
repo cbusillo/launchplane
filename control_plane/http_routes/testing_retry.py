@@ -4,11 +4,11 @@ from collections.abc import Callable
 from typing import Annotated, NoReturn
 
 import click
-from fastapi import Depends, Header, Path
+from fastapi import Depends, Header, Path, Query
 from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane.build_provenance import BuildProvenanceError
-from control_plane.contracts.product_reconcile import TestingRetryRearm
+from control_plane.contracts.testing_retry import TestingRetryRearm
 from control_plane.http_routes.mutation_support import (
     AcceptedEvidenceResponse,
     accepted_evidence_response,
@@ -38,12 +38,12 @@ def register_testing_retry_routes(
     dependencies: ReadRouteDependencies,
     mutation_identity: Callable[..., LaunchplaneIdentity],
 ) -> None:
-    def retry(
-        product: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+    def perform_retry(
+        product: str,
         body: TestingRetryRequest,
-        identity: Annotated[LaunchplaneIdentity, Depends(mutation_identity)],
-        record_store: Annotated[object, Depends(dependencies.get_record_store)],
-        idempotency_key: Annotated[str, Header(alias="Idempotency-Key", max_length=256)] = "",
+        identity: LaunchplaneIdentity,
+        record_store: object,
+        idempotency_key: str,
     ) -> AcceptedEvidenceResponse:
         trace = dependencies.next_trace_id()
 
@@ -167,6 +167,115 @@ def register_testing_retry_routes(
         except SQLAlchemyError:
             refusal("testing_retry_storage_unavailable", 503)
 
+    def retry(
+        product: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        body: TestingRetryRequest,
+        identity: Annotated[LaunchplaneIdentity, Depends(mutation_identity)],
+        record_store: Annotated[object, Depends(dependencies.get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key", max_length=256)] = "",
+    ) -> AcceptedEvidenceResponse:
+        try:
+            return perform_retry(product, body, identity, record_store, idempotency_key)
+        except SQLAlchemyError as error:
+            raise dependencies.http_error(
+                status_code=503,
+                trace_id=dependencies.next_trace_id(),
+                code="testing_retry_storage_unavailable",
+                message="Testing retry storage is unavailable.",
+            ) from error
+
+    def review(
+        product: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        artifact_id: Annotated[str, Query(min_length=1)],
+        source_git_ref: Annotated[str, Query(pattern=r"^[a-f0-9]{40}$")],
+        reason: Annotated[str, Query(min_length=1, max_length=1000)],
+        identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_identity)],
+        record_store: Annotated[object, Depends(dependencies.get_record_store)],
+    ) -> AcceptedEvidenceResponse:
+        trace = dependencies.next_trace_id()
+        try:
+            if not isinstance(record_store, PostgresRecordStore):
+                raise dependencies.http_error(
+                    status_code=503,
+                    trace_id=trace,
+                    code="database_storage_required",
+                    message="Testing retry requires database storage.",
+                )
+            lane = resolve_odoo_target_replacement_apply_lane(
+                record_store=record_store, product=product, instance="testing"
+            )
+            if not dependencies.authorization_allows(
+                identity=identity,
+                action="product_environment.read",
+                product=product,
+                context=lane.context,
+                target=AuthorizationTarget(scope="instance", instances=("testing",)),
+            ):
+                raise dependencies.http_error(
+                    status_code=403,
+                    trace_id=trace,
+                    code="authorization_denied",
+                    message="Caller cannot review this testing lane.",
+                )
+            body = TestingRetryRequest(
+                artifact_id=artifact_id, source_git_ref=source_git_ref, reason=reason
+            )
+            plan = build_testing_retry_plan(record_store, product, body)
+            return accepted_evidence_response(
+                trace_id=trace,
+                records={},
+                result={
+                    "product": product,
+                    "context": plan.context,
+                    "instance": "testing",
+                    "artifact_id": body.artifact_id,
+                    "source_git_ref": body.source_git_ref,
+                    "after_operation_id": plan.after_operation_id,
+                    "plan_sha256": plan.plan_sha256,
+                    "reconcile_requested": False,
+                    "data_source_mode": "existing",
+                },
+            )
+        except TestingRetryRefused as error:
+            raise dependencies.http_error(
+                status_code=409,
+                trace_id=trace,
+                code=error.code,
+                message="Testing retry is not ready; review the lane evidence.",
+            ) from error
+        except SQLAlchemyError as error:
+            raise dependencies.http_error(
+                status_code=503,
+                trace_id=trace,
+                code="testing_retry_storage_unavailable",
+                message="Testing retry storage is unavailable.",
+            ) from error
+        except (
+            FileNotFoundError,
+            ValueError,
+            ProductReconcileError,
+            BuildProvenanceError,
+            click.ClickException,
+        ) as error:
+            raise dependencies.http_error(
+                status_code=409,
+                trace_id=trace,
+                code="testing_retry_evidence_unavailable",
+                message="Testing retry evidence is unavailable.",
+            ) from error
+
+    app.add_api_route(
+        TESTING_RETRY_ROUTE,
+        review,
+        methods=["GET"],
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="review_testing_retry",
+        summary="Review an exhausted testing artifact without write authority",
+        responses={
+            code: {"model": dependencies.error_response_model} for code in (401, 403, 409, 503)
+        },
+    )
     app.add_api_route(
         TESTING_RETRY_ROUTE,
         retry,

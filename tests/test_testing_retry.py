@@ -2,8 +2,11 @@
 
 import asyncio
 from dataclasses import replace
+from datetime import datetime, timedelta
 from typing import Any, cast
 from unittest.mock import patch
+from urllib.parse import urlencode
+from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.authz_policy_record import (
@@ -13,9 +16,21 @@ from control_plane.contracts.authz_policy_record import (
 )
 from control_plane.contracts.promotion_record import DeploymentEvidence
 from control_plane.http_app import create_launchplane_fastapi_app
-from control_plane.product_reconcile import TESTING_DEPLOY_MAX_FAILED_ATTEMPTS
+from control_plane.product_reconcile import (
+    TESTING_DEPLOY_MAX_FAILED_ATTEMPTS,
+    TESTING_DEPLOY_MAX_ATTEMPT_CHAIN,
+)
+from control_plane.odoo_testing_restore import FreshOdooTestingGeneration
+from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
+from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.promotion_record import PostDeployUpdateEvidence
 from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
 from control_plane.storage.postgres import LaunchplaneReleaseTupleRow
+from control_plane.contracts.testing_retry import TESTING_RETRY_ROUTE
+from control_plane.testing_lane_hold import STAFF_TESTING_HOLD_REASON
+from control_plane.launchplane_reconcile_authorization import (
+    build_launchplane_reconcile_authorization,
+)
 from tests import test_product_reconcile as reconcile_fixtures
 from tests.http_app_test_support import (
     _AsgiResponse,
@@ -27,7 +42,7 @@ from tests.http_app_test_support import (
     _github_oauth_config,
 )
 
-ROUTE = "/v1/products/site/testing-retry"
+ROUTE = TESTING_RETRY_ROUTE.format(product="site")
 
 
 class TestingRetryTests(reconcile_fixtures.ProductReconcileTestCase):
@@ -40,8 +55,18 @@ class TestingRetryTests(reconcile_fixtures.ProductReconcileTestCase):
         )
         self.session = self.sessions.issue(_github_human_identity())
         policy = _github_human_product_config_policy(
-            actions=("odoo_target_replacement_apply.execute",), product="site", context="cm"
+            actions=("odoo_target_replacement_apply.execute", "product_environment.read"),
+            product="site",
+            context="cm",
         )
+        reader = policy.github_humans[0].model_copy(
+            update={
+                "logins": ("unprivileged",),
+                "roles": ("read_only",),
+                "actions": ("product_environment.read",),
+            }
+        )
+        policy = policy.model_copy(update={"github_humans": (*policy.github_humans, reader)})
         self.store.seed_authz_policy_if_absent(
             LaunchplaneAuthzPolicyRecord(
                 record_id=build_authz_policy_record_id(
@@ -117,6 +142,7 @@ class TestingRetryTests(reconcile_fixtures.ProductReconcileTestCase):
     def test_exhausted_artifact_rearms_through_reconciler_preserving_data_and_history(self) -> None:
         before = self.snapshot()
         old_operations = self.store.list_odoo_stable_target_replacement_operation_records()
+        queue_before = self.store.read_product_reconcile_request("site:testing").model_dump()
         inventory = self.store.read_environment_inventory(
             context_name="cm", instance_name="testing"
         )
@@ -126,6 +152,8 @@ class TestingRetryTests(reconcile_fixtures.ProductReconcileTestCase):
         applied = self.post(body, "retry-original")
         self.assertEqual(applied.status_code, 202, applied.text)
         self.assertTrue(applied.json()["result"]["reconcile_requested"])
+        queue_after = self.store.read_product_reconcile_request("site:testing").model_dump()
+        self.assertEqual(queue_after.keys(), queue_before.keys())
         self.assertEqual(self.snapshot(), before)
         plan = self.reconcile()
         operation = self.store.read_odoo_stable_target_replacement_operation_record(
@@ -135,7 +163,14 @@ class TestingRetryTests(reconcile_fixtures.ProductReconcileTestCase):
         self.assertEqual(operation.request.data_source_mode, "existing")
         self.assertFalse(operation.request.allow_empty_data)
         assert operation.authorization is not None
-        self.assertEqual(operation.authorization.caller.identity_type, "launchplane_reconcile")
+        self.assertEqual(
+            operation.authorization,
+            build_launchplane_reconcile_authorization(
+                product="site",
+                context="cm",
+                authorized_at=operation.created_at,
+            ),
+        )
         self.assertEqual(
             self.store.read_environment_inventory(context_name="cm", instance_name="testing"),
             inventory,
@@ -249,7 +284,127 @@ class TestingRetryTests(reconcile_fixtures.ProductReconcileTestCase):
                 email="unprivileged@example.invalid",
             )
         )
-        self.assertEqual(self.post(self.draft).status_code, 403)
+        denied = self.post(body, "reader-apply")
+        self.assertEqual(denied.status_code, 403, denied.text)
+        self.assertEqual(denied.json()["error"]["code"], "authorization_denied")
+        self.assertEqual(self.store.read_product_reconcile_request("site:testing").state, "failed")
+
+    def test_read_only_review_needs_no_csrf_or_deploy_grant(self) -> None:
+        self.session = self.sessions.issue(
+            replace(
+                _github_human_identity(role="read_only"),
+                login="unprivileged",
+                github_id=456,
+                organizations=frozenset(),
+                teams=frozenset(),
+                email="unprivileged@example.invalid",
+            )
+        )
+        before = self.store.read_product_reconcile_request("site:testing")
+        response = asyncio.run(
+            _asgi_request(
+                self.app,
+                "GET",
+                ROUTE + "?" + urlencode({k: v for k, v in self.draft.items() if k != "instance"}),
+                headers={"Cookie": self.sessions.session_cookie_header(self.session)},
+            )
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertFalse(response.json()["result"]["reconcile_requested"])
+        self.assertEqual(self.store.read_product_reconcile_request("site:testing"), before)
+
+    def test_apply_storage_preflight_failure_is_a_service_refusal(self) -> None:
+        body = self.reviewed()
+        with patch.object(
+            self.store, "prepare_db_only_mutation", side_effect=SQLAlchemyError("unavailable")
+        ):
+            response = self.post(body, "storage-failed")
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(response.json()["error"]["code"], "testing_retry_storage_unavailable")
+
+    def test_repeated_rearms_do_not_exhaust_traversal_on_retained_history(self) -> None:
+        for cycle in range(
+            TESTING_DEPLOY_MAX_ATTEMPT_CHAIN // TESTING_DEPLOY_MAX_FAILED_ATTEMPTS + 1
+        ):
+            body = self.reviewed()
+            applied = self.post(body, f"rearm-{cycle}")
+            self.assertEqual(applied.status_code, 202, applied.text)
+            for _ in range(TESTING_DEPLOY_MAX_FAILED_ATTEMPTS):
+                self.request()
+                self.finish(cast(str, self.reconcile()["queued_operation_id"]), "fail")
+        self.assertGreater(
+            len(self.store.list_odoo_stable_target_replacement_operation_records()),
+            TESTING_DEPLOY_MAX_ATTEMPT_CHAIN,
+        )
+        inventory = self.store.read_environment_inventory(
+            context_name="cm", instance_name="testing"
+        )
+        self.store.write_environment_inventory(
+            inventory.model_copy(update={"deployment_record_id": "review-new-state"})
+        )
+        self.assertEqual(self.post(self.reviewed(), "review-after-movement").status_code, 202)
+
+    def test_fresh_generation_does_not_inherit_existing_data_rearm(self) -> None:
+        self.assertEqual(self.post(self.reviewed(), "existing-data-rearm").status_code, 202)
+        operations = self.store.list_odoo_stable_target_replacement_operation_records()
+        prepared = (
+            max(datetime.fromisoformat(op.created_at) for op in operations) + timedelta(seconds=1)
+        ).isoformat()
+        generation = FreshOdooTestingGeneration(
+            product="site",
+            context="cm",
+            operation_id="fresh-copy",
+            target_id="fresh-target",
+            namespace="lp-testing-" + "a" * 32,
+            domain_host="fresh.example.invalid",
+            resources_binding_sha256="b" * 64,
+            bootstrap_plan_sha256="c" * 64,
+            request_sha256="d" * 64,
+            prepared_at=prepared,
+            reconcile_requested_at=prepared,
+        )
+        with patch(
+            "control_plane.odoo_testing_restore.read_current_testing_generation",
+            return_value=generation,
+        ):
+            plan = self.reconcile()
+        operation = self.store.read_odoo_stable_target_replacement_operation_record(
+            cast(str, plan["queued_operation_id"])
+        )
+        self.assertEqual(operation.request.data_source_mode, "upstream_restore")
+        self.assertTrue(operation.request.allow_empty_data)
+
+    def test_unfinished_restore_refuses_rearm_before_apply(self) -> None:
+        self.store.write_dokploy_target_id_record(
+            DokployTargetIdRecord(
+                context="cm",
+                instance="testing",
+                target_id="retained-target",
+                updated_at="2026-09-30T12:00:00Z",
+            )
+        )
+        self.store.write_deployment_record(
+            DeploymentRecord(
+                record_id="failed-copy",
+                context="cm",
+                instance="testing",
+                source_git_ref=reconcile_fixtures.OLDER,
+                resolved_target=ResolvedTargetEvidence(
+                    target_type="compose", target_id="retained-target", target_name="fixture"
+                ),
+                deploy=DeploymentEvidence(
+                    status="fail",
+                    deploy_mode="recreate-in-place",
+                    target_name="fixture",
+                    target_type="compose",
+                ),
+                runtime_source={"data_source_mode": "upstream_restore"},
+                post_deploy_update=PostDeployUpdateEvidence(attempted=True, status="fail"),
+            )
+        )
+        response = self.post(self.draft)
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()["error"]["code"], "testing_retry_restore_incomplete")
 
     def test_missing_key_and_csrf_refuse_without_record_changes(self) -> None:
         body = self.reviewed()
@@ -278,7 +433,7 @@ class TestingRetryTests(reconcile_fixtures.ProductReconcileTestCase):
         body = self.reviewed()
         self.assertEqual(self.post(body, "retry-original").status_code, 202)
         self.hold_testing()
-        self.assertEqual(self.reconcile()["reason"], "staff_testing")
+        self.assertEqual(self.reconcile()["reason"], STAFF_TESTING_HOLD_REASON)
         self.lift_testing_hold()
         for _ in range(TESTING_DEPLOY_MAX_FAILED_ATTEMPTS):
             self.request()

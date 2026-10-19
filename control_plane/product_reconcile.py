@@ -593,8 +593,12 @@ def reconcile_testing_target(
     if generation is not None and not generation.reconcile_requested_at:
         plan.update(action="wait", held=True, reason="fresh_testing_bootstrap_incomplete")
         return ReconcileOutcome(plan)
-    rearmed_after = testing_retry_after_operation(
-        record_store=record_store, profile=profile, lane=lane, artifact_id=manifest.artifact_id
+    rearmed_after = (
+        ""
+        if generation is not None and not generation.completed_at
+        else testing_retry_after_operation(
+            record_store=record_store, profile=profile, lane=lane, artifact_id=manifest.artifact_id
+        )
     )
     envelope = OdooTargetReplacementApplyEnvelope(
         product=profile.product,
@@ -633,6 +637,13 @@ def reconcile_testing_target(
         idempotency_scope=idempotency_scope,
         generation_prepared_at=generation.prepared_at if generation is not None else "",
         rearmed_after_operation_id=rearmed_after,
+        history_after_operation_id=testing_retry_after_operation(
+            record_store=record_store,
+            profile=profile,
+            lane=lane,
+            artifact_id=manifest.artifact_id,
+            require_current_binding=False,
+        ),
     )
     if attempt.last_failed is not None:
         # The operation's own status read needs the grant that starts a deploy;
@@ -1138,17 +1149,14 @@ def testing_retry_after_operation(
     profile: LaunchplaneProductProfileRecord,
     lane: ProductLaneProfile,
     artifact_id: str,
+    require_current_binding: bool = True,
 ) -> str:
     if not isinstance(record_store, PostgresRecordStore):
         return ""
-    try:
-        request = record_store.read_product_reconcile_request(f"{profile.product}:testing")
-    except FileNotFoundError:
-        return ""
-    rearm = request.testing_retry_rearm
+    rearm = record_store.read_testing_retry_rearm(profile.product)
     if rearm is None or (rearm.context, rearm.artifact_id) != (lane.context, artifact_id):
         return ""
-    if (
+    if require_current_binding and (
         record_store.read_testing_retry_binding(product=profile.product, context=lane.context)
         != rearm.lane_binding_sha256
     ):
@@ -1173,6 +1181,13 @@ def testing_artifact_attempt(
         rearmed_after_operation_id=testing_retry_after_operation(
             record_store=record_store, profile=profile, lane=lane, artifact_id=artifact_id
         ),
+        history_after_operation_id=testing_retry_after_operation(
+            record_store=record_store,
+            profile=profile,
+            lane=lane,
+            artifact_id=artifact_id,
+            require_current_binding=False,
+        ),
     )
 
 
@@ -1184,6 +1199,7 @@ def _next_testing_attempt(
     idempotency_scope: str,
     generation_prepared_at: str = "",
     rearmed_after_operation_id: str = "",
+    history_after_operation_id: str = "",
 ) -> _TestingAttempt:
     """Follow this artifact's earlier attempts to the active one or the next key.
 
@@ -1198,9 +1214,29 @@ def _next_testing_attempt(
         if generation_prepared_at
         else None
     )
-    key = base_key
+    # The prefix was terminal and exhausted when re-arm committed under the lane
+    # lock. Start at its successor so repeated recoveries do not spend the chain
+    # traversal bound on immutable history. Enqueue still checks the entire lane
+    # for active/unknown operations, including any reopened historical attempt.
+    boundary = history_after_operation_id or rearmed_after_operation_id
+    key = f"{base_key}:after-{boundary}" if boundary else base_key
     failed_attempts = 0
     last_failed: OdooStableTargetReplacementOperationRecord | None = None
+    if boundary:
+        prior = operation_store.read_odoo_stable_target_replacement_operation_record(boundary)
+        if prior.status not in ODOO_STABLE_TARGET_REPLACEMENT_TERMINAL_OPERATION_STATUSES:
+            return _TestingAttempt(idempotency_key=key, active=prior)
+        if not rearmed_after_operation_id and (
+            generation_started is None
+            or parse_launchplane_mutation_timestamp(
+                prior.created_at, field_name="testing operation creation"
+            )
+            >= generation_started
+        ):
+            # A stale binding voids the budget reset, not the immutable traversal
+            # checkpoint. A fresh review must still be possible after long history.
+            failed_attempts = TESTING_DEPLOY_MAX_FAILED_ATTEMPTS
+            last_failed = prior
     for _ in range(TESTING_DEPLOY_MAX_ATTEMPT_CHAIN):
         existing = find_odoo_target_replacement_apply_operation_by_idempotency_key(
             operation_store=operation_store,
@@ -1238,11 +1274,6 @@ def _next_testing_attempt(
             ):
                 failed_attempts += 1
                 last_failed = existing
-        if existing.operation_id == rearmed_after_operation_id:
-            # Only the reviewed terminal prefix is forgiven. Later failures still
-            # spend the bounded budget, and active/unknown attempts above never do.
-            failed_attempts = 0
-            last_failed = None
         # A passed attempt that testing no longer runs was rolled back: deploy again.
         key = f"{base_key}:after-{existing.operation_id}"
     raise ProductReconcileError(
