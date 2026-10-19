@@ -2610,6 +2610,35 @@ The route does not guess that absence or a timeout permits another create,
 restore, capture or deletion. Fixed prerequisite codes and the trace identify
 unavailable source, artifact, placement, credentials, state or recovery evidence;
 no provider exception text is returned.
+For an incomplete action, original-key readback also returns the operation's
+state, effect phase and checkpoint time. An uncertain effect remains
+`hold_unknown`; a matching completed prerequisite refusal is reported as
+`completed_refusal`. These observations do not authorize another apply. Value-free `custody` reports
+whether an effect marker, capture receipt, pending capture receipt, extracted
+filestore directory and source snapshot directory exist, plus raw dump/archive
+byte counts. Presence and size do not prove a complete or usable copy. Readback
+holds the existing host execution lock while inspecting custody and reports a
+fixed busy observation if a host process still owns it. It creates no replacement lock.
+`failure_events_after_checkpoint` projects bounded provider event identities,
+times, fixed provider statuses, traceback presence and host function names from
+this namespace's logs within the provider's existing checkpoint clock-skew
+window within the provider-returned list. Provider retention can already have
+removed older candidates. Missing or bounded evidence is explicitly unavailable. An unavailable event log
+retains its event metadata with `log_available: false`; the oldest candidates
+are read first. If host observation is unavailable, journal and event evidence
+survive with `host_observation_unavailable`, and unobserved custody/copy values
+are omitted. `operation_journal_status` distinguishes bound, missing, unbound
+and unrequested journals; no checkpoint is never proof that no effect happened.
+Events are read
+before launching the observation schedule. They are diagnostic candidates, not proof
+that an event belongs to the original apply. Provider prose and source data are
+withheld. Preserve the original request, key and all partial custody until a
+supported continuation is established. Any failed readback preserves a supplied
+original key, including authorization and transport refusals. A read failure
+cannot establish release. Lock loss and integrity contradictions remain
+refusals; a fresh pre-effect rejection is determinate only after its reservation
+is released. A completed native receipt makes no claim that a journal bound to
+a pre-publication record matches the published record.
 Before a compose exists, prepare readback uses the original intent and key to
 read its exact journal instead of trying to run a host schedule. It returns
 `completed: false`, the operation state, effect phase and checkpoint time, and

@@ -161,6 +161,24 @@ class RehearsalClientTests(unittest.TestCase):
         read.assert_called_once()
         write.assert_not_called()
 
+    def test_incomplete_readback_preserves_unknown_isolation_and_terminal_status(self) -> None:
+        for terminal in (False, True):
+            observation = {
+                "completed": False,
+                "original_key_required": not terminal,
+                "recovery_disposition": "completed_refusal" if terminal else "hold_unknown",
+                "host_observation_unavailable": not terminal,
+            }
+            if terminal:
+                observation.update(public_route=False, business_host_frozen=False)
+            code, result, post = self.call("readback", response_result=observation)
+            self.assertNotEqual(code, 0)
+            self.assertEqual(
+                result["status"], "unavailable" if terminal else "reconciliation_required"
+            )
+            self.assertEqual(result["original_key_required"], not terminal)
+            post.assert_called_once()
+
     def call(
         self,
         mode: str,
@@ -169,6 +187,7 @@ class RehearsalClientTests(unittest.TestCase):
         changed: bool = False,
         failure: tuple[int, dict[str, Any]] | None = None,
         action: str = "prepare",
+        response_result: dict[str, Any] | None = None,
     ) -> tuple[int, dict[str, Any], Mock]:
         client = runpy.run_path(
             str(Path(__file__).resolve().parents[1] / "scripts/odoo-upgrade-rehearsal.py")
@@ -200,6 +219,12 @@ class RehearsalClientTests(unittest.TestCase):
             "business_host_frozen": False,
             "resources_preserved": True,
         }
+        if response_result is not None:
+            result = {
+                "product": result["product"],
+                "rehearsal_id": result["rehearsal_id"],
+                **response_result,
+            }
         post = Mock(
             return_value={"status": "accepted", "trace_id": "fixture-trace", "result": result}
         )
@@ -297,22 +322,27 @@ class RehearsalClientTests(unittest.TestCase):
             with self.subTest(mode=mode):
                 code, result, post = self.call(mode, lost=True)
                 self.assertNotEqual(code, 0)
-                self.assertEqual(result["original_key_required"], mode == "apply")
+                self.assertTrue(result["original_key_required"])
                 self.assertEqual(
                     result["status"],
                     "reconciliation_required" if mode == "apply" else "unavailable",
                 )
                 post.assert_called_once()
 
-    def test_readback_only_preserves_prepare_key_for_a_recovery_refusal(self) -> None:
+    def test_readback_preserves_each_original_key_for_an_uncertain_effect(self) -> None:
         from control_plane.contracts.odoo_upgrade_rehearsal import RehearsalPrerequisite
 
         for action, status, code, required in (
             ("prepare", 409, RehearsalPrerequisite.RECOVERY_REQUIRED, True),
-            ("prepare", 403, "authorization_denied", False),
-            ("prepare", 404, "not_found", False),
-            ("prepare", 409, RehearsalPrerequisite.STATE_UNVERIFIED, False),
-            ("execute", 409, RehearsalPrerequisite.RECOVERY_REQUIRED, False),
+            ("prepare", 403, "authorization_denied", True),
+            ("prepare", 404, "not_found", True),
+            ("prepare", 409, RehearsalPrerequisite.STATE_UNVERIFIED, True),
+            ("execute", 409, RehearsalPrerequisite.RECOVERY_REQUIRED, True),
+            ("execute", 409, RehearsalPrerequisite.STATE_UNVERIFIED, True),
+            ("execute", 409, RehearsalPrerequisite.PLACEMENT_UNAVAILABLE, True),
+            ("prepare", 409, RehearsalPrerequisite.CREDENTIALS_UNAVAILABLE, True),
+            ("prepare", 409, RehearsalPrerequisite.ARTIFACT_UNAVAILABLE, True),
+            ("execute", 503, "rehearsal_provider_unavailable", True),
         ):
             with self.subTest(action=action, status=status, code=code):
                 result_code, result, post = self.call(
