@@ -2638,6 +2638,10 @@ probe checks metadata, file presence and sizes before hashing, within one
 read-only repeatable-read snapshot and the same bounded budget. A failed Docker
 command reports `runtime_unavailable` while retaining the custody observation;
 isolation contradictions and malformed observation output still refuse.
+The observation allows up to ten minutes of scanning within the existing host
+job limit, so a large retained filestore can reach its content checks. It holds
+the existing execution lock for that scan; an incomplete scan still grants no
+continuation and starts from the beginning on a later observation.
 `failure_events_after_checkpoint` projects bounded provider event identities,
 times, fixed provider statuses, traceback presence, host function names and
 native traceback line numbers from

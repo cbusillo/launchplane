@@ -1664,6 +1664,11 @@ class RehearsalHostSafetyTests(unittest.TestCase):
             patch.object(sys, "argv", ["validator", "observe"]),
         ):
             self.assertEqual(program["attachment_validation_main"](), "verified")
+            # A source-sized scan can legitimately outlast a short polling
+            # interval while remaining inside the existing host job budget.
+            ticks = iter([0])
+            program["time"] = SimpleNamespace(monotonic=lambda: next(ticks, 30))
+            self.assertEqual(program["attachment_validation_main"](), "verified")
             missing = hashlib.sha1(b"missing fixture").hexdigest()
             rows.append((missing[:2] + "/" + missing, missing, 1))
             # A slow earlier content scan must not hide a later missing file.

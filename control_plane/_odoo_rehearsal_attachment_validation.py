@@ -77,7 +77,7 @@ def attachment_validation_main():
         connection.set_session(readonly=True, isolation_level='REPEATABLE READ')
         with connection.cursor() as cursor:
             cursor.execute("SET LOCAL statement_timeout = '5s'")
-        deadline = time.monotonic()+20 if bounded else None
+        deadline = time.monotonic()+600 if bounded else None
         # A server cursor keeps a large attachment table out of client memory.
         # Inspect metadata/presence across the table before spending the read
         # budget hashing early large files. Both passes use the same snapshot.
