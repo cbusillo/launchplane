@@ -31,11 +31,15 @@ import time
 from datetime import datetime, timezone
 
 
+class RehearsalCommandFailure(RuntimeError):
+    pass
+
+
 def command(arguments, *, stdin=None, stdout=None, environment=None):
     result = subprocess.run(arguments, input=stdin, stdout=stdout or subprocess.PIPE,
         stderr=subprocess.PIPE, env=environment, check=False)
     if result.returncode:
-        raise RuntimeError('Rehearsal command failed; preserve its private custody')
+        raise RehearsalCommandFailure('Rehearsal command failed; preserve its private custody')
     return result.stdout if stdout is None else b''
 
 
@@ -459,7 +463,10 @@ def observe(spec, root, receipt, lock_held=False):
                 and custody['raw_filestore_extracted'] and custody['capture_receipt_present']
                 and not custody['capture_pending_present']
                 and not custody['source_snapshot_directory_present']):
-            result['capture_attachment_validation']=capture_attachment_observation(spec)
+            try:
+                result['capture_attachment_validation']=capture_attachment_observation(spec)
+            except RehearsalCommandFailure:
+                result['capture_attachment_validation']='runtime_unavailable'
         print('rehearsal_result='+json.dumps(result).encode().hex())
         return
     result=json.loads(receipt.read_text())

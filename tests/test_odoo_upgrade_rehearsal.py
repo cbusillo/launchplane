@@ -1601,7 +1601,9 @@ class RehearsalHostSafetyTests(unittest.TestCase):
             # file cases below execute its real file validator separately.
             program["validate_attachment_files"] = Mock(return_value="verified")
             self.assertEqual(program["attachment_validation_main"](), "verified")
-            connection.set_session.assert_called_once_with(readonly=True)
+            connection.set_session.assert_called_once_with(
+                readonly=True, isolation_level="REPEATABLE READ"
+            )
             connection.rollback.assert_called_once()
             connection.close.assert_called_once()
             self.assertGreater(driver.connect.call_args.kwargs["connect_timeout"], 0)
@@ -1611,6 +1613,11 @@ class RehearsalHostSafetyTests(unittest.TestCase):
             )
             driver.connect.side_effect = RuntimeError("private login detail")
             self.assertEqual(program["attachment_validation_main"](), "database_unavailable")
+            driver.connect.side_effect = None
+            cursor.execute.side_effect = None
+            connection.rollback.side_effect = RuntimeError("private connection loss")
+            connection.close.side_effect = RuntimeError("private connection loss")
+            self.assertEqual(program["attachment_validation_main"](), "verified")
         with patch.dict(sys.modules, {"psycopg2": None}):
             self.assertEqual(program["attachment_validation_main"](), "dependency_unavailable")
         with patch.dict(sys.modules, {"psycopg2": driver}), patch.dict(os.environ, {}, clear=True):
@@ -1638,8 +1645,9 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         path.write_bytes(content)
         validate = program["validate_attachment_files"]
         connection = MagicMock()
-        connection.cursor.return_value.__enter__.return_value.__iter__.return_value = iter(
-            [(name, checksum, len(content))]
+        rows = [(name, checksum, len(content))]
+        connection.cursor.return_value.__enter__.return_value.__iter__.side_effect = lambda: iter(
+            rows
         )
         program["Path"] = lambda _: root.parent
         with (
@@ -1656,14 +1664,23 @@ class RehearsalHostSafetyTests(unittest.TestCase):
             patch.object(sys, "argv", ["validator", "observe"]),
         ):
             self.assertEqual(program["attachment_validation_main"](), "verified")
-        for rows, expected in (
+            missing = hashlib.sha1(b"missing fixture").hexdigest()
+            rows.append((missing[:2] + "/" + missing, missing, 1))
+            # A slow earlier content scan must not hide a later missing file.
+            with patch.object(
+                program["hashlib"],
+                "sha1",
+                side_effect=AssertionError("content scan before metadata"),
+            ):
+                self.assertEqual(program["attachment_validation_main"](), "attachment_missing")
+        for case_rows, expected in (
             ([(name, checksum, len(content))], "verified"),
             ([(name, None, len(content))], "attachment_metadata_invalid"),
             ([("../private", checksum, len(content))], "attachment_metadata_invalid"),
             ([(name, checksum, len(content) + 1)], "attachment_size_mismatch"),
         ):
             with self.subTest(expected=expected):
-                self.assertEqual(validate(rows, root, None), expected)
+                self.assertEqual(validate(case_rows, root, None), expected)
                 self.assertEqual(path.read_bytes(), content)
         program["time"] = SimpleNamespace(monotonic=lambda: 2)
         self.assertEqual(validate([(name, checksum, len(content))], root, 1), "incomplete")
@@ -1870,6 +1887,25 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         self.assertFalse(observed["completed"])
         self.assertEqual((raw / "database.dump").read_bytes(), before)
         self.host["docker"].assert_not_called()
+        from types import SimpleNamespace
+
+        with (
+            patch.object(
+                self.host["subprocess"], "run", return_value=SimpleNamespace(returncode=1)
+            ),
+            self.assertRaises(RuntimeError) as failure,
+        ):
+            self.host["command"](["docker", "exec", "fixture"])
+        self.host["capture_attachment_observation"].side_effect = failure.exception
+        unavailable = self.run_host(spec)
+        self.assertEqual(unavailable["capture_attachment_validation"], "runtime_unavailable")
+        self.assertEqual(unavailable["custody"], observed["custody"])
+        self.assertFalse(unavailable["completed"])
+        self.host["capture_attachment_observation"].side_effect = RuntimeError(
+            "isolation contradiction"
+        )
+        with self.assertRaises(RuntimeError):
+            self.run_host(spec)
         (raw / "filestore").rmdir()
         import fcntl
 

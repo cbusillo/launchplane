@@ -11,7 +11,7 @@ import sys
 import time
 
 
-def validate_attachment_files(rows, root, deadline):
+def validate_attachment_files(rows, root, deadline, *, check_content=True):
     if root.resolve() != root.absolute() or not root.is_dir():
         return 'attachment_path_unsafe'
     for name, checksum, size in rows:
@@ -32,6 +32,8 @@ def validate_attachment_files(rows, root, deadline):
                 return 'attachment_path_unsafe'
             if metadata.st_size != size:
                 return 'attachment_size_mismatch'
+            if not check_content:
+                continue
             value = hashlib.sha1()
             with os.fdopen(descriptor, 'rb') as stream:
                 descriptor = None
@@ -72,21 +74,33 @@ def attachment_validation_main():
     except Exception:
         return 'database_unavailable'
     try:
-        connection.set_session(readonly=True)
+        connection.set_session(readonly=True, isolation_level='REPEATABLE READ')
         with connection.cursor() as cursor:
             cursor.execute("SET LOCAL statement_timeout = '5s'")
         deadline = time.monotonic()+20 if bounded else None
         # A server cursor keeps a large attachment table out of client memory.
-        with connection.cursor(name='launchplane_rehearsal_attachments') as cursor:
-            cursor.itersize = 256
-            cursor.execute('SELECT store_fname,checksum,file_size FROM ir_attachment WHERE store_fname IS NOT NULL')
-            return validate_attachment_files(cursor,
-                Path('/volumes/data/filestore')/database, deadline)
+        # Inspect metadata/presence across the table before spending the read
+        # budget hashing early large files. Both passes use the same snapshot.
+        for check_content in (False, True):
+            with connection.cursor(name='launchplane_rehearsal_attachments') as cursor:
+                cursor.itersize = 256
+                cursor.execute('SELECT store_fname,checksum,file_size FROM ir_attachment WHERE store_fname IS NOT NULL')
+                reason = validate_attachment_files(cursor,
+                    Path('/volumes/data/filestore')/database, deadline,
+                    check_content=check_content)
+                if reason != 'verified':
+                    return reason
+        return 'verified'
     except Exception:
         return 'attachment_query_unavailable'
     finally:
-        connection.rollback()
-        connection.close()
+        for cleanup in (connection.rollback, connection.close):
+            try:
+                cleanup()
+            except Exception:
+                # This session is read-only; a dead connection must not erase
+                # the result already computed by the validator.
+                pass
 
 
 if __name__ == '__main__':

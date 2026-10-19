@@ -190,6 +190,7 @@ class RehearsalHostResult(BaseModel):
             "verified",
             "incomplete",
             "writer_active",
+            "runtime_unavailable",
         ]
         | None
     ) = None

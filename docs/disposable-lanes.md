@@ -2632,6 +2632,12 @@ receipts, markers or Python bytecode. `verified` applies only to this attachment
 scan; it proves neither the raw capture hashes nor completed sanitization or
 recovery eligibility. Every probe result retains `hold_unknown` and the original
 key. It never restores, recaptures, sanitizes, starts a runtime or resumes execute.
+Read the code together with the original failure locations: capture receipt
+presence alone does not establish that restore or sanitization finished. The
+probe checks metadata, file presence and sizes before hashing, within one
+read-only repeatable-read snapshot and the same bounded budget. A failed Docker
+command reports `runtime_unavailable` while retaining the custody observation;
+isolation contradictions and malformed observation output still refuse.
 `failure_events_after_checkpoint` projects bounded provider event identities,
 times, fixed provider statuses, traceback presence, host function names and
 native traceback line numbers from
