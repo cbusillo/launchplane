@@ -53,6 +53,8 @@ After testing inputs are configured, use the existing `testing-hold-dry-run` and
 `testing-hold-apply` helpers with `--lift --purpose isolation_staging` and the same
 product, context, testing instance and audit reason. Save the dry run, review its
 digest, then apply with that evidence and a stable original idempotency key.
+Put the helper's global `--timeout 360` before the apply subcommand so its
+300-second bounded host inspection can finish and return its receipt.
 
 The original Director agent can lift only its own staging interlock on the
 fresh conventional application and lane-only volume it already allocated. The
@@ -61,13 +63,17 @@ current exclusive ownership, placement, empty source/environment, sole mount and
 absence of deployment, protected use, needed data, aliases and uncertain effects.
 Staff, foreign, legacy and Compose interlocks keep their existing protections.
 
-Dry-run performs metadata and provider reads only. Apply runs a fixed read-only
+Dry-run remains an inert hold plan and does not qualify provider readiness.
+Apply runs a fixed read-only
 inspection through a disabled manual job on the recorded server before clearing
 the hold. The allocated Docker volume and its backing directory must still be
 absent, and no running or stopped container may consume the allocation or overlap
-its storage. Existing volumes, incomplete inspection and drift remain held for
+its storage through a writable path. Administrative read-only parent mounts are
+allowed; exact allocation paths and children remain protected consumers.
+Existing volumes, incomplete inspection and drift remain held for
 separate recovery; this path creates or deletes no storage. The hold and replay
 receipt commit atomically. Keep the original key after an uncertain reply.
+The disabled inspection job reuses one per-lane slot on the recorded server.
 
 A staging lift requests no reconcile and performs no workload deployment. The
 normal testing event/sweep then delivers managed inputs and the verified build

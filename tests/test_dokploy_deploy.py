@@ -15,6 +15,52 @@ from control_plane.workflows.dokploy_deploy import (
 
 
 class DokployDeployRegistryTests(unittest.TestCase):
+    def test_application_image_and_env_updates_preserve_provider_credential_and_build_inputs(
+        self,
+    ) -> None:
+        from control_plane.dokploy.api import JsonObject, update_dokploy_target_env
+
+        target: JsonObject = {
+            "username": "fixture-user",
+            "password": "fixture-password",
+            "registryUrl": "registry.example.invalid",
+            "buildArgs": "FIXTURE_ARG=value",
+            "buildSecrets": "FIXTURE_SECRET=value",
+            "createEnvFile": True,
+        }
+        with (
+            patch(
+                "control_plane.workflows.dokploy_deploy.dokploy_api.fetch_dokploy_target_payload",
+                return_value=target,
+            ),
+            patch("control_plane.workflows.dokploy_deploy.dokploy_api.dokploy_request") as mutate,
+        ):
+            update_dokploy_target_artifact(
+                host="https://provider.example.invalid",
+                token="fixture-token",
+                target_type="application",
+                target_id="fixture-application",
+                artifact_id="registry.example.invalid/example:sha-fixture",
+            )
+            image_payload = mutate.call_args.kwargs["payload"]
+            self.assertEqual(
+                {key: image_payload[key] for key in ("username", "password", "registryUrl")},
+                {key: target[key] for key in ("username", "password", "registryUrl")},
+            )
+            update_dokploy_target_env(
+                host="https://provider.example.invalid",
+                token="fixture-token",
+                target_type="application",
+                target_id="fixture-application",
+                target_payload=target,
+                env_text="MANAGED=value",
+            )
+            env_payload = mutate.call_args.kwargs["payload"]
+            self.assertEqual(
+                {key: env_payload[key] for key in ("buildArgs", "buildSecrets")},
+                {key: target[key] for key in ("buildArgs", "buildSecrets")},
+            )
+
     def test_registry_host_normalization_matches_docker_image_rules(self) -> None:
         self.assertEqual(_docker_image_registry_host("ubuntu:24.04"), "docker.io")
         self.assertEqual(_docker_image_registry_host("library/postgres:16"), "docker.io")

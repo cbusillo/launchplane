@@ -35,7 +35,12 @@ def inspect_application_testing_storage(
         raise ValueError("Testing storage inspection requires its original recorded server.")
     encoded = base64.b64encode(json.dumps(spec).encode()).decode()
     schedule_name = "Launchplane fresh testing application storage inspection"
-    schedule_app = "lp-testing-storage-check-" + str(adapter.intent["plan_id"])
+    # A server has one inspection slot per owned lane, reused after a replacement.
+    # The caller holds the lane and current target's event-execution locks.
+    schedule_app = (
+        "lp-testing-storage-check-"
+        + canonical_json_sha256([adapter.product, adapter.request.context, "testing"])[:32]
+    )
     evidence = post_deploy.run_manual_data_schedule(
         host=host,
         token=token,
@@ -133,7 +138,11 @@ try:
                 raise ValueError("allocation already referenced")
             if not isinstance(mount.get("Source"), str) or not Path(mount["Source"]).is_absolute():
                 raise ValueError("mount backing unavailable")
-            source = Path(mount["Source"]).resolve(strict=True)
+            source = Path(mount["Source"]).resolve()
+            if mount.get("Type") == "bind" and mount.get("RW") is False and source in allocation.parents:
+                # An administrative read-only parent cannot modify the allocation.
+                # Exact resource paths and children remain consumers.
+                continue
             if source == allocation or source in allocation.parents or allocation in source.parents:
                 raise ValueError("allocation backing overlaps a container")
     if (identifiers("ps", "-aq", "--no-trunc") != containers or identifiers("volume", "ls", "-q") != volumes

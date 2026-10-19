@@ -193,8 +193,75 @@ class _ApplicationStateVolumeFixture(_DirectorTestingSetupFixture):
             actor=actor,
         )
 
+    async def _reviewed_application_lift(self) -> Any:
+        plan = await self._testing_hold()
+        self.assertEqual(plan.status_code, 202, plan.text)
+        return await self._testing_hold(
+            mode="apply", reviewed_plan_sha256=plan.json()["result"]["plan_sha256"]
+        )
+
 
 class ApplicationStateVolumeTests(_ApplicationStateVolumeFixture):
+    async def test_application_lift_plan_remains_inert_when_provider_or_allocation_is_unavailable(
+        self,
+    ) -> None:
+        await self.prepare_application_hold()
+        target = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        self.store.write_dokploy_target_record(
+            target.model_copy(update={"project_name": "legacy-project"})
+        )
+        with (
+            patch.object(
+                self.store,
+                "testing_replacement_execution_lock",
+                side_effect=AssertionError("Planning acquired an execution lock"),
+            ),
+            patch(
+                "control_plane.dokploy_target_setup_http.fetch_dokploy_target_payload_for_setup",
+                side_effect=AssertionError("Planning read the provider"),
+            ),
+        ):
+            plan = await self._testing_hold()
+        self.assertEqual(plan.status_code, 202, plan.text)
+        self.assertEqual(plan.json()["result"]["action"], "clear")
+        self.assertFalse(plan.json()["result"]["applied"])
+        self.storage_inspector.assert_not_called()
+
+    async def test_provider_transport_and_inventory_refusals_keep_hold_with_bounded_response(
+        self,
+    ) -> None:
+        from http.client import IncompleteRead
+        from urllib.error import URLError
+        from control_plane.dokploy_inventory import InventoryUnavailable
+
+        await self.prepare_application_hold()
+        plan = await self._testing_hold()
+        for error in (
+            InventoryUnavailable("fixture-private-detail"),
+            RuntimeError("fixture-private-detail"),
+            URLError("fixture-private-detail"),
+            IncompleteRead(b"fixture-private-detail"),
+        ):
+            with (
+                self.subTest(error=type(error).__name__),
+                patch(
+                    "control_plane.dokploy_target_setup_http.fetch_dokploy_target_payload_for_setup",
+                    side_effect=error,
+                ),
+            ):
+                result = await self._testing_hold(
+                    mode="apply", reviewed_plan_sha256=plan.json()["result"]["plan_sha256"]
+                )
+            self.assertEqual(result.status_code, 409, result.text)
+            self.assertNotIn("fixture-private-detail", result.text)
+            self.assertIsNotNone(
+                self.store.read_dokploy_target_record(
+                    context_name=self.context, instance_name="testing"
+                ).policies.staff_testing_hold
+            )
+
     async def test_original_application_allocation_can_lift_its_own_staging_hold(self) -> None:
         await self.prepare_application_hold()
         target = self.store.read_dokploy_target_record(
@@ -204,6 +271,7 @@ class ApplicationStateVolumeTests(_ApplicationStateVolumeFixture):
             target.model_copy(update={"domains": ("testing.example.invalid",)})
         )
         self.live["domains"] = [{"host": "testing.example.invalid"}]
+        self.live.update(dockerfile="Dockerfile", buildPath="/", dockerContextPath=None)
         provider_calls = self.provider.call_count
         plan = await self._testing_hold()
         self.assertEqual(plan.status_code, 202, plan.text)
@@ -240,6 +308,18 @@ class ApplicationStateVolumeTests(_ApplicationStateVolumeFixture):
             {"sourceType": "unsupported"},
             {"dockerImage": "fixture.invalid/example:configured"},
             {"env": "UNTRACKED_KEY=fixture-only"},
+            {"username": "unreviewed-registry-user"},
+            {"password": "fixture-secret"},
+            {"registryId": "unreviewed-registry"},
+            {"registryUrl": "https://registry.example.invalid"},
+            {"command": "unreviewed-command"},
+            {"args": ["unreviewed-argument"]},
+            {"buildArgs": "UNREVIEWED=fixture"},
+            {"buildSecrets": "UNREVIEWED=fixture"},
+            {"dockerfile": "other.Dockerfile"},
+            {"buildPath": "/unreviewed"},
+            {"customGitBuildPath": "/unreviewed"},
+            {"dockerContextPath": "/unreviewed"},
             {"mounts": []},
             {"mounts": [{**original["mounts"][0], "volumeName": "foreign-state"}]},
             {"serverId": "another-server"},
@@ -310,12 +390,76 @@ class ApplicationStateVolumeTests(_ApplicationStateVolumeFixture):
                 with self.assertRaises(ValueError):
                     inspect_application_testing_storage(adapter, checkpoint=lambda _phase: None)
 
+    async def test_replacement_allocations_reuse_the_lanes_inspection_slot(self) -> None:
+        from dataclasses import replace
+        from uuid import uuid4
+        from control_plane.application_state_volume import (
+            ApplicationStateVolumeAdapter,
+            state_volume_allocation_names,
+        )
+        from control_plane.application_testing_storage import inspect_application_testing_storage
+        from control_plane.http_routes.mutation_support import idempotency_scope
+        from control_plane.service_auth import configured_local_operator_identity
+        from tests.http_app_test_support import _local_operator_bearer_config
+
+        await self.prepare_application_hold()
+        identity = configured_local_operator_identity(_local_operator_bearer_config())
+        assert identity is not None
+        original = ApplicationStateVolumeAdapter.completed_for_testing_lane(
+            self.root,
+            self.store,
+            product=self.profile.product,
+            context=self.context,
+            scope=idempotency_scope(identity),
+            trace="fixture-inspection",
+        )
+        next_plan = uuid4().hex
+        replacement_names = state_volume_allocation_names(next_plan)
+        replacement = replace(
+            original,
+            intent={
+                **original.intent,
+                **replacement_names,
+                "plan_id": next_plan,
+            },
+        )
+        # The inspector consumes a previously qualified allocation. Model the
+        # replacement's different physical identity without another HTTP fixture.
+        next_phase = {
+            "application": "replacement-application",
+            "environment": "replacement-environment",
+            "app_name": replacement_names["app_name"],
+        }
+        with patch(
+            "control_plane.application_testing_storage.post_deploy.run_manual_data_schedule",
+            return_value={},
+        ) as dispatch:
+            with self.assertRaises(ValueError):
+                inspect_application_testing_storage(original, checkpoint=lambda _phase: None)
+            with (
+                patch.object(replacement, "_progress_phase", return_value=json.dumps(next_phase)),
+                patch.object(
+                    replacement,
+                    "_live",
+                    return_value={
+                        "serverId": self.payload["server_id"],
+                        "appName": next_phase["app_name"],
+                    },
+                ),
+                self.assertRaises(ValueError),
+            ):
+                inspect_application_testing_storage(replacement, checkpoint=lambda _phase: None)
+        self.assertEqual(
+            dispatch.call_args_list[0].kwargs["schedule_app_name"],
+            dispatch.call_args_list[1].kwargs["schedule_app_name"],
+        )
+
     async def test_another_scope_cannot_lift_the_original_allocations_hold(self) -> None:
         from tests.http_app_test_support import _local_operator_bearer_config
 
         await self.prepare_application_hold()
         self.app = self.make_app(_local_operator_bearer_config(token_label="another-token"))
-        result = await self._testing_hold()
+        result = await self._reviewed_application_lift()
         self.assertEqual(result.status_code, 409, result.text)
         self.storage_inspector.assert_not_called()
         self.assertIsNotNone(
@@ -336,7 +480,7 @@ class ApplicationStateVolumeTests(_ApplicationStateVolumeFixture):
         self.store.write_provider_target_record(
             self.production_provider.model_copy(update={"target_id": current.target_id})
         )
-        aliased = await self._testing_hold()
+        aliased = await self._reviewed_application_lift()
         self.assertEqual(aliased.status_code, 409, aliased.text)
         self.store.write_provider_target_record(self.production_provider)
         reservation = self.store.reserve_mutation(
@@ -353,7 +497,7 @@ class ApplicationStateVolumeTests(_ApplicationStateVolumeFixture):
             reservation=reservation.record,
             reconciliation_key="original-binding",
         )
-        unknown = await self._testing_hold()
+        unknown = await self._reviewed_application_lift()
         self.assertEqual(unknown.status_code, 409, unknown.text)
         self.storage_inspector.assert_not_called()
         self.assertIsNotNone(
@@ -387,7 +531,11 @@ class ApplicationStateVolumeTests(_ApplicationStateVolumeFixture):
                         }
                     )
                 )
-                result = await self._testing_hold()
+                result = (
+                    await self._testing_hold()
+                    if changed.purpose == "staff_testing"
+                    else await self._reviewed_application_lift()
+                )
                 self.assertEqual(result.status_code, 409, result.text)
                 self.assertEqual(
                     self.store.read_dokploy_target_record(
@@ -403,7 +551,7 @@ class ApplicationStateVolumeTests(_ApplicationStateVolumeFixture):
         ):
             with self.subTest(facts=facts):
                 record_safety(self.store, self.profile.product, self.context, "testing", **facts)
-                result = await self._testing_hold()
+                result = await self._reviewed_application_lift()
                 self.assertEqual(result.status_code, 409, result.text)
         self.assertEqual(self.store.list_product_reconcile_requests(), ())
         self.assert_production_unchanged()

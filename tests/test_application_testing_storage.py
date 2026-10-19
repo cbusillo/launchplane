@@ -40,9 +40,14 @@ class ApplicationTestingStorageProgramTests(unittest.TestCase):
         arguments = command[1:]
         if arguments[:2] == ["volume", "ls"]:
             output = "\n".join(self.volumes)
+        elif arguments[:2] == ["volume", "inspect"]:
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="not found")
         elif arguments[0] == "info":
             output = json.dumps(str(self.root))
-        elif arguments[:2] == ["ps", "-aq"]:
+        elif arguments[0] == "ps":
+            options = set(arguments[1:])
+            self.assertTrue(options & {"-aq", "-a", "--all"})
+            self.assertTrue(options & {"-aq", "-q", "--quiet"})
             self.list_calls += 1
             output = "\n".join(self.containers)
             if self.change_inventory and self.list_calls > 1:
@@ -89,7 +94,6 @@ class ApplicationTestingStorageProgramTests(unittest.TestCase):
         for changed in (
             {"mounts": [{"Type": "volume", "Name": self.spec["volume"]}]},
             {"mounts": [{"Type": "bind", "Source": str(self.root), "RW": True}]},
-            {"mounts": [{"Type": "bind", "Source": str(self.root), "RW": False}]},
             {"labels": {"com.docker.swarm.service.name": self.spec["application"]}},
             {"mounts": None},
         ):
@@ -101,6 +105,40 @@ class ApplicationTestingStorageProgramTests(unittest.TestCase):
                         "labels": {},
                         "mounts": [],
                         **changed,
+                    }
+                }
+                self.assertEqual(self.run_program()["testing_resources_ok"], "false")
+
+    def test_read_only_administration_and_unrelated_deleted_bind_do_not_hold_fresh_storage(
+        self,
+    ) -> None:
+        identifier = "c" * 64
+        for mount in (
+            {"Type": "bind", "Source": str(self.root), "RW": False},
+            {"Type": "bind", "Source": str(self.root / "deleted-unrelated-bind"), "RW": True},
+        ):
+            with self.subTest(mount=mount):
+                self.containers = {
+                    identifier: {
+                        "id": identifier,
+                        "name": "/unrelated-stopped-container",
+                        "labels": {},
+                        "mounts": [mount],
+                    }
+                }
+                self.assertEqual(self.run_program()["testing_resources_ok"], "true")
+
+    def test_read_only_exact_or_child_backing_remains_a_protected_consumer(self) -> None:
+        identifier = "d" * 64
+        allocation = self.root / "volumes" / self.spec["volume"]
+        for source in (allocation, allocation / "_data"):
+            with self.subTest(source=source):
+                self.containers = {
+                    identifier: {
+                        "id": identifier,
+                        "name": "/stopped-consumer",
+                        "labels": {},
+                        "mounts": [{"Type": "bind", "Source": str(source), "RW": False}],
                     }
                 }
                 self.assertEqual(self.run_program()["testing_resources_ok"], "false")

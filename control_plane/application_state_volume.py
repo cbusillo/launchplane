@@ -238,10 +238,14 @@ class ApplicationStateVolumeAdapter:
             raise ValueError("Original application allocation progress is incomplete.")
         self._verify_adopted(phase, configuration_verified=False)
         if inspect_provider:
-            from control_plane.dokploy.target_source_setup import require_empty_target_source
+            from control_plane.dokploy.target_source_setup import (
+                require_empty_target_source,
+                require_empty_application_overrides,
+            )
 
             live = self._live(data["application"], data["environment"], data["app_name"])
             require_empty_target_source(live)
+            require_empty_application_overrides(live)
             if (
                 not self._mount_matches(live)
                 or live.get("deployments") != []

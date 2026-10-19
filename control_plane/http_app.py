@@ -31,6 +31,7 @@ from functools import cache
 from urllib.parse import unquote
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, MutableMapping
 from contextlib import ExitStack, asynccontextmanager, contextmanager, nullcontext
+from http.client import HTTPException as HTTPTransportException
 from datetime import datetime, timedelta, timezone
 from pathlib import Path as FilePath
 from typing import Annotated, Any, Literal, NoReturn, NotRequired, Protocol, Self, TypedDict, cast
@@ -9204,30 +9205,29 @@ def create_launchplane_fastapi_app(
         )
         typed_store = cast(control_plane_testing_lane_hold.TestingHoldStore, record_store)
         actor = launchplane_identity_actor(identity)
-        if director_application_lift:
+        if director_application_lift and hold_request.mode == "apply":
+            from control_plane.dokploy_inventory import InventoryUnavailable
+
             assert isinstance(record_store, PostgresRecordStore)
-            if hold_request.mode == "apply":
-                if not idempotency_key.strip():
-                    raise _launchplane_http_error(
-                        status_code=400,
-                        trace_id=trace_id,
-                        code="idempotency_key_required",
-                        message="Testing hold apply requires an Idempotency-Key header.",
-                    )
-                normalized_key, fingerprint, replay = await replay_apply_idempotency(
-                    request=request,
-                    record_store=record_store,
-                    identity=identity,
-                    route_path=route_path,
-                    idempotency_key=idempotency_key,
+            if not idempotency_key.strip():
+                raise _launchplane_http_error(
+                    status_code=400,
                     trace_id=trace_id,
-                    check_replay=True,
-                    request_payload=raw_payload,
+                    code="idempotency_key_required",
+                    message="Testing hold apply requires an Idempotency-Key header.",
                 )
-                if replay is not None:
-                    return replay
-            else:
-                normalized_key, fingerprint = "", ""
+            normalized_key, fingerprint, replay = await replay_apply_idempotency(
+                request=request,
+                record_store=record_store,
+                identity=identity,
+                route_path=route_path,
+                idempotency_key=idempotency_key,
+                trace_id=trace_id,
+                check_replay=True,
+                request_payload=raw_payload,
+            )
+            if replay is not None:
+                return replay
 
             def continue_application() -> AcceptedEvidenceResponse:
                 from control_plane.application_state_volume import LANE_LOCK_PREFIX
@@ -9279,13 +9279,6 @@ def create_launchplane_fastapi_app(
                         )
 
                     binding = qualify(inspect_provider=True)
-                    if hold_request.mode == "dry-run":
-                        plan, _ = control_plane_testing_lane_hold.build_testing_hold_plan(
-                            record_store=typed_store, request=hold_request, actor=actor
-                        )
-                        return accepted_evidence_response(
-                            trace_id=trace_id, records={}, result=plan.model_dump(mode="json")
-                        )
 
                     def inspection_checkpoint(_phase: str) -> None:
                         lane_check()
@@ -9364,7 +9357,14 @@ def create_launchplane_fastapi_app(
 
             try:
                 return await run_in_worker_thread(continue_application)
-            except (ValueError, FileNotFoundError, OSError, click.ClickException) as error:
+            except (
+                ValueError,
+                OSError,
+                click.ClickException,
+                InventoryUnavailable,
+                RuntimeError,
+                HTTPTransportException,
+            ) as error:
                 raise _launchplane_http_error(
                     status_code=409,
                     trace_id=trace_id,
