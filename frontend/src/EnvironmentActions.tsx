@@ -21,6 +21,7 @@ import { OdooReleasePanel } from "./OdooReleasePanel";
 import { ServiceRestartPanel } from "./ServiceRestartPanel";
 import { TestingRebuildPanel } from "./TestingRebuildPanel";
 import { HealthMonitoringPanel } from "./HealthMonitoringPanel";
+import { RouteRecordRepairPanel } from "./RouteRecordRepairPanel";
 import { BackupWorkerCredentialsPanel } from "./BackupWorkerCredentialsPanel";
 import { ProductionBackupAuthorityPanel } from "./ProductionBackupAuthorityPanel";
 import { ProductPromotionFlow } from "./ProductPromotionFlow";
@@ -68,6 +69,8 @@ export function EnvironmentActionsView({
 
   return (
     <section className="environment-actions-view">
+      <RouteRecordRepairPanel key={`route-repair:${detail.product}:${detail.context}:${detail.environment}`}
+        detail={detail} fixtureMode={!!fixtureMode} onRefresh={onRefresh} refreshToken={refreshToken} />
       {testingRebuild ? <TestingRebuildPanel
         key={`rebuild:${detail.product}:${detail.context}`} detail={detail} fixtureMode={!!fixtureMode} onRefresh={onRefresh}
       /> : null}

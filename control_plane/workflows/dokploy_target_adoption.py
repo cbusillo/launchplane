@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from dataclasses import dataclass
 import re
 from typing import Protocol
 
@@ -132,7 +133,15 @@ def normalize_dokploy_domain_hosts(raw_hosts: tuple[str, ...]) -> tuple[str, ...
     return tuple(normalized)
 
 
-def repair_dokploy_target_domain_authority(
+@dataclass(frozen=True)
+class DokployTargetDomainRepairPlan:
+    current_target: DokployTargetRecord
+    target_id: DokployTargetIdRecord
+    current_provider_target: ProviderTargetRecord
+    result: DokployTargetDomainRepairResult
+
+
+def plan_dokploy_target_domain_authority(
     *,
     record_store: DokployTargetAdoptionRecordStore,
     host: str,
@@ -146,10 +155,9 @@ def repair_dokploy_target_domain_authority(
     expected_current_provider_target_fingerprint: str = "",
     source_label: str = "service:dokploy-targets:setup:repair-domain-authority",
     updated_at: str = "",
-    apply: bool = False,
     fetch_target_payload: FetchDokployTargetPayload,
     fetch_target_domains: FetchDokployTargetDomains,
-) -> DokployTargetDomainRepairResult:
+) -> DokployTargetDomainRepairPlan:
     normalized_context = _normalize_route_part(context, "context")
     normalized_instance = _normalize_route_part(instance, "instance")
     normalized_target_id = _require_non_empty(target_id, "target_id")
@@ -184,8 +192,6 @@ def repair_dokploy_target_domain_authority(
         raise ValueError(
             "Dokploy domain authority repair target id does not match the tracked target."
         )
-    if apply and expected_current_provider_target_fingerprint:
-        raise ValueError("Comparison fingerprints support domain-authority dry runs only.")
     require_provider_target_expectation(
         current=provider_target_record,
         expected=expected_current_provider_target,
@@ -241,31 +247,75 @@ def repair_dokploy_target_domain_authority(
             "source_label": normalized_source_label,
         }
     )
-    if apply:
-        target_record, provider_target_record = (
-            record_store.compare_and_write_dokploy_target_domains(
-                expected_record=target_record,
-                expected_target_id_record=target_id_record,
-                expected_provider_target_record=provider_target_record,
-                domains=requested_domains,
-                updated_at=recorded_at,
-                source_label=normalized_source_label,
-            )
-        )
-    else:
-        target_record = projected_target_record
-        provider_target_record = projected_provider_target_record
+    return DokployTargetDomainRepairPlan(
+        current_target=target_record,
+        target_id=target_id_record,
+        current_provider_target=provider_target_record,
+        result=DokployTargetDomainRepairResult(
+            applied=False,
+            target_record=projected_target_record,
+            target_id_record=target_id_record,
+            provider_target_record=projected_provider_target_record,
+            requested_domains=requested_domains,
+            live_provider_domains=live_provider_domains,
+            warnings=("dry run only; records were not written and provider remained read-only",),
+        ),
+    )
 
-    return DokployTargetDomainRepairResult(
-        applied=apply,
-        target_record=target_record,
-        target_id_record=target_id_record,
-        provider_target_record=provider_target_record,
-        requested_domains=requested_domains,
-        live_provider_domains=live_provider_domains,
-        warnings=()
-        if apply
-        else ("dry run only; records were not written and provider remained read-only",),
+
+def repair_dokploy_target_domain_authority(
+    *,
+    record_store: DokployTargetAdoptionRecordStore,
+    host: str,
+    token: str,
+    context: str,
+    instance: str,
+    target_type: DokployTargetType,
+    target_id: str,
+    domains: tuple[str, ...],
+    expected_current_provider_target: DeployedTargetReference,
+    expected_current_provider_target_fingerprint: str = "",
+    source_label: str = "service:dokploy-targets:setup:repair-domain-authority",
+    updated_at: str = "",
+    apply: bool = False,
+    fetch_target_payload: FetchDokployTargetPayload,
+    fetch_target_domains: FetchDokployTargetDomains,
+) -> DokployTargetDomainRepairResult:
+    if apply and expected_current_provider_target_fingerprint:
+        raise ValueError("Comparison fingerprints support domain-authority dry runs only.")
+    plan = plan_dokploy_target_domain_authority(
+        record_store=record_store,
+        host=host,
+        token=token,
+        context=context,
+        instance=instance,
+        target_type=target_type,
+        target_id=target_id,
+        domains=domains,
+        expected_current_provider_target=expected_current_provider_target,
+        expected_current_provider_target_fingerprint=expected_current_provider_target_fingerprint,
+        source_label=source_label,
+        updated_at=updated_at,
+        fetch_target_payload=fetch_target_payload,
+        fetch_target_domains=fetch_target_domains,
+    )
+    if not apply:
+        return plan.result
+    target_record, provider_target_record = record_store.compare_and_write_dokploy_target_domains(
+        expected_record=plan.current_target,
+        expected_target_id_record=plan.target_id,
+        expected_provider_target_record=plan.current_provider_target,
+        domains=plan.result.requested_domains,
+        updated_at=plan.result.target_record.updated_at,
+        source_label=plan.result.target_record.source_label,
+    )
+    return plan.result.model_copy(
+        update={
+            "applied": True,
+            "target_record": target_record,
+            "provider_target_record": provider_target_record,
+            "warnings": (),
+        }
     )
 
 

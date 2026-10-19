@@ -604,6 +604,22 @@ export function applyProductHealthMonitoring(
   );
 }
 
+export function repairDomainAuthority(
+  payload: import("./generated/openapi.ts").SetupDokployTargetData["body"],
+  options: BrowserOperationOptions,
+): Promise<import("./generated/openapi.ts").SetupDokployTargetResponse> {
+  return requestJson(BROWSER_WRITE_ROUTES.domainAuthorityRepair, "POST", payload,
+    options.signal, options.idempotencyKey, options.onDispatch);
+}
+
+export function repairRouteBinding(
+  payload: import("./generated/openapi.ts").ReconcileRouteBindingData["body"],
+  options: BrowserOperationOptions,
+): Promise<import("./generated/openapi.ts").ReconcileRouteBindingResponse> {
+  return requestJson(BROWSER_WRITE_ROUTES.routeBindingRepair, "POST", payload,
+    options.signal, options.idempotencyKey, options.onDispatch);
+}
+
 export function applyProductionBackupAuthority(
   payload: ApplyProductionBackupAuthorityData["body"], options: BrowserOperationOptions,
 ): Promise<ApplyProductionBackupAuthorityResponse> {

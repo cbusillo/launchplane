@@ -2471,6 +2471,50 @@ and a clean legacy-only dry-run baseline before proceeding.
 
 ### Dokploy domain authority
 
+In Product Ops, open the environment's **Actions → Repair route records** panel
+as a verified administrator. Domain authority and Route binding are separate
+decisions: enter a reason, review the current and proposed records, then Apply,
+Leave records unchanged, or Investigate evidence. A blocked binding names its
+missing evidence and cannot be applied; an unchanged review needs no write.
+The domain review preserves the destination and shows the proposed primary
+domain. These operations update Launchplane records only; they do not modify
+Dokploy, DNS or TLS, or establish website health. Existing no-op ingress audit
+automation remains separate.
+
+The browser preserves the exact reviewed request and idempotency key before
+dispatch. An unknown apply acknowledgement keeps **Resume original** available
+under that same request and key. An accepted response or verified original-key
+replay completes the operation. A separate inert review reads the current
+record afterward. Denied, unavailable or differing current readback is reported
+separately; it does not undo the completed receipt, lock either decision, or
+prevent a fresh review. Current readback does not establish website health.
+For an unproved apply, **Start a separate review** releases this tab's recovery
+fence, including when the saved payload is missing or invalid. It does not cancel
+the earlier request or prove whether it changed records; that request may still
+finish. The card keeps its earlier key, fingerprint and last failure in an
+advanced detail for this view only, separately from any later receipt. Browser
+storage cleanup is best-effort, not a durable history or discard guarantee.
+A separate apply requires a fresh inert review and decision, with a new key;
+the service's existing record compare-and-set checks protect the reviewed
+baseline if the earlier request finishes concurrently. Uncertainty in one card
+does not block the other decision; current network work still serializes them.
+The controls require the existing strict-admin service admission and add no
+grant or machine authority.
+
+Each browser apply settles under its caller scope, route and idempotency key.
+A proven prewrite `stale` refusal must first record its completed immutable 409
+receipt using the same unique idempotency row as the atomic successful write.
+If success already won, the stale caller recovers the original 202 instead. If
+the refusal won, another in-flight request with that same key recovers 409 and
+cannot write route records. The refusal remains terminal even if current
+evidence later becomes eligible again; review current records with a new key.
+A changed payload under a completed key conflicts. Storage, commit and unknown
+outcomes do not become settled refusals and retain original-key recovery.
+No separate long-lived request lock or client-side inference decides the result.
+The typed review supplies its `expected_confirmation` from the same server
+contract used to validate apply, and the durable browser receipt records the
+administrator's reason. These fields do not confer authorization.
+
 For an invalid tracked Dokploy target domain authority, use the `Dokploy Target
 Setup` workflow with `operation=repair-domain-authority`. Supply the exact
 tracked target type and target ID, a comma-separated tuple of bare DNS hosts,

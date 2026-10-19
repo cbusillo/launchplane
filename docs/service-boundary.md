@@ -2727,6 +2727,50 @@ for apply and `dokploy_target.repair_domain_authority.plan` for dry-run. It
 remains fail-closed when any tracked or live identity/evidence is missing or
 changed.
 
+The setup repair operation and `POST /v1/route-bindings/reconcile` also support
+the explicit CSRF-checked strict-administrator browser decision. Their optional
+`browser_review` names the actual lane product and, on apply, the reviewed
+semantic plan digest. Setup retains its service namespace `product=launchplane`;
+the browser supplies no provider identity, placement, target or domain payload.
+The service resolves fresh lane records and read-only provider evidence. Binding
+browser dry-run uses the absent expectation as a discovery sentinel and returns
+the actual current expectation for apply. The typed top-level `review` exposes
+current/proposed records and findings, without arbitrary provider evidence.
+It is omitted for existing machine requests, whose result shape and authority
+remain unchanged.
+
+Browser apply rechecks the semantic review and current source rows through the
+existing atomic CAS/receipt boundary. A deterministic prewrite `stale` result
+is returned only after its completed 409 refusal wins the same unique caller,
+route and idempotency-key row as a successful atomic write. A concurrent 202
+winner is recovered instead of a false refusal; a 409 winner prevents later
+same-key route-record writes, even after evidence becomes eligible again.
+Existing immutable once-only idempotency insertion decides this result without
+a second request-lock or lease lifecycle. Changed payloads conflict, while
+in-progress, infrastructure, storage and commit uncertainty retain the original
+request/key. Browser replay preserves the exact stored 409 error and trace before
+any Accepted response conversion. Machine replay behavior remains unchanged.
+
+A historical same-key replay is recovered before fresh-plan drift checks. A
+verified accepted or replayed receipt completes that apply independently of
+current-record readback. The browser then performs a separate inert dry-run,
+using a distinct request identity. Failure, denial or later drift of readback is
+shown as current evidence only and does not retain the completed operation in
+recovery or block either decision. Resuming an unproved apply requires the exact
+original payload/key. The administrator may instead explicitly start a separate
+review, releasing only browser tracking without canceling or settling the old
+request. A new inert review and decision precede a fresh-key apply, protected
+by the existing record CAS boundary. The earlier identity/failure stays labeled
+unknown in this view; it is not a durable browser history, and a new receipt
+does not establish the earlier outcome. Unknown operations do not lock the
+independent card, although current network work still serializes both cards.
+Administrator, session and CSRF checks remain required. Neither a later record nor readback
+proves current site health. Browser receipts retain the administrator's reason;
+the typed review's required `expected_confirmation` comes from the same
+server-side envelope property that validates apply. Existing machine response
+shapes and confirmations remain unchanged. No other setup operation is admitted
+by this browser path.
+
 Besides `dokploy_target.setup` (or `dokploy_target.plan` for dry-run), checked on
 product and context `launchplane`, the route accepts the lane-scoped
 `dokploy_target.lane_setup` action for `create-compose` and the narrow
