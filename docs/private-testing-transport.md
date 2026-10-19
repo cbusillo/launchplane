@@ -61,6 +61,16 @@ fresh conventional application and lane-only volume it already allocated. The
 service resolves that caller's completed allocation receipt itself and checks
 current exclusive ownership, placement, empty source/environment, sole mount and
 absence of deployment, protected use, needed data, aliases and uncertain effects.
+The original environment and project IDs and their inherited environment inputs
+must also match the empty allocation. The application must retain its vanilla
+single-replica runtime: no custom Swarm options, networks, published ports,
+execution, registry bindings, security or redirects. Nullable Swarm options must
+stay null, since even empty objects override provider defaults. Supported testing
+domain setup remains available; Dockerfile/build-path settings skipped by
+Docker-source deployment do not block continuation.
+This boundary follows Dokploy's
+[application defaults](https://github.com/Dokploy/dokploy/blob/e0c8d80cdea15a4ac3fe495a6ad38e043b4b80b5/packages/server/src/db/schema/application.ts)
+and [runtime construction](https://github.com/Dokploy/dokploy/blob/e0c8d80cdea15a4ac3fe495a6ad38e043b4b80b5/packages/server/src/utils/builders/index.ts).
 Staff, foreign, legacy and Compose interlocks keep their existing protections.
 
 Dry-run remains an inert hold plan and does not qualify provider readiness.

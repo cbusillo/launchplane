@@ -233,28 +233,18 @@ class ApplicationStateVolumeAdapter:
         data = json.loads(phase)
         if not isinstance(data, dict) or not all(
             isinstance(data.get(key), str) and data[key]
-            for key in ("application", "environment", "app_name")
+            for key in ("application", "environment", "project", "app_name")
         ):
             raise ValueError("Original application allocation progress is incomplete.")
         self._verify_adopted(phase, configuration_verified=False)
         if inspect_provider:
-            from control_plane.dokploy.target_source_setup import (
-                require_empty_target_source,
-                require_empty_application_overrides,
-            )
+            from control_plane.dokploy.fresh_application import require_fresh_application_runtime
 
             live = self._live(data["application"], data["environment"], data["app_name"])
-            require_empty_target_source(live)
-            require_empty_application_overrides(live)
-            if (
-                not self._mount_matches(live)
-                or live.get("deployments") != []
-                or live.get("applicationStatus") not in {None, "idle"}
-                or (
-                    live.get("env") is not None
-                    and (not isinstance(live["env"], str) or bool(live["env"].strip()))
-                )
-            ):
+            require_fresh_application_runtime(
+                live, environment_id=data["environment"], project_id=data["project"]
+            )
+            if not self._mount_matches(live):
                 raise ValueError("Application source, execution, storage or placement changed.")
         return request_fingerprint(
             {

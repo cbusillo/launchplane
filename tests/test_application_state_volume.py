@@ -59,6 +59,24 @@ class _ApplicationStateVolumeFixture(_DirectorTestingSetupFixture):
                 "serverId": self.payload["server_id"],
                 "mounts": deepcopy(self.preexisting_mounts),
                 "deployments": [],
+                "previewDeployments": [],
+                "ports": [],
+                "security": [],
+                "redirects": [],
+                "replicas": 1,
+                "applicationStatus": "idle",
+                "env": None,
+                "args": None,
+                "networkIds": [],
+                "detachDokployNetwork": False,
+                "placementSwarm": None,
+                "networkSwarm": None,
+                "environment": {
+                    "environmentId": "created-environment",
+                    "projectId": "created-project",
+                    "env": None,
+                    "project": {"projectId": "created-project", "env": None},
+                },
             }
             self.placement["environments"][0]["targets"].append(
                 {
@@ -271,7 +289,6 @@ class ApplicationStateVolumeTests(_ApplicationStateVolumeFixture):
             target.model_copy(update={"domains": ("testing.example.invalid",)})
         )
         self.live["domains"] = [{"host": "testing.example.invalid"}]
-        self.live.update(dockerfile="Dockerfile", buildPath="/", dockerContextPath=None)
         provider_calls = self.provider.call_count
         plan = await self._testing_hold()
         self.assertEqual(plan.status_code, 202, plan.text)
@@ -281,6 +298,7 @@ class ApplicationStateVolumeTests(_ApplicationStateVolumeFixture):
         self.assertEqual(applied.status_code, 202, applied.text)
         self.assertTrue(applied.json()["result"]["read_back_matches"])
         self.assertFalse(applied.json()["result"]["reconcile_requested"])
+        self.assertEqual(applied.json()["records"], plan.json()["records"])
         target = self.store.read_dokploy_target_record(
             context_name=self.context, instance_name="testing"
         )
@@ -314,12 +332,28 @@ class ApplicationStateVolumeTests(_ApplicationStateVolumeFixture):
             {"registryUrl": "https://registry.example.invalid"},
             {"command": "unreviewed-command"},
             {"args": ["unreviewed-argument"]},
-            {"buildArgs": "UNREVIEWED=fixture"},
-            {"buildSecrets": "UNREVIEWED=fixture"},
-            {"dockerfile": "other.Dockerfile"},
-            {"buildPath": "/unreviewed"},
-            {"customGitBuildPath": "/unreviewed"},
-            {"dockerContextPath": "/unreviewed"},
+            {"buildServerId": "another-server"},
+            {"buildRegistryId": "unreviewed-registry"},
+            {"rollbackRegistryId": "unreviewed-registry"},
+            {"registry": {"registryId": "unreviewed-registry"}},
+            {"ports": [{"publishedPort": 8080, "targetPort": 8080}]},
+            {"ports": None},
+            {"networkSwarm": [{"Target": "production-overlay"}]},
+            {"networkSwarm": []},
+            {"networkIds": ["production-network"]},
+            {"detachDokployNetwork": True},
+            {"placementSwarm": {"Constraints": ["node.labels.production==true"]}},
+            {"placementSwarm": {}},
+            {"modeSwarm": {"Global": {}}},
+            {"labelsSwarm": {"traefik.enable": "true"}},
+            {"healthCheckSwarm": {"Test": ["CMD", "unreviewed-command"]}},
+            {"endpointSpecSwarm": {"Ports": [{"PublishedPort": 8080}]}},
+            {"security": [{"username": "unreviewed-user"}]},
+            {"redirects": [{"regex": ".*", "replacement": "https://elsewhere.invalid"}]},
+            {"replicas": 2},
+            {"replicas": None},
+            {"memoryLimit": "1024"},
+            {"previewDeployments": [{"previewDeploymentId": "already-started"}]},
             {"mounts": []},
             {"mounts": [{**original["mounts"][0], "volumeName": "foreign-state"}]},
             {"serverId": "another-server"},
@@ -337,6 +371,117 @@ class ApplicationStateVolumeTests(_ApplicationStateVolumeFixture):
                     ).policies.staff_testing_hold
                 )
         self.assertEqual(self.provider.call_count, calls)
+        self.storage_inspector.assert_not_called()
+        self.assertEqual(self.store.list_product_reconcile_requests(), ())
+        self.assert_production_unchanged()
+
+    async def test_application_continuation_requires_original_empty_parent_environments(
+        self,
+    ) -> None:
+        await self.prepare_application_hold()
+        original = deepcopy(self.live)
+        plan = await self._testing_hold()
+        for environment in (
+            None,
+            {},
+            {**original["environment"], "environmentId": "another-environment"},
+            {**original["environment"], "projectId": "another-project"},
+            {**original["environment"], "project": {"projectId": "another-project"}},
+            {**original["environment"], "project": {"projectId": "created-project"}},
+            {**original["environment"], "env": "UNTRACKED=fixture"},
+            {
+                **original["environment"],
+                "project": {"projectId": "created-project", "env": "UNTRACKED=fixture"},
+            },
+        ):
+            with self.subTest(environment=environment):
+                self.live = {**deepcopy(original), "environment": environment}
+                result = await self._testing_hold(
+                    mode="apply", reviewed_plan_sha256=plan.json()["result"]["plan_sha256"]
+                )
+                self.assertEqual(result.status_code, 409, result.text)
+                self.assertIsNotNone(
+                    self.store.read_dokploy_target_record(
+                        context_name=self.context, instance_name="testing"
+                    ).policies.staff_testing_hold
+                )
+        self.storage_inspector.assert_not_called()
+        self.assertEqual(self.store.list_product_reconcile_requests(), ())
+        self.assert_production_unchanged()
+
+    async def test_inert_source_build_settings_do_not_block_docker_runtime_continuation(
+        self,
+    ) -> None:
+        await self.prepare_application_hold()
+        self.live.update(
+            dockerfile="unused.Dockerfile",
+            buildPath="/unused",
+            customGitBuildPath="/unused",
+            dockerContextPath="/unused",
+            dockerBuildStage="unused-stage",
+            buildArgs="UNUSED=fixture",
+            buildSecrets="UNUSED=fixture",
+            args=[],
+        )
+        result = await self._reviewed_application_lift()
+        self.assertEqual(result.status_code, 202, result.text)
+        self.assertIsNone(
+            self.store.read_dokploy_target_record(
+                context_name=self.context, instance_name="testing"
+            ).policies.staff_testing_hold
+        )
+        self.storage_inspector.assert_called_once()
+        self.assert_production_unchanged()
+
+    async def test_late_cross_lane_idempotency_collision_retains_hold_and_original_receipt(
+        self,
+    ) -> None:
+        from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+        from control_plane.http_app import idempotency_request_fingerprint
+        from control_plane.http_routes.mutation_support import idempotency_scope
+        from control_plane.service_auth import configured_local_operator_identity
+        from control_plane.testing_lane_hold import TESTING_HOLD_APPLY_ROUTE
+        from control_plane.workflows.ship import utc_now_timestamp
+        from tests.http_app_test_support import _local_operator_bearer_config
+
+        await self.prepare_application_hold()
+        identity = configured_local_operator_identity(_local_operator_bearer_config())
+        assert identity is not None
+        # Another lane has a different execution lock but shares the caller's
+        # route/key namespace. Its transaction can finish after our replay read.
+        other_payload: dict[str, object] = {"context": "another-testing-context", "hold": False}
+        other_receipt = LaunchplaneIdempotencyRecord(
+            record_id="late-other-lane-receipt",
+            scope=idempotency_scope(identity),
+            route_path=TESTING_HOLD_APPLY_ROUTE,
+            idempotency_key="application-hold-lift",
+            request_fingerprint=idempotency_request_fingerprint(
+                route_path=TESTING_HOLD_APPLY_ROUTE, payload=other_payload
+            ),
+            response_status_code=202,
+            response_trace_id="other-lane-trace",
+            recorded_at=utc_now_timestamp(),
+            response_payload={"records": {"context": other_payload["context"]}},
+        )
+        self.storage_inspector.side_effect = lambda *_args, **_kwargs: (
+            self.store.write_idempotency_record(other_receipt)
+        )
+        result = await self._reviewed_application_lift()
+        self.assertEqual(result.status_code, 409, result.text)
+        self.assertEqual(result.json()["error"]["code"], "idempotency_key_reused")
+        self.assertEqual(
+            self.store.read_idempotency_record(
+                scope=other_receipt.scope,
+                route_path=other_receipt.route_path,
+                idempotency_key=other_receipt.idempotency_key,
+            ),
+            other_receipt,
+        )
+        self.assertIsNotNone(
+            self.store.read_dokploy_target_record(
+                context_name=self.context, instance_name="testing"
+            ).policies.staff_testing_hold
+        )
         self.assertEqual(self.store.list_product_reconcile_requests(), ())
         self.assert_production_unchanged()
 

@@ -85,40 +85,6 @@ def require_empty_target_source(payload: JsonObject) -> None:
             raise ValueError("Target already has a configured or partial source.")
 
 
-def require_empty_application_overrides(payload: JsonObject) -> None:
-    """Reject inputs ordinary image deployment preserves, retaining inert provider defaults."""
-    for key in (
-        "registryUrl",
-        "username",
-        "password",
-        "registryId",
-        "rollbackRegistryId",
-        "buildRegistryId",
-        "buildServerId",
-        "command",
-        "buildArgs",
-        "buildSecrets",
-        "dockerBuildStage",
-    ):
-        if payload.get(key) not in (None, ""):
-            raise ValueError("Application has an unreviewed execution or credential override.")
-    if payload.get("args") not in (None, []):
-        raise ValueError("Application has unreviewed command arguments.")
-    if payload.get("dockerfile") not in (None, "", "Dockerfile"):
-        raise ValueError("Application has a configured Dockerfile override.")
-    for key in (
-        "dockerContextPath",
-        "buildPath",
-        "customGitBuildPath",
-        "gitlabBuildPath",
-        "giteaBuildPath",
-        "bitbucketBuildPath",
-        "dropBuildPath",
-    ):
-        if payload.get(key) not in (None, "", "/"):
-            raise ValueError("Application has a configured build path override.")
-
-
 def configure_empty_compose_source(
     *,
     host: str,

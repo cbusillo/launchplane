@@ -9205,6 +9205,11 @@ def create_launchplane_fastapi_app(
         )
         typed_store = cast(control_plane_testing_lane_hold.TestingHoldStore, record_store)
         actor = launchplane_identity_actor(identity)
+        records = {
+            "product_profile": hold_request.product,
+            "context": hold_request.context,
+            "instance": hold_request.instance,
+        }
         if director_application_lift and hold_request.mode == "apply":
             from control_plane.dokploy_inventory import InventoryUnavailable
 
@@ -9278,7 +9283,7 @@ def create_launchplane_fastapi_app(
                             before_inspection=before_inspection,
                         )
 
-                    binding = qualify(inspect_provider=True)
+                    binding = qualify(inspect_provider=False)
 
                     def inspection_checkpoint(_phase: str) -> None:
                         lane_check()
@@ -9328,7 +9333,7 @@ def create_launchplane_fastapi_app(
                             }
                         )
                         response = accepted_evidence_response(
-                            trace_id=trace_id, records={}, result=plan.model_dump(mode="json")
+                            trace_id=trace_id, records=records, result=plan.model_dump(mode="json")
                         )
                         status, receipt = record_store.commit_testing_hold(
                             product=hold_request.product,
@@ -9353,7 +9358,15 @@ def create_launchplane_fastapi_app(
                             return replay_idempotent_response(
                                 trace_id=trace_id, stored_record=receipt, route_path=route_path
                             )
-                        raise ValueError("The original testing hold mutation must be reconciled.")
+                        raise _launchplane_http_error(
+                            status_code=409,
+                            trace_id=trace_id,
+                            code={
+                                "idempotency_conflict": "idempotency_key_reused",
+                                "reconciliation_required": "mutation_reconciliation_required",
+                            }.get(status, "mutation_in_progress"),
+                            message="The original testing hold mutation must be retained and reconciled.",
+                        )
 
             try:
                 return await run_in_worker_thread(continue_application)
@@ -9395,11 +9408,6 @@ def create_launchplane_fastapi_app(
                     message="The staff-hold rehearsal is not currently qualified for this caller.",
                 ) from error
 
-        records = {
-            "product_profile": hold_request.product,
-            "context": hold_request.context,
-            "instance": hold_request.instance,
-        }
         if hold_request.mode == "dry-run":
             await verify_activation_interlock()
             try:
