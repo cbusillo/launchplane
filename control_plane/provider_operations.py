@@ -103,6 +103,7 @@ class ProviderObservation:
     response_status_code: int = 202
     response_payload: dict[str, object] = field(default_factory=dict)
     retry_safe: bool = False
+    preserve_effect_checkpoint: bool = False
 
 
 @dataclass(frozen=True)
@@ -252,6 +253,7 @@ class DurableProviderOperationStore(Protocol):
         reservation: LaunchplaneIdempotencyRecord,
         lease_owner: str,
         lease_seconds: int = ...,
+        preserve_effect_checkpoint: bool = False,
     ) -> MutationReconciliationRetryResult: ...
 
 
@@ -863,6 +865,7 @@ def _reconcile(
             reservation=fallback_record,
             lease_owner=lease_owner,
             lease_seconds=lease_seconds,
+            preserve_effect_checkpoint=observation.preserve_effect_checkpoint,
         )
         if retry.status == "replayed":
             return _replayed_result(retry.record)

@@ -688,14 +688,13 @@ class OdooRehearsalAdapter:
             before_provider_mutation=lambda _phase: checkpoint(),
         )
 
-    def host(
+    def host_script(
         self,
         record: OdooUpgradeRehearsalRecord,
         mode: str,
-        checkpoint: Callable[[], None],
         *,
         operation_key: str = "",
-    ) -> dict[str, object]:
+    ) -> str:
         if mode == "observe" or self.request.action in {"verify", "retire"}:
             source_values: dict[str, str] = {}
             shape: dict[str, str] = {}
@@ -722,6 +721,33 @@ class OdooRehearsalAdapter:
             + ")), '<rehearsal>', 'exec'), {})"
             + "\nLP_REHEARSAL\n"
         )
+        return script
+
+    @staticmethod
+    def validate_apply_script(record: OdooUpgradeRehearsalRecord, script: str) -> None:
+        from control_plane.provider_operations import ProviderMutationRejectedError
+
+        try:
+            api.validate_dokploy_schedule_script({"script": script, "appName": record.rehearsal_id})
+        except click.ClickException:
+            raise ProviderMutationRejectedError(
+                RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
+            ) from None
+
+    def host(
+        self,
+        record: OdooUpgradeRehearsalRecord,
+        mode: str,
+        checkpoint: Callable[[], None],
+        *,
+        operation_key: str = "",
+        prepared_script: str | None = None,
+    ) -> dict[str, object]:
+        script = (
+            prepared_script
+            if prepared_script is not None
+            else self.host_script(record, mode, operation_key=operation_key)
+        )
         evidence = self.run_script(record, script, checkpoint)
         try:
             result = RehearsalHostResult.model_validate_json(
@@ -737,7 +763,8 @@ class OdooRehearsalAdapter:
             or (
                 result["refusal_code"]
                 and (
-                    result["attempt_sha256"] != spec["attempt_sha256"]
+                    result["attempt_sha256"]
+                    != canonical_json_sha256({"operation_key": operation_key})
                     or result["completed"] is not False
                     or result["state"] != record.state
                     or result["copies"] != [copy.model_dump(mode="json") for copy in record.copies]
@@ -831,13 +858,21 @@ class OdooRehearsalAdapter:
                     check()
                     # Only remaining child creation may continue. The project
                     # is recorded later, under the reacquired provider lease.
-                    return ProviderObservation("absent", retry_safe=True)
+                    return ProviderObservation(
+                        "absent", retry_safe=True, preserve_effect_checkpoint=True
+                    )
                 result = self.host(record, "observe", check, operation_key=provider_operation_key)
                 if self.can_continue_prepare_host(record, result, provider_effect_phase):
                     if self.initial_prepare_binding(record) != self.request.reviewed_plan_sha256:
                         return ProviderObservation("unknown")
+                    self.validate_apply_script(
+                        record,
+                        self.host_script(record, "apply", operation_key=provider_operation_key),
+                    )
                     self._continue_prepare_host = True
-                    return ProviderObservation("absent", retry_safe=True)
+                    return ProviderObservation(
+                        "absent", retry_safe=True, preserve_effect_checkpoint=True
+                    )
                 if result.get("refusal_code"):
                     return ProviderObservation(
                         "present",
@@ -956,8 +991,10 @@ class OdooRehearsalAdapter:
                     raise RehearsalRefused(RehearsalPrerequisite.RECOVERY_REQUIRED) from None
                 resources = rehearsal_resource(record)
                 checkpoint()
+                storage_script = resources.script("prepare")
+                self.validate_apply_script(record, storage_script)
                 lease.checkpoint_effect("independent_storage")
-                evidence = self.run_script(record, resources.script("prepare"), checkpoint)
+                evidence = self.run_script(record, storage_script, checkpoint)
                 if (
                     evidence.get("testing_resources_ok") != "true"
                     or evidence.get("testing_resources_binding_sha256") != resources.binding_sha256
@@ -979,8 +1016,16 @@ class OdooRehearsalAdapter:
                 ):
                     raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
             checkpoint()
+            script = self.host_script(record, "apply", operation_key=provider_operation_key)
+            self.validate_apply_script(record, script)
             lease.checkpoint_effect(self.request.action)
-            result = self.host(record, "apply", checkpoint, operation_key=provider_operation_key)
+            result = self.host(
+                record,
+                "apply",
+                checkpoint,
+                operation_key=provider_operation_key,
+                prepared_script=script,
+            )
             if result.get("refusal_code"):
                 return ProviderMutationOutcome(409, self.refusal_response(result))
             public = self.publish(record, result)

@@ -2570,7 +2570,9 @@ full artifact and record binding remain in service custody. The reviewed host
 program and its input use a compressed stdin wrapper, avoiding large Python
 arguments and Dokploy's base64-wrapped remote shell materialization limit.
 The shared schedule writer bounds the materialized command before provider
-mutation; rehearsal also checks it before its effect checkpoint. Oversized
+mutation. Rehearsal renders and validates the exact storage/apply script before
+advancing its effect checkpoint, then executes that same string. Local size
+rejection cannot advance the effect checkpoint. Oversized
 scripts require compact delivery, rather than a provider row written before a
 shell-size failure. Exact apply scripts include purpose-local values resolved
 at execution, so this bound is enforced on the rendered script at that point.
@@ -2585,6 +2587,11 @@ and existing storage through readback, without recreating placement, storage or
 passwords. The host's execution lock and started marker still fence its first
 effect; an already started or uncertain host action remains held. This rule is
 limited to prepare, and never retries capture, migration or a later action.
+These two supported prepare continuations explicitly preserve the preceding
+effect phase and timestamp when atomically reacquiring their original lease.
+A local refusal or storage readback failure during continuation therefore keeps
+the original reservation and custody; it cannot release it as a fresh attempt.
+Other provider-operation retries retain their existing default behavior.
 Once placement exists, a readback without the matching original key still
 returns the host observation and `original_key_required`; it cannot supply a
 journal recovery disposition or authorize a retry.

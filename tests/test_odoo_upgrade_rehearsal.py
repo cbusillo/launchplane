@@ -482,7 +482,12 @@ class RehearsalScenario(unittest.TestCase):
         self.assertEqual(result["intent_sha256"], record.intent_sha256)
         self.assertFalse(result["completed"])
 
-    def test_oversize_host_script_is_refused_before_effect_checkpoint(self) -> None:
+        prepare_rehearsal_local_credentials(self.store, self.identifier, actor=self.principal)
+        apply_script = adapter.host_script(record, "apply", operation_key="fixture-operation")
+        validate_dokploy_schedule_script({"script": apply_script, "appName": record.rehearsal_id})
+        compile(python_heredoc(apply_script), "<apply-transport>", "exec")
+
+    def test_oversize_host_script_is_refused_before_dispatch_checks(self) -> None:
         import click
         from control_plane.dokploy.api import DOKPLOY_SCHEDULE_MATERIALIZATION_LIMIT_BYTES
 
@@ -493,6 +498,31 @@ class RehearsalScenario(unittest.TestCase):
                 self.record, "x" * DOKPLOY_SCHEDULE_MATERIALIZATION_LIMIT_BYTES, checkpoint
             )
         checkpoint.assert_not_called()
+
+    def test_oversize_apply_payload_releases_fresh_action_without_provider_dispatch(self) -> None:
+        from control_plane.dokploy import api
+
+        retained = self.record.model_copy(update={"state": "switched", "compose_id": "own-compose"})
+        self.store.compare_and_write_odoo_upgrade_rehearsal(self.record, retained)
+        adapter = self.adapter("verify")
+        render = rehearsal_host_spec
+
+        def oversized(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            spec = render(*args, **kwargs)
+            if args[2] == "apply":
+                spec["oversize_fixture"] = hashlib.shake_256(b"apply payload").hexdigest(250_000)
+            return spec
+
+        with (
+            patch(
+                "control_plane.odoo_upgrade_rehearsal.rehearsal_host_spec", side_effect=oversized
+            ),
+            patch.object(api, "dokploy_request") as provider,
+        ):
+            with self.assertRaises(RehearsalRefused):
+                self.run_operation(adapter, "oversize-apply")
+        provider.assert_not_called()
+        self.assertEqual(self.store.list_held_provider_target_reservations(), ())
 
     def test_retirement_uses_retained_intent_without_source_or_credential_reads(self) -> None:
         retained = self.record.model_copy(update={"state": "verified", "compose_id": "own-compose"})
@@ -563,6 +593,7 @@ class RehearsalScenario(unittest.TestCase):
             checkpoint: Callable[[], None],
             *,
             operation_key: str,
+            prepared_script: str | None = None,
         ) -> dict[str, object]:
             checkpoint()
             action = adapter.request.action
@@ -619,6 +650,7 @@ class RehearsalScenario(unittest.TestCase):
         self.assertEqual(retired.copies, tuple(copies))
 
     def test_unknown_provider_effect_is_never_blindly_replayed(self) -> None:
+        prepare_rehearsal_local_credentials(self.store, self.identifier, actor=self.principal)
         prepared = self.record.model_copy(update={"state": "prepared", "compose_id": "own-compose"})
         self.store.compare_and_write_odoo_upgrade_rehearsal(self.record, prepared)
         adapter = self.adapter("execute")
@@ -951,16 +983,138 @@ class RehearsalScenario(unittest.TestCase):
                 self.run_operation(adapter, "original-prepare").status, "reconcile_required"
             )
             self.assertEqual(modes, ["prepare"])
+            original = self.store.list_held_provider_target_reservations()[0]
+            host.return_value = {**incomplete, "prepare_not_started": True}
+            render = rehearsal_host_spec
+            renders = 0
+
+            def oversized(*args: Any, **kwargs: Any) -> dict[str, Any]:
+                nonlocal renders
+                spec = render(*args, **kwargs)
+                if args[2] == "apply":
+                    renders += 1
+                    if renders >= refuse_on_render:
+                        spec["oversize_fixture"] = hashlib.shake_256(b"continuation").hexdigest(
+                            250_000
+                        )
+                return spec
+
+            for refuse_on_render in (1, 2):
+                renders = 0
+                with patch(
+                    "control_plane.odoo_upgrade_rehearsal.rehearsal_host_spec",
+                    side_effect=oversized,
+                ):
+                    self.assertEqual(
+                        self.run_operation(adapter, "original-prepare").status, "reconcile_required"
+                    )
+                retained = self.store.list_held_provider_target_reservations()[0]
+                self.assertEqual(retained.provider_effect_phase, original.provider_effect_phase)
+                self.assertEqual(
+                    retained.provider_effect_started_at, original.provider_effect_started_at
+                )
+                if refuse_on_render == 1:
+                    self.assertEqual(retained, original)
+                else:
+                    self.assertGreater(retained.attempt, original.attempt)
+            with patch.object(
+                adapter,
+                "run_script",
+                side_effect=RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED),
+            ):
+                with self.assertRaises(RehearsalRefused):
+                    self.run_operation(adapter, "original-prepare")
+            retained = self.store.list_held_provider_target_reservations()[0]
+            self.assertEqual(retained.provider_effect_phase, original.provider_effect_phase)
+            self.assertEqual(
+                retained.provider_effect_started_at, original.provider_effect_started_at
+            )
+            self.assertEqual(self.run_operation(adapter, "replacement-key").status, "target_busy")
             host.side_effect = [
                 {**incomplete, "prepare_not_started": True},
                 {"state": "prepared", "copies": [], "elapsed_seconds": {}},
             ]
             result = self.run_operation(adapter, "original-prepare")
             self.assertEqual((result.status, result.response_status_code), ("completed", 202))
-            self.assertEqual(modes, ["prepare", "readback"])
+            self.assertEqual(modes, ["prepare", "readback", "readback", "readback"])
             self.assertEqual(create.call_count, 3)
             self.assertEqual(rehearsal_credentials(self.store, self.identifier), credentials)
             self.assertEqual(self.authority(), before)
+
+    def assert_prepare_size_refusal_retains_previous_phase(self, stage: str) -> None:
+        from control_plane.dokploy import api
+        from control_plane.odoo_testing_resources import OdooRehearsalResources
+
+        adapter = self.adapter("prepare")
+        creates = iter(
+            (
+                {"projectId": "own-project"},
+                {"environmentId": "own-environment"},
+                {"composeId": "own-compose"},
+            )
+        )
+        storage_script = OdooRehearsalResources.script
+        render = rehearsal_host_spec
+        observed: dict[str, Any] = {}
+        write_checkpoint = self.store.checkpoint_mutation_provider_effect
+
+        def track_checkpoint(**kwargs: Any) -> Any:
+            result = write_checkpoint(**kwargs)
+            observed[kwargs["effect_phase"]] = result.record
+            return result
+
+        def resource_script(resource: OdooRehearsalResources, mode: Any) -> str:
+            return (
+                "x" * api.DOKPLOY_SCHEDULE_MATERIALIZATION_LIMIT_BYTES
+                if stage == "storage"
+                else storage_script(resource, mode)
+            )
+
+        def host_spec(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            spec = render(*args, **kwargs)
+            spec["oversize_fixture"] = hashlib.shake_256(b"prepare apply").hexdigest(250_000)
+            return spec
+
+        def storage(record: OdooUpgradeRehearsalRecord, *_: Any) -> dict[str, str]:
+            return {
+                "testing_resources_ok": "true",
+                "testing_resources_binding_sha256": rehearsal_resource(record).binding_sha256,
+            }
+
+        with (
+            patch(
+                "control_plane.dokploy.sandbox_placement.created_placement",
+                return_value=("", "", ""),
+            ),
+            patch.object(api, "dokploy_request", side_effect=lambda **_: next(creates)) as create,
+            patch.object(
+                OdooRehearsalResources, "script", autospec=True, side_effect=resource_script
+            ),
+            patch(
+                "control_plane.odoo_upgrade_rehearsal.rehearsal_host_spec", side_effect=host_spec
+            ),
+            patch.object(adapter, "run_script", side_effect=storage) as dispatch,
+            patch.object(
+                self.store, "checkpoint_mutation_provider_effect", side_effect=track_checkpoint
+            ),
+        ):
+            self.assertEqual(
+                self.run_operation(adapter, "original-prepare").status, "reconcile_required"
+            )
+        retained = self.store.list_held_provider_target_reservations()[0]
+        expected_phase = "compose_id" if stage == "storage" else "independent_storage"
+        self.assertEqual(retained.provider_effect_phase, expected_phase)
+        self.assertEqual(
+            retained.provider_effect_started_at, observed[expected_phase].provider_effect_started_at
+        )
+        self.assertEqual(dispatch.call_count, 0 if stage == "storage" else 1)
+        self.assertEqual(create.call_count, 3)
+
+    def test_storage_size_refusal_retains_placement_checkpoint(self) -> None:
+        self.assert_prepare_size_refusal_retains_previous_phase("storage")
+
+    def test_host_size_refusal_retains_storage_checkpoint(self) -> None:
+        self.assert_prepare_size_refusal_retains_previous_phase("host")
 
     def test_lost_refusal_response_reconciles_only_the_same_operation_key(self) -> None:
         retained = self.record.model_copy(update={"state": "switched", "compose_id": "own-compose"})
@@ -974,6 +1128,7 @@ class RehearsalScenario(unittest.TestCase):
             checkpoint: Callable[[], None],
             *,
             operation_key: str,
+            prepared_script: str | None = None,
         ) -> dict[str, object]:
             nonlocal original
             checkpoint()
