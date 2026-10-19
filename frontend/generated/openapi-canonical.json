@@ -156,20 +156,6 @@
             "title": "Change",
             "type": "string"
           },
-          "contexts": {
-            "items": {
-              "type": "string"
-            },
-            "title": "Contexts",
-            "type": "array"
-          },
-          "instances": {
-            "items": {
-              "type": "string"
-            },
-            "title": "Instances",
-            "type": "array"
-          },
           "managed_rule_id": {
             "title": "Managed Rule Id",
             "type": "string"
@@ -184,13 +170,6 @@
           "principal": {
             "title": "Principal",
             "type": "string"
-          },
-          "products": {
-            "items": {
-              "type": "string"
-            },
-            "title": "Products",
-            "type": "array"
           },
           "role_effects": {
             "default": [],
@@ -207,6 +186,10 @@
             },
             "title": "Roles",
             "type": "array"
+          },
+          "scope_summary": {
+            "title": "Scope Summary",
+            "type": "string"
           }
         },
         "required": [
@@ -214,9 +197,7 @@
           "change",
           "principal",
           "permissions",
-          "products",
-          "contexts",
-          "instances"
+          "scope_summary"
         ],
         "title": "AccessPolicyRuleReview",
         "type": "object"

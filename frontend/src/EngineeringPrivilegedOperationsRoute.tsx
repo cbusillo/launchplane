@@ -781,7 +781,7 @@ function PrivilegedOperationPlanCard({
         <section aria-label="People and access changes" className="privileged-operation-policy-review privileged-operation-access-review">
           <h3>People and access changes</h3>
           {review.access_policy.state === "unavailable" ? (
-            <p role="status">Current role effects are unavailable. This policy plan no longer matches the current policy, or its evidence could not be read.</p>
+            <p role="status" data-access-review-state="unavailable">Current role effects are unavailable. This policy plan no longer matches the current policy, or its evidence could not be read.</p>
           ) : review.access_policy.rules.length === 0 ? (
             <p>No rules are added or removed.</p>
           ) : review.access_policy.rules.map((rule, index) => (
@@ -790,17 +790,17 @@ function PrivilegedOperationPlanCard({
               <dl className="privileged-operation-details">
                 <div><dt>Browser role</dt><dd>{rule.roles.map(role => role === "admin" ? "Administrator" : "Read only").join(", ") || "No browser role"}</dd></div>
                 <div><dt>Permissions</dt><dd>{rule.permissions.join(", ") || "All permissions"}</dd></div>
-                <div><dt>Applies to</dt><dd>Products: {rule.products.join(", ") || "All"}. Contexts: {rule.contexts.join(", ") || "All"}. Instance selectors: {rule.instances.join(", ") || "None"}.</dd></div>
+                <div><dt>Applies to</dt><dd>{rule.scope_summary}</dd></div>
               </dl>
               {rule.role_effects.map((effect, effectIndex) => (
-                <p key={`${effect.principal}:${effectIndex}`} className={effect.state === "lost" || effect.state === "reduced" ? "privileged-operation-warning" : undefined}>
+                <p key={`${effect.principal}:${effectIndex}`} data-role-effect={effect.state} className={effect.state === "lost" || effect.state === "reduced" ? "privileged-operation-warning" : undefined}>
                   <strong>{effect.principal}: </strong>
                   {effect.state === "unknown" ? "Role impact is unknown. Other selectors or team membership may affect sign-in access."
-                    : effect.state === "lost" ? "Loses their browser role entirely. No other rule grants a browser role."
+                    : effect.state === "lost" ? "Loses all policy-granted sign-in roles. Client review access is separate."
                     : effect.state === "reduced" ? "Loses the administrator role; retains read-only sign-in access."
                     : effect.state === "gained" ? `Gains ${effect.after === "admin" ? "administrator" : "read-only"} sign-in access.`
                     : effect.state === "unaffected" ? "These selectors grant no browser role before or after this change."
-                    : `Retains ${effect.after === "admin" ? "administrator" : "read-only"} sign-in access through another rule.`}
+                    : `Retains ${effect.after === "admin" ? "administrator" : "read-only"} sign-in access under the proposed policy.`}
                 </p>
               ))}
             </article>

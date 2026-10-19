@@ -2,6 +2,7 @@
 
 from collections.abc import Callable
 from functools import lru_cache
+from http.client import HTTPException
 import json
 import re
 from time import monotonic
@@ -25,6 +26,7 @@ from control_plane.contracts.privileged_operation import (
     ManagedAuthzPolicySetHumanEvidence,
     ManagedAuthzPolicySetProposalInput,
 )
+from control_plane.contracts.ordinary_agent import OrdinaryAgentPolicyRule
 from control_plane.service_auth import GitHubHumanPolicyRule, LaunchplaneAuthzPolicy
 
 
@@ -49,9 +51,24 @@ def _public_github_account_login(github_id: int, cache_window: int) -> str:
             and re.fullmatch(r"[A-Za-z0-9-]{1,39}", login)
         ):
             return login
-    except (URLError, OSError, ValueError, AttributeError):
+    except (URLError, OSError, ValueError, AttributeError, HTTPException):
         pass
     return ""
+
+
+def bounded_account_logins(reader: Callable[[int], str]) -> Callable[[int], str]:
+    """Share one small metadata budget across the entire HTTP response."""
+    deadline = monotonic() + 1
+    logins: dict[int, str] = {}
+
+    def read(github_id: int) -> str:
+        if github_id not in logins:
+            if len(logins) >= 10 or monotonic() >= deadline:
+                return ""
+            logins[github_id] = reader(github_id)
+        return logins[github_id]
+
+    return read
 
 
 def _principal(entry: AuthzManagedRuleEntry, login_for_id: Callable[[int], str]) -> str:
@@ -82,15 +99,34 @@ def _principal(entry: AuthzManagedRuleEntry, login_for_id: Callable[[int], str])
         "github_actions": "Workflow",
     }
     if entry.principal_type == "github_actions":
-        return (
-            "Workflow in "
-            + getattr(rule, "repository", "")
-            + ": "
-            + ", ".join(getattr(rule, "workflow_refs", ()))
-        )
+        return "GitHub workflow in " + getattr(rule, "repository", "")
     if entry.principal_type == "ordinary_agents":
         return "Agent principal " + getattr(rule, "principal_id", "")
-    return labels[entry.principal_type] + " " + ", ".join(getattr(rule, "subjects", ()))
+    return (
+        labels[entry.principal_type]
+        + " "
+        + (", ".join(getattr(rule, "subjects", ())) or "(any subject)")
+    )
+
+
+def _scope(entry: AuthzManagedRuleEntry, schema_version: int) -> str:
+    rule = entry.rule
+    if isinstance(rule, OrdinaryAgentPolicyRule):
+        return f"Repository {rule.target.repository} (ID {rule.target.repository_id}), base branch {rule.target.base_branch}."
+    instances = ", ".join(rule.instances) or (
+        "all" if schema_version == 1 else "context/global only"
+    )
+    summary = f"Products: {', '.join(rule.products) or 'all'}. Contexts: {', '.join(rule.contexts) or 'all'}. Targets: {instances}."
+    if entry.principal_type == "github_actions":
+        for label, field in (
+            ("Workflows", "workflow_refs"),
+            ("Reusable workflows", "job_workflow_refs"),
+            ("Events", "event_names"),
+            ("Git refs", "refs"),
+            ("Environments", "environments"),
+        ):
+            summary += f" {label}: {', '.join(getattr(rule, field)) or 'any'}."
+    return summary
 
 
 def _role_effects(
@@ -233,9 +269,9 @@ def build_access_policy_review(
                         if isinstance(rule, GitHubHumanPolicyRule)
                         else (),
                         permissions=rule.actions,
-                        products=getattr(rule, "products", ()),
-                        contexts=getattr(rule, "contexts", ()),
-                        instances=getattr(rule, "instances", ()),
+                        scope_summary=_scope(
+                            AuthzManagedRuleEntry(principal_type, rule), policy.schema_version
+                        ),
                         role_effects=_role_effects(rule, active.policy, candidate, login_for_id)
                         if isinstance(rule, GitHubHumanPolicyRule)
                         else (),

@@ -95,7 +95,9 @@ the semantic review; agent and read-only projections omit it. Immutable
 GitHub IDs are labeled with public account logins where available, using
 credential-free, cached GitHub account metadata; an unavailable lookup keeps
 the account ID visible. This lookup provides no membership claims. No secret
-values or request free text enter the display. If the current planner no
+values or request free text enter the display. A shared per-response metadata
+budget bounds lookup work across the full list; IDs remain visible when it is
+spent. Truncated provider replies also fall back to IDs. If the current planner no
 longer matches the saved plan, current role effects are shown as unavailable.
 These are review fields only; approval, cancellation and worker apply rules
 are unchanged.

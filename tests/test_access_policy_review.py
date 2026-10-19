@@ -1,10 +1,17 @@
 import unittest
+from http.client import IncompleteRead
 from unittest.mock import Mock, patch
 
 from control_plane.access_policy_review import (
     build_access_policy_review,
     _public_github_account_login,
+    bounded_account_logins,
+    _principal,
+    _scope,
 )
+from control_plane.authz_grant_service import AuthzManagedRuleEntry
+from control_plane.contracts.ordinary_agent import OrdinaryAgentPolicyRule, OrdinaryAgentTarget
+from control_plane.service_auth import GitHubActionsPolicyRule, LocalOperatorPolicyRule
 from control_plane.contracts.privileged_operation import ManagedAuthzPolicySetProposalInput
 from control_plane.privileged_operation_registry import plan_managed_authz_policy_set
 from control_plane.service_auth import LaunchplaneAuthzPolicy
@@ -102,3 +109,49 @@ class AccessPolicyReviewTests(unittest.TestCase):
             self.assertEqual(request.get_method(), "GET")
             self.assertEqual(_public_github_account_login(790, 0), "")
         _public_github_account_login.cache_clear()
+
+    def test_display_lookup_budget_is_shared_and_truncated_responses_are_unavailable(self) -> None:
+        _public_github_account_login.cache_clear()
+        with patch("control_plane.access_policy_review.urlopen", side_effect=IncompleteRead(b"")):
+            self.assertEqual(_public_github_account_login(789, 0), "")
+        _public_github_account_login.cache_clear()
+        reader = Mock(return_value="fixture-person")
+        with patch("control_plane.access_policy_review.monotonic", side_effect=[0, 0, 2]):
+            bounded = bounded_account_logins(reader)
+            self.assertEqual(bounded(789), "fixture-person")
+            self.assertEqual(bounded(789), "fixture-person")
+            self.assertEqual(bounded(790), "")
+        reader.assert_called_once_with(789)
+
+    def test_scope_display_preserves_target_and_workflow_conditions(self) -> None:
+        target = OrdinaryAgentTarget(
+            repository_id=42, repository="fixture/target", base_branch="next"
+        )
+        ordinary = OrdinaryAgentPolicyRule(
+            managed_set_id="fixture",
+            managed_rule_id="ordinary",
+            principal_id="fixture-agent",
+            target=target,
+            actions=("self_read",),
+        )
+        summary = _scope(AuthzManagedRuleEntry("ordinary_agents", ordinary), 3)
+        for value in (target.repository, str(target.repository_id), target.base_branch):
+            self.assertIn(value, summary)
+        conditions = {
+            "job_workflow_refs": ("fixture/shared/.github/workflows/deploy.yml@" + "a" * 40,),
+            "event_names": ("push",),
+            "refs": ("refs/heads/next",),
+            "environments": ("testing",),
+        }
+        workflow = GitHubActionsPolicyRule.model_validate(
+            {"repository": "fixture/source", **conditions}
+        )
+        summary = _scope(AuthzManagedRuleEntry("github_actions", workflow), 3)
+        for values in conditions.values():
+            for value in values:
+                self.assertIn(value, summary)
+        self.assertIn("any", summary)
+        principal = _principal(
+            AuthzManagedRuleEntry("local_operators", LocalOperatorPolicyRule()), lambda _: ""
+        )
+        self.assertIn("any subject", principal)

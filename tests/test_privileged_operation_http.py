@@ -469,6 +469,17 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                 "contexts": ["launchplane"],
             }
         )
+        payload["github_humans"].append(
+            {
+                "managed_set_id": "review.non-administrator",
+                "managed_rule_id": "human-reader",
+                "github_ids": [999],
+                "roles": ["admin"],
+                "actions": [AUTHZ_POLICY_OPERATION_READ_ACTION],
+                "products": ["launchplane"],
+                "contexts": ["launchplane"],
+            }
+        )
         operator = LocalOperatorIdentity(subject="agent:access-review", token_label="fixture")
         payload["local_operators"] = [
             {
@@ -518,6 +529,7 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                 for identity, expected_status in (
                     (operator, 200),
                     (replace(_human(), role="read_only"), 403),
+                    (replace(_human(), github_id=999, login="fixture-policy-reader"), 200),
                 ):
                     async with lifespan_client(
                         self._app(

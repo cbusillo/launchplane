@@ -23,9 +23,9 @@ async function openReview(page: Page, state = "available", readOnly = false) {
         blast_radius: { summary: "The reviewed rules only." }, rollback: { summary: "Separate reviewed change." },
         evidence: { result_status: "ok", digests: [], raw_detail_available: true }, activity: [], can_approve: true, can_revoke: false,
         access_policy: { state, rules: [
-          { managed_rule_id: "only-role", change: "removed", principal: "GitHub login fixture-alex", roles: ["read_only"], permissions: ["operations.read"], products: ["fixture-product"], contexts: ["fixture-testing"], instances: [], role_effects: [{ principal: "GitHub login fixture-alex", before: "read_only", after: null, state: "lost" }] },
-          { managed_rule_id: "covered-role", change: "removed", principal: "GitHub login fixture-blair", roles: ["admin"], permissions: ["operations.read"], products: ["fixture-product"], contexts: [], instances: [], role_effects: [{ principal: "GitHub login fixture-blair", before: "admin", after: "admin", state: "retained" }] },
-          { managed_rule_id: "local-rule", change: "added", principal: "Local operator agent:fixture", roles: [], permissions: ["authz_policy_operation.read"], products: ["launchplane"], contexts: ["launchplane"], instances: [], role_effects: [] },
+          { managed_rule_id: "only-role", change: "removed", principal: "GitHub login fixture-alex", roles: ["read_only"], permissions: ["operations.read"], scope_summary: "Products: fixture-product. Contexts: fixture-testing. Targets: context/global only.", role_effects: [{ principal: "GitHub login fixture-alex", before: "read_only", after: null, state: "lost" }] },
+          { managed_rule_id: "covered-role", change: "removed", principal: "GitHub login fixture-blair", roles: ["admin"], permissions: ["operations.read"], scope_summary: "Products: fixture-product. Contexts: all. Targets: context/global only.", role_effects: [{ principal: "GitHub login fixture-blair", before: "admin", after: "admin", state: "retained" }] },
+          { managed_rule_id: "local-rule", change: "added", principal: "Local operator agent:fixture", roles: [], permissions: ["authz_policy_operation.read"], scope_summary: "Products: launchplane. Contexts: launchplane. Targets: context/global only.", role_effects: [] },
         ] },
         secret_value: "secret-value-must-not-render",
       } } });
@@ -43,9 +43,9 @@ test("access review names principals, entire role loss, overlap and local operat
   const review = page.getByRole("region", { name: "People and access changes" });
   await expect(review).toBeVisible();
   await expect(review).toContainText("fixture-alex");
-  await expect(review).toContainText("Loses their browser role entirely");
+  await expect(review.locator('[data-role-effect="lost"]')).toContainText("fixture-alex");
   await expect(review).toContainText("fixture-blair");
-  await expect(review).toContainText("Retains administrator sign-in access through another rule");
+  await expect(review.locator('[data-role-effect="retained"]')).toContainText("fixture-blair");
   await expect(review).toContainText("Local operator agent:fixture");
   await expect(review).toContainText("authz_policy_operation.read");
   await expect(page.getByRole("button", { name: "Approve plan", exact: true })).toBeEnabled();
@@ -60,7 +60,7 @@ test("access review names principals, entire role loss, overlap and local operat
 test("missing current policy evidence is visibly unknown", async ({ page }) => {
   await openReview(page, "unavailable");
   const review = page.getByRole("region", { name: "People and access changes" });
-  await expect(review).toContainText("Current role effects are unavailable");
+  await expect(review.locator('[data-access-review-state="unavailable"]')).toBeVisible();
   await expect(review).not.toContainText("fixture-alex");
 });
 

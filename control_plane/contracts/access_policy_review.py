@@ -20,9 +20,7 @@ class AccessPolicyRuleReview(BaseModel):
     principal: str
     roles: tuple[str, ...] = ()
     permissions: tuple[str, ...]
-    products: tuple[str, ...]
-    contexts: tuple[str, ...]
-    instances: tuple[str, ...]
+    scope_summary: str
     role_effects: tuple[AccessPolicyRoleEffect, ...] = ()
 
 
