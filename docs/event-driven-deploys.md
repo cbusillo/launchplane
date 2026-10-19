@@ -86,7 +86,9 @@ reservation. The webhook request never waits on a deploy.
     text. Agent-facing readers use the code and run id; the error can contain
     upstream response text and API paths. Missing evidence
     leaves the lane unchanged with a recorded reason.
-  - If testing already runs the desired artifact, stop.
+  - If testing already runs the desired artifact, stop unless its declared
+    application testing inputs or product qualification need the existing
+    deployment path again, as described below.
   - Odoo existing-data reconciliation waits with `testing_restore_required` if
     this target's latest attempted restore lacks completion proof. A later failed
     maintenance deploy or a newer artifact cannot repair that missing data.
@@ -171,6 +173,19 @@ reservation. The webhook request never waits on a deploy.
     `deploy_status`, `post_deploy_status` and `deployment_record_id`, never the
     driver's message; a refusal's reason goes to the worker log only. A product on any other driver is held with
     `no_reconcile_deploy_for_driver`.
+    For generic-web application testing with managed site inputs, a matching
+    image also needs its successful deployment's readback-verified input receipt.
+    Missing legacy evidence or changed site inputs uses this same deployment
+    path once, preserving holds and original-operation recovery. Its separate
+    keyed delivery fingerprint excludes global settings, worker credentials,
+    other lanes and audit timestamps; required managed-secret provenance is
+    part of it. Plaintext values never enter the request or recovery snapshot.
+    A captured desired fingerprint alone is no proof of delivery: the original
+    attempt must have durably recorded provider readback before triggering, and
+    its provider deployment must succeed. Recovery preserves that original
+    evidence without backfilling a legacy attempt from today's inputs. See
+    [application testing delivery](private-testing-transport.md) for retirement,
+    platform-credential and unchanged-reconcile behavior.
     For VeriReel testing, a matching image without deployment-bound migration and
     creator/admin qualification gets one normal deploy of that same verified
     artifact to run the testing-only post-deploy extension. Passing qualification
@@ -464,7 +479,8 @@ finishes.
 - While it's on, the testing reconcile still works out the desired build, then
   records the plan as held with reason `staff_testing` and the hold's reason.
   It records no artifact and queues nothing. A testing lane already running the
-  desired build is reported as `already_deployed`, as before.
+  desired build with current input and product-qualification evidence is
+  reported as `already_deployed`; an input repair still waits behind the hold.
 - A deploy the reconciler queued just before the hold is cancelled by the
   worker before any provider effect. Its cancellation names the hold and the
   reconciler; it doesn't count toward the three failed attempts.

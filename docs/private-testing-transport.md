@@ -96,6 +96,26 @@ through the existing deployment gates. Standalone runtime sync remains subject
 to its normal qualification; do not bypass a refusal. Actual runtime identity,
 health, monitor cadence and Chris's authenticated receiver proof remain separate.
 
+For a generic-web application testing target, that ordinary deployment resolves
+the site's context, exact lane and target settings with its site-scoped managed
+secrets. Global settings, other lanes and Launchplane worker credentials do not
+reach the application. Declared inputs, managed-secret provenance, key safety and
+explicit provider-key retirements are checked before writing. The existing
+provider operation writes the environment, verifies its readback, then installs
+and deploys the verified image. Platform credentials left in provider-only keys
+must be explicitly retired through product configuration before delivery.
+
+A successful deployment retains a keyed, value-free receipt for those captured
+inputs. Missing legacy evidence or changed site inputs makes the same verified
+image eligible for one normal testing deployment; an unchanged receipt settles
+without another deployment. Staff/staging holds and unresolved operations still
+prevent dispatch. Recovery preserves only the original readback-verified receipt
+and never credits current inputs to an earlier attempt. An old operation without
+that receipt can settle, then the next normal sweep repairs its inputs. Removing
+a declaration or binding alone does not delete provider-only values; explicit
+retirement remains the deletion contract. Production, preview and Compose
+delivery paths are unchanged.
+
 ### Health probes with public wildcard DNS
 
 An application testing endpoint may retain the existing public wildcard DNS.

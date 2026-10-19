@@ -748,7 +748,13 @@ def _execute_generic_web_deploy_unserialized(
         nonlocal post_deploy_update
         if provider_effect_checkpoint is not None:
             provider_effect_checkpoint(phase)
-        if phase == "provider_dispatch_prepared":
+        if phase in {"provider_dispatch_prepared", "runtime_inputs_verified"}:
+            if phase == "runtime_inputs_verified":
+                from control_plane.generic_web_testing_inputs import DELIVERY_RECEIPT_KEY
+
+                verified_build_evidence[DELIVERY_RECEIPT_KEY] = (
+                    prepared_deploy_target.testing_runtime_verified_digest
+                )
             # Value-free provider references join the already reserved original
             # request/target before any env write or deploy trigger can happen.
             post_deploy_update = post_deploy_update.model_copy(
@@ -787,6 +793,15 @@ def _execute_generic_web_deploy_unserialized(
         mark_provider_effect_started()
 
     try:
+        from control_plane.workflows.generic_web_deploy_provider import (
+            prepare_generic_web_testing_runtime,
+        )
+
+        # Recovered targets carry captured authority, never serialized values.
+        # Legacy snapshots deliberately have no authority to backfill.
+        prepare_generic_web_testing_runtime(
+            prepared_deploy_target, record_store, resolved_profile, resolved_lane, capture=False
+        )
         if request.reset:
             from control_plane.disposable_lanes import DisposableLaneStore, require_disposable_lane
 
@@ -1254,6 +1269,7 @@ def record_observed_generic_web_deploy(
         ),
         post_deploy_update=post_deploy_update,
         runtime_identity=runtime_identity,
+        runtime_source=existing_record.runtime_source if existing_record is not None else {},
     )
     record_store.write_deployment_record(deployment_record)
     if deploy_status == "pass":

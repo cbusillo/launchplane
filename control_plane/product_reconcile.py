@@ -515,6 +515,27 @@ def reconcile_testing_target(
         repository_id=repository_id,
         transport=transport,
     )
+    if isinstance(desired, VerifiedGenericWebBuild) and plan.get("reason") == "already_deployed":
+        from control_plane.generic_web_testing_inputs import (
+            DELIVERY_RECEIPT_KEY,
+            testing_input_authority,
+        )
+
+        lane = next(lane for lane in profile.lanes if lane.instance == TESTING_INSTANCE)
+        delivery_digest = testing_input_authority(record_store, profile, lane)
+        if delivery_digest:
+            try:
+                deployed = cast(GenericWebDeployStore, record_store).read_deployment_record(
+                    _current_testing_deployment_id(record_store=record_store, lane=lane)
+                )
+            except FileNotFoundError:
+                deployed = None
+            if (
+                deployed is None
+                or deployed.deploy.status != "pass"
+                or deployed.runtime_source.get(DELIVERY_RECEIPT_KEY) != delivery_digest
+            ):
+                plan.update(action="deploy", reason="testing_runtime_inputs_missing")
     if (
         isinstance(desired, VerifiedGenericWebBuild)
         and declares_verireel_testing_extension(profile, instance=TESTING_INSTANCE)
@@ -791,9 +812,13 @@ def _deploy_generic_web_testing(
     plan["held"] = False
     try:
         authority = _generic_web_testing_authority(record_store=record_store, lane=lane)
+        from control_plane.generic_web_testing_inputs import testing_input_authority
+
+        delivery_digest = testing_input_authority(record_store, profile, lane)
         idempotency_key = (
             f"{RECONCILE_SOURCE}:{profile.product}:{lane.context}:{TESTING_INSTANCE}:"
             f"{desired.manifest.image.digest}:authority-{authority}:from-{starting_point}"
+            + (f":inputs-{delivery_digest}" if delivery_digest else "")
         )
         plan["deploy_idempotency_key"] = idempotency_key
         request_fingerprint = _fingerprint(envelope.model_dump(mode="json"))

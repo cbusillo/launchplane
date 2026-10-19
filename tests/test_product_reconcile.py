@@ -1786,6 +1786,301 @@ def _generic_web_profile() -> LaunchplaneProductProfileRecord:
 
 
 class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
+    def application_input_provider(self) -> tuple[dict[str, object], list[str]]:
+        self.store.write_dokploy_target_record(
+            DokployTargetRecord(
+                context="cm",
+                instance="testing",
+                target_type="application",
+                target_name="site-testing-app",
+                updated_at="2026-10-19T00:00:00Z",
+            )
+        )
+        self.store.write_dokploy_target_id_record(
+            DokployTargetIdRecord(
+                context="cm",
+                instance="testing",
+                target_id="target-123",
+                updated_at="2026-10-19T00:00:00Z",
+            )
+        )
+        self.store.write_provider_target_record(
+            ProviderTargetRecord(
+                context="cm",
+                instance="testing",
+                provider_id="dokploy",
+                target_category="application",
+                provider_target_type="application",
+                target_id="target-123",
+                display_name="site-testing-app",
+                updated_at="2026-10-19T00:00:00Z",
+            )
+        )
+        provider = DokployGenericWebDeployProvider()
+        self.application_inputs_provider = provider
+        self.testing_hooks = TestingProviderHooks(generic_web_deploy_provider=lambda: provider)
+        payload: dict[str, object] = {"env": "PROVIDER_ONLY=keep"}
+        triggered: list[str] = []
+
+        def update(**kwargs: object) -> None:
+            payload["env"] = kwargs["env_text"]
+
+        for patcher in (
+            patch.object(provider, "_read_provider_config", return_value=("fixture", "unused")),
+            patch(
+                "control_plane.dokploy.api.fetch_dokploy_target_payload",
+                side_effect=lambda **_: dict(payload),
+            ),
+            patch("control_plane.dokploy.api.latest_deployment_for_target", return_value=None),
+            patch("control_plane.dokploy.api.update_dokploy_target_env", side_effect=update),
+            patch("control_plane.dokploy.api.dokploy_request", return_value={}),
+            patch(
+                "control_plane.dokploy.api.trigger_deployment",
+                side_effect=lambda **kwargs: triggered.append(str(kwargs.get("title"))),
+            ),
+            patch("control_plane.dokploy.api.wait_for_target_deployment", return_value=None),
+            patch.object(
+                provider,
+                "observe_artifact_deploy",
+                return_value=GenericWebProviderDeploymentObservation(
+                    outcome="present",
+                    deployment_status="success",
+                    deployment_id="provider-input-deploy",
+                    started_at="2026-10-19T00:00:00Z",
+                    finished_at="2026-10-19T00:01:00Z",
+                ),
+            ),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        return payload, triggered
+
+    def test_same_image_missing_managed_inputs_is_repaired_once_and_rotation_converges(
+        self,
+    ) -> None:
+        from control_plane.generic_web_testing_inputs import DELIVERY_RECEIPT_KEY
+        from control_plane.dokploy.api import parse_dokploy_env_text
+
+        payload, triggered = self.application_input_provider()
+        self.github.add_run(20, DEPLOYABLE)
+        self.request()
+        legacy = self.reconcile()
+        self.assertNotIn(
+            DELIVERY_RECEIPT_KEY,
+            self.store.read_deployment_record(str(legacy["deployment_record_id"])).runtime_source,
+        )
+        settings = RuntimeEnvironmentRecord(
+            scope="instance",
+            context="cm",
+            instance="testing",
+            env={"APP_SETTING": "first"},
+            updated_at="2026-10-19T00:00:00Z",
+        )
+        for value in ("first", "second"):
+            self.store.write_runtime_environment_record(
+                settings.model_copy(update={"env": {"APP_SETTING": value}})
+            )
+            self.request()
+            repaired = self.reconcile()
+            self.assertEqual(repaired["action"], "deploy")
+            self.assertEqual(parse_dokploy_env_text(str(payload["env"]))["APP_SETTING"], value)
+            record = self.store.read_deployment_record(str(repaired["deployment_record_id"]))
+            self.assertTrue(record.runtime_source[DELIVERY_RECEIPT_KEY])
+            count = len(triggered)
+            self.request()
+            self.assertEqual(self.reconcile()["reason"], "already_deployed")
+            self.assertEqual(len(triggered), count)
+        self.assertEqual(legacy["desired_image_digest"], repaired["desired_image_digest"])
+
+    def test_same_image_input_repair_obeys_testing_hold(self) -> None:
+        _payload, triggered = self.application_input_provider()
+        self.github.add_run(20, DEPLOYABLE)
+        self.request()
+        self.reconcile()
+        self.store.write_runtime_environment_record(
+            RuntimeEnvironmentRecord(
+                scope="instance",
+                context="cm",
+                instance="testing",
+                env={"APP_SETTING": "new"},
+                updated_at="2026-10-19T00:00:00Z",
+            )
+        )
+        target = self.store.read_dokploy_target_record(context_name="cm", instance_name="testing")
+        self.hold_testing()
+        held_target = self.store.read_dokploy_target_record(
+            context_name="cm", instance_name="testing"
+        )
+        self.store.write_dokploy_target_record(
+            target.model_copy(update={"policies": held_target.policies})
+        )
+        self.request()
+        held = self.reconcile()
+        self.assertEqual(held["reason"], "staff_testing")
+        self.assertEqual(len(triggered), 1)
+
+    def test_changed_inputs_cannot_bypass_unknown_original_testing_deploy(self) -> None:
+        from control_plane.generic_web_testing_inputs import DELIVERY_RECEIPT_KEY
+        from control_plane.provider_operations import ProviderMutationUnknownError
+
+        _payload, triggered = self.application_input_provider()
+        settings = RuntimeEnvironmentRecord(
+            scope="instance",
+            context="cm",
+            instance="testing",
+            env={"APP_SETTING": "first"},
+            updated_at="2026-10-19T00:00:00Z",
+        )
+        self.store.write_runtime_environment_record(settings)
+        self.github.add_run(20, DEPLOYABLE)
+        self.request()
+        with patch(
+            "control_plane.dokploy.api.wait_for_target_deployment",
+            side_effect=ProviderMutationUnknownError("lost provider outcome"),
+        ):
+            interrupted = self.run_once()
+        self.assertEqual(interrupted.state, "failed")
+        held = self.store.list_held_provider_target_reservations()
+        self.assertTrue(held)
+        pending = self.store.list_deployment_records(context_name="cm", instance_name="testing")[0]
+        original_digest = pending.runtime_source[DELIVERY_RECEIPT_KEY]
+        self.store.write_runtime_environment_record(
+            settings.model_copy(update={"env": {"APP_SETTING": "second"}})
+        )
+        self.request()
+        with patch.object(
+            self.application_inputs_provider,
+            "observe_artifact_deploy",
+            return_value=GenericWebProviderDeploymentObservation(outcome="unknown"),
+        ):
+            refused = self.run_once()
+        self.assertEqual(refused.state, "failed")
+        self.assertEqual(len(triggered), 1)
+        self.assertEqual(
+            self.store.read_deployment_record(pending.record_id).runtime_source[
+                DELIVERY_RECEIPT_KEY
+            ],
+            original_digest,
+        )
+        self.assertEqual(
+            tuple(item.record_id for item in self.store.list_held_provider_target_reservations()),
+            tuple(item.record_id for item in held),
+        )
+
+    def assert_runtime_policy_revocation(self, *, after_readback: bool) -> None:
+        from tests.test_generic_web_deploy import (
+            _runtime_secret_record,
+            _runtime_secret_version,
+            _runtime_secret_binding,
+        )
+
+        payload, triggered = self.application_input_provider()
+        self.store.write_secret_record(
+            _runtime_secret_record(
+                secret_id="site-secret",
+                scope="context",
+                name="api-token",
+                version_id="site-version",
+                context="cm",
+            )
+        )
+        self.store.write_secret_version(
+            _runtime_secret_version(
+                secret_id="site-secret", version_id="site-version", plaintext_value="fixture token"
+            )
+        )
+        self.store.write_secret_binding(
+            _runtime_secret_binding(secret_id="site-secret", binding_key="APP_TOKEN", context="cm")
+        )
+        self.store.write_runtime_key_safety_policy_record(
+            RuntimeKeySafetyPolicyRecord(
+                record_id="site-policy",
+                source="test",
+                updated_at="2026-10-19T00:00:00Z",
+                rules=(RuntimeSecretSafetyRule(binding_key="APP_TOKEN", secret_class="testing"),),
+            )
+        )
+        revoked = False
+        list_policy = self.store.list_runtime_key_safety_policy_records
+        execute = self.application_inputs_provider.execute_artifact_deploy
+
+        def policies(**kwargs: Any) -> Any:
+            return () if revoked else list_policy(**kwargs)
+
+        def apply(**kwargs: Any) -> Any:
+            original_checkpoint = kwargs["before_provider_mutation"]
+
+            def checkpoint(phase: str) -> None:
+                nonlocal revoked
+                original_checkpoint(phase)
+                if phase == (
+                    "runtime_inputs_verified" if after_readback else "provider_dispatch_prepared"
+                ):
+                    revoked = True
+
+            kwargs["before_provider_mutation"] = checkpoint
+            return execute(**kwargs)
+
+        self.github.add_run(20, DEPLOYABLE)
+        self.request()
+        with (
+            patch.object(
+                self.store, "list_runtime_key_safety_policy_records", side_effect=policies
+            ),
+            patch.object(
+                self.application_inputs_provider, "execute_artifact_deploy", side_effect=apply
+            ),
+        ):
+            refused = self.run_once()
+        self.assertEqual(refused.state, "failed")
+        self.assertFalse(triggered)
+        self.assertEqual(bool(self.store.list_held_provider_target_reservations()), after_readback)
+        self.assertEqual("APP_TOKEN" in str(payload["env"]), after_readback)
+        if not after_readback:
+            self.assertEqual(refused.last_plan["deploy_operation_status"], "refused")
+
+    def test_runtime_policy_revocation_before_effect_is_a_normal_refusal(self) -> None:
+        self.assert_runtime_policy_revocation(after_readback=False)
+
+    def test_runtime_policy_revocation_after_env_write_retains_original_fence(self) -> None:
+        self.assert_runtime_policy_revocation(after_readback=True)
+
+    def test_input_change_before_effect_is_a_normal_refusal(self) -> None:
+        _payload, triggered = self.application_input_provider()
+        settings = RuntimeEnvironmentRecord(
+            scope="instance",
+            context="cm",
+            instance="testing",
+            env={"APP_SETTING": "first"},
+            updated_at="2026-10-19T00:00:00Z",
+        )
+        self.store.write_runtime_environment_record(settings)
+        execute = self.application_inputs_provider.execute_artifact_deploy
+
+        def apply(**kwargs: Any) -> Any:
+            original_checkpoint = kwargs["before_provider_mutation"]
+
+            def checkpoint(phase: str) -> None:
+                original_checkpoint(phase)
+                if phase == "provider_dispatch_prepared":
+                    self.store.write_runtime_environment_record(
+                        settings.model_copy(update={"env": {"APP_SETTING": "second"}})
+                    )
+
+            kwargs["before_provider_mutation"] = checkpoint
+            return execute(**kwargs)
+
+        self.github.add_run(20, DEPLOYABLE)
+        self.request()
+        with patch.object(
+            self.application_inputs_provider, "execute_artifact_deploy", side_effect=apply
+        ):
+            refused = self.run_once()
+        self.assertEqual(refused.state, "failed")
+        self.assertFalse(triggered)
+        self.assertFalse(self.store.list_held_provider_target_reservations())
+        self.assertEqual(refused.last_plan["deploy_operation_status"], "refused")
+
     def test_hold_set_during_adapter_preparation_blocks_dispatch_under_execution_lock(self) -> None:
         self.github.add_run(20, DEPLOYABLE)
         self.request()
