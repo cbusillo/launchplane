@@ -5,6 +5,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hmac
+import gzip
 import json
 from pathlib import Path
 import re
@@ -428,8 +429,13 @@ def rehearsal_host_spec(
         "ODOO_DB_USER": "odoo",
         "ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64": "",
     }
+    host_record = record.model_dump(mode="json", exclude={"target_artifact"})
+    host_record["target_artifact"] = {
+        "artifact_id": record.target_artifact.artifact_id,
+        "source_commit": record.target_artifact.source_commit,
+    }
     return {
-        "record": record.model_dump(mode="json"),
+        "record": host_record,
         "action": action,
         "mode": mode,
         "source": source_values,
@@ -478,6 +484,30 @@ class OdooRehearsalAdapter:
     principal: str
     trace: str
     _observed_project_id: str = field(default="", init=False)
+    _continue_prepare_host: bool = field(default=False, init=False)
+
+    def can_continue_prepare_host(
+        self, record: OdooUpgradeRehearsalRecord, result: dict[str, object], phase: str
+    ) -> bool:
+        if not (
+            self.request.action == "prepare"
+            and phase == "prepare"
+            and record.state == "planned"
+            and record.project_id
+            and record.environment_id
+            and record.compose_id
+            and record.credential_bindings_sha256
+            and not record.copies
+            and not record.elapsed_seconds
+            and result.get("prepare_not_started") is True
+            and result.get("completed") is False
+            and result.get("state") == "planned"
+            and result.get("copies") == []
+            and result.get("raw_source_retained") is False
+        ):
+            return False
+        fresh, _, _ = self.inputs()
+        return fresh == record
 
     @staticmethod
     def initial_prepare_binding(record: OdooUpgradeRehearsalRecord) -> str:
@@ -547,7 +577,7 @@ class OdooRehearsalAdapter:
             raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
         disposition = "hold_unknown"
         reason = "operation_not_recoverable"
-        if reservation.state == "reconcile_required":
+        if reservation.state == "reconcile_required" and not record.compose_id:
             try:
                 self.partial_prepare_project(record, reservation.provider_effect_phase)
                 disposition = "continue_original_prepare"
@@ -679,11 +709,16 @@ class OdooRehearsalAdapter:
         spec["record_binding_sha256"] = record.binding_sha256
         program = str(spec.pop("program"))
         encoded = base64.b64encode(json.dumps(spec, sort_keys=True).encode()).decode()
+        # Keep both Dokploy's remote shell materializer and Python's argv small.
+        # The full reviewed record binding stays above; only the host's projection
+        # and reviewed program cross this transport, through Python's stdin.
+        program = "import sys\nsys.argv = ['rehearsal', " + repr(encoded) + "]\n" + program
+        packed = base64.b64encode(gzip.compress(program.encode(), mtime=0)).decode()
         script = (
-            "#!/usr/bin/env bash\nset -euo pipefail\npython3 - "
-            + encoded
-            + " <<'LP_REHEARSAL'\n"
-            + program
+            "#!/usr/bin/env bash\nset -euo pipefail\npython3 - <<'LP_REHEARSAL'\n"
+            + "import base64, gzip\nexec(compile(gzip.decompress(base64.b64decode("
+            + repr(packed)
+            + ")), '<rehearsal>', 'exec'), {})"
             + "\nLP_REHEARSAL\n"
         )
         evidence = self.run_script(record, script, checkpoint)
@@ -797,6 +832,11 @@ class OdooRehearsalAdapter:
                     # is recorded later, under the reacquired provider lease.
                     return ProviderObservation("absent", retry_safe=True)
                 result = self.host(record, "observe", check, operation_key=provider_operation_key)
+                if self.can_continue_prepare_host(record, result, provider_effect_phase):
+                    if self.initial_prepare_binding(record) != self.request.reviewed_plan_sha256:
+                        return ProviderObservation("unknown")
+                    self._continue_prepare_host = True
+                    return ProviderObservation("absent", retry_safe=True)
                 if result.get("refusal_code"):
                     return ProviderObservation(
                         "present",
@@ -844,7 +884,7 @@ class OdooRehearsalAdapter:
             recovering_project = bool(self._observed_project_id)
             reviewed_binding = (
                 self.initial_prepare_binding(record)
-                if recovering_project
+                if recovering_project or self._continue_prepare_host
                 else record.binding_sha256
             )
             if reviewed_binding != self.request.reviewed_plan_sha256:
@@ -860,7 +900,7 @@ class OdooRehearsalAdapter:
                     raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
                 require_unaliased_rehearsal(self.store, fresh)
 
-            if self.request.action == "prepare":
+            if self.request.action == "prepare" and not self._continue_prepare_host:
                 if recovering_project:
                     checkpoint()
                     if (
@@ -917,6 +957,21 @@ class OdooRehearsalAdapter:
                 checkpoint()
                 lease.checkpoint_effect("independent_storage")
                 evidence = self.run_script(record, resources.script("prepare"), checkpoint)
+                if (
+                    evidence.get("testing_resources_ok") != "true"
+                    or evidence.get("testing_resources_binding_sha256") != resources.binding_sha256
+                ):
+                    raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
+            elif self.request.action == "prepare":
+                checkpoint()
+                if created_placement(self.root, record.rehearsal_id) != (
+                    record.project_id,
+                    record.environment_id,
+                    record.compose_id,
+                ):
+                    raise RehearsalRefused(RehearsalPrerequisite.RECOVERY_REQUIRED)
+                resources = rehearsal_resource(record)
+                evidence = self.run_script(record, resources.script("readback"), checkpoint)
                 if (
                     evidence.get("testing_resources_ok") != "true"
                     or evidence.get("testing_resources_binding_sha256") != resources.binding_sha256

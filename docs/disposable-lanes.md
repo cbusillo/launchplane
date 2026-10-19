@@ -2565,6 +2565,22 @@ ambiguous, populated or changed projects, credential/source drift, later effect
 phases and partial host work remain held for diagnosis. No new-key abandonment,
 direct provider cleanup, source capture or later rehearsal action is implied.
 
+Host schedules carry only the artifact identity fields the host consumes; the
+full artifact and record binding remain in service custody. The reviewed host
+program and its input use a compressed stdin wrapper, avoiding large Python
+arguments and Dokploy's base64-wrapped remote shell materialization limit.
+
+If prepare reached its host checkpoint but never started there, original-key
+readback can return `continue_original_prepare` with reason
+`prepare_host_not_started`. This requires the native `prepare_not_started`
+proof: no started marker, receipt alias, raw source, copy receipts or project
+containers, with fresh unchanged service inputs and credential bindings. An old
+host response supplies no such proof. Continuation rechecks recorded placement
+and existing storage through readback, without recreating placement, storage or
+passwords. The host's execution lock and started marker still fence its first
+effect; an already started or uncertain host action remains held. This rule is
+limited to prepare, and never retries capture, migration or a later action.
+
 Elapsed times describe this isolated simulation. Real source writer drain,
 public DNS/TLS switching, business integration resumption and the actual
 production downtime window remain unmeasured. The consuming product issue must
