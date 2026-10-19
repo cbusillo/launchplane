@@ -52,8 +52,8 @@ The artifact contains:
   mutation modes, idempotency and reviewed-evidence requirements, response
   statuses, and structural OpenAPI fingerprints.
 - `contract.protected_workflows`: the protected GitHub workflows that own
-  product retirement, detached application retirement, managed authorization
-  reconciliation, and bounded stable-lane repair.
+  product retirement, detached application retirement, and bounded stable-lane
+  repair. Managed authorization reconciliation uses the UI and service API.
 - `contract.invariants`: durable lifecycle, deploy identity, reconciliation,
   and governance boundaries that OpenAPI cannot express.
 

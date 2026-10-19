@@ -393,9 +393,13 @@ No production, backup, promotion or Client-access boundary changes.
 ## Current Transitional Model
 
 The current service has a DB-backed managed-rule reconciliation endpoint with
-compare-and-swap, idempotency, reviewed-plan digests, and redacted evidence. A
-protected GitHub workflow currently reads desired managed sets from repository
-secrets and transports them to that endpoint through GitHub Actions OIDC.
+compare-and-swap, idempotency, reviewed-plan digests, and redacted evidence.
+Managed sets are maintained through the DB-native Access policy workbench and
+Director-approved privileged-operation proposals. The GitHub-secret reconcile
+wrapper and reusable worker are deleted; their removal does not revoke stored
+rules or delete repository secrets. The bootstrap installer is deleted with
+them. Use [agent proposal access](#preparing-agent-proposal-access) for its
+DB-native successor; installing that access still requires Director approval.
 
 Reconciliation planning accepts schema-v2 and schema-v3 desired managed sets.
 It resolves explicit v1-to-v2, v2-to-v3, and same-schema transitions,
@@ -421,12 +425,8 @@ empty-set readback are recorded on #2006. Its dedicated
 `manager-preview-approval-retirement` wrapper selection is removed after that
 operation; it is no longer a dispatch path.
 
-The `authz-policy-reconcile.yml` workflow is transitional compatibility
-infrastructure. The database remains
-the live decision authority, but GitHub-hosted desired sets still make GitHub
-part of the effective administration chain. Do not interpret the workflow's
-existence, its protected environment, or its listing in repository metadata as
-approval to use GitHub for routine permission administration.
+A PR that retires a caller carries the matching grant-removal proposal in the
+same change, so the Director can review it at retirement time.
 
 ## The Admin
 

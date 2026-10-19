@@ -299,7 +299,7 @@ OPERATION_SPECS = (
         "POST",
         "/v1/authz-policies/managed-rule-sets/reconcile",
         "Dry-run or apply managed authorization reconciliation.",
-        ("protected_workflow", "operator_ui", "service_api"),
+        ("operator_ui", "service_api"),
         ("dry-run", "apply"),
         "apply",
         ("reviewed_plan_digest",),
@@ -334,11 +334,6 @@ PROTECTED_WORKFLOWS = (
         "workflow_file": ".github/workflows/detached-application-retirement.yml",
         "reusable_workflow_file": ".github/workflows/reusable-detached-application-retirement.yml",
         "route": "/v1/detached-application-retirement",
-    },
-    {
-        "workflow_file": ".github/workflows/authz-policy-reconcile.yml",
-        "reusable_workflow_file": ".github/workflows/reusable-authz-policy-reconcile.yml",
-        "route": "/v1/authz-policies/managed-rule-sets/reconcile",
     },
     {
         "workflow_file": ".github/workflows/product-onboarding-manifest.yml",

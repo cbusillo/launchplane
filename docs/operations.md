@@ -1098,27 +1098,21 @@ The record never stores a principal identifier or token label, expires after 30
 days, and missing and expired traces share `authz_denial_not_found`. Persistence
 failure never weakens or replaces the original denial.
 
-Admins never mutate shared or production authz through direct DB commands or
-a local CLI from an arbitrary checkout. The protected secret/workflow model
-below is transitional compatibility for already-existing managed sets, not the
-routine path for new grants. Do not create a managed set or modify production
-authorization merely to resolve another task's `authorization_denied` result.
-The Director-approved August 25, 2026 root-of-trust exception adds the temporary
-`privileged-operation-bootstrap` selection without a new GitHub secret. The
-protected wrapper derives the immutable repository-owner GitHub ID from the
-dispatch event and reads the existing terminal-agent subject and token label
-bootstrap variables. Its exact `operator.privileged-operation-bootstrap` set
-grants only terminal-agent policy proposal plus repository-owner policy
-read/cancel/approve/revoke. After the initial Director-approved attempt proved that
-the existing self-preflight authority was not an immutable-ID admin
-rule, the Director explicitly approved adding
-`authz_policy_grant.write` to that same exact-ID rule. The set grants no secret
-operation action, execute action, summary read, product/runtime action, or
-workflow identity. Missing repository-owner or terminal-agent selectors fail request
-validation rather than widening a rule. Use dry-run and exact reviewed-digest
-apply, then remove the
-temporary selection after the DB-native policy-operation path removes its own
-bootstrap set and read-back proves the exception is gone.
+Maintain authorization through the DB-native Access policy workbench and
+Director-approved privileged-operation proposals. The GitHub-secret managed-set
+wrapper and reusable worker are deleted, including the temporary
+`privileged-operation-bootstrap` installer. Existing managed rules remain
+persisted until a separately approved proposal changes them. The supported
+successor is [agent proposal access](authorization-authority.md#preparing-agent-proposal-access),
+installed by the Director through the Access policy card. The proposer submits
+an inert plan; only the signed-in Director can approve it for worker execution.
+
+Repository secrets formerly consumed by that wrapper are obsolete inputs, not
+policy authority. Their later deletion is the Director's hand step, tracked by
+[#2521](https://github.com/cbusillo/launchplane/issues/2521). Never replace them
+or use a workflow to resolve an `authorization_denied` result. Shared or
+production authorization is not changed through direct DB commands or a local
+CLI from an arbitrary checkout.
 
 For the already-deployed unconfirmed activation, do not approve the inert
 `privileged-operation-78a8a92942bfb2b442530a15ad7946e2` plan and do not use a
@@ -1135,111 +1129,17 @@ the active policy schema for their exact managed-set request. Against schema v3
 they can produce repeatable dry-run candidates while the shared reconciliation
 apply fence and storage fences continue to reject persistence.
 
-`LAUNCHPLANE_AUTHZ_MANAGED_SET_JSON` currently carries the primary admin set;
-`LAUNCHPLANE_AUTHZ_POLICY_RECONCILE_MANAGED_SET_JSON` owns the exact immutable
-policy-admin worker rules for the standalone authz wrapper and must declare the
-`operator.authz-policy-reconcile` managed-set identity;
-`LAUNCHPLANE_AUTHZ_OWNER_ACCEPTANCE_MANAGED_SET_JSON` is a retired compatibility
-name. The `operator.owner-acceptance` managed set accepts only an empty desired
-policy so existing grants can be removed. It cannot create or update Client
-review grants. The current `/ui/owner-review` path uses the product profile's
-Client identity directly. Do not introduce new GitHub-secret/workflow grants;
-use the native reviewed policy path for any separately authorized contraction.
-See [Client acceptance](owner-acceptance.md).
+The signed trusted-maintenance webhook and its independent
+`LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET` remain in use. Client review
+uses the Client identity on the product profile, not retired owner-acceptance
+or product-owner policy grants; see [Client acceptance](owner-acceptance.md).
 
-Separately authorized contractions use the current reviewed
-[authorization surface](authorization-authority.md). The signed trusted-maintenance
-webhook and its independent `LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET`
-remain in use.
-
-The Client policy-admin grant set is retained runtime history, not an active
-approval path: its service evaluator and routes are removed. Do not extend it
-or use it as delivery authority.
-
-Generic-web preview caller
-grants are no longer sourced from a per-product repository secret. The
-typed product-onboarding planner derives repository identity, caller workflow
-refs, immutable Launchplane worker refs, products, contexts, events, and actions
-and submits the complete `operator.generic-web-preview` desired set through the
-same protected managed reconcile contract. Relative nested reusable-workflow
-calls resolve at the caller's immutable Launchplane commit, so rotate lifecycle,
-verification, notice, and feedback worker rules through the planner's
-expand/contract operations before repinning product callers;
-`LAUNCHPLANE_AUTHZ_GENERIC_WEB_ONBOARDING_MANAGED_SET_JSON` owns only the
-permanent exact Launchplane workflow grants for typed onboarding planning,
-protected target/record/authz apply, and preview-authz rotation/retirement. It
-must declare `operator.generic-web-onboarding` and must not contain product
-repository, product context, target, domain, or per-product preview rules;
-`LAUNCHPLANE_AUTHZ_PRODUCT_HEALTH_MONITORING_MANAGED_SET_JSON` owns the generic
-Product Health Monitoring wrapper's exact immutable worker grant;
-`LAUNCHPLANE_AUTHZ_GENERIC_WEB_ROUTE_BINDING_MANAGED_SET_JSON` owns independent
-exact-instance route-binding read/apply grants for generic-web stable lanes and
-must declare `operator.generic-web-route-binding`. Keep real products, contexts,
-instances, and immutable workflow identities only in that protected secret;
-`LAUNCHPLANE_AUTHZ_GENERIC_WEB_TESTING_INGRESS_ROUTE_MANAGED_SET_JSON` owns the
-separate exact-instance `ingress_route.plan` and `ingress_route.apply` grants
-for generic-web testing lanes and must declare
-`operator.generic-web-testing-ingress-route`; keep it independent from the
-route-binding set so ingress provider access is never implied by record-only
-route-binding authority;
-`LAUNCHPLANE_AUTHZ_ODOO_ROUTE_BINDING_MANAGED_SET_JSON` owns the independent
-Odoo stable managed route-binding set.
-`LAUNCHPLANE_AUTHZ_PREVIEW_FEEDBACK_REMEDIATION_MANAGED_SET_JSON` owns the
-`local_operator`-only VeriReel preview-feedback remediation plan/apply grants; and
-`LAUNCHPLANE_AUTHZ_ODOO_EXTERNAL_ROUTE_BINDING_MANAGED_SET_JSON` owns the
-testing-first external route-binding set.
-`LAUNCHPLANE_AUTHZ_ODOO_TESTING_INGRESS_ROUTE_MANAGED_SET_JSON` owns narrow
-testing-lane ingress inspection and reviewed no-op audit authority. The
-`LAUNCHPLANE_AUTHZ_ODOO_TESTING_ROUTE_BINDING_REFRESH_MANAGED_SET_JSON` owns the
-testing-only refresh controller and its exact-instance binding grants. The
-`LAUNCHPLANE_AUTHZ_ODOO_TESTING_TARGET_REPLACEMENT_MANAGED_SET_JSON` owns the
-separate exact-instance testing read, plan, and apply grants used by the pinned
-Odoo target-replacement workers. The
-`LAUNCHPLANE_AUTHZ_ODOO_OPW_PREVIEW_FEEDBACK_MANAGED_SET_JSON` owns the isolated
-OPW preview feedback writer grant without requiring admins to read or replace
-the primary managed-set secret. The
-`LAUNCHPLANE_AUTHZ_ODOO_OPW_PRODUCTION_ENROLLMENT_MANAGED_SET_JSON` owns the
-separate exact-instance OPW production inspection and enrollment grants so the
-admin can reconcile that lane without replacing another unreadable managed
-set. `LAUNCHPLANE_AUTHZ_ODOO_PRODUCTION_ENROLLMENT_MANAGED_SET_JSON` owns
-additional exact-instance Odoo production inspection and enrollment grants
-without expanding the OPW-specific set or replacing another unreadable managed
-set. `LAUNCHPLANE_AUTHZ_ODOO_PRODUCTION_OPERATION_READ_MANAGED_SET_JSON` owns
-separate exact-instance cross-operation read grants, such as allowing an
-immutable production apply worker to read its reviewed plan operation without
-replacing the broader production-enrollment set. The
-`LAUNCHPLANE_AUTHZ_ODOO_PRODUCTION_BACKUP_RESTORE_MANAGED_SET_JSON` owns the
-separate exact-instance destructive restore apply grant for the immutable
-production restore wrapper and worker without replacing the broader
-production-enrollment set. The
-`Manage Launchplane Authorization` wrapper selects one of those explicit
-secrets and forwards it into the reusable worker, whose OIDC-minting job remains
-gated by the `launchplane-authz-admin` environment. Never replace the unreadable
-primary secret with a partial set; use a distinct managed set and protected
-secret instead. The JSON owns desired state only: `schema_version`, `product`,
-`managed_set_id`, migration/adoption intent, and `desired_policy`.
-Dispatch-time mode, reason, issue reference, and reviewed plan digest are
-deliberately excluded from that secret.
-
-The policy-admin worker set is self-rotating. Before repinning the standalone
-wrapper, add a distinct exact rule for the next reusable-worker SHA through the
-currently authorized worker, apply the reviewed expansion, then advance the
-wrapper. The former temporary deploy selector for first-time policy-admin
-recovery no longer exists. Do not reintroduce it or represent image rollback as
-DB-policy recovery. A missing authorized administrator is an architecture
-blocker to report to the Director until a bounded, independently protected
-DB-policy recovery contract is designed and reviewed.
-
-The reusable authz worker requires an exact expected managed-set identity from
-every reviewed wrapper. The worker rejects protected
-configuration whose `managed_set_id` does not match before rendering or sending
-the reconciliation request. Every standalone selector binds one exact
-`operator.*` identity. The deploy workflow is not an authorization wrapper and
-does not carry a managed-set secret.
-
-Land reusable-workflow input compatibility before advancing any immutable
-wrapper pin that depends on it. Never pass a newly introduced input to an older
-pinned worker revision that does not declare that input.
+Generic-web preview caller grants are generated from typed onboarding input
+and persisted in the DB-backed `operator.generic-web-preview` managed set.
+The planner derives repository identity, caller workflow refs, immutable worker
+refs, products, contexts, events, and actions. Relative nested reusable-workflow
+calls resolve at the caller's immutable Launchplane commit; use the planner's
+reviewed expand/contract operations before repinning product callers.
 
 ### Reusable workflow SHA rollout for readiness-gated actions
 
@@ -1250,11 +1150,10 @@ worker without creating an authorization gap by using two separate exact rules:
 1. Add a new rule with a distinct `managed_rule_id` and the new immutable worker
    SHA while retaining the old exact rule unchanged. Each rule must keep a
    singleton `job_workflow_refs` selector and the same exact lane/action scope.
-2. Only for an explicitly approved maintenance of this already-authorized
-   transitional set, run `Manage Launchplane Authorization` in `dry_run` mode and require
-   `operational_readiness_blocked_rule_count=0` in the recorded diff before
-   approving the protected `launchplane-authz-admin` job. Apply the reviewed
-   expansion, then deploy the wrapper that calls the new worker SHA.
+2. Prepare the expansion through the DB-native Access policy proposal path.
+   Require `operational_readiness_blocked_rule_count=0` in its recorded diff,
+   obtain the Director's signed-in approval, and verify worker execution before
+   deploying the wrapper that calls the new worker SHA.
 3. Run the read-only operational-readiness preflight from the new worker. It must
    select only the new exact rule and report authorization ready.
 4. Remove the old rule through a second dry-run/review/apply cycle, then repeat
@@ -1329,81 +1228,6 @@ It derives the exact route from service records and reuses a covering existing
 certificate without changing generic instance-scoped ingress authority. It
 preserves the restored copy and supplies same-key recovery; another bootstrap
 or restore is never a TLS repair.
-
-For explicitly approved maintenance of an already-authorized transitional set,
-use `Manage Launchplane Authorization` on the default branch. Select the
-intended `managed_set`, then dispatch `mode=dry_run` with the final single-line
-reason and related issue that will also be used for apply. The environment gate
-protects the OIDC-minting job,
-the worker is pinned to a reviewed immutable revision, and all authz runs share
-one non-canceling concurrency group. `Deploy Launchplane` has no authorization
-inputs or jobs and must not be used for policy bootstrap or recovery.
-
-Babysit protected admin workflows with the installed GitHub workflow helper
-instead of dispatching and then polling by workflow name:
-
-```sh
-skills_home="${CODE_HOME:-${CODEX_HOME:-$HOME/.code}}/skills"
-uv run "$skills_home/github/scripts/github_workflow_babysit.py" dispatch \
-  --repo OWNER/REPO \
-  --workflow authz-policy-reconcile.yml \
-  --ref main \
-  --field mode=dry_run \
-  --field managed_set=MANAGED_SET \
-  --field reason=REASON \
-  --field related_issue=ISSUE \
-  --approve-environment launchplane-authz-admin \
-  --timeout-seconds 1800
-```
-
-Do not substitute raw `gh workflow run`, `gh run watch`, or a generic Actions
-run waiter for this helper. GitHub reports a protected-environment approval as
-`status=waiting`; generic waiters commonly treat that as an ordinary
-nonterminal state and may emit no approval diagnostic. The exact-run helper
-reads `pending_deployments` on the first waiting poll, reports the eligible
-reviewer state, and either submits the explicitly authorized approval or stops
-with an actionable split-identity error.
-
-The helper dispatches with the configured automation actor and reviews the
-protected environment with the active local human GitHub account. Those
-identities must be distinct; do not weaken the environment's self-review
-protection. GitHub's returned run ID and URL are authoritative. If dispatch
-does not return exact run details, stop rather than rediscovering a just-created
-run through list filtering. An already-known run may be resumed with `watch
---run-id RUN_ID`.
-
-Every `status=waiting` poll queries `pending_deployments` immediately and
-reports the environment, eligible reviewers, wait timer, and
-`current_user_can_approve`. Approval occurs only when the active human is
-eligible and the exact environment name was supplied with
-`--approve-environment`, which is the Director's explicit authorization for
-that protected action. A triggering-actor self-review denial or ineligible
-reviewer stops immediately with an actionable result. The run must also report
-the configured automation actor as its triggering actor. Before approval, the
-helper reads the active human's existing review history so resuming the same run
-does not repeat a non-idempotent approval. Timer-only and custom protection
-waits remain bounded; queued runner jobs and waiting runs with no pending
-deployment are reported as distinct diagnostics. The default timeout is 30
-minutes and the hard maximum is two hours, so workflow babysitting cannot
-silently poll overnight.
-
-Review the job summary and 30-day evidence artifact. The review must cover
-`result.diff.plan_sha256`, previous and desired policy hashes, desired-set and
-configuration hashes, migration/adoption intent, rule IDs/hashes, add/adopt/
-update/remove counts, unmanaged compatibility candidate and retirement counts,
-and whether authorization changed. Apply from the same default-branch workflow
-with the identical protected desired-set secret, reason, and issue reference;
-change only mode to `apply` and supply the reviewed plan SHA-256. The worker
-derives the stable idempotency key from the managed set and reviewed plan. The
-service recomputes the plan against the active policy and rejects drift before
-mutation.
-
-The artifact contains only request hashes/intent and the service's redacted
-summary. Failed requests add a bounded error summary containing only the
-service error code, at most 500 message characters, and the trace ID. The
-worker removes the protected desired policy, raw request, and raw response
-material before upload so repository-secret contents do not become
-artifact-readable runtime authority.
 
 Use the `Route Binding Reconcile` workflow on the default branch for shared or
 production route authority. Supply only the product/context/instance tuple from
@@ -4606,16 +4430,11 @@ checkpointing the sole `application.delete`. Reconciliation and already-absent
 retries reuse the same apply idempotency key. Completion requires candidate
 absence, unchanged protected fingerprints, and zero authority writes.
 
-Managed authz routing is reserved through the
-`detached-application-retirement` selector, managed-set ID
-`operator.detached-application-retirement`, and secret name
-`LAUNCHPLANE_AUTHZ_DETACHED_APPLICATION_RETIREMENT_MANAGED_SET_JSON`. Neither
-phase creates or populates that secret or reconciles a live rule. Merge/deploy
-of code may continue, but do not configure a new caller/worker grant through the
-managed authz workflow. Registering the exact caller and worker is a grant, so
-ask the Director, then use the DB-native administration route and run the
-reviewed plan and apply sequence. Never substitute a mutable ref, a checked-in target value, or a
-local CLI live-target fallback.
+Existing detached-application retirement authority is DB-backed in
+`operator.detached-application-retirement`. Neither phase installs a grant.
+Registering an exact caller and worker changes access, so obtain the Director's
+approval through the DB-native Access policy proposal path. Never substitute a
+mutable ref, a checked-in target value, or a local CLI live-target fallback.
 
 ## Privileged-Operation Canary
 

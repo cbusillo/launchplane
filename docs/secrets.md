@@ -315,31 +315,13 @@ authentication before creating a separate private token file.
   repository, and permission identity, revokes the token after use, and never
   persists or logs the token.
   Do not reuse onboarding, runner-host-hygiene, PAT, or ordinary service tokens.
-- The protected
-  `LAUNCHPLANE_AUTHZ_GENERIC_WEB_ONBOARDING_MANAGED_SET_JSON` secret contains
-  the permanent exact Launchplane workflow grants for onboarding and preview
-  authorization maintenance. It is generic worker authority, not per-product
-  policy: do not place product repositories, contexts, targets, domains, or
-  generated preview caller rules in it. Product rules are planned from typed
-  runtime input and persisted in the DB-backed `operator.generic-web-preview`
-  managed set.
-- `LAUNCHPLANE_AUTHZ_OWNER_ACCEPTANCE_MANAGED_SET_JSON` names a retired
-  compatibility set. `operator.owner-acceptance` accepts only an empty desired
-  policy for removal of existing grants. Current Client review uses the Client
-  on the product profile and has no Client-grant secret prerequisite. This code
-  retirement does not change deployed secrets or authorization records. See
-  [`owner-acceptance.md`](owner-acceptance.md).
-
-- The protected
-  `LAUNCHPLANE_AUTHZ_PRODUCT_OWNER_POLICY_ADMIN_MANAGED_SET_JSON` secret contains
-  the complete `operator.product-owner-policy-admin` `local_operators` desired set.
-  Every rule must bind one exact admin subject and token label to one exact
-  product/system scope and exactly the product Client policy and requirement
-  read/write actions. Product identities, repository identities, and Client
-  memberships remain DB-backed runtime records and do not belong in this secret.
-  Those actions belong to the retired Client policy records, whose routes are
-  deleted (see [`product-owner-policy.md`](product-owner-policy.md)), so this
-  set authorizes no current route.
+- The GitHub-secret authorization reconcile wrapper and reusable worker are
+  deleted. Their former `LAUNCHPLANE_AUTHZ_*_MANAGED_SET_JSON` inputs are no
+  longer consumed. The Director deletes those repository secrets by hand after
+  the deletion lands; [#2521](https://github.com/cbusillo/launchplane/issues/2521)
+  records the names. Stored managed rules remain DB-backed and are changed only
+  through the reviewed Access policy path. Current Client review uses the
+  product profile's Client identity and has no Client-grant secret prerequisite.
 
 ## DB-Backed Secret Resolution
 

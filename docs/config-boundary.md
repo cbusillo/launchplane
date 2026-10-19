@@ -494,8 +494,8 @@ Product retirement does not add checked-in product or provider authority. The
 workflow accepts admin-supplied product, instance, target digest, reason,
 issue, reviewed plan, and idempotency values; the service resolves all real
 context, provider target, runtime, and secret authority from DB-backed records.
-Authorization managed-set secrets are transitional desired input routed through
-the protected reconciliation workflow. They are not live policy authority and
-must not become a product catalog or the routine durable permissions editor.
-Do not add new routine managed sets or grants through those secrets; granting
-access is a stop boundary, see `authorization-authority.md`.
+The GitHub-secret authorization reconcile wrapper and reusable worker are
+deleted. Existing managed sets remain DB-backed; maintain them through the
+Access policy workbench and Director-approved privileged-operation proposals.
+Their obsolete repository secrets are removed separately by the Director.
+Granting or removing access is a stop boundary; see `authorization-authority.md`.
