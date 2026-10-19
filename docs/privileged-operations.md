@@ -80,6 +80,40 @@ later proposal and approval.
 
 ## Approval And Execution Boundary
 
+The signed-in Director's access-policy review shows each added or removed
+rule's principal, browser roles, permissions and scope. Updated rules show
+both their removed and added sides. Role effects come from the existing
+managed-set planner's candidate and the policy's sign-in role resolver,
+including rules outside the changed set. The display distinguishes losing
+all browser access, losing administrator access while retaining read-only
+access, and a role retained through another rule. Team or organization
+membership and unresolved overlapping selectors are marked unknown rather
+than treated as proof of losing access.
+
+Only the signed-in Director with immutable-ID admin permission receives this display in
+the semantic review; agent and read-only projections omit it. Immutable
+GitHub IDs are labeled with public account logins where available, using
+credential-free, cached GitHub account metadata; an unavailable lookup keeps
+the account ID visible. This lookup provides no membership claims. No secret
+values or request free text enter the display. Token labels and workflow
+repository identity pins are selector identifiers and are displayed; credential
+values are never read. An ID's login is used for role evaluation only when
+observed in the signed-in identity or an ID-bound provider reply; a rule's login
+selector is never substituted for a failed lookup. Unknown effects assert no
+before/after role. Exact login-only selectors use the public account lookup in
+the other direction, keeping both its returned immutable ID and canonical
+login. An unavailable lookup stays unknown, and a renamed account does not
+silently satisfy its former login selector. Both lookup directions share the
+same per-response admission budget.
+
+Across one response, at most ten account lookups may start within a one-second
+admission window. Each uses a three-second socket timeout; this is not a hard
+wall deadline for network or DNS work. IDs remain visible when the admission
+budget is spent. Truncated provider replies also fall back to IDs. If the current planner no
+longer matches the saved plan, current role effects are shown as unavailable.
+These are review fields only; approval, cancellation and worker apply rules
+are unchanged.
+
 Planning remains typed and dry-run-only. Phase 2 adds a separate finite human
 approval and a supervised service-internal worker; it adds no HTTP execute
 route, execute action, static execution credential, or agent execution path.

@@ -405,6 +405,7 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
         configured_terminal_identity: TerminalAgentIdentity | None = None,
         configured_local_operator_identity: LocalOperatorIdentity | None = None,
         policy_record_reader: Callable[[], object] | None = None,
+        github_login_reader: Callable[[int], str] = lambda _: "",
     ) -> FastAPI:
         app = FastAPI()
         reader = human_reader or Mock(return_value=_human())
@@ -445,6 +446,7 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                 read_github_human_mutation_identity=read_mutation_human,
                 policy_reader=lambda: policy,
                 policy_record_reader=policy_record_reader or (lambda: _policy_record(policy)),
+                github_login_reader=github_login_reader,
                 read_configured_terminal_identity=lambda: configured_terminal_identity,
                 read_configured_local_operator_identity=(
                     lambda: configured_local_operator_identity
@@ -452,6 +454,110 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         return app
+
+    async def test_access_effects_are_director_only_and_agent_reads_stay_value_free(self) -> None:
+        from dataclasses import replace
+
+        payload = _policy().model_dump(mode="json")
+        payload["github_humans"].append(
+            {
+                "managed_set_id": "review.subjects",
+                "managed_rule_id": "removed-person",
+                "github_ids": [789],
+                "logins": ["fixture-affected-person"],
+                "roles": ["read_only"],
+                "actions": ["operations.read"],
+                "products": ["launchplane"],
+                "contexts": ["launchplane"],
+            }
+        )
+        payload["github_humans"].append(
+            {
+                "managed_set_id": "review.non-administrator",
+                "managed_rule_id": "human-reader",
+                "github_ids": [999],
+                "roles": ["admin"],
+                "actions": [AUTHZ_POLICY_OPERATION_READ_ACTION],
+                "products": ["launchplane"],
+                "contexts": ["launchplane"],
+            }
+        )
+        operator = LocalOperatorIdentity(subject="agent:access-review", token_label="fixture")
+        payload["local_operators"] = [
+            {
+                "managed_set_id": "review.reader",
+                "managed_rule_id": "agent-reader",
+                "subjects": [operator.subject],
+                "token_labels": [operator.token_label],
+                "actions": [
+                    AUTHZ_POLICY_OPERATION_READ_ACTION,
+                    PRIVILEGED_POLICY_OPERATION_SUMMARY_READ_ACTION,
+                ],
+                "products": ["launchplane"],
+                "contexts": ["launchplane"],
+            }
+        ]
+        policy = LaunchplaneAuthzPolicy.model_validate(payload)
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(directory) / "review.sqlite3")
+            )
+            store.ensure_schema()
+            store.seed_authz_policy_if_absent(_policy_record(policy))
+            try:
+                async with lifespan_client(
+                    self._app(
+                        store=store,
+                        policy=policy,
+                        github_login_reader=lambda _: "fixture-affected-person",
+                    )
+                ) as client:
+                    planned = await client.post(
+                        "/v1/privileged-operations/plans",
+                        json={
+                            "descriptor_id": "managed-authz-policy-set",
+                            "source_event_id": "review-removal",
+                            "request": {
+                                "managed_set_id": "review.subjects",
+                                "reason": "sensitive-value-sentinel",
+                                "desired_policy": {"schema_version": 2},
+                            },
+                        },
+                    )
+                    self.assertEqual(planned.status_code, 200, planned.text)
+                    operation_id = planned.json()["record"]["operation_id"]
+                    review_path = f"/v1/privileged-operations/plans/{operation_id}/review"
+                    review = await client.get(review_path)
+                    self.assertEqual(review.status_code, 200, review.text)
+                    access = review.json()["review"]["access_policy"]
+                    self.assertIn("fixture-affected-person", json.dumps(access))
+                    self.assertEqual(access["rules"][0]["role_effects"][0]["state"], "lost")
+                    self.assertNotIn("sensitive-value-sentinel", json.dumps(access))
+                # Both the semantic detail and list must omit private principal display.
+                for identity, expected_status in (
+                    (operator, 200),
+                    (replace(_human(), role="read_only"), 403),
+                    (replace(_human(), github_id=999, login="fixture-policy-reader"), 200),
+                ):
+                    async with lifespan_client(
+                        self._app(
+                            store=store, policy=policy, human_reader=Mock(return_value=identity)
+                        )
+                    ) as client:
+                        for path in (
+                            review_path,
+                            "/v1/privileged-operations/plans?descriptor_id=managed-authz-policy-set",
+                        ):
+                            response = await client.get(path)
+                            self.assertEqual(response.status_code, expected_status, response.text)
+                            self.assertNotIn("access_policy", response.text)
+                            self.assertNotIn("fixture-affected-person", response.text)
+                record = store.read_privileged_operation_record(operation_id)
+                self.assertEqual(record.status, "planned")
+                self.assertIsNone(record.approval)
+                self.assertIsNone(record.execution)
+            finally:
+                store.close()
 
     async def test_openapi_exposes_human_transitions_but_no_execute(self) -> None:
         with TemporaryDirectory() as directory:
@@ -608,7 +714,10 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(
             "separate administrator approval", review.json()["review"]["change"]["summary"]
         )
-        self.assertNotIn("owner-terminal", review.text)
+        semantic = review.json()["review"]
+        principal_display = semantic.pop("access_policy")
+        self.assertIn(terminal.token_label, json.dumps(principal_display))
+        self.assertNotIn(terminal.token_label, json.dumps(semantic))
 
     async def test_terminal_enrollment_removal_review_keeps_existing_client_state(self) -> None:
         terminal = TerminalAgentIdentity(subject="trusted-terminal", token_label="owner-terminal")
@@ -795,7 +904,11 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(review["title"], "Review agent product setup access")
         self.assertIn("example-docs, example-shop", review["change"]["summary"])
         self.assertIn("cannot change the Client or release review", review["change"]["summary"])
-        self.assertNotIn("operator-agent-token", reviews[0])
+        principal_display = review.pop("access_policy")
+        for rule in rules:
+            for label in rule.token_labels:
+                self.assertIn(label, json.dumps(principal_display))
+                self.assertNotIn(label, json.dumps(review))
 
     async def test_agent_product_setup_candidate_refuses_unsafe_selection_or_missing_operator(
         self,

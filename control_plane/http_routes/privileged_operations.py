@@ -5,6 +5,11 @@ from typing import Annotated, Literal
 
 from fastapi import Depends, Path, Query
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from control_plane.access_policy_review import (
+    AccountReader,
+    bounded_account_logins,
+    build_access_policy_review,
+)
 from control_plane.contracts.backup_policy_proposal import BackupPolicyProposalInput
 
 from control_plane.contracts.privileged_operation import (
@@ -110,6 +115,8 @@ class PrivilegedOperationRouteDependencies:
     read_github_human_mutation_identity: Callable[..., GitHubHumanIdentity]
     policy_reader: Callable[[], LaunchplaneAuthzPolicy]
     policy_record_reader: Callable[[], object] | None = None
+    github_login_reader: Callable[[int], str] = lambda _: ""
+    github_account_reader: AccountReader = lambda _: None
     read_configured_terminal_identity: Callable[[], TerminalAgentIdentity | None] = lambda: None
     read_configured_local_operator_identity: Callable[[], LocalOperatorIdentity | None] = lambda: (
         None
@@ -492,9 +499,12 @@ def register_privileged_operation_routes(
         generated_at: datetime,
         trace_id: str,
         record_store: object,
+        identity: LaunchplaneIdentity,
+        github_login_reader: Callable[[int], str],
+        github_account_reader: AccountReader,
     ) -> PrivilegedOperationSemanticReview:
         try:
-            return privileged_operation_semantic_review(
+            review = privileged_operation_semantic_review(
                 record=record,
                 events=events,
                 generated_at=generated_at,
@@ -507,6 +517,32 @@ def register_privileged_operation_routes(
                     )
                 ),
             )
+            if (
+                isinstance(identity, GitHubHumanIdentity)
+                and dependencies.policy_reader().names_administrator(identity)
+                and isinstance(record.request, ManagedAuthzPolicySetProposalInput)
+                and isinstance(record.evidence, ManagedAuthzPolicySetHumanEvidence)
+            ):
+                review = review.model_copy(
+                    update={
+                        "access_policy": build_access_policy_review(
+                            record_store=record_store,
+                            request=record.request,
+                            evidence=record.evidence,
+                            login_for_id=lambda github_id: (
+                                identity.login
+                                if github_id == identity.github_id
+                                else github_login_reader(github_id)
+                            ),
+                            account_for_login=lambda login: (
+                                (identity.github_id, identity.login)
+                                if login == identity.login
+                                else github_account_reader(login)
+                            ),
+                        )
+                    }
+                )
+            return review
         except PrivilegedOperationSemanticReviewError as error:
             raise dependencies.common.http_error(
                 status_code=409,
@@ -789,6 +825,9 @@ def register_privileged_operation_routes(
                 descriptor_id=descriptor_id,
                 limit=limit,
             )
+            github_login_reader, github_account_reader = bounded_account_logins(
+                dependencies.github_login_reader, dependencies.github_account_reader
+            )
             reviews = tuple(
                 semantic_review_or_error(
                     record=record,
@@ -799,6 +838,9 @@ def register_privileged_operation_routes(
                     generated_at=generated_at,
                     trace_id=trace_id,
                     record_store=record_store,
+                    identity=identity,
+                    github_login_reader=github_login_reader,
+                    github_account_reader=github_account_reader,
                 )
                 for record in records
             )
@@ -882,6 +924,9 @@ def register_privileged_operation_routes(
                 code="privileged_operation_storage_unavailable",
                 message="Privileged-operation planning storage is unavailable.",
             ) from error
+        github_login_reader, github_account_reader = bounded_account_logins(
+            dependencies.github_login_reader, dependencies.github_account_reader
+        )
         return PrivilegedOperationSemanticReviewResponse(
             trace_id=trace_id,
             review=semantic_review_or_error(
@@ -890,6 +935,9 @@ def register_privileged_operation_routes(
                 generated_at=datetime.now(timezone.utc),
                 trace_id=trace_id,
                 record_store=record_store,
+                identity=identity,
+                github_login_reader=github_login_reader,
+                github_account_reader=github_account_reader,
             ),
         )
 
