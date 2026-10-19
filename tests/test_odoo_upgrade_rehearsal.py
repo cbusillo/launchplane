@@ -621,6 +621,164 @@ class RehearsalHostSafetyTests(unittest.TestCase):
             self.host["inspect_copy_runtime"](self.spec, expected_instance="rehearsal"),
         )
 
+    def storage_fixture(
+        self, budget: dict[str, int]
+    ) -> tuple[dict[str, Any], Path, dict[str, Any]]:
+        root = self.fixture.root / ".local/state/launchplane-rehearsals" / self.identifier
+        root.mkdir(parents=True)
+        containers = self.inspect()
+        for role in ("database", "script-runner"):
+            upper = self.fixture.root / (role + "-upper")
+            upper.mkdir()
+            containers[role][1]["GraphDriver"] = {"Data": {"UpperDir": str(upper)}}
+        spec = {"record": {"rehearsal_id": self.identifier, "storage": budget}}
+        return spec, root, containers
+
+    def test_historical_capture_fits_without_recharging_completed_copies(self) -> None:
+        from types import SimpleNamespace
+
+        # Synthetic storage limits around the diagnosed source sizes. These
+        # are fixture budgets, not requested changes to a live host's quota.
+        database, filestore = 1_075_328_691, 106_516_687_222
+        available = 933_105_549_312
+        spec, root, containers = self.storage_fixture(
+            {
+                "database_bytes": database,
+                "filestore_bytes": filestore,
+                "staging_bytes": 1024**3,
+                "reserve_bytes": 10 * 1024**3,
+            }
+        )
+        retained_copy_bytes = database + filestore
+        # After execute, two working copies and one recovery snapshot exist;
+        # after simulate-final there are four working copies and two snapshots.
+        for phase, retained in (("execute", 0), ("simulate-final", 3), ("verify", 6)):
+            free = available - retained * retained_copy_bytes
+            with (
+                self.subTest(phase=phase),
+                patch.object(
+                    os, "statvfs", return_value=SimpleNamespace(f_bavail=free, f_frsize=1)
+                ),
+            ):
+                self.assertTrue(
+                    self.host["rehearsal_storage_capacity"](spec, root, containers, phase)
+                )
+
+    def test_capacity_groups_devices_and_reserves_nonroot_available_bytes_once(self) -> None:
+        from types import SimpleNamespace
+
+        spec, root, containers = self.storage_fixture(
+            {
+                "database_bytes": 40,
+                "filestore_bytes": 80,
+                "staging_bytes": 20,
+                "reserve_bytes": 10,
+            }
+        )
+        volumes = self.fixture.volumes
+        data = Path(volumes[self.identifier + "-data"]["Mountpoint"])
+        database = Path(volumes[self.identifier + "-db"]["Mountpoint"])
+        runner = Path(containers["script-runner"][1]["GraphDriver"]["Data"]["UpperDir"])
+        database_upper = Path(containers["database"][1]["GraphDriver"]["Data"]["UpperDir"])
+        devices = {data: 1, database: 1, runner: 2, root: 3, database_upper: 4}
+        # Two new working copies share device 1. The runner dump and host
+        # raw/snapshot custody use their own devices, each with one reserve.
+        free = {1: 250, 2: 50, 3: 350, 4: 50}
+        original_stat = Path.stat
+
+        def stat(path: Path, *args: Any, **kwargs: Any) -> os.stat_result:
+            values = list(original_stat(path, *args, **kwargs))
+            if path in devices:
+                values[2] = devices[path]
+            return os.stat_result(values)
+
+        def statvfs(path: Path) -> SimpleNamespace:
+            return SimpleNamespace(f_bavail=free[devices[path]] // 2, f_bfree=10_000, f_frsize=2)
+
+        with patch.object(Path, "stat", stat), patch.object(os, "statvfs", statvfs):
+            self.assertTrue(
+                self.host["rehearsal_storage_capacity"](spec, root, containers, "execute")
+            )
+            for device in (1, 2, 3):
+                with self.subTest(device=device):
+                    free[device] -= 2
+                    self.assertFalse(
+                        self.host["rehearsal_storage_capacity"](spec, root, containers, "execute")
+                    )
+                    free[device] += 2
+            # Final restoration's temporary dump belongs to the database
+            # writable layer. It must not borrow runner or host free space.
+            free[2] = 10
+            free[3] = 230
+            free[4] -= 2
+            self.assertFalse(
+                self.host["rehearsal_storage_capacity"](spec, root, containers, "simulate-final")
+            )
+            free[4] += 2
+            self.assertTrue(
+                self.host["rehearsal_storage_capacity"](spec, root, containers, "simulate-final")
+            )
+
+    def test_unknown_runner_or_database_staging_backing_refuses(self) -> None:
+        from types import SimpleNamespace
+
+        spec, root, containers = self.storage_fixture(
+            {
+                "database_bytes": 40,
+                "filestore_bytes": 80,
+                "staging_bytes": 20,
+                "reserve_bytes": 10,
+            }
+        )
+        with patch.object(os, "statvfs", return_value=SimpleNamespace(f_bavail=10_000, f_frsize=1)):
+            for role, phase in (("script-runner", "execute"), ("database", "simulate-final")):
+                with self.subTest(role=role):
+                    driver = containers[role][1].pop("GraphDriver")
+                    with self.assertRaisesRegex(RuntimeError, "staging backing is unavailable"):
+                        self.host["rehearsal_storage_capacity"](spec, root, containers, phase)
+                    containers[role][1]["GraphDriver"] = driver
+
+    def test_verify_refuses_insufficient_space_before_new_snapshot_or_runtime_write(self) -> None:
+        import base64
+        import json
+        import sys
+        from types import SimpleNamespace
+
+        spec, _, containers = self.storage_fixture(
+            {
+                "database_bytes": 40,
+                "filestore_bytes": 80,
+                "staging_bytes": 20,
+                "reserve_bytes": 10,
+            }
+        )
+        spec.update(mode="apply", action="verify", target_image=self.spec["image_reference"])
+        spec["record"].update(
+            state="switched", intent_sha256=hashlib.sha256(b"fixture").hexdigest(), copies=[]
+        )
+        self.host["inspection"] = Mock(return_value=containers)
+        self.host["validate_snapshots"] = Mock()
+        self.host["snapshot"] = Mock()
+        self.host["private_health"] = Mock()
+        self.host["docker"] = Mock(wraps=self.host["docker"])
+        with (
+            patch.object(sys, "argv", ["rehearsal", base64.b64encode(json.dumps(spec).encode())]),
+            patch.object(Path, "home", return_value=self.fixture.root),
+            patch.object(os, "statvfs", return_value=SimpleNamespace(f_bavail=149, f_frsize=1)),
+            self.assertRaisesRegex(RuntimeError, "Insufficient independent backing capacity"),
+        ):
+            self.host["main"]()
+        self.host["snapshot"].assert_not_called()
+        self.host["private_health"].assert_not_called()
+        # Capacity may inspect volume backing, but must not stop a container
+        # or run SQL before refusing the new recovery allocation.
+        self.assertTrue(
+            all(
+                call.args[:2] == ("volume", "inspect")
+                for call in self.host["docker"].call_args_list
+            )
+        )
+
     def test_runtime_guard_accepts_only_the_private_standalone_network(self) -> None:
         qualified = self.inspect()
         self.assertEqual(set(qualified), set(self.fixture.containers))

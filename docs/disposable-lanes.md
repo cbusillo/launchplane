@@ -2388,9 +2388,29 @@ Before planning, supply a private intent file outside the checkout. It contains
 `source_odoo_version`, `target_artifact_id`, `storage` and `reason`. `storage` uses
 `database_bytes`, `filestore_bytes`, `staging_bytes` and `reserve_bytes`. The
 first two bound each streamed capture as well as supplying working headroom.
-Budget four database/filestore copies plus host staging and immutable recovery
-snapshots. Headroom checks group demands by actual backing filesystem; they are
-not filesystem quotas.
+Budget four database/filestore working copies and all three immutable recovery
+snapshots over the lifecycle. Before each allocating action, the guard charges
+only that action's new allocations against current free space. Existing copies
+already consume space and are never charged a second time. With `D` and `F` as
+the reviewed per-copy bounds, the conservative charges are:
+
+| Action | DB volume | Data volume | Runner writable layer | DB writable layer | Host custody |
+| --- | --- | --- | --- | --- | --- |
+| `execute` | `2D` | `2F` | `D` | `0` | `2D + 3F + staging_bytes` |
+| `simulate-final` | `2D` | `2F` | `0` | `D` | `D + 2F + staging_bytes` |
+| `verify` | `0` | `0` | `0` | `0` | `D + F + staging_bytes` |
+
+Host custody includes the new recovery snapshot and, where applicable, the raw
+dump, archive and extracted filestore. Runner scratch holds only the initial
+sanitizer dump; final-source restore puts its temporary dump in the database
+container instead. `staging_bytes` is additional host headroom for archive and
+allocation overhead. Choose working bounds that also cover restored/upgraded
+database growth and migration/WAL requirements; a measured dump size alone does
+not bound restored size. Each action rechecks actual volume mountpoints,
+writable-layer backing and custody using `st_dev` and non-root available bytes,
+with `reserve_bytes` added once per backing device. Unknown backing fails closed.
+These checks do not reserve space or impose filesystem quotas. All four working
+copies and every recovery tuple remain preserved.
 
 The candidate artifact must already be registered, immutable, attributable to
 this product's repository, and declare its Odoo version and exact module intent.

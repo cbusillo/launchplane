@@ -313,6 +313,31 @@ def capture(spec,root,containers,database):
     return raw
 
 
+def rehearsal_storage_capacity(spec, root, containers, action):
+    budget=spec['record']['storage']
+    database=budget['database_bytes']; filestore=budget['filestore_bytes']
+    # Free space already excludes every completed phase's working/recovery
+    # copies. Charge only this phase's new allocations, including transients.
+    working=2 if action in {'execute','simulate-final'} else 0
+    host=database+filestore+budget['staging_bytes']
+    if action=='execute':
+        # Raw dump + tar + extracted filestore remain until upgrade succeeds,
+        # overlapping the sanitized source snapshot and both working copies.
+        host+=database+2*filestore
+    elif action=='simulate-final':
+        # Restoring the retained source extracts on the host and copies its
+        # dump into the database container, not the runner's writable layer.
+        host+=filestore
+    elif action!='verify':
+        raise RuntimeError('Unsupported storage phase')
+    return storage_capacity(
+        {'generation':{'namespace':spec['record']['rehearsal_id']},'staging_directory':str(root)},
+        containers,{**budget,'database_bytes':working*database,'filestore_bytes':working*filestore},
+        runner_staging_bytes=database if action=='execute' else 0,
+        host_staging_bytes=host,
+        database_staging_bytes=database if action=='simulate-final' else 0)
+
+
 def main():
     spec=json.loads(base64.b64decode(sys.argv[1],validate=True))
     record=spec['record']
@@ -386,12 +411,8 @@ def main():
         else:
             containers=inspection(spec,database,image)
             validate_snapshots(spec,root,containers,record['copies'])
-            budget=record['storage']
-            headroom={**budget,'database_bytes':budget['database_bytes']*4,
-                'filestore_bytes':budget['filestore_bytes']*4,
-                'staging_bytes':budget['staging_bytes']+4*(budget['database_bytes']+budget['filestore_bytes'])}
-            if action in {'execute','simulate-final'} and not storage_capacity(
-                {'generation':{'namespace':namespace},'staging_directory':str(root)},containers,headroom):
+            if action in {'execute','simulate-final','verify'} and not rehearsal_storage_capacity(
+                spec,root,containers,action):
                 raise RuntimeError('Insufficient independent backing capacity')
             copies=list(record['copies'])
             if action=='execute':
