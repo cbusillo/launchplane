@@ -114,10 +114,10 @@ def route_document(plan: TestingLaneRoute, backend: str) -> dict[str, Any]:
 
 
 def testing_ingress_entrypoints(raw: dict[str, Any], host: str) -> tuple[str, ...]:
-    """Discover the exact application's listeners, not every proxy listener.
+    """Discover potentially serving application listeners, not proxy-internal ones.
 
     Compilation still checks all possibly matching rules on those listeners.
-    Neither a broad rule nor an internal admin route can expand this authority.
+    Non-exact rules enter that check so conflicts cannot hide on another listener.
     """
     routers = raw.get("routers")
     if not isinstance(routers, dict):
@@ -128,7 +128,7 @@ def testing_ingress_entrypoints(raw: dict[str, Any], host: str) -> tuple[str, ..
             isinstance(name, str)
             and name.endswith(("@docker", "@file"))
             and isinstance(router, dict)
-            and router.get("rule") in {f"Host(`{host}`)", f'Host("{host}")'}
+            and host_rule_may_match(str(router.get("rule") or ""), host)
         ):
             bound = router.get("entryPoints")
             if (

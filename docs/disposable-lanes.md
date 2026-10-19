@@ -982,8 +982,9 @@ qualifies the predecessor against its recorded physical port and prepares its
 successor at the desired current port, without reverting the profile or changing
 the public address.
 
-Native route admission derives listeners from the application's exact host
-routes. The proxy's canonical internal API/dashboard listeners do not become
+Native route admission derives listeners conservatively from application routes
+that may match the host; non-exact conflicts on another listener still refuse.
+The proxy's canonical internal API/dashboard listeners do not become
 application ingress. Its enabled, canonical high-priority ACME challenge route
 remains outside takeover and above every application winner. A changed internal
 route on an application listener still refuses. Duplicate Docker router families
@@ -993,18 +994,11 @@ middleware, TLS and load-balancer behavior. The plan retains every alias for
 subsequent drift checks and emits one owned winner per equivalent group. It
 never deletes a live router or changes proxy configuration to make admission pass.
 
-The native plan API returns fixed, traced prerequisite codes for route-read,
-private-backend, application-entrypoint and compiler failures:
-`testing_route_read_unavailable`, `testing_route_backend_unavailable`,
-`testing_route_entrypoints_unavailable`, and `testing_route_compilation_failed`.
-Runtime-identity drift, an unverified watched provider and an invalid owned file
-carry `testing_route_identity_changed`, `testing_route_provider_unverified` and
-`testing_route_file_invalid` respectively. Other retained-input/protection
-verification failures carry `testing_rebuild_inputs_unverified`; an unfinished
-rebuild carries `testing_rebuild_active`.
-These are preflight conflicts (HTTP 409), not request-schema errors. Provider
-authorization denials remain denials; exception/provider payloads are not exposed.
-Inspection keeps its diagnostic checkpoint. The signed-in submit adapter uses
+Inspection and the native plan return fixed, traced HTTP 409 checkpoint codes
+for observation, route compilation and retained-input failures, without exposing
+exception/provider payloads. Authorization denials stay HTTP 403. Transient
+observation failures in an admitted worker stay pending on the same operation;
+only the inspection layer maps them to a diagnostic refusal. The signed-in submit adapter uses
 the stable `testing_rebuild_not_ready` admission code for a refusal proven before
 enqueue, with the safe specific message. Browser recovery can then return a
 first refused submit to inspection without maintaining a copy of checkpoint

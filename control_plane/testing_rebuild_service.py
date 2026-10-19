@@ -257,7 +257,7 @@ def capture_rebuild_intent(
     )
     try:
         frame = transport.read()
-    except NativeSourceAuthorizationDenied:
+    except (NativeSourceAuthorizationDenied, NativeSourceUnavailable):
         raise
     except TestingRouteObservationRefused as error:
         raise TestingRebuildRefused(error.code, str(error)) from error
