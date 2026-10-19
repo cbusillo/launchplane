@@ -51,6 +51,69 @@ def python_heredoc(script: str) -> str:
 class RehearsalScenario(unittest.TestCase):
     database_url = ""
 
+    def test_host_accepts_only_content_free_mismatch_evidence_for_its_exact_operation(self) -> None:
+        import json
+        from control_plane.contracts.canonical_json import canonical_json_sha256
+
+        record = self.record.model_copy(update={"state": "prepared", "compose_id": "own-compose"})
+        adapter = self.adapter("execute")
+        operation = "original-provider-operation"
+        evidence: dict[str, Any] = {
+            "intent_sha256": record.intent_sha256,
+            "record_binding_sha256": record.binding_sha256,
+            "attempt_sha256": canonical_json_sha256({"operation_key": operation}),
+            "attachment": RehearsalHostSafetyTests.attachment_mismatch_fixture(),
+        }
+        result = {
+            "intent_sha256": record.intent_sha256,
+            "state": record.state,
+            "copies": [],
+            "elapsed_seconds": {},
+            "resources_preserved": True,
+            "public_route": False,
+            "business_host_frozen": False,
+            "completed": False,
+            "capture_attachment_validation": evidence["attachment"]["reason"],
+            "attachment_mismatch": evidence,
+        }
+        with patch.object(
+            adapter,
+            "run_script",
+            side_effect=lambda *a: {"rehearsal_result": json.dumps(result).encode().hex()},
+        ):
+            read = adapter.host(
+                record, "observe", lambda: None, operation_key=operation, inspect_capture=True
+            )
+            self.assertEqual(read["attachment_mismatch"], evidence)
+            for key in ("intent_sha256", "record_binding_sha256", "attempt_sha256"):
+                original = evidence[key]
+                evidence[key] = hashlib.sha256(key.encode()).hexdigest()
+                with self.subTest(binding=key), self.assertRaises(RehearsalRefused):
+                    adapter.host(
+                        record,
+                        "observe",
+                        lambda: None,
+                        operation_key=operation,
+                        inspect_capture=True,
+                    )
+                evidence[key] = original
+            for field in ("content", "datas", "db_datas", "raw"):
+                evidence["attachment"][field] = "private contents"
+                with self.subTest(content=field), self.assertRaises(RehearsalRefused):
+                    adapter.host(
+                        record,
+                        "observe",
+                        lambda: None,
+                        operation_key=operation,
+                        inspect_capture=True,
+                    )
+                del evidence["attachment"][field]
+            result["completed"] = True
+            with self.assertRaises(RehearsalRefused):
+                adapter.host(
+                    record, "observe", lambda: None, operation_key=operation, inspect_capture=True
+                )
+
     def setUp(self) -> None:
         fixture = resources.TestingReplacementResourceHttpTests()
         fixture.database_url = self.database_url
@@ -1552,6 +1615,279 @@ class RehearsalScenario(unittest.TestCase):
 
 
 class RehearsalHostSafetyTests(unittest.TestCase):
+    @staticmethod
+    def attachment_mismatch_fixture() -> dict[str, Any]:
+        checksum = hashlib.sha1(b"expected attachment").hexdigest()
+        return {
+            "reason": "attachment_size_mismatch",
+            "store_fname": checksum[:2] + "/" + checksum,
+            "name": "Service invoice.pdf",
+            "res_model": "account.move",
+            "res_id": 42,
+            "mimetype": "application/pdf",
+            "database_size": len(b"expected attachment"),
+            "database_checksum": checksum,
+            "file_size": len(b"private contents"),
+            "file_checksum": hashlib.sha1(b"private contents").hexdigest(),
+            "file_status": "measured",
+            "truncated_fields": [],
+        }
+
+    def test_failing_capture_names_its_attachment_without_content_or_another_scan(self) -> None:
+        from control_plane._odoo_rehearsal_attachment_validation import (
+            ATTACHMENT_METADATA_LIMITS,
+            ATTACHMENT_MISMATCH_RECEIPT_NAME,
+        )
+        import io
+        import json
+        import tarfile
+
+        spec, root, containers = self.storage_fixture(
+            {
+                "database_bytes": 4096,
+                "filestore_bytes": 20480,
+                "staging_bytes": 20,
+                "reserve_bytes": 10,
+            }
+        )
+        spec.update(
+            action="execute",
+            source={"ODOO_UPSTREAM_DB_USER": "fixture", "ODOO_UPSTREAM_DB_NAME": "fixture"},
+        )
+        spec["record"].update(
+            state="prepared",
+            source_odoo_version="18.0",
+            source_binding_sha256=hashlib.sha256(b"source").hexdigest(),
+        )
+        self.host["rehearsal_source_reader"] = Mock(return_value=([], "fixture", "/fixture"))
+        self.host["sanitize_capture"] = Mock()
+        self.host["sql"] = Mock(return_value="18.0")
+        self.host["docker"] = Mock()
+        mismatch = self.attachment_mismatch_fixture()
+        for field, limit in ATTACHMENT_METADATA_LIMITS.items():
+            mismatch[field] = "\U0001f680" * limit
+
+        def capture_file(arguments: list[str], path: Path, bound: int) -> None:
+            if path.suffix == ".dump":
+                path.write_bytes(b"private database contents")
+            else:
+                with tarfile.open(path, "w") as archive:
+                    member = tarfile.TarInfo(mismatch["store_fname"])
+                    member.size = len(b"private contents")
+                    archive.addfile(member, io.BytesIO(b"private contents"))
+
+        self.host["bounded_capture"] = capture_file
+        probe = Mock(return_value={"reason": mismatch["reason"], "mismatch": mismatch})
+        self.host["attachment_validation_payload"] = probe
+        (root / "execute.started").touch(mode=0o600)
+        (root / ".execution.lock").touch(mode=0o600)
+        with self.assertRaises(RuntimeError):
+            self.host["capture"](spec, root, containers, self.fixture.database)
+        saved = root / ATTACHMENT_MISMATCH_RECEIPT_NAME
+        evidence = json.loads(saved.read_text())
+        self.assertEqual(evidence["attachment"], mismatch)
+        self.assertEqual(evidence["attempt_sha256"], spec["attempt_sha256"])
+        self.assertEqual(evidence["record_binding_sha256"], spec["record_binding_sha256"])
+        self.assertEqual(saved.stat().st_mode & 0o777, 0o600)
+        self.assertNotIn("private contents", saved.read_text())
+        self.assertNotIn("private database contents", saved.read_text())
+        probe.assert_called_once()
+        spec.update(mode="observe", inspect_capture=True)
+        self.host["capture_attachment_observation"] = Mock(side_effect=AssertionError("extra scan"))
+        self.host["inspection"] = Mock(side_effect=AssertionError("runtime lookup"))
+        saved_before_readback = saved.read_bytes()
+        observed = self.run_host(spec)
+        self.assertEqual(observed["attachment_mismatch"], evidence)
+        self.assertFalse(observed["completed"])
+        self.assertEqual(observed["copies"], [])
+        self.assertEqual(saved.read_bytes(), saved_before_readback)
+        for field in ("attempt_sha256", "record_binding_sha256"):
+            with self.subTest(binding=field):
+                changed = {**spec, field: hashlib.sha256(field.encode()).hexdigest()}
+                with self.assertRaises(RuntimeError):
+                    self.run_host(changed)
+        clean_root = root / "clean-fixture"
+        clean_root.mkdir()
+        probe.return_value = {"reason": "verified"}
+        self.assertEqual(
+            self.host["capture"](spec, clean_root, containers, self.fixture.database),
+            clean_root / "raw-source",
+        )
+        self.assertFalse((clean_root / ATTACHMENT_MISMATCH_RECEIPT_NAME).exists())
+        self.assertTrue((clean_root / "capture.json").is_file())
+        self.assertEqual(
+            (clean_root / "raw-source/filestore" / mismatch["store_fname"]).read_bytes(),
+            b"private contents",
+        )
+
+    def test_validator_reports_compared_facts_for_size_and_checksum_mismatches(self) -> None:
+        from control_plane.contracts.odoo_upgrade_rehearsal import RehearsalAttachmentFacts
+        from contextlib import nullcontext, redirect_stdout
+        import io
+        import json
+        import sys
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+        from control_plane._odoo_rehearsal_attachment_validation import (
+            ATTACHMENT_METADATA_LIMITS,
+            ATTACHMENT_VALIDATION_PROGRAM,
+        )
+
+        program: dict[str, Any] = {"__name__": "fixture"}
+        exec(compile(ATTACHMENT_VALIDATION_PROGRAM, "fixture", "exec"), program)
+        expected = self.attachment_mismatch_fixture()
+        root = self.fixture.root / "attachment-evidence"
+        path = root / expected["store_fname"]
+        path.parent.mkdir(parents=True)
+        row = (
+            expected["store_fname"],
+            expected["database_checksum"],
+            expected["database_size"],
+            expected["name"],
+            expected["res_model"],
+            expected["res_id"],
+            expected["mimetype"],
+        )
+        for content, reason in (
+            (b"private contents", "attachment_size_mismatch"),
+            (b"x" * expected["database_size"], "attachment_hash_mismatch"),
+        ):
+            with self.subTest(reason=reason):
+                path.write_bytes(content)
+                mismatch: dict[str, Any] = {}
+                self.assertEqual(
+                    program["validate_attachment_files"]([row], root, None, mismatch=mismatch),
+                    reason,
+                )
+                self.assertEqual(
+                    mismatch,
+                    {
+                        **expected,
+                        "reason": reason,
+                        "file_size": len(content),
+                        "file_checksum": hashlib.sha1(content).hexdigest(),
+                    },
+                )
+                self.assertNotIn(content.decode(), json.dumps(mismatch))
+                self.assertEqual(path.read_bytes(), content)
+        path.write_bytes(b"expected attachment")
+        clean: dict[str, Any] = {}
+        self.assertEqual(
+            program["validate_attachment_files"]([row], root, None, mismatch=clean), "verified"
+        )
+        self.assertEqual(clean, {})
+        path.write_bytes(b"private contents")
+        for record_id in (-7, None):
+            mismatch = {}
+            signed_row = (*row[:5], record_id, row[6])
+            self.assertEqual(
+                program["validate_attachment_files"]([signed_row], root, None, mismatch=mismatch),
+                expected["reason"],
+            )
+            self.assertEqual(mismatch["res_id"], record_id)
+            self.assertEqual(
+                RehearsalAttachmentFacts.model_validate(mismatch).model_dump(), mismatch
+            )
+        for field in ("name", "res_model", "mimetype"):
+            long_value = "\U0001f680" * (ATTACHMENT_METADATA_LIMITS[field] + 1)
+            details = {**expected, field: long_value}
+            long_row = (
+                details["store_fname"],
+                details["database_checksum"],
+                details["database_size"],
+                details["name"],
+                details["res_model"],
+                details["res_id"],
+                details["mimetype"],
+            )
+            path.write_bytes(b"private contents")
+            mismatch = {}
+            self.assertEqual(
+                program["validate_attachment_files"]([long_row], root, None, mismatch=mismatch),
+                expected["reason"],
+            )
+            self.assertTrue(long_value.startswith(mismatch[field]))
+            self.assertLess(len(mismatch[field]), len(long_value))
+            self.assertEqual(mismatch["truncated_fields"], [field])
+            self.assertEqual(
+                RehearsalAttachmentFacts.model_validate(mismatch).model_dump(), mismatch
+            )
+        metadata = path.stat()
+        changed = SimpleNamespace(
+            st_size=metadata.st_size,
+            st_mtime_ns=metadata.st_mtime_ns,
+            st_ctime_ns=metadata.st_ctime_ns + 1,
+        )
+        real_fstat = program["os"].fstat
+        for status in ("changed", "unreadable"):
+            mismatch = {}
+            reads = 0
+
+            def observed_metadata(descriptor: int) -> Any:
+                nonlocal reads
+                actual = real_fstat(descriptor)
+                if actual.st_ino != metadata.st_ino:
+                    return actual
+                reads += 1
+                return metadata if reads == 1 else changed
+
+            with (
+                patch.object(
+                    program["os"],
+                    "fstat",
+                    side_effect=observed_metadata if status == "changed" else real_fstat,
+                ),
+                patch.object(
+                    program["os"], "fdopen", side_effect=OSError("private filesystem error")
+                )
+                if status == "unreadable"
+                else nullcontext(),
+            ):
+                self.assertEqual(
+                    program["validate_attachment_files"]([row], root, None, mismatch=mismatch),
+                    expected["reason"],
+                )
+            self.assertEqual(mismatch["file_status"], status)
+            self.assertIsNone(mismatch["file_checksum"])
+            self.assertEqual(mismatch["name"], expected["name"])
+            self.assertEqual(
+                RehearsalAttachmentFacts.model_validate(mismatch).model_dump(), mismatch
+            )
+        # Exercise the emitted CLI too: its normal validate call must carry
+        # the failed row into the payload, not only the lower-level helper.
+        path.write_bytes(b"private contents")
+        connection = MagicMock()
+        connection.cursor.return_value.__enter__.return_value.__iter__.side_effect = lambda: iter(
+            [row]
+        )
+        output = io.StringIO()
+        with (
+            patch.dict(sys.modules, {"psycopg2": SimpleNamespace(connect=lambda **_: connection)}),
+            patch.dict(
+                os.environ,
+                {
+                    "ODOO_DB_NAME": root.name,
+                    "ODOO_DB_USER": "fixture",
+                    "ODOO_DB_PASSWORD": "private login",
+                },
+            ),
+            patch.object(sys, "argv", ["validator", "validate"]),
+            patch("pathlib.Path", side_effect=lambda _: root.parent),
+            redirect_stdout(output),
+        ):
+            exec(
+                compile(ATTACHMENT_VALIDATION_PROGRAM, "fixture-cli", "exec"),
+                {"__name__": "__main__"},
+            )
+        payload = json.loads(bytes.fromhex(output.getvalue().strip().split("=", 1)[1]))
+        self.assertEqual(payload, {"reason": expected["reason"], "mismatch": expected})
+        self.assertNotIn("private contents", str(payload))
+        self.assertNotIn("private login", str(payload))
+        self.assertTrue(connection.set_session.call_args.kwargs["readonly"])
+        self.assertEqual(
+            sum(bool(call.kwargs.get("name")) for call in connection.cursor.call_args_list), 1
+        )
+
     def test_captured_table_decoder_bounds_output_and_closes_its_process(self) -> None:
         import subprocess
         import sys
@@ -2987,6 +3323,7 @@ class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
     async def test_execute_readback_merges_only_original_journal_and_keeps_unavailable_logs_unknown(
         self,
     ) -> None:
+        from control_plane.contracts.canonical_json import canonical_json_sha256
         from control_plane.dokploy import api
         from control_plane.contracts.odoo_upgrade_rehearsal import ODOO_UPGRADE_REHEARSAL_ROUTE
         from tests.support.http import request
@@ -3015,11 +3352,18 @@ class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
             "custody": custody,
             "capture_attachment_validation": "verified",
         }
+        evidence: dict[str, Any] = {
+            "intent_sha256": prepared.intent_sha256,
+            "record_binding_sha256": prepared.binding_sha256,
+            "attempt_sha256": canonical_json_sha256({"operation_key": "fixture-operation"}),
+            "attachment": RehearsalHostSafetyTests.attachment_mismatch_fixture(),
+        }
         payload = fixture.request.model_copy(
             update={"mode": "readback", "action": "execute"}
         ).model_dump(mode="json")
         for status, attachment_reason in (
             (None, "verified"),
+            (None, "attachment_size_mismatch"),
             (503, "attachment_content_matches_checksum_size_mismatch"),
             (None, "attachment_size_and_hash_mismatch"),
             (None, "capture_attachment_matches_reference_copy_differs"),
@@ -3029,6 +3373,9 @@ class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.subTest(log_status=status, attachment_reason=attachment_reason):
                 observed["capture_attachment_validation"] = attachment_reason
+                observed.pop("attachment_mismatch", None)
+                if attachment_reason == evidence["attachment"]["reason"]:
+                    observed["attachment_mismatch"] = evidence
                 observed.pop("capture_database_reference_validation", None)
                 if attachment_reason == "capture_attachment_matches_copy_reference_differs":
                     observed["capture_database_reference_validation"] = "reference_present"
@@ -3071,6 +3418,25 @@ class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(host.call_args.kwargs["operation_key"])
                 self.assertTrue(host.call_args.kwargs["inspect_capture"])
                 self.assertEqual(result["capture_attachment_validation"], attachment_reason)
+                self.assertEqual(
+                    result.get("attachment_mismatch"), observed.get("attachment_mismatch")
+                )
+                if "attachment_mismatch" in result:
+                    from tests.test_odoo_upgrade_rehearsal_client import RehearsalClientTests
+
+                    client = RehearsalClientTests()
+                    self.addCleanup(client.doCleanups)
+                    client_result_input = {
+                        key: value
+                        for key, value in result.items()
+                        if key not in {"product", "rehearsal_id"}
+                    }
+                    code, client_result, _ = client.call(
+                        "readback", action="execute", response_result=client_result_input
+                    )
+                    self.assertEqual(code, 1)
+                    self.assertEqual(client_result["attachment_mismatch"], evidence)
+                    self.assertNotIn("private contents", str(client_result))
                 self.assertEqual(
                     result.get("capture_database_reference_validation"),
                     observed.get("capture_database_reference_validation"),

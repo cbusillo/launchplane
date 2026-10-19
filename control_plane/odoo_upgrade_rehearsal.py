@@ -1082,6 +1082,21 @@ class OdooRehearsalAdapter:
             )
         ):
             raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
+        mismatch = result.get("attachment_mismatch")
+        if mismatch is not None and (
+            not isinstance(mismatch, dict)
+            or mode != "observe"
+            or not inspect_capture
+            or self.request.action != "execute"
+            or record.state != "prepared"
+            or result["completed"] is not False
+            or result["copies"]
+            or mismatch["intent_sha256"] != record.intent_sha256
+            or mismatch["record_binding_sha256"] != record.binding_sha256
+            or mismatch["attempt_sha256"] != canonical_json_sha256({"operation_key": operation_key})
+            or result["capture_attachment_validation"] != mismatch["attachment"]["reason"]
+        ):
+            raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
         return result
 
     def refusal_response(self, result: dict[str, object]) -> dict[str, object]:

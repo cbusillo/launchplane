@@ -5,12 +5,16 @@ only, and raw failure material remains outside every application mount.
 """
 
 from control_plane._odoo_rehearsal_source_reader import REHEARSAL_SOURCE_READER_LIBRARY
-from control_plane._odoo_rehearsal_attachment_validation import ATTACHMENT_VALIDATION_PROGRAM
+from control_plane._odoo_rehearsal_attachment_validation import (
+    ATTACHMENT_MISMATCH_LIBRARY,
+    ATTACHMENT_VALIDATION_PROGRAM,
+)
 from control_plane._odoo_rehearsal_capture_comparison import REHEARSAL_CAPTURE_COMPARISON_LIBRARY
 
 ODOO_UPGRADE_REHEARSAL_PROGRAM = (
     REHEARSAL_SOURCE_READER_LIBRARY
     + REHEARSAL_CAPTURE_COMPARISON_LIBRARY
+    + ATTACHMENT_MISMATCH_LIBRARY
     + "\nATTACHMENT_VALIDATION_PROGRAM = "
     + repr(ATTACHMENT_VALIDATION_PROGRAM)
     + "\n"
@@ -305,8 +309,15 @@ def capture(spec,root,containers,database):
         raise RuntimeError('Captured source version differs from the selected source version')
     # Check the dump's attachment set against the copied bytes, so a concurrent
     # source deletion or incomplete rsync cannot be called a consistent capture.
-    reason=attachment_validation(containers,database,'validate')
+    validation=attachment_validation_payload(containers,database,'validate')
+    reason=validation['reason']
     if reason!='verified':
+        if 'mismatch' in validation:
+            save(root/ATTACHMENT_MISMATCH_RECEIPT_NAME,{
+                'intent_sha256':spec['record']['intent_sha256'],
+                'attempt_sha256':spec['attempt_sha256'],
+                'record_binding_sha256':spec['record_binding_sha256'],
+                'attachment':validation['mismatch']})
         raise RuntimeError('Attachment validation refused: '+reason)
     return raw
 
@@ -414,10 +425,6 @@ def capture_attachment_observation(spec,root,observations=None):
     return value['reason']
 
 
-def attachment_validation(containers, database, mode):
-    return attachment_validation_payload(containers,database,mode)['reason']
-
-
 def attachment_validation_payload(containers, database, mode):
     result=docker('exec','-i','-e','PYTHONDONTWRITEBYTECODE=1','-e','ODOO_DB_NAME='+database,
         containers['script-runner'][0],'python3','-',mode,
@@ -434,10 +441,36 @@ def attachment_validation_payload(containers, database, mode):
         'attachment_content_matches_checksum_size_mismatch','verified','incomplete'}:
         raise RuntimeError('Attachment observation is unverified')
     private=mode=='compare' and value['reason']=='attachment_size_and_hash_mismatch'
-    if set(value)!=({'reason','reference'} if private else {'reason'}):
+    mismatch=mode=='validate' and value['reason'] in {'attachment_size_mismatch','attachment_hash_mismatch'}
+    if set(value)!=({'reason','reference'} if private else {'reason','mismatch'} if mismatch else {'reason'}):
         raise RuntimeError('Attachment observation is unverified')
     if private and not valid_attachment_reference(value['reference']):
         raise RuntimeError('Attachment observation is unverified')
+    if mismatch and (not valid_attachment_mismatch(value['mismatch'])
+            or value['mismatch']['reason']!=value['reason']):
+        raise RuntimeError('Attachment observation is unverified')
+    return value
+
+
+def read_attachment_mismatch(spec,root):
+    path=root/ATTACHMENT_MISMATCH_RECEIPT_NAME
+    try:
+        descriptor=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    except FileNotFoundError:
+        return None
+    with os.fdopen(descriptor,'r') as stream:
+        metadata=os.fstat(stream.fileno())
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_size>ATTACHMENT_EVIDENCE_MAX_BYTES
+                or stat.S_IMODE(metadata.st_mode)!=0o600):
+            raise RuntimeError('Attachment evidence custody is unverified')
+        value=json.load(stream)
+    if (not isinstance(value,dict) or set(value)!=
+            {'intent_sha256','attempt_sha256','record_binding_sha256','attachment'}
+            or value['intent_sha256']!=spec['record']['intent_sha256']
+            or any(not re.fullmatch('[a-f0-9]{64}',str(value[key])) or value[key]!=spec.get(key)
+                for key in ('attempt_sha256','record_binding_sha256'))
+            or not valid_attachment_mismatch(value['attachment'])):
+        raise RuntimeError('Attachment evidence binding is unverified')
     return value
 
 
@@ -476,7 +509,14 @@ def observe(spec, root, receipt, lock_held=False):
             'prepare_not_started':prepare_not_started,
             'custody':custody_observation(spec,root,action)}
         custody=result['custody']
+        mismatch=None
         if (lock_held and spec.get('inspect_capture') is True and action=='execute'
+                and record['state']=='prepared' and not copies and custody['effect_started']):
+            mismatch=read_attachment_mismatch(spec,root)
+            if mismatch is not None:
+                result['attachment_mismatch']=mismatch
+                result['capture_attachment_validation']=mismatch['attachment']['reason']
+        if (mismatch is None and lock_held and spec.get('inspect_capture') is True and action=='execute'
                 and record['state']=='prepared' and not copies and custody['effect_started']
                 and custody['raw_database_bytes'] and custody['raw_filestore_bytes']
                 and custody['raw_filestore_extracted'] and custody['capture_receipt_present']
