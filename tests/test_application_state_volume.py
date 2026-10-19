@@ -1,4 +1,5 @@
 from copy import deepcopy
+from contextlib import nullcontext
 import json
 from typing import Any
 from unittest.mock import patch
@@ -14,7 +15,7 @@ from control_plane.workflows.dokploy_target_adoption import (
 from tests.test_director_testing_target_creation import _DirectorTestingSetupFixture
 
 
-class ApplicationStateVolumeTests(_DirectorTestingSetupFixture):
+class _ApplicationStateVolumeFixture(_DirectorTestingSetupFixture):
     def setUp(self) -> None:
         super().setUp()
         self.payload.update(operation="create-application", state_volume_path="/var/lib/example")
@@ -58,6 +59,25 @@ class ApplicationStateVolumeTests(_DirectorTestingSetupFixture):
                 "serverId": self.payload["server_id"],
                 "mounts": deepcopy(self.preexisting_mounts),
                 "deployments": [],
+                "previewDeployments": [],
+                "ports": [],
+                "security": [],
+                "redirects": [],
+                "domains": [],
+                "replicas": 1,
+                "applicationStatus": "idle",
+                "env": None,
+                "args": None,
+                "networkIds": [],
+                "detachDokployNetwork": False,
+                "placementSwarm": None,
+                "networkSwarm": None,
+                "environment": {
+                    "environmentId": "created-environment",
+                    "projectId": "created-project",
+                    "env": None,
+                    "project": {"projectId": "created-project", "env": None},
+                },
             }
             self.placement["environments"][0]["targets"].append(
                 {
@@ -122,6 +142,744 @@ class ApplicationStateVolumeTests(_DirectorTestingSetupFixture):
             expected_plan_sha256=plan["plan_sha256"],
         )
         return plan
+
+    async def _testing_hold(self, *, mode: str = "dry-run", **changes: Any) -> Any:
+        from tests.support.http import request
+
+        return await request(
+            self.app,
+            "POST",
+            "/v1/product-config/testing-hold/apply",
+            headers={
+                "Authorization": "Bearer local-operator-token",
+                "Idempotency-Key": "application-hold-" + ("set" if changes.get("hold") else "lift"),
+            },
+            payload={
+                "product": self.profile.product,
+                "context": self.context,
+                "instance": "testing",
+                "hold": False,
+                "purpose": "isolation_staging",
+                "reason": "Continue the isolated testing application through ordinary deployment.",
+                "mode": mode,
+                **changes,
+            },
+        )
+
+    async def prepare_application_hold(self) -> None:
+        from control_plane.http_app import launchplane_identity_actor
+        from control_plane.service_auth import configured_local_operator_identity
+        from control_plane.testing_lane_hold import (
+            TestingHoldApplyRequest,
+            apply_testing_hold_plan,
+            build_testing_hold_plan,
+        )
+        from tests.http_app_test_support import _local_operator_bearer_config
+
+        self.storage_inspector = self.enterContext(
+            patch("control_plane.application_testing_storage.inspect_application_testing_storage")
+        )
+
+        # SQLite rehearses HTTP semantics; PostgreSQL owns real authority exclusion.
+        if self.store.database_dialect_name != "postgresql":
+            self.enterContext(
+                patch.object(
+                    self.store, "serialize_disposable_testing_resources", side_effect=nullcontext
+                )
+            )
+
+        await self.plan()
+        created = await self.post()
+        self.assertEqual(created.status_code, 202, created.text)
+        self.register_testing_lane()
+        identity = configured_local_operator_identity(_local_operator_bearer_config())
+        assert identity is not None
+        actor = launchplane_identity_actor(identity)
+        request = TestingHoldApplyRequest(
+            product=self.profile.product,
+            context=self.context,
+            instance="testing",
+            hold=True,
+            purpose="isolation_staging",
+            reason="Retain this allocation's staging interlock.",
+        )
+        plan, _ = build_testing_hold_plan(record_store=self.store, request=request, actor=actor)
+        apply_testing_hold_plan(
+            record_store=self.store,
+            request=request.model_copy(
+                update={"mode": "apply", "reviewed_plan_sha256": plan.plan_sha256}
+            ),
+            actor=actor,
+        )
+
+    async def _reviewed_application_lift(self) -> Any:
+        plan = await self._testing_hold()
+        self.assertEqual(plan.status_code, 202, plan.text)
+        return await self._testing_hold(
+            mode="apply", reviewed_plan_sha256=plan.json()["result"]["plan_sha256"]
+        )
+
+    def private_domain(self) -> dict[str, Any]:
+        """Hydrated domain.one defaults for the supported private-origin creation."""
+        return {
+            "domainId": "testing-domain",
+            "host": "testing.example.invalid",
+            "path": "/",
+            "internalPath": "/",
+            "port": self.profile.runtime_port,
+            "https": False,
+            "applicationId": self.live["applicationId"],
+            "certificateType": "none",
+            "customCertResolver": None,
+            "composeId": None,
+            "serviceName": None,
+            "domainType": "application",
+            "previewDeploymentId": None,
+            "stripPath": False,
+            "customEntrypoint": None,
+            "middlewares": [],
+            "forwardAuthEnabled": False,
+            "enabled": True,
+        }
+
+
+class ApplicationStateVolumeTests(_ApplicationStateVolumeFixture):
+    async def test_application_lift_plan_remains_inert_when_provider_or_allocation_is_unavailable(
+        self,
+    ) -> None:
+        await self.prepare_application_hold()
+        target = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        self.store.write_dokploy_target_record(
+            target.model_copy(update={"project_name": "legacy-project"})
+        )
+        with (
+            patch.object(
+                self.store,
+                "testing_replacement_execution_lock",
+                side_effect=AssertionError("Planning acquired an execution lock"),
+            ),
+            patch(
+                "control_plane.dokploy_target_setup_http.fetch_dokploy_target_payload_for_setup",
+                side_effect=AssertionError("Planning read the provider"),
+            ),
+        ):
+            plan = await self._testing_hold()
+        self.assertEqual(plan.status_code, 202, plan.text)
+        self.assertEqual(plan.json()["result"]["action"], "clear")
+        self.assertFalse(plan.json()["result"]["applied"])
+        self.storage_inspector.assert_not_called()
+
+    async def test_provider_transport_and_inventory_refusals_keep_hold_with_bounded_response(
+        self,
+    ) -> None:
+        from http.client import IncompleteRead
+        from urllib.error import URLError
+        from control_plane.dokploy_inventory import InventoryUnavailable
+
+        await self.prepare_application_hold()
+        plan = await self._testing_hold()
+        for error in (
+            InventoryUnavailable("fixture-private-detail"),
+            RuntimeError("fixture-private-detail"),
+            URLError("fixture-private-detail"),
+            IncompleteRead(b"fixture-private-detail"),
+        ):
+            with (
+                self.subTest(error=type(error).__name__),
+                patch(
+                    "control_plane.dokploy_target_setup_http.fetch_dokploy_target_payload_for_setup",
+                    side_effect=error,
+                ),
+            ):
+                result = await self._testing_hold(
+                    mode="apply", reviewed_plan_sha256=plan.json()["result"]["plan_sha256"]
+                )
+            self.assertEqual(result.status_code, 409, result.text)
+            self.assertNotIn("fixture-private-detail", result.text)
+            self.assertIsNotNone(
+                self.store.read_dokploy_target_record(
+                    context_name=self.context, instance_name="testing"
+                ).policies.staff_testing_hold
+            )
+
+    async def test_original_application_allocation_can_lift_its_own_staging_hold(self) -> None:
+        await self.prepare_application_hold()
+        target = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        self.store.write_dokploy_target_record(
+            target.model_copy(update={"domains": ("testing.example.invalid",)})
+        )
+        self.live["domains"] = [self.private_domain()]
+        provider_calls = self.provider.call_count
+        plan = await self._testing_hold()
+        self.assertEqual(plan.status_code, 202, plan.text)
+        self.storage_inspector.assert_not_called()
+        reviewed = plan.json()["result"]["plan_sha256"]
+        applied = await self._testing_hold(mode="apply", reviewed_plan_sha256=reviewed)
+        self.assertEqual(applied.status_code, 202, applied.text)
+        self.assertTrue(applied.json()["result"]["read_back_matches"])
+        self.assertFalse(applied.json()["result"]["reconcile_requested"])
+        self.assertEqual(applied.json()["records"], plan.json()["records"])
+        target = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        self.assertIsNone(target.policies.staff_testing_hold)
+        self.assertEqual(self.store.list_product_reconcile_requests(), ())
+        # An exact replay reports the original result, even after provider drift.
+        self.live["dockerImage"] = "fixture.invalid/example:changed-after-lift"
+        replay = await self._testing_hold(mode="apply", reviewed_plan_sha256=reviewed)
+        self.assertEqual(replay.status_code, 202, replay.text)
+        self.assertEqual(replay.json()["result"], applied.json()["result"])
+        self.assertEqual(self.provider.call_count, provider_calls)
+        self.assertEqual(self.storage_inspector.call_count, 1)
+        self.assert_production_unchanged()
+
+    async def test_application_continuation_refuses_live_domain_drift(self) -> None:
+        await self.prepare_application_hold()
+        target = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        self.store.write_dokploy_target_record(
+            target.model_copy(update={"domains": ("testing.example.invalid",)})
+        )
+        domain = self.private_domain()
+        plan = await self._testing_hold()
+        variations: tuple[object, ...] = (
+            None,
+            {},
+            [{"host": domain["host"]}],
+            [domain, {**domain, "domainId": "second-domain", "host": "second.example.invalid"}],
+            *(
+                [{**domain, **changes}]
+                for changes in (
+                    {"host": "production.example.invalid"},
+                    {"host": "*.example.invalid"},
+                    {"path": "/production-path"},
+                    {"internalPath": "/another-path"},
+                    {"https": True},
+                    {"certificateType": "letsencrypt"},
+                    {"customCertResolver": "foreign-resolver"},
+                    {"applicationId": "another-application"},
+                    {"port": self.profile.runtime_port + 1},
+                    {"serviceName": "another-service"},
+                    {"composeId": "another-compose"},
+                    {"previewDeploymentId": "another-preview"},
+                    {"stripPath": True},
+                    {"domainType": "compose"},
+                    {"middlewares": ["unreviewed-middleware"]},
+                    {"customEntrypoint": "websecure"},
+                    {"forwardAuthEnabled": True},
+                    {"enabled": False},
+                )
+            ),
+        )
+        for domains in variations:
+            with self.subTest(domains=domains):
+                self.live["domains"] = domains
+                result = await self._testing_hold(
+                    mode="apply", reviewed_plan_sha256=plan.json()["result"]["plan_sha256"]
+                )
+                self.assertEqual(result.status_code, 409, result.text)
+                self.assertIsNotNone(
+                    self.store.read_dokploy_target_record(
+                        context_name=self.context, instance_name="testing"
+                    ).policies.staff_testing_hold
+                )
+        self.storage_inspector.assert_not_called()
+        self.assertEqual(self.store.list_product_reconcile_requests(), ())
+        self.assert_production_unchanged()
+
+    async def test_application_continuation_refuses_another_lanes_hostname_claim(self) -> None:
+        from control_plane.contracts.dokploy_target_record import PublicHostEffect
+
+        await self.prepare_application_hold()
+        target = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        hostname = "testing.example.invalid"
+        self.store.write_dokploy_target_record(target.model_copy(update={"domains": (hostname,)}))
+        self.live["domains"] = [self.private_domain()]
+        plan = await self._testing_hold()
+        targets = self.store.list_dokploy_target_records()
+        unrelated = self.production.model_copy(
+            update={"domains": ("https://unrelated.example.invalid/path",)}
+        )
+        with patch.object(
+            self.store, "list_dokploy_target_records", return_value=(*targets, unrelated)
+        ):
+            allowed = await self._testing_hold()
+        self.assertEqual(allowed.status_code, 202, allowed.text)
+        for changes in (
+            {"domains": (hostname,)},
+            {"domains": ("TESTING.EXAMPLE.INVALID.",)},
+            {"domains": (f"https://{hostname}/",)},
+            {"domains": (f"https://{hostname}/path",)},
+            {"domains": ("*.example.invalid",)},
+            {"domains": ("https://*.example.invalid/",)},
+            {"domains": ("~^testing[.]example[.]invalid$",)},
+            {"domains": ("https://",)},
+            {"domains": ("https://[invalid",)},
+            {"public_hosts": (hostname,)},
+            {
+                "pending_public_host_effects": (
+                    PublicHostEffect(
+                        host=hostname,
+                        provider_host="https://provider.example.invalid",
+                        target_id=self.production_id.target_id,
+                        runtime_port=self.profile.runtime_port,
+                    ),
+                )
+            },
+        ):
+            with self.subTest(changes=changes):
+                other = self.production.model_copy(update=changes)
+                with patch.object(
+                    self.store, "list_dokploy_target_records", return_value=(*targets, other)
+                ):
+                    result = await self._testing_hold(
+                        mode="apply", reviewed_plan_sha256=plan.json()["result"]["plan_sha256"]
+                    )
+                self.assertEqual(result.status_code, 409, result.text)
+                self.assertIsNotNone(
+                    self.store.read_dokploy_target_record(
+                        context_name=self.context, instance_name="testing"
+                    ).policies.staff_testing_hold
+                )
+        self.storage_inspector.assert_not_called()
+        self.assert_production_unchanged()
+
+    async def test_application_continuation_refuses_live_source_mount_placement_and_execution_drift(
+        self,
+    ) -> None:
+        await self.prepare_application_hold()
+        original = deepcopy(self.live)
+        plan = await self._testing_hold()
+        reviewed = plan.json()["result"]["plan_sha256"]
+        calls = self.provider.call_count
+        variations: tuple[dict[str, Any], ...] = (
+            {"repository": "some-other-source"},
+            {"sourceType": "unsupported"},
+            {"dockerImage": "fixture.invalid/example:configured"},
+            {"env": "UNTRACKED_KEY=fixture-only"},
+            {"username": "unreviewed-registry-user"},
+            {"password": "fixture-secret"},
+            {"registryId": "unreviewed-registry"},
+            {"registryUrl": "https://registry.example.invalid"},
+            {"command": "unreviewed-command"},
+            {"args": ["unreviewed-argument"]},
+            {"buildServerId": "another-server"},
+            {"buildRegistryId": "unreviewed-registry"},
+            {"rollbackRegistryId": "unreviewed-registry"},
+            {"registry": {"registryId": "unreviewed-registry"}},
+            {"ports": [{"publishedPort": 8080, "targetPort": 8080}]},
+            {"ports": None},
+            {"networkSwarm": [{"Target": "production-overlay"}]},
+            {"networkSwarm": []},
+            {"networkIds": ["production-network"]},
+            {"detachDokployNetwork": True},
+            {"placementSwarm": {"Constraints": ["node.labels.production==true"]}},
+            {"placementSwarm": {}},
+            {"modeSwarm": {"Global": {}}},
+            {"labelsSwarm": {"traefik.enable": "true"}},
+            {"healthCheckSwarm": {"Test": ["CMD", "unreviewed-command"]}},
+            {"endpointSpecSwarm": {"Ports": [{"PublishedPort": 8080}]}},
+            {"security": [{"username": "unreviewed-user"}]},
+            {"redirects": [{"regex": ".*", "replacement": "https://elsewhere.invalid"}]},
+            {"replicas": 2},
+            {"replicas": None},
+            {"memoryLimit": "1024"},
+            {"previewDeployments": [{"previewDeploymentId": "already-started"}]},
+            {"mounts": []},
+            {"mounts": [{**original["mounts"][0], "volumeName": "foreign-state"}]},
+            {"serverId": "another-server"},
+            {"deployments": [{"deploymentId": "already-started"}]},
+            {"applicationStatus": "running"},
+        )
+        for changes in variations:
+            with self.subTest(changes=changes):
+                self.live = {**deepcopy(original), **changes}
+                result = await self._testing_hold(mode="apply", reviewed_plan_sha256=reviewed)
+                self.assertEqual(result.status_code, 409, result.text)
+                self.assertIsNotNone(
+                    self.store.read_dokploy_target_record(
+                        context_name=self.context, instance_name="testing"
+                    ).policies.staff_testing_hold
+                )
+        self.assertEqual(self.provider.call_count, calls)
+        self.storage_inspector.assert_not_called()
+        self.assertEqual(self.store.list_product_reconcile_requests(), ())
+        self.assert_production_unchanged()
+
+    async def test_application_continuation_requires_original_empty_parent_environments(
+        self,
+    ) -> None:
+        await self.prepare_application_hold()
+        original = deepcopy(self.live)
+        plan = await self._testing_hold()
+        for environment in (
+            None,
+            {},
+            {**original["environment"], "environmentId": "another-environment"},
+            {**original["environment"], "projectId": "another-project"},
+            {**original["environment"], "project": {"projectId": "another-project"}},
+            {**original["environment"], "project": {"projectId": "created-project"}},
+            {**original["environment"], "env": "UNTRACKED=fixture"},
+            {
+                **original["environment"],
+                "project": {"projectId": "created-project", "env": "UNTRACKED=fixture"},
+            },
+        ):
+            with self.subTest(environment=environment):
+                self.live = {**deepcopy(original), "environment": environment}
+                result = await self._testing_hold(
+                    mode="apply", reviewed_plan_sha256=plan.json()["result"]["plan_sha256"]
+                )
+                self.assertEqual(result.status_code, 409, result.text)
+                self.assertIsNotNone(
+                    self.store.read_dokploy_target_record(
+                        context_name=self.context, instance_name="testing"
+                    ).policies.staff_testing_hold
+                )
+        self.storage_inspector.assert_not_called()
+        self.assertEqual(self.store.list_product_reconcile_requests(), ())
+        self.assert_production_unchanged()
+
+    async def test_inert_source_build_settings_do_not_block_docker_runtime_continuation(
+        self,
+    ) -> None:
+        await self.prepare_application_hold()
+        self.live.update(
+            dockerfile="unused.Dockerfile",
+            buildPath="/unused",
+            customGitBuildPath="/unused",
+            dockerContextPath="/unused",
+            dockerBuildStage="unused-stage",
+            buildArgs="UNUSED=fixture",
+            buildSecrets="UNUSED=fixture",
+            args=[],
+        )
+        result = await self._reviewed_application_lift()
+        self.assertEqual(result.status_code, 202, result.text)
+        self.assertIsNone(
+            self.store.read_dokploy_target_record(
+                context_name=self.context, instance_name="testing"
+            ).policies.staff_testing_hold
+        )
+        self.storage_inspector.assert_called_once()
+        self.assert_production_unchanged()
+
+    async def test_late_cross_lane_idempotency_collision_retains_hold_and_original_receipt(
+        self,
+    ) -> None:
+        from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+        from control_plane.http_app import idempotency_request_fingerprint
+        from control_plane.http_routes.mutation_support import idempotency_scope
+        from control_plane.service_auth import configured_local_operator_identity
+        from control_plane.testing_lane_hold import TESTING_HOLD_APPLY_ROUTE
+        from control_plane.workflows.ship import utc_now_timestamp
+        from tests.http_app_test_support import _local_operator_bearer_config
+
+        await self.prepare_application_hold()
+        identity = configured_local_operator_identity(_local_operator_bearer_config())
+        assert identity is not None
+        # Another lane has a different execution lock but shares the caller's
+        # route/key namespace. Its transaction can finish after our replay read.
+        other_payload: dict[str, object] = {"context": "another-testing-context", "hold": False}
+        other_receipt = LaunchplaneIdempotencyRecord(
+            record_id="late-other-lane-receipt",
+            scope=idempotency_scope(identity),
+            route_path=TESTING_HOLD_APPLY_ROUTE,
+            idempotency_key="application-hold-lift",
+            request_fingerprint=idempotency_request_fingerprint(
+                route_path=TESTING_HOLD_APPLY_ROUTE, payload=other_payload
+            ),
+            response_status_code=202,
+            response_trace_id="other-lane-trace",
+            recorded_at=utc_now_timestamp(),
+            response_payload={"records": {"context": other_payload["context"]}},
+        )
+        self.storage_inspector.side_effect = lambda *_args, **_kwargs: (
+            self.store.write_idempotency_record(other_receipt)
+        )
+        result = await self._reviewed_application_lift()
+        self.assertEqual(result.status_code, 409, result.text)
+        self.assertEqual(result.json()["error"]["code"], "idempotency_key_reused")
+        self.assertEqual(
+            self.store.read_idempotency_record(
+                scope=other_receipt.scope,
+                route_path=other_receipt.route_path,
+                idempotency_key=other_receipt.idempotency_key,
+            ),
+            other_receipt,
+        )
+        self.assertIsNotNone(
+            self.store.read_dokploy_target_record(
+                context_name=self.context, instance_name="testing"
+            ).policies.staff_testing_hold
+        )
+        self.assertEqual(self.store.list_product_reconcile_requests(), ())
+        self.assert_production_unchanged()
+
+    async def test_missing_physical_storage_proof_keeps_application_held(self) -> None:
+        await self.prepare_application_hold()
+        plan = await self._testing_hold()
+        self.storage_inspector.side_effect = ValueError("fixture host proof unavailable")
+        result = await self._testing_hold(
+            mode="apply", reviewed_plan_sha256=plan.json()["result"]["plan_sha256"]
+        )
+        self.assertEqual(result.status_code, 409, result.text)
+        self.assertIsNotNone(
+            self.store.read_dokploy_target_record(
+                context_name=self.context, instance_name="testing"
+            ).policies.staff_testing_hold
+        )
+        self.assertEqual(self.store.list_product_reconcile_requests(), ())
+        self.assert_production_unchanged()
+
+    async def test_application_host_inspector_requires_the_exact_bound_schedule_evidence(
+        self,
+    ) -> None:
+        from control_plane.application_state_volume import ApplicationStateVolumeAdapter
+        from control_plane.application_testing_storage import inspect_application_testing_storage
+        from control_plane.http_routes.mutation_support import idempotency_scope
+        from control_plane.service_auth import configured_local_operator_identity
+        from tests.http_app_test_support import _local_operator_bearer_config
+
+        await self.prepare_application_hold()
+        identity = configured_local_operator_identity(_local_operator_bearer_config())
+        assert identity is not None
+        adapter = ApplicationStateVolumeAdapter.completed_for_testing_lane(
+            self.root,
+            self.store,
+            product=self.profile.product,
+            context=self.context,
+            scope=idempotency_scope(identity),
+            trace="fixture-inspection",
+        )
+        for evidence in (
+            {},
+            {"testing_resources_ok": "true", "testing_resources_binding_sha256": "b" * 64},
+        ):
+            with (
+                self.subTest(evidence=evidence),
+                patch(
+                    "control_plane.application_testing_storage.post_deploy.run_manual_data_schedule",
+                    return_value=evidence,
+                ),
+            ):
+                with self.assertRaises(ValueError):
+                    inspect_application_testing_storage(adapter, checkpoint=lambda _phase: None)
+
+    async def test_replacement_allocations_reuse_the_lanes_inspection_slot(self) -> None:
+        from dataclasses import replace
+        from uuid import uuid4
+        from control_plane.application_state_volume import (
+            ApplicationStateVolumeAdapter,
+            state_volume_allocation_names,
+        )
+        from control_plane.application_testing_storage import inspect_application_testing_storage
+        from control_plane.http_routes.mutation_support import idempotency_scope
+        from control_plane.service_auth import configured_local_operator_identity
+        from tests.http_app_test_support import _local_operator_bearer_config
+
+        await self.prepare_application_hold()
+        identity = configured_local_operator_identity(_local_operator_bearer_config())
+        assert identity is not None
+        original = ApplicationStateVolumeAdapter.completed_for_testing_lane(
+            self.root,
+            self.store,
+            product=self.profile.product,
+            context=self.context,
+            scope=idempotency_scope(identity),
+            trace="fixture-inspection",
+        )
+        next_plan = uuid4().hex
+        replacement_names = state_volume_allocation_names(next_plan)
+        replacement = replace(
+            original,
+            intent={
+                **original.intent,
+                **replacement_names,
+                "plan_id": next_plan,
+            },
+        )
+        # The inspector consumes a previously qualified allocation. Model the
+        # replacement's different physical identity without another HTTP fixture.
+        next_phase = {
+            "application": "replacement-application",
+            "environment": "replacement-environment",
+            "app_name": replacement_names["app_name"],
+        }
+        with patch(
+            "control_plane.application_testing_storage.post_deploy.run_manual_data_schedule",
+            return_value={},
+        ) as dispatch:
+            with self.assertRaises(ValueError):
+                inspect_application_testing_storage(original, checkpoint=lambda _phase: None)
+            with (
+                patch.object(replacement, "_progress_phase", return_value=json.dumps(next_phase)),
+                patch.object(
+                    replacement,
+                    "_live",
+                    return_value={
+                        "serverId": self.payload["server_id"],
+                        "appName": next_phase["app_name"],
+                    },
+                ),
+                self.assertRaises(ValueError),
+            ):
+                inspect_application_testing_storage(replacement, checkpoint=lambda _phase: None)
+        self.assertEqual(
+            dispatch.call_args_list[0].kwargs["schedule_app_name"],
+            dispatch.call_args_list[1].kwargs["schedule_app_name"],
+        )
+
+    async def test_another_scope_cannot_lift_the_original_allocations_hold(self) -> None:
+        from tests.http_app_test_support import _local_operator_bearer_config
+
+        await self.prepare_application_hold()
+        self.app = self.make_app(_local_operator_bearer_config(token_label="another-token"))
+        result = await self._reviewed_application_lift()
+        self.assertEqual(result.status_code, 409, result.text)
+        self.storage_inspector.assert_not_called()
+        self.assertIsNotNone(
+            self.store.read_dokploy_target_record(
+                context_name=self.context, instance_name="testing"
+            ).policies.staff_testing_hold
+        )
+
+    async def test_application_alias_and_unknown_provider_effect_preserve_hold(self) -> None:
+        from control_plane.workflows.generic_web_deploy_provider import (
+            dokploy_generic_web_provider_target_key,
+        )
+
+        await self.prepare_application_hold()
+        current = self.store.read_provider_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        self.store.write_provider_target_record(
+            self.production_provider.model_copy(update={"target_id": current.target_id})
+        )
+        aliased = await self._reviewed_application_lift()
+        self.assertEqual(aliased.status_code, 409, aliased.text)
+        self.store.write_provider_target_record(self.production_provider)
+        reservation = self.store.reserve_mutation(
+            scope="original-caller",
+            route_path="/original-operation",
+            idempotency_key="original-key",
+            request_fingerprint="original-request",
+            provider_target_key=dokploy_generic_web_provider_target_key(current),
+            reconciliation_key="original-binding",
+            lease_owner="original-worker",
+        )
+        assert reservation.record is not None
+        self.store.mark_mutation_reconcile_required(
+            reservation=reservation.record,
+            reconciliation_key="original-binding",
+        )
+        unknown = await self._reviewed_application_lift()
+        self.assertEqual(unknown.status_code, 409, unknown.text)
+        self.storage_inspector.assert_not_called()
+        self.assertIsNotNone(
+            self.store.read_dokploy_target_record(
+                context_name=self.context, instance_name="testing"
+            ).policies.staff_testing_hold
+        )
+        self.assertEqual(self.store.list_product_reconcile_requests(), ())
+        self.assert_production_unchanged()
+
+    async def test_application_continuation_preserves_foreign_staff_and_protected_data(
+        self,
+    ) -> None:
+        from tests.support.disposable_lanes import record_safety
+
+        await self.prepare_application_hold()
+        target = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        hold = target.policies.staff_testing_hold
+        assert hold is not None
+        for changes in ({"recorded_by": "another-operator"}, {"purpose": "staff_testing"}):
+            with self.subTest(hold=changes):
+                changed = hold.model_copy(update=changes)
+                self.store.write_dokploy_target_record(
+                    target.model_copy(
+                        update={
+                            "policies": target.policies.model_copy(
+                                update={"staff_testing_hold": changed}
+                            )
+                        }
+                    )
+                )
+                result = (
+                    await self._testing_hold()
+                    if changed.purpose == "staff_testing"
+                    else await self._reviewed_application_lift()
+                )
+                self.assertEqual(result.status_code, 409, result.text)
+                self.assertEqual(
+                    self.store.read_dokploy_target_record(
+                        context_name=self.context, instance_name="testing"
+                    ).policies.staff_testing_hold,
+                    changed,
+                )
+        self.store.write_dokploy_target_record(target)
+        for facts in (
+            {"usage": "in_use"},
+            {"data": "only_copy"},
+            {"production_resources": "shared"},
+        ):
+            with self.subTest(facts=facts):
+                record_safety(self.store, self.profile.product, self.context, "testing", **facts)
+                result = await self._reviewed_application_lift()
+                self.assertEqual(result.status_code, 409, result.text)
+        self.assertEqual(self.store.list_product_reconcile_requests(), ())
+        self.assert_production_unchanged()
+
+    async def test_application_continuation_rechecks_ownership_under_authority_lock(self) -> None:
+        from contextlib import contextmanager
+
+        await self.prepare_application_hold()
+        plan = await self._testing_hold()
+        target = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        hold = target.policies.staff_testing_hold
+        assert hold is not None
+        protected = hold.model_copy(update={"purpose": "staff_testing", "recorded_by": "staff"})
+        original_lock = self.store.serialize_disposable_testing_resources
+
+        @contextmanager
+        def changed_before_commit() -> Any:
+            self.store.write_dokploy_target_record(
+                target.model_copy(
+                    update={
+                        "policies": target.policies.model_copy(
+                            update={"staff_testing_hold": protected}
+                        )
+                    }
+                )
+            )
+            with original_lock():
+                yield
+
+        with patch.object(
+            self.store, "serialize_disposable_testing_resources", side_effect=changed_before_commit
+        ):
+            result = await self._testing_hold(
+                mode="apply", reviewed_plan_sha256=plan.json()["result"]["plan_sha256"]
+            )
+        self.assertEqual(result.status_code, 409, result.text)
+        self.assertEqual(
+            self.store.read_dokploy_target_record(
+                context_name=self.context, instance_name="testing"
+            ).policies.staff_testing_hold,
+            protected,
+        )
+        self.assertEqual(self.store.list_product_reconcile_requests(), ())
 
     async def test_compose_replacement_reads_source_outside_authority_commit(self) -> None:
         provider = self.register_unused_testing_compose(source_type="github")

@@ -24,6 +24,11 @@ from control_plane.contracts.ingress_route_audit_record import (
     TESTING_PRIVATE_INGRESS_AUDIT_PREFIX,
 )
 from control_plane.dokploy import api, source
+from control_plane.dokploy.application_domains import (
+    private_application_domain_payload,
+    require_exclusive_testing_application_hostname,
+    require_private_application_domains,
+)
 from control_plane.ingress_route_scope import validate_ingress_route_instance_scope
 from control_plane.npmplus import NpmplusClient, NpmplusProxyHost, NpmplusProxyHostPayload
 from control_plane.provider_operations import (
@@ -173,16 +178,9 @@ class TestingPrivateIngressAdapter:
                 provider.instance,
             ):
                 raise ValueError("The testing application is shared with another lane.")
-        for other_target in self.store.list_dokploy_target_records():
-            if (other_target.context, other_target.instance) != (
-                target.context,
-                target.instance,
-            ) and hostname in (
-                *other_target.domains,
-                *other_target.public_hosts,
-                *(effect.host for effect in other_target.pending_public_host_effects),
-            ):
-                raise ValueError("The hostname belongs to another lane.")
+        require_exclusive_testing_application_hostname(
+            hostname=hostname, target=target, targets=self.store.list_dokploy_target_records()
+        )
         edge = self.store.read_edge_endpoint_record(self.request.edge_endpoint_key)
         if edge.status != "active" or edge.upstream_scheme != "http":
             raise ValueError("Private testing requires an active HTTP application edge.")
@@ -438,30 +436,17 @@ class TestingPrivateIngressAdapter:
         domains = api.fetch_dokploy_application_domains(
             host=host, token=token, application_id=str(authority["application_id"]), strict=True
         )
-        domain_payload: api.JsonObject = {
-            "host": hostname,
-            "path": "/",
-            "internalPath": "/",
-            "port": int(str(authority["runtime_port"])),
-            "https": False,
-            "applicationId": str(authority["application_id"]),
-            "certificateType": "none",
-            "customCertResolver": None,
-            "composeId": None,
-            "serviceName": None,
-            "domainType": "application",
-            "previewDeploymentId": None,
-            "stripPath": False,
-        }
-        if len(domains) > 1 or any(
-            not domain.get("domainId")
-            or any(
-                (domain.get(key) not in (None, "") if value is None else domain.get(key) != value)
-                for key, value in domain_payload.items()
-            )
-            for domain in domains
-        ):
-            raise ValueError("The application's hostname authority is foreign or changed.")
+        domain_payload = private_application_domain_payload(
+            hostname=hostname,
+            runtime_port=int(str(authority["runtime_port"])),
+            application_id=str(authority["application_id"]),
+        )
+        require_private_application_domains(
+            domains,
+            hostname=hostname,
+            runtime_port=int(str(authority["runtime_port"])),
+            application_id=str(authority["application_id"]),
+        )
         return (
             {
                 "authority": authority,
