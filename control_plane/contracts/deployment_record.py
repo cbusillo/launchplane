@@ -17,6 +17,8 @@ from control_plane.contracts.odoo_cutover import OdooCutoverRecord
 from control_plane.contracts.generic_web_cutover import GenericWebCutoverRecord
 
 DelegatedExecutor = str
+# New read-backs produce pass, fail, unavailable or skipped. Only deployment records
+# written before launchplane#2773 carry "reported", so it stays readable.
 IntegrationKeyReadbackStatus = Literal["pass", "reported", "fail", "unavailable", "skipped"]
 
 
@@ -30,10 +32,9 @@ class IntegrationKeyReadbackFinding(BaseModel):
 class IntegrationKeyReadbackEvidence(BaseModel):
     """Key safety of the integration keys a deploy delivered to its lane.
 
-    Names and finding codes only, never values. ``reported`` means every key is
-    allowed but a shared_safe production key has no recorded sharing reason;
-    ``fail`` means a key breaks the lane's key-safety rules. Both are recorded,
-    not enforced, after the deploy.
+    Names and finding codes only, never values. ``fail`` means a key breaks the
+    lane's key-safety rules, including a shared_safe production key with no
+    recorded sharing reason. It is recorded, not enforced, after the deploy.
     """
 
     model_config = ConfigDict(extra="forbid")
