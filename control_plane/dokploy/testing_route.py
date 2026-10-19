@@ -126,7 +126,7 @@ def testing_ingress_entrypoints(raw: dict[str, Any], host: str) -> tuple[str, ..
     for name, router in routers.items():
         if (
             isinstance(name, str)
-            and name.endswith(("@docker", "@file"))
+            and not name.endswith("@internal")
             and isinstance(router, dict)
             and host_rule_may_match(str(router.get("rule") or ""), host)
         ):

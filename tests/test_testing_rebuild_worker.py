@@ -537,25 +537,30 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertEqual(self.effects, [])
         self.assertEqual(self.current(), self.fixture.before)
         host = self.fixture.route.host
-        for rule in (
-            f"Host(`{host}`) && PathPrefix(`/x`)",
-            f"Host(`{host.upper()}`)",
-            f"Host(`{host}`) || Host(`other.invalid`)",
+        for provider, rule in (
+            ("docker", f"Host(`{host}`) && PathPrefix(`/x`)"),
+            ("docker", f"Host(`{host.upper()}`)"),
+            ("docker", f"Host(`{host}`) || Host(`other.invalid`)"),
+            ("swarm", f"Host(`{host}`)"),
+            ("futureprovider", f"Host(`{host}`)"),
         ):
-            frame["raw"]["routers"]["conflict@docker"] = {
+            conflicting_frame = deepcopy(frame)
+            conflicting_frame["raw"]["routers"][f"conflict@{provider}"] = {
                 **deepcopy(frame["raw"]["routers"]["old-http@docker"]),
                 "rule": rule,
                 "entryPoints": ["another-listener"],
             }
             with (
-                self.subTest(rule=rule),
-                patch.object(DokployTestingRouteTransport, "read", return_value=frame),
+                self.subTest(provider=provider, rule=rule),
+                patch.object(DokployTestingRouteTransport, "read", return_value=conflicting_frame),
             ):
                 with self.assertRaises(service.TestingRebuildRefused) as refused:
                     self.capture_function(
                         root=self.root, store=self.store, operation=self.operation
                     )
                 self.assertEqual(refused.exception.code, "testing_route_compilation_failed")
+                self.assertEqual(self.effects, [])
+                self.assertEqual(self.current(), self.fixture.before)
 
     def test_transient_initial_route_capture_keeps_the_admitted_worker_pending(self) -> None:
         from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
