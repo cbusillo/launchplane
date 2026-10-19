@@ -5,6 +5,7 @@ from control_plane.github_app_identity import ADVISORY_GITHUB_APP_ID_ENV_KEY
 from types import SimpleNamespace
 from typing import Any, cast
 from pathlib import Path
+from github_plan_status.client_test_notes import ENGINEERING_RELEASE_TESTS
 from tempfile import TemporaryDirectory
 from email.message import Message
 from http.client import IncompleteRead
@@ -3371,30 +3372,38 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
             ((rejection.model_copy(update={"decision": "accepted"}), rejection), "pass", False),
             ((), "pass", False),
         )
-        for decisions, expected_status, expected_review in cases:
-            with self.subTest(decisions=decisions):
-                pull = _github_pull_request(42)
-                pull["body"] = "## Client test notes\nNothing for the Client to test: CI only."
-                pull["labels"] = [{"name": "ready-to-merge"}]
-                transport = RecordingMergeTrainGitHubTransport(
-                    responses=(
-                        _github_branch(),
-                        [pull],
-                        pull,
-                        {"permission": "admin"},
-                        _label_events(),
-                        _combined_status(),
-                        {"check_runs": [_check_run("completed", "success")]},
-                        _conversation_rule(),
-                        [],
+        for notes in (
+            "Nothing for the Client to test: CI only.",
+            f"{ENGINEERING_RELEASE_TESTS}\nCheck the imported parts at release.",
+        ):
+            for decisions, expected_status, expected_review in cases:
+                with self.subTest(decisions=decisions):
+                    pull = _github_pull_request(42)
+                    pull["body"] = "## Client test notes\n" + notes
+                    pull["labels"] = [{"name": "ready-to-merge"}]
+                    transport = RecordingMergeTrainGitHubTransport(
+                        responses=(
+                            _github_branch(),
+                            [pull],
+                            pull,
+                            {"permission": "admin"},
+                            _label_events(),
+                            _combined_status(),
+                            {"check_runs": [_check_run("completed", "success")]},
+                            _conversation_rule(),
+                            [],
+                        )
                     )
-                )
-                store = _client_veto_store(decisions)
-                snapshot = GitHubMergeTrainSnapshotReader(
-                    transport=transport, branch_refresh_store=cast(Any, store)
-                ).read_merge_train_snapshot(repository=rejection.repository, base_branch="main")
-                self.assertEqual(snapshot.pull_requests[0].required_checks_status, expected_status)
-                self.assertEqual(snapshot.pull_requests[0].owner_review_required, expected_review)
+                    store = _client_veto_store(decisions)
+                    snapshot = GitHubMergeTrainSnapshotReader(
+                        transport=transport, branch_refresh_store=cast(Any, store)
+                    ).read_merge_train_snapshot(repository=rejection.repository, base_branch="main")
+                    self.assertEqual(
+                        snapshot.pull_requests[0].required_checks_status, expected_status
+                    )
+                    self.assertEqual(
+                        snapshot.pull_requests[0].owner_review_required, expected_review
+                    )
 
     def test_direct_merge_rechecks_veto_after_notes_reclassification(self) -> None:
         pull = _github_pull_request(42)

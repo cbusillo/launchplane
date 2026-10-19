@@ -7,6 +7,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import click
+from github_plan_status.client_test_notes import ENGINEERING_RELEASE_TESTS
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.product_review import (
@@ -474,6 +475,31 @@ class OwnerReviewStatusTests(unittest.TestCase):
 
         self.assertEqual(github.statuses[0]["state"], "failure")
         self.assertEqual(github.check_runs[0]["conclusion"], "failure")
+
+    def test_release_testing_engineering_notes_publish_neutral_without_acceptance(self) -> None:
+        github = _GitHub(labels=())
+        github.body = (
+            f"## Client test notes\n{ENGINEERING_RELEASE_TESTS}\n"
+            "Check the imported parts at release."
+        )
+        self._publish(github)
+        self.assertEqual(github.statuses[0]["state"], "neutral")
+        self.assertEqual(github.comments, [])
+        self.assertEqual(
+            self.store.list_product_review_decision_records(
+                repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
+            ),
+            (),
+        )
+        github.labels = ("owner-review",)
+        self._publish(github)
+        self.assertEqual(github.statuses[0]["state"], "pending")
+        github.labels = ()
+        self.store.write_product_review_decision_record(
+            _decision(decision="changes_requested", decided_at="2026-09-20T10:00:00Z")
+        )
+        self._publish(github)
+        self.assertEqual(github.statuses[0]["state"], "failure")
 
     def test_marked_pull_request_without_an_owner_says_so(self) -> None:
         github = _GitHub()

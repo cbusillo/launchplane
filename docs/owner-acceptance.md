@@ -46,6 +46,18 @@ manifest contents or replace the train's commit-provenance, dependency-safety or
 gates.
 The train carries the derived engineering-only explanation into batch and release
 notes; it requests no Client preview review and does not accept a release.
+Engineering changes with real Client checks at release use the explicit marker in
+[the shared ready-handoff notes contract](https://github.com/cbusillo/codex-skills/blob/main/skills/github/references/cli-reference.md#ready-handoffs)
+as a plain first notes line, followed by real release test steps. Launchplane
+imports that classification from its pinned shared package. Each notes section
+and batch member keeps its own review requirement. Unmarked steps and changes
+the Client must approve before merge, including wording, screens, workflows or
+data, still need acceptance before merge; do not mark them as engineering.
+The review label and a current Client rejection still hold the change.
+Release test steps remain in the release checklist. This classification permits
+merge to testing and records no acceptance; every release still needs the
+Client's acceptance.
+
 Editing the PR body re-plans its preview and review intent without needing a
 push or label change.
 The preview reconciler refreshes the Client-review check even while waiting for
