@@ -908,25 +908,15 @@ def publish_release_invitation(
                 _remember_delivery(backoff, receipt, due, True)
                 return True
             notify = not request or bool(added)
-            display_changes = client_changes
-            if request and added:
-                display_changes = added | {
-                    key: change
-                    for key, change in client_changes.items()
-                    if not change.client_review_requested
-                }
-            changes = [_change_link(change) for change in display_changes.values()]
+            changes = [
+                _change_link(change)
+                for change in (added if request and added else client_changes).values()
+            ]
             if not changes:
                 changes = ["- Engineering updates only; no new Client change needs checking."]
             client = f"@{profile.owner.github_login}" if notify else profile.owner.github_login
             heading = (
-                "Added to this release"
-                if request
-                and added
-                and not any(
-                    not change.client_review_requested for change in display_changes.values()
-                )
-                else "What to check in this release"
+                "Added to this release" if request and added else "What to check in this release"
             )
             receipts = "\n".join(
                 f"<!-- launchplane:release-client-change:{key} -->"

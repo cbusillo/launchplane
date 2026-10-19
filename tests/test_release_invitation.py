@@ -265,10 +265,11 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.lose_response = False
         self.read_count = 0
         self.now = datetime.now(UTC)
+        self.public_origin = "https://launchplane.example.invalid"
         for target, replacement in (
             ("_now", lambda: self.now),
             ("monotonic", lambda: self.now.timestamp()),
-            ("launchplane_public_origin_from_env", lambda: "https://launchplane.example.invalid"),
+            ("launchplane_public_origin_from_env", lambda: self.public_origin),
             ("current_release_review", self.read_review),
             ("resolve_launchplane_github_token", lambda **kwargs: "delivery-token"),
             ("resolve_delivery_github_app_id", lambda **kwargs: 77),
@@ -1100,6 +1101,8 @@ class ReleaseInvitationTests(unittest.TestCase):
         )
 
     def test_release_test_additions_update_current_request_without_another_ping(self) -> None:
+        assert self.review.checklist is not None
+        original = self.review.checklist.items[0]
         self.assertTrue(self.publish())
         posts = len(self.posts)
         item = self.add_release_test_change()
@@ -1112,20 +1115,34 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.assertIn(item.owner_test_notes.splitlines()[1], body)
         self.assertNotIn(f"@{self.profile.owner.github_login}", body)
         self.assertNotIn(ENGINEERING_RELEASE_TESTS, body)
-        # A later material addition still includes the release-only test steps.
+        # Q121's new ping names only the additions. The following silent update
+        # restores the complete testing list, including release-only steps.
         self.add_client_change(43)
+        assert self.review.checklist is not None
+        addition = self.review.checklist.items[-1]
         self.change_candidate(source_commit="f" * 40)
+        self.assertTrue(self.publish())
+        self.assertEqual(len(self.posts), posts + 1)
+        self.assertIn(addition.url, self.comments[-1]["body"])
+        self.assertNotIn(original.url, self.comments[-1]["body"])
+        self.assertNotIn(item.url, self.comments[-1]["body"])
         self.assertTrue(self.publish())
         self.assertEqual(len(self.posts), posts + 1)
         self.assertIn(item.url, self.comments[-1]["body"])
         self.assertIn(item.owner_test_notes.splitlines()[1], self.comments[-1]["body"])
+        self.assertNotIn(f"@{self.profile.owner.github_login}", self.comments[-1]["body"])
 
     def test_current_request_and_reminder_refresh_release_steps_without_an_extra_ping(self) -> None:
         self.make_engineering_only()
         self.assertTrue(self.publish(urgent_reason="Reliability fix."))
         # Model a request emitted by the old publisher for the same candidate:
         # adding the previously omitted checklist item changes no lane version.
-        no_test_action = self.comments[0]["body"].split("\n\n")[-3]
+        release_page = f"{self.public_origin}/ui/owner-review?product={self.profile.product}"
+
+        def release_action(body: str) -> str:
+            return next(paragraph for paragraph in body.split("\n\n") if release_page in paragraph)
+
+        no_test_action = release_action(self.comments[0]["body"])
         item = self.add_release_test_change()
         posts = len(self.posts)
         self.assertTrue(self.publish(ReleaseInvitationBackoff()))
@@ -1133,12 +1150,12 @@ class ReleaseInvitationTests(unittest.TestCase):
         body = self.comments[0]["body"]
         self.assertIn(item.url, body)
         self.assertIn(item.owner_test_notes.splitlines()[1], body)
-        self.assertNotEqual(body.split("\n\n")[-3], no_test_action)
+        self.assertNotEqual(release_action(body), no_test_action)
         self.now += timedelta(days=4)
         self.assertTrue(self.publish())
         self.assertEqual(len(self.posts), posts + 1)
         self.assertIn(item.owner_test_notes.splitlines()[1], self.comments[-1]["body"])
-        self.assertNotEqual(self.comments[-1]["body"].split("\n\n")[-3], no_test_action)
+        self.assertNotEqual(release_action(self.comments[-1]["body"]), no_test_action)
 
     def test_batch_release_test_steps_use_the_constituent_without_preview_evidence(self) -> None:
         batch = self.seed_train_batch()

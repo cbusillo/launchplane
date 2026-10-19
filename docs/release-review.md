@@ -227,11 +227,13 @@ of changes gets one invitation. Client-facing evidence is an existing product
 preview decision or a bound per-PR review request in Launchplane's persisted
 preview feedback; titles, labels and the existence of a preview are not classifiers.
 Valid engineering release-test notes under the
-[shared notes contract](https://github.com/cbusillo/codex-skills/blob/5d5379271bac82101c94de441541e3cb4d9ee095/skills/github/references/cli-reference.md#ready-handoffs)
+[shared notes contract](https://github.com/cbusillo/codex-skills/blob/main/skills/github/references/cli-reference.md#ready-handoffs)
 also appear in an existing mixed request or a deliberately opened urgent request.
 The Client sees the real test steps and the source change, without the engineering
 directive. Those steps alone never open an automatic request or send a new ping;
 only the preview-review evidence above supplies that notification trigger.
+An addition note still names only the Client-facing additions; the next silent
+update restores the full testing list, including the release-test steps.
 Existing requests refresh missing or corrected release-test steps silently before
 their receipt is reused or a reminder is sent. Adoption receipts record only the
 changes with preview-review evidence, so a later material addition can still notify.
