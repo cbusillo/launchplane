@@ -375,6 +375,18 @@ def rehearsal_resource(record: OdooUpgradeRehearsalRecord) -> OdooRehearsalResou
     )
 
 
+def rehearsal_host_program() -> str:
+    from control_plane._odoo_copy_runtime_guard import COPY_RUNTIME_INSPECTION_LIBRARY
+    from control_plane._odoo_testing_storage_program import STORAGE_MAINTENANCE_LIBRARY
+    from control_plane._odoo_upgrade_rehearsal_program import ODOO_UPGRADE_REHEARSAL_PROGRAM
+
+    return (
+        COPY_RUNTIME_INSPECTION_LIBRARY
+        + STORAGE_MAINTENANCE_LIBRARY
+        + ODOO_UPGRADE_REHEARSAL_PROGRAM
+    )
+
+
 def rehearsal_host_spec(
     record: OdooUpgradeRehearsalRecord,
     action: str,
@@ -384,9 +396,6 @@ def rehearsal_host_spec(
     credentials: dict[str, str],
 ) -> dict[str, object]:
     import yaml
-    from control_plane._odoo_copy_runtime_guard import COPY_RUNTIME_INSPECTION_LIBRARY
-    from control_plane._odoo_testing_storage_program import STORAGE_MAINTENANCE_LIBRARY
-    from control_plane._odoo_upgrade_rehearsal_program import ODOO_UPGRADE_REHEARSAL_PROGRAM
     from control_plane.dokploy.compose import (
         render_odoo_raw_compose_file,
         ODOO_DATABASE_DATA_DIRECTORY,
@@ -474,9 +483,7 @@ def rehearsal_host_spec(
         "database_data_directory": ODOO_DATABASE_DATA_DIRECTORY,
         "sanitize_runner": rehearsal_copy_runner(sanitize_source_only=True),
         "upgrade_runner": rehearsal_copy_runner(sanitize_source_only=False),
-        "program": COPY_RUNTIME_INSPECTION_LIBRARY
-        + STORAGE_MAINTENANCE_LIBRARY
-        + ODOO_UPGRADE_REHEARSAL_PROGRAM,
+        "program": rehearsal_host_program(),
     }
 
 
@@ -645,7 +652,6 @@ class OdooRehearsalAdapter:
         """Read bounded event candidates without exporting provider prose or source data."""
         import ast
         from control_plane.dokploy import post_deploy
-        from control_plane._odoo_upgrade_rehearsal_program import ODOO_UPGRADE_REHEARSAL_PROGRAM
 
         if not started_at:
             raise ValueError("Missing original checkpoint")
@@ -685,7 +691,7 @@ class OdooRehearsalAdapter:
         )
         functions = {
             node.name
-            for node in ast.parse(ODOO_UPGRADE_REHEARSAL_PROGRAM).body
+            for node in ast.walk(ast.parse(rehearsal_host_program()))
             if isinstance(node, ast.FunctionDef)
         }
         events: list[dict[str, object]] = []
@@ -724,20 +730,17 @@ class OdooRehearsalAdapter:
                 lines = ()
                 log_available = complete = False
             log = "\n".join(lines)
-            frames = sorted(
-                {
-                    name
-                    for name in functions
-                    if re.search(
-                        r'File "'
-                        + re.escape(REHEARSAL_HOST_FILENAME)
-                        + r'", line \d+, in '
-                        + re.escape(name)
-                        + r"(?:\n|$)",
-                        log,
-                    )
-                }
-            )
+            locations = [
+                {"function": match[2], "line": int(match[1])}
+                for match in re.finditer(
+                    r'File "'
+                    + re.escape(REHEARSAL_HOST_FILENAME)
+                    + r'", line ([0-9]{1,9}), in ([A-Za-z_][A-Za-z0-9_]*)(?:\n|$)',
+                    log,
+                )
+                if match[2] in functions
+            ]
+            frames = sorted({str(location["function"]) for location in locations})
             status = api.deployment_status(deployment)
             events.append(
                 {
@@ -749,6 +752,7 @@ class OdooRehearsalAdapter:
                     "log_available": log_available,
                     "traceback_present": "Traceback (most recent call last):" in log,
                     "failure_frames": frames,
+                    "failure_locations": locations,
                 }
             )
         return events, complete

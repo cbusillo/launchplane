@@ -784,13 +784,34 @@ class RehearsalScenario(unittest.TestCase):
                 host_fixture.host["bounded_capture"](
                     ["fixture-command"], host_fixture.fixture.root / "partial.dump", 100
                 )
-        except RuntimeError:
+        except RuntimeError as error:
             log = traceback.format_exc().splitlines()
+            from control_plane.odoo_upgrade_rehearsal import REHEARSAL_HOST_FILENAME
+
+            locations = [
+                {"function": frame.name, "line": frame.lineno}
+                for frame in traceback.extract_tb(error.__traceback__)
+                if frame.filename == REHEARSAL_HOST_FILENAME
+            ]
         else:
             self.fail("An incomplete source process must refuse capture")
         log += ["PRIVATE_VALUE=do-not-export"]
+        try:
+            host_fixture.host["inspect_copy_runtime"](
+                host_fixture.spec, expected_instance="invalid"
+            )
+        except RuntimeError as error:
+            library_log = traceback.format_exc().splitlines()
+            library_locations = [
+                {"function": frame.name, "line": frame.lineno}
+                for frame in traceback.extract_tb(error.__traceback__)
+                if frame.filename == REHEARSAL_HOST_FILENAME
+            ]
+        else:
+            self.fail("An unqualified runtime inspection must refuse")
         current["status"] = "error"
         killed = {**current, "deploymentId": "killed-event"}
+        library = {**current, "deploymentId": "library-event"}
         with (
             patch.object(
                 api,
@@ -804,9 +825,11 @@ class RehearsalScenario(unittest.TestCase):
             patch.object(
                 api, "find_matching_dokploy_schedule", return_value={"scheduleId": "owned"}
             ),
-            patch.object(api, "dokploy_request", return_value=[older] * 40 + [current, killed]),
             patch.object(
-                api, "fetch_dokploy_deployment_logs", side_effect=[log, ["Killed"]]
+                api, "dokploy_request", return_value=[older] * 40 + [current, killed, library]
+            ),
+            patch.object(
+                api, "fetch_dokploy_deployment_logs", side_effect=[log, ["Killed"], library_log]
             ) as logs,
         ):
             events, complete = self.adapter("execute").failure_events(
@@ -819,8 +842,10 @@ class RehearsalScenario(unittest.TestCase):
         assert isinstance(frames, list)
         self.assertIn(host_fixture.host["bounded_capture"].__name__, frames)
         self.assertTrue(events[0]["traceback_present"])
+        self.assertEqual(events[0]["failure_locations"], locations)
         self.assertEqual(events[1]["provider_status"], killed["status"])
         self.assertFalse(events[1]["traceback_present"])
+        self.assertEqual(events[2]["failure_locations"], library_locations)
         self.assertNotIn("PRIVATE_VALUE", str(events))
         self.assertNotIn("do-not-export", str(events))
 
@@ -1522,9 +1547,7 @@ class RehearsalScenario(unittest.TestCase):
 class RehearsalHostSafetyTests(unittest.TestCase):
     def setUp(self) -> None:
         from tests.test_odoo_testing_restore import FreshTestingHostProgramTests
-        from control_plane._odoo_copy_runtime_guard import COPY_RUNTIME_INSPECTION_LIBRARY
-        from control_plane._odoo_testing_storage_program import STORAGE_MAINTENANCE_LIBRARY
-        from control_plane._odoo_upgrade_rehearsal_program import ODOO_UPGRADE_REHEARSAL_PROGRAM
+        from control_plane.odoo_upgrade_rehearsal import rehearsal_host_program
         import ast
 
         self.fixture = FreshTestingHostProgramTests()
@@ -1565,11 +1588,7 @@ class RehearsalHostSafetyTests(unittest.TestCase):
             for mount in container["Mounts"]:
                 mount["Name"] = mount["Name"].replace(previous, self.identifier)
             container["State"] = {"Running": True}
-        program = (
-            COPY_RUNTIME_INSPECTION_LIBRARY
-            + STORAGE_MAINTENANCE_LIBRARY
-            + ODOO_UPGRADE_REHEARSAL_PROGRAM
-        )
+        program = rehearsal_host_program()
         tree = ast.parse(program)
         tree.body.pop()  # Load the real emitted functions without starting its CLI.
         self.host: dict[str, Any] = {}
