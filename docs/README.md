@@ -65,8 +65,8 @@ not describe runtime authority until it is implemented, deployed, and activated.
 - [post-v2-audit.md](post-v2-audit.md) — post-v2 product, security,
   persistence, contract, test, and modularity audit baseline and execution
   graph.
-- [work-graph-read-model.md](work-graph-read-model.md) — RETIRED (work graphs
-  inside Launchplane), scheduled for deletion; see DIRECTION.md.
+- [work-graph-read-model.md](work-graph-read-model.md) — record-backed work graph,
+  ranking, and the removed Project/inbox source boundary.
 - [merge-train-policy.md](merge-train-policy.md) — repository/base-branch merge
   train policy contract, enqueue authority, and smoke-target policy.
 - [merge-train-events.md](merge-train-events.md) — signed App events, worker wake hints,

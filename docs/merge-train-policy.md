@@ -1486,8 +1486,9 @@ GH_TOKEN=... uv run launchplane work-graph merge-train-run-once \
 
 This local rehearsal command reads its explicit `--github-token-env` option
 (default `GH_TOKEN`) independently of the policy's managed credential source.
-The deployed merge train resolves the policy's `github_app` source instead. The work-graph read credential remains a
-separate consumer of `LAUNCHPLANE_WORK_GRAPH_GH_TOKEN`.
+The deployed merge train resolves the policy's `github_app` source instead.
+The Project/inbox credential consumer was removed under Q543; self-deploy no
+longer supplies a work-graph token.
 
 Passing `--mutate` applies exactly one ordered-queue worker transition from that
 fresh snapshot. Use it only from the intended admin environment for the smoke

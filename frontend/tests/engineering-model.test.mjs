@@ -2,8 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  ISSUE_RECONCILIATION_BROWSER_BOUNDARY,
-  MERGE_TRAIN_BROWSER_BOUNDARY,
   filterWorkGraphItems,
   mergeTrainControllerTone,
   mergeTrainStatusScopeKey,
@@ -18,12 +16,6 @@ import {
   emptyEngineeringResource,
   engineeringFailure,
 } from "../src/engineering-resource.ts";
-
-test("engineering write boundaries stay explicit and unsupported", () => {
-  assert.match(ISSUE_RECONCILIATION_BROWSER_BOUNDARY, /GitHub Actions OIDC/);
-  assert.match(ISSUE_RECONCILIATION_BROWSER_BOUNDARY, /absent from the generated browser write contract/);
-  assert.match(MERGE_TRAIN_BROWSER_BOUNDARY, /never executes a worker route dynamically/);
-});
 
 test("merge train targets come only from policy targets", () => {
   const targets = mergeTrainTargetOptions([

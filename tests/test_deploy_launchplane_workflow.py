@@ -11,6 +11,7 @@ import unittest
 
 from control_plane.deploy_failure_alert import FINAL_VERIFICATION_TIMEOUT_SECONDS
 from tests.support.workflows import load_workflow
+from control_plane.workflows.launchplane_self_deploy import _RETIRED_WORK_GRAPH_ENV_KEYS
 
 
 class DeployLaunchplaneWorkflowTests(unittest.TestCase):
@@ -355,6 +356,25 @@ if [ -f "$RUNNER_TEMP/probed" ] || [ "${HEALTH_RECOVERED:-false}" = true ]; then
         self.assertTrue(retired.keys().isdisjoint(removals))
         self.assertEqual(oauth_env["LAUNCHPLANE_DEPLOYMENT_MARKER"], "deploy-marker")
 
+    def test_self_deploy_removes_project_source_even_when_old_inputs_are_present(self) -> None:
+        retired = dict.fromkeys(_RETIRED_WORK_GRAPH_ENV_KEYS, "synthetic-retired-value")
+        payload = self._render(
+            "Render Launchplane self deploy request",
+            {
+                "BOOTSTRAP_SECRET_OPERATION": "preserve",
+                "DEPLOYMENT_MARKER": "deploy-marker",
+                "DEPLOY_IMAGE_REFERENCE": "ghcr.io/example/service@sha256:" + ("b" * 64),
+                "IMAGE_REPOSITORY": "ghcr.io/example/service",
+                "LAUNCHPLANE_WORK_GRAPH_GH_TOKEN": "synthetic-retired-credential",
+                **retired,
+            },
+        )
+        deploy = cast(dict[str, object], payload["deploy"])
+        delivered = cast(dict[str, str], deploy["oauth_env"])
+        self.assertTrue(retired.keys().isdisjoint(delivered))
+        removed = cast(list[str], deploy.get("oauth_env_removals", []))
+        self.assertTrue(retired.keys() <= set(removed))
+
     def test_self_deploy_removes_unset_public_ingress_token_and_omitted_npmplus_env(
         self,
     ) -> None:
@@ -389,7 +409,12 @@ if [ -f "$RUNNER_TEMP/probed" ] || [ "${HEALTH_RECOVERED:-false}" = true ]; then
                     },
                 )
                 deploy = cast(dict[str, object], payload["deploy"])
-                self.assertEqual(deploy.get("oauth_env_removals"), removals)
+                removed = set(cast(list[str], deploy.get("oauth_env_removals", [])))
+                self.assertTrue(set(removals or ()).issubset(removed))
+                if token:
+                    self.assertNotIn("LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN", removed)
+                if omit_npmplus == "false":
+                    self.assertNotIn("LAUNCHPLANE_NPMPLUS_SECRET", removed)
 
     def test_self_deploy_rejects_multiline_previous_image_reference(self) -> None:
         with TemporaryDirectory() as directory_name:

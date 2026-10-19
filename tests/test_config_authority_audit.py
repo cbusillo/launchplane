@@ -2311,7 +2311,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 "LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET",
                 "$manager_preview_webhook_secret",
             ),
-            ("GH_TOKEN", "$work_graph_gh_token"),
         )
         for key, value in service_env_payload:
             with self.subTest(key=key):
@@ -2326,6 +2325,20 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 self.assertEqual(
                     _allow_reason(
                         path=".github/workflows/other.yml",
+                        key=key,
+                        value=value,
+                    ),
+                    "",
+                )
+
+        for key, value in (
+            ("GH_TOKEN", "$work_graph_gh_token"),
+            ("LAUNCHPLANE_WORK_GRAPH_GH_TOKEN", "${{ secrets.LAUNCHPLANE_WORK_GRAPH_GH_TOKEN }}"),
+        ):
+            with self.subTest(retired_key=key):
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/deploy-launchplane.yml",
                         key=key,
                         value=value,
                     ),
