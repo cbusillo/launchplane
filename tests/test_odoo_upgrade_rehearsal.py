@@ -3,6 +3,7 @@
 from datetime import datetime, timezone
 import hashlib
 import os
+import re
 from pathlib import Path
 from typing import Any, cast
 from collections.abc import Callable
@@ -35,6 +36,16 @@ from control_plane.testing_local_credentials import prepare_rehearsal_local_cred
 from tests import test_testing_replacement_resources as resources
 from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
 from control_plane.contracts.odoo_upgrade_rehearsal import OdooUpgradeRehearsalRecord
+
+
+def python_heredoc(script: str) -> str:
+    match = re.search(r"python3\s+-\s*<<'(?P<delimiter>\w+)'\s*\n", script)
+    if match is None:
+        raise AssertionError("Host delivery must put its Python program on stdin")
+    body, delimiter, _ = script[match.end() :].partition("\n" + match["delimiter"] + "\n")
+    if not delimiter:
+        raise AssertionError("Host Python heredoc is unterminated")
+    return body
 
 
 class RehearsalScenario(unittest.TestCase):
@@ -366,8 +377,7 @@ class RehearsalScenario(unittest.TestCase):
         def scheduler(
             record: OdooUpgradeRehearsalRecord, script: str, check: Callable[[], None]
         ) -> dict[str, str]:
-            lines = script.splitlines()
-            program = "\n".join(lines[3:-1])
+            program = python_heredoc(script)
             output = io.StringIO()
             with (
                 patch.object(sys, "argv", ["host"]),
@@ -405,6 +415,11 @@ class RehearsalScenario(unittest.TestCase):
         marker.touch()
         with patch.object(adapter, "run_script", side_effect=scheduler):
             self.assertFalse(adapter.host(record, "observe", lambda: None)["prepare_not_started"])
+        marker.unlink()
+        receipt = marker.with_name("prepare.json")
+        receipt.mkdir()
+        with patch.object(adapter, "run_script", side_effect=scheduler):
+            self.assertFalse(adapter.host(record, "observe", lambda: None)["prepare_not_started"])
         with patch.object(adapter, "run_script", return_value={}):
             with self.assertRaises(RehearsalRefused):
                 adapter.host(record, "observe", lambda: None)
@@ -414,11 +429,11 @@ class RehearsalScenario(unittest.TestCase):
     ) -> None:
         import io
         import base64
-        import shlex
         import subprocess
         import sys
         from contextlib import redirect_stdout
         from control_plane.dokploy.post_deploy import extract_odoo_post_deploy_readback_markers
+        from control_plane.dokploy.api import validate_dokploy_schedule_script
 
         artifact = self.record.target_artifact
         artifact = artifact.model_copy(
@@ -427,7 +442,9 @@ class RehearsalScenario(unittest.TestCase):
                     update={
                         "values": {
                             **artifact.build_flags.values,
-                            "fixture_large_provenance": "fixture" * 100_000,
+                            "fixture_large_provenance": hashlib.shake_256(
+                                b"large artifact"
+                            ).hexdigest(350_000),
                         }
                     }
                 )
@@ -441,22 +458,11 @@ class RehearsalScenario(unittest.TestCase):
         def scheduler(
             record: OdooUpgradeRehearsalRecord, script: str, check: Callable[[], None]
         ) -> dict[str, str]:
-            destination = self.root / "provider-schedule.sh"
-            # Dokploy materializes remote schedules through one shell -c command.
+            # Enforce the Linux materializer bound independently of the test OS.
+            validate_dokploy_schedule_script({"script": script, "appName": record.rehearsal_id})
             encoded = base64.b64encode(script.encode()).decode()
-            subprocess.run(
-                [
-                    "/bin/sh",
-                    "-c",
-                    "printf '%s' "
-                    + shlex.quote(encoded)
-                    + " | base64 -d > "
-                    + shlex.quote(str(destination)),
-                ],
-                check=True,
-            )
-            materialized = destination.read_text()
-            body = "\n".join(materialized.splitlines()[3:-1])
+            materialized = base64.b64decode(encoded, validate=True).decode()
+            body = python_heredoc(materialized)
             output = io.StringIO()
             with (
                 patch.object(sys, "argv", ["host"]),
@@ -475,6 +481,18 @@ class RehearsalScenario(unittest.TestCase):
             result = adapter.host(record, "observe", lambda: None)
         self.assertEqual(result["intent_sha256"], record.intent_sha256)
         self.assertFalse(result["completed"])
+
+    def test_oversize_host_script_is_refused_before_effect_checkpoint(self) -> None:
+        import click
+        from control_plane.dokploy.api import DOKPLOY_SCHEDULE_MATERIALIZATION_LIMIT_BYTES
+
+        adapter = self.adapter("prepare")
+        checkpoint = Mock()
+        with self.assertRaises(click.ClickException):
+            adapter.run_script(
+                self.record, "x" * DOKPLOY_SCHEDULE_MATERIALIZATION_LIMIT_BYTES, checkpoint
+            )
+        checkpoint.assert_not_called()
 
     def test_retirement_uses_retained_intent_without_source_or_credential_reads(self) -> None:
         retained = self.record.model_copy(update={"state": "verified", "compose_id": "own-compose"})
@@ -1912,6 +1930,31 @@ class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(store.read_odoo_upgrade_rehearsal(self.fixture.identifier), placed)
             self.assertEqual(store.list_held_provider_target_reservations(), journal)
         self.fixture.record = placed
+        for key in ("", "different-key"):
+            with patch.object(
+                OdooRehearsalAdapter,
+                "host",
+                return_value={
+                    "state": "planned",
+                    "copies": [],
+                    "completed": False,
+                    "raw_source_retained": False,
+                    "prepare_not_started": True,
+                },
+            ):
+                read = await request(
+                    app,
+                    "POST",
+                    ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=self.fixture.product),
+                    payload=self.fixture.request.model_copy(update={"mode": "readback"}).model_dump(
+                        mode="json"
+                    ),
+                    headers={"Idempotency-Key": key} if key else {},
+                )
+            self.assertEqual(read.status_code, 202)
+            self.assertTrue(read.json()["result"]["original_key_required"])
+            self.assertNotIn("recovery_disposition", read.json()["result"])
+            self.assertEqual(store.list_held_provider_target_reservations(), journal)
         from contextlib import contextmanager
 
         @contextmanager

@@ -390,7 +390,8 @@ def main():
             raw=root/'raw-source'
             if (action=='prepare' and record['state']=='planned' and not copies
                     and not marker.exists() and not marker.is_symlink()
-                    and not receipt.is_symlink() and not raw.exists() and not raw.is_symlink()):
+                    and not receipt.exists() and not receipt.is_symlink()
+                    and not raw.exists() and not raw.is_symlink()):
                 try:
                     prepare_not_started=not docker('ps','-a','--filter',
                         'label=com.docker.compose.project='+namespace,'--format','{{.ID}}').strip()

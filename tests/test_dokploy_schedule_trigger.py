@@ -10,6 +10,7 @@ must send exactly one trigger and report what actually happened.
 from __future__ import annotations
 
 import unittest
+import click
 from contextlib import contextmanager
 from collections.abc import Callable, Iterator
 from datetime import datetime, timedelta, timezone
@@ -98,6 +99,44 @@ def _run(provider: FakeProvider, *, execution_timeout_seconds: int = 7200) -> st
 
 
 class ScheduleTriggerTests(unittest.TestCase):
+    def test_oversize_script_refuses_before_provider_access_or_checkpoint(self) -> None:
+        payload: JsonObject = {
+            "script": "x" * dokploy_api.DOKPLOY_SCHEDULE_MATERIALIZATION_LIMIT_BYTES
+        }
+        target = control_plane_dokploy.DokployTargetDefinition(
+            context="fixture",
+            instance="testing",
+            target_id="compose",
+            target_name="fixture-testing",
+        )
+        checkpoint = unittest.mock.Mock()
+        with patch.object(dokploy_api, "dokploy_request") as provider:
+            with self.assertRaises(click.ClickException):
+                dokploy_api.upsert_dokploy_schedule(
+                    host="https://provider.invalid",
+                    token="fixture",
+                    target_id="compose",
+                    schedule_type="server",
+                    schedule_name="fixture",
+                    app_name="fixture",
+                    schedule_payload=payload,
+                )
+            with self.assertRaises(click.ClickException):
+                dokploy_post_deploy.run_manual_data_schedule(
+                    host="https://provider.invalid",
+                    token="fixture",
+                    target_definition=target,
+                    schedule_lookup_id="server",
+                    schedule_type="server",
+                    schedule_name="fixture",
+                    schedule_app_name="fixture",
+                    schedule_payload=payload,
+                    resolved_schedule_execution_timeout_seconds=60,
+                    before_provider_mutation=checkpoint,
+                )
+        provider.assert_not_called()
+        checkpoint.assert_not_called()
+
     def test_trigger_deadline_is_separate_from_the_execution_budget(self) -> None:
         provider = FakeProvider(
             trigger=lambda: {"ok": True},

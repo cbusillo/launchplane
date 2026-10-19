@@ -620,6 +620,7 @@ class OdooRehearsalAdapter:
     ) -> dict[str, str]:
         from control_plane.dokploy import post_deploy
 
+        api.validate_dokploy_schedule_script({"script": script, "appName": record.rehearsal_id})
         host, token = source.read_dokploy_config(control_plane_root=self.root)
         payload = api.fetch_dokploy_target_payload(
             host=host, token=token, target_type="compose", target_id=record.compose_id

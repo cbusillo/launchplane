@@ -178,7 +178,18 @@ def register_odoo_upgrade_rehearsal_routes(
                         if fresh != record:
                             raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
                         if body.action == "prepare" and record.state == "planned":
-                            journal = adapter.prepare_readback(record, idempotency_key)
+                            try:
+                                journal = adapter.prepare_readback(record, idempotency_key)
+                            except RehearsalRefused as error:
+                                if (
+                                    not record.compose_id
+                                    or error.code != RehearsalPrerequisite.STATE_UNVERIFIED
+                                ):
+                                    raise
+                                return {
+                                    **adapter.host(record, "observe", check),
+                                    "original_key_required": True,
+                                }
                             if not record.compose_id:
                                 return journal
                             observation = adapter.host(record, "observe", check)
@@ -219,6 +230,7 @@ def register_odoo_upgrade_rehearsal_routes(
                             "provider_effect_started_at",
                             "recovery_disposition",
                             "recovery_reason",
+                            "original_key_required",
                         )
                         if key in result
                     },
