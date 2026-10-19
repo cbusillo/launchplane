@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane.integration_readback import web_held_until_integration_readback
 from control_plane.odoo_testing_restore import (
+    FreshOdooTestingGeneration,
     read_current_testing_generation,
     generation_snapshot_matches,
     fresh_testing_authority_sha256,
@@ -288,6 +289,31 @@ def _upstream_restore_blockers(
         # This validator reports fixed schema keys only, never their values.
         blockers.append(("upstream_restore_environment_invalid", str(error), ()))
     return tuple(blockers)
+
+
+def _validate_replacement_key_retirement(
+    *,
+    generation: FreshOdooTestingGeneration | None,
+    retired_keys: set[str],
+    application_keys: set[str],
+) -> None:
+    # Bootstrap intentionally omits external secret pointers. Only a qualified
+    # generation can retire those unused pointers; declarations and rendered
+    # override requirements still protect any pointer the application needs.
+    omitted_pointers = (
+        {
+            key
+            for key in generation.omitted_runtime_keys
+            if key.startswith(control_plane_odoo_instance_overrides.ODOO_OVERRIDE_SECRET_ENV_PREFIX)
+            and key not in application_keys
+        }
+        if generation is not None
+        else set()
+    )
+    control_plane_live_target_runtime.validate_provider_key_retirement(
+        retired_keys=retired_keys - omitted_pointers,
+        application_keys=application_keys,
+    )
 
 
 def _provider_only_keys(
@@ -1674,7 +1700,8 @@ def build_odoo_stable_target_replacement_plan(
             # A lane may retire a key its site's records hold (for example a shared
             # integration setting kept off this lane); the retirement wins and the key
             # is not delivered. Declared and driver keys still cannot be retired.
-            control_plane_live_target_runtime.validate_provider_key_retirement(
+            _validate_replacement_key_retirement(
+                generation=generation,
                 retired_keys=retired_provider_keys,
                 application_keys=declared_runtime_keys | ODOO_REPLACEMENT_DRIVER_ENV_KEYS,
             )
@@ -2403,7 +2430,8 @@ def execute_odoo_stable_target_replacement_apply(
                     "Provider key retirement changed during execution; review current configuration.",
                     tuple(retired_provider_keys ^ set(plan.retired_provider_keys)),
                 )
-            control_plane_live_target_runtime.validate_provider_key_retirement(
+            _validate_replacement_key_retirement(
+                generation=generation,
                 retired_keys=retired_provider_keys,
                 application_keys=declared_runtime_keys | ODOO_REPLACEMENT_DRIVER_ENV_KEYS,
             )
