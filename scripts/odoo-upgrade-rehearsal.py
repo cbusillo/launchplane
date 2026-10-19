@@ -11,6 +11,7 @@ from urllib.parse import quote
 
 from control_plane.contracts.odoo_upgrade_rehearsal import (
     ODOO_UPGRADE_REHEARSAL_ROUTE,
+    REHEARSAL_PUBLIC_FAILURE_MESSAGES,
     OdooUpgradeRehearsalRequest,
 )
 
@@ -130,10 +131,7 @@ def main() -> int:
         except (ValueError, TypeError, AttributeError):
             trace = ""
             code = "rehearsal_unavailable"
-        refused = error.code == 409 and code in {
-            "rehearsal_storage_capacity_insufficient",
-            "rehearsal_precheck_refused",
-        }
+        refused = error.code == 409 and code in REHEARSAL_PUBLIC_FAILURE_MESSAGES
         print(
             json.dumps(
                 {
