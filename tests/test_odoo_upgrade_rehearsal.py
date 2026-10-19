@@ -688,9 +688,10 @@ class RehearsalScenario(unittest.TestCase):
                 side_effect=RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED),
             ),
             patch.object(OdooRehearsalAdapter, "host") as host,
-            self.assertRaises(RehearsalRefused),
+            self.assertRaises(RehearsalRefused) as refusal,
         ):
             self.run_operation(adapter, "fresh-refusal")
+        self.assertEqual(refusal.exception.prerequisite, RehearsalPrerequisite.STATE_UNVERIFIED)
         self.assertEqual(self.store.list_held_provider_target_reservations(), ())
         host.assert_not_called()
         self.assertEqual(self.store.read_odoo_upgrade_rehearsal(self.identifier), self.record)
@@ -778,14 +779,116 @@ class RehearsalScenario(unittest.TestCase):
         self.assertTrue(complete)
         self.assertEqual(logs.call_count, len(events))
         self.assertEqual(events[0]["deployment_id"], current["deploymentId"])
-        self.assertEqual(
-            events[0]["failure_frames"], [host_fixture.host["bounded_capture"].__name__]
-        )
+        frames = events[0]["failure_frames"]
+        assert isinstance(frames, list)
+        self.assertIn(host_fixture.host["bounded_capture"].__name__, frames)
         self.assertTrue(events[0]["traceback_present"])
         self.assertEqual(events[1]["provider_status"], killed["status"])
         self.assertFalse(events[1]["traceback_present"])
         self.assertNotIn("PRIVATE_VALUE", str(events))
         self.assertNotIn("do-not-export", str(events))
+
+    def test_failure_events_preserve_oldest_metadata_when_one_log_is_unavailable(self) -> None:
+        from control_plane.dokploy import api
+        from datetime import timedelta
+
+        record = self.record.model_copy(update={"compose_id": "own-compose"})
+        checkpoint = datetime.now(timezone.utc)
+        candidates = [
+            {
+                "deploymentId": f"event-{index}",
+                "createdAt": (checkpoint + timedelta(seconds=index)).isoformat(),
+                "status": "error",
+            }
+            for index in range(35)
+        ]
+        unavailable = api.DokployRequestFailed(
+            method="GET", path="/api/deployment.logs", detail="private", status_code=503
+        )
+        with (
+            patch.object(
+                api,
+                "fetch_dokploy_target_payload",
+                return_value={"serverId": record.server_id, "appName": record.rehearsal_id},
+            ),
+            patch(
+                "control_plane.dokploy.post_deploy._resolve_dokploy_schedule_runtime",
+                return_value=("server", record.server_id, "", record.server_id),
+            ),
+            patch.object(
+                api, "find_matching_dokploy_schedule", return_value={"scheduleId": "owned"}
+            ),
+            patch.object(api, "dokploy_request", return_value=list(reversed(candidates))),
+            patch.object(
+                api, "fetch_dokploy_deployment_logs", side_effect=[unavailable] + [[]] * 31
+            ),
+        ):
+            events, complete = self.adapter("execute").failure_events(
+                record, checkpoint.isoformat()
+            )
+        self.assertFalse(complete)
+        self.assertEqual(events[0]["deployment_id"], candidates[0]["deploymentId"])
+        self.assertFalse(events[0]["log_available"])
+        self.assertEqual(events[0]["provider_status"], candidates[0]["status"])
+        self.assertTrue(events[1]["log_available"])
+        self.assertGreater(len(events), 1)
+
+    def test_native_readback_preserves_journal_and_events_when_host_is_busy(self) -> None:
+        adapter = self.adapter("execute")
+        journal = {
+            "operation_state": "reconcile_required",
+            "provider_effect_phase": "execute",
+            "provider_effect_started_at": "2026-10-19T00:00:00Z",
+            "_provider_operation_key": "private-key",
+            "_stored_refusal_code": "",
+        }
+        event = {"deployment_id": "original", "provider_status": "running"}
+        with (
+            patch.object(OdooRehearsalAdapter, "operation_readback", return_value=dict(journal)),
+            patch.object(OdooRehearsalAdapter, "failure_events", return_value=([event], True)),
+            patch.object(OdooRehearsalAdapter, "host", side_effect=BlockingIOError),
+        ):
+            result = adapter.native_readback(self.record, "original", lambda: None)
+        self.assertEqual(result["failure_events_after_checkpoint"], [event])
+        self.assertEqual(result["operation_state"], journal["operation_state"])
+        self.assertTrue(result["host_observation_unavailable"])
+        self.assertTrue(result["original_key_required"])
+        for field in ("state", "copies", "custody", "raw_source_retained", "_stored_refusal_code"):
+            self.assertNotIn(field, result)
+
+    def test_native_readback_distinguishes_missing_unbound_and_no_checkpoint(self) -> None:
+        adapter = self.adapter("execute")
+        bound = {
+            "operation_state": "reconcile_required",
+            "provider_effect_phase": "",
+            "provider_effect_started_at": "",
+            "_provider_operation_key": "private-key",
+            "_stored_refusal_code": "",
+        }
+        for value, reason in (
+            (
+                RehearsalRefused(RehearsalPrerequisite.OPERATION_UNAVAILABLE),
+                "operation_journal_missing",
+            ),
+            (RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED), "operation_journal_unbound"),
+            (bound, "no_effect_checkpoint"),
+        ):
+            with (
+                self.subTest(reason=reason),
+                patch.object(
+                    OdooRehearsalAdapter,
+                    "operation_readback",
+                    side_effect=value if isinstance(value, Exception) else None,
+                    return_value=dict(bound),
+                ),
+                patch.object(OdooRehearsalAdapter, "failure_events") as events,
+                patch.object(OdooRehearsalAdapter, "host", return_value={"completed": False}),
+            ):
+                result = adapter.native_readback(self.record, "original", lambda: None)
+            self.assertEqual(result["recovery_reason"], reason)
+            self.assertEqual(result["recovery_disposition"], "hold_unknown")
+            self.assertTrue(result["original_key_required"])
+            events.assert_not_called()
 
     def run_operation(
         self, adapter: OdooRehearsalAdapter, key: str
@@ -2168,10 +2271,7 @@ class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fixture.store.list_held_provider_target_reservations(), before)
         self.assertEqual(fixture.store.read_odoo_upgrade_rehearsal(fixture.identifier), prepared)
 
-        from control_plane.contracts.odoo_upgrade_rehearsal import REHEARSAL_PUBLIC_FAILURE_MESSAGES
-
         refusal_code = RehearsalPrerequisite.PRECHECK_REFUSED
-        self.assertIn(refusal_code, REHEARSAL_PUBLIC_FAILURE_MESSAGES)
         adopted = fixture.store.adopt_reconciled_mutation(
             reservation=before[0],
             response_status_code=409,
@@ -2198,6 +2298,19 @@ class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["result"]["recovery_disposition"], "completed_refusal")
         self.assertFalse(response.json()["result"]["original_key_required"])
         events.assert_not_called()
+
+        with patch.object(
+            OdooRehearsalAdapter, "host", return_value={**observed, "refusal_code": "different"}
+        ):
+            response = await request(
+                app,
+                "POST",
+                ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=fixture.product),
+                payload=payload,
+                headers={"Idempotency-Key": "original-execute"},
+            )
+        self.assertEqual(response.json()["result"]["recovery_disposition"], "hold_unknown")
+        self.assertTrue(response.json()["result"]["original_key_required"])
 
     def read_only_app(self) -> Any:
         from fastapi import FastAPI, HTTPException

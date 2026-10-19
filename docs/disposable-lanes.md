@@ -2622,7 +2622,13 @@ a host process still owns it. It creates no replacement lock.
 `failure_events_after_checkpoint` projects bounded provider event identities,
 times, fixed provider statuses, traceback presence and host function names from
 this namespace's logs within the provider's existing checkpoint clock-skew
-window. Missing or bounded evidence is explicitly unavailable. Events are read
+window. Missing or bounded evidence is explicitly unavailable. An unavailable event log
+retains its event metadata with `log_available: false`; the oldest candidates
+are read first. If host observation is unavailable, journal and event evidence
+survive with `host_observation_unavailable`, and unobserved custody/copy values
+are omitted. `operation_journal_status` distinguishes bound, missing, unbound
+and unrequested journals; no checkpoint is never proof that no effect happened.
+Events are read
 before launching the observation schedule. They are diagnostic candidates, not proof
 that an event belongs to the original apply. Provider prose and source data are
 withheld. Preserve the original request, key and all partial custody until a
