@@ -269,8 +269,15 @@ for (const kind of ["domain", "binding"] as const) {
         const sibling = page.getByRole("region", { name: "Route binding", exact: true });
         await expect(sibling).toHaveAttribute("data-recovery", "true");
         await expect(panel.getByRole("button", { name: `Resume original ${title.toLowerCase()}` })).toHaveCount(0);
+        const earlierFailureCode = await page.evaluate(async operationScope => {
+          const operations = await import("/ui/src/browser-operation.ts");
+          return operations.recoverBrowserOperationState(operationScope).failure!.code;
+        }, repairOperationScope(scope, kind));
         await panel.getByRole("button", { name: "Start a separate review", exact: true }).click();
         await expect(panel).toHaveAttribute("data-recovery", "false");
+        const earlier = panel.locator('[data-earlier-outcome="unknown"]');
+        await earlier.locator("summary").click();
+        await expect(earlier.locator("[data-earlier-failure-code]")).toHaveText(earlierFailureCode);
         await panel.getByLabel(`${title} reason`, { exact: true }).fill("Review current records without reconstructing the missing payload.");
         await panel.getByRole("button", { name: `Review ${title.toLowerCase()}`, exact: true }).click();
         await expect(panel.getByLabel(`${title} review`, { exact: true })).toBeVisible();

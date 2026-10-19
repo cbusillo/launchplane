@@ -214,7 +214,7 @@ function RepairDecision({ kind, scope, admin, otherActive, setActive, refreshTok
       <p>This tab stopped following the earlier request. It may still finish; a later receipt does not prove its outcome. This detail lasts only in this view.</p>
       <p>Earlier request key: <code>{earlierRequest.identity.idempotencyKey}</code></p>
       <p>Earlier request fingerprint: <code>{earlierRequest.identity.requestFingerprint}</code></p>
-      {earlierRequest.failure && <p>Last observed failure: {earlierRequest.failure.message}{earlierRequest.failure.traceId && <> Last refusal trace: <code>{earlierRequest.failure.traceId}</code></>}</p>}
+      {earlierRequest.failure && <p>Failure code when tracking stopped: <code data-earlier-failure-code={earlierRequest.failure.code}>{earlierRequest.failure.code}</code>{earlierRequest.failure.traceId && <> Response trace at that time: <code>{earlierRequest.failure.traceId}</code></>}</p>}
     </details>}
     {message && <p role="status">{message}</p>}
     {failure && <p role="alert">{failure.message}{failure.traceId && <> Trace: <code>{failure.traceId}</code></>}</p>}
