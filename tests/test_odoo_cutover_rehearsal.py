@@ -30,6 +30,7 @@ from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.odoo_cutover_storage import DeploymentCutoverStore
 from control_plane.odoo_cutover_plan import cutover_record_id, resolve_profile_cutover_plan
 from control_plane.dokploy.cutover_factory import DokployOdooCutoverProviderFactory
+from control_plane.dokploy.compose import ODOO_DATABASE_IMAGE
 from tests.support.profiles import _odoo_preview_profile_payload
 from control_plane.contracts.odoo_cutover_lane import OdooCutoverLane, OdooSlotCoordinates
 from control_plane.contracts.promotion_record import HealthcheckEvidence
@@ -135,7 +136,7 @@ class OdooCutoverRehearsalTests(unittest.TestCase):
             "POSTGRES_DB=fixture",
             "-e",
             "POSTGRES_HOST_AUTH_METHOD=trust",
-            "postgres:17",
+            ODOO_DATABASE_IMAGE,
         )
         manifests = Path(os.environ["LAUNCHPLANE_TEST_CUTOVER_MANIFESTS"])
         old, static, changed = (
