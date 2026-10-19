@@ -203,6 +203,9 @@ class RehearsalHostResult(BaseModel):
         ]
         | None
     ) = None
+    capture_database_reference_validation: (
+        Literal["reference_present", "reference_not_found", "unavailable", "incomplete"] | None
+    ) = None
     refusal_code: Literal[
         "", "rehearsal_storage_capacity_insufficient", "rehearsal_precheck_refused"
     ] = ""

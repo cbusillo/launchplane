@@ -2,6 +2,7 @@
 
 REHEARSAL_CAPTURE_COMPARISON_LIBRARY = r"""
 from contextlib import contextmanager
+import selectors
 
 
 def valid_attachment_reference(value):
@@ -39,6 +40,160 @@ def capture_comparison_file(path):
         fields=('st_dev','st_ino','st_size','st_mtime_ns','st_ctime_ns')
         if any(getattr(before,key)!=getattr(after,key) for key in fields):
             raise ValueError('Capture comparison custody changed')
+
+
+def captured_attachment_table_chunks(stream,containers,deadline,output_limit):
+    # Decode selected table data to a pipe. No database connection, SQL
+    # execution, output file, dump copy or application runtime is involved.
+    remaining=max(1,int(deadline-time.monotonic()))
+    arguments=['docker','exec','-i',containers['database'][0],
+        'timeout','--signal=TERM','--kill-after=5',str(remaining),'pg_restore','--data-only',
+        '--schema=public','--table=ir_attachment','--no-owner','--no-acl','--file=-']
+    process=subprocess.Popen(arguments,stdin=stream,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
+    try:
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout,selectors.EVENT_READ)
+            consumed=0
+            while True:
+                remaining=deadline-time.monotonic()
+                if remaining<=0 or not selector.select(remaining):
+                    raise TimeoutError('Captured database observation expired')
+                chunk=os.read(process.stdout.fileno(),65536)
+                if not chunk:
+                    break
+                consumed+=len(chunk)
+                if consumed>output_limit:
+                    raise ValueError('Captured database output exceeds its bound')
+                yield chunk
+        remaining=deadline-time.monotonic()
+        if remaining<=0:
+            raise TimeoutError('Captured database observation expired')
+        status=process.wait(timeout=remaining)
+        if status==124:
+            raise TimeoutError('Captured database observation expired')
+        if status!=0:
+            raise ValueError('Captured database decoding is unavailable')
+    except subprocess.TimeoutExpired as error:
+        raise TimeoutError('Captured database observation expired') from error
+    finally:
+        process.stdout.close()
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+
+
+def captured_attachment_reference_present(chunks,reference):
+    prefix=b'COPY public.ir_attachment ('
+    suffix=b') FROM stdin;\n'
+    columns=None
+    complete=False
+    found=False
+    metadata=b''
+    index=0
+    offset=0
+    marker=b''
+    row_matches=True
+    expected={}
+    for chunk in chunks:
+        # COPY escapes tabs/newlines inside values. Only literal delimiters
+        # end fields/rows. Compare the three short values incrementally;
+        # discard arbitrary-length index_content/db_datas and other fields.
+        for part in re.split(b'([\t\n])',chunk):
+            if columns is None or complete:
+                metadata+=part
+                if len(metadata)>65536:
+                    raise ValueError('Captured database metadata exceeds its bound')
+                if part!=b'\n':
+                    continue
+                line,metadata=metadata,b''
+                if not line.startswith(b'COPY '):
+                    continue
+                if columns is not None or not line.startswith(prefix) or not line.endswith(suffix):
+                    raise ValueError('Captured attachment table is ambiguous')
+                columns=line[len(prefix):-len(suffix)].split(b', ')
+                keys=(b'store_fname',b'checksum',b'file_size')
+                if len(columns)!=len(set(columns)) or not all(key in columns for key in keys):
+                    raise ValueError('Captured attachment columns are unavailable')
+                values=(reference['name'].encode(),reference['checksum'].encode(),str(reference['size']).encode())
+                expected={columns.index(key):value for key,value in zip(keys,values)}
+                continue
+            if part not in (b'\t',b'\n'):
+                if index==0:
+                    marker=(marker+part)[:3]
+                if index in expected and part!=expected[index][offset:offset+len(part)]:
+                    row_matches=False
+                offset+=len(part)
+                continue
+            if part==b'\n' and index==0 and offset==2 and marker==b'\\.':
+                complete=True
+                continue
+            if index in expected and offset!=len(expected[index]):
+                row_matches=False
+            if part==b'\t':
+                index+=1
+                if index>=len(columns):
+                    raise ValueError('Captured attachment row has excess fields')
+                offset=0
+                continue
+            if index+1!=len(columns):
+                raise ValueError('Captured attachment row is incomplete')
+            found=found or row_matches
+            index,offset,marker,row_matches=0,0,b'',True
+    if not complete or metadata:
+        raise ValueError('Captured attachment table is incomplete')
+    return found
+
+
+def compare_captured_database_reference(spec,root,containers,reference):
+    if not valid_attachment_reference(reference):
+        raise RuntimeError('Attachment observation is unverified')
+    try:
+        raw=root/'raw-source'
+        if root.resolve()!=root.absolute() or raw.resolve()!=raw.absolute() or not raw.is_dir():
+            return 'unavailable'
+        with capture_comparison_file(root/'capture.json') as (stream,_):
+            encoded=stream.read(4097)
+            if len(encoded)>4096:
+                return 'unavailable'
+            receipt=json.loads(encoded)
+        if (not isinstance(receipt,dict)
+                or set(receipt)!={'source_binding_sha256','database_sha256','filestore_sha256'}
+                or receipt['source_binding_sha256']!=spec['record']['source_binding_sha256']
+                or any(not isinstance(receipt[key],str) or not re.fullmatch('[a-f0-9]{64}',receipt[key])
+                    for key in receipt)):
+            return 'unavailable'
+        deadline=time.monotonic()+600
+        with capture_comparison_file(raw/'database.dump') as (stream,metadata):
+            bound=spec['record']['storage']['database_bytes']
+            if type(bound) is not int or bound<=0 or not 0<metadata.st_size<=bound:
+                return 'unavailable'
+            value=hashlib.sha256()
+            consumed=0
+            while True:
+                if time.monotonic()>=deadline:
+                    raise TimeoutError('Captured database observation expired')
+                chunk=stream.read(1048576)
+                if not chunk:
+                    break
+                consumed+=len(chunk)
+                if consumed>metadata.st_size:
+                    return 'unavailable'
+                value.update(chunk)
+            if consumed!=metadata.st_size or value.hexdigest()!=receipt['database_sha256']:
+                return 'unavailable'
+            stream.seek(0)
+            lines=captured_attachment_table_chunks(stream,containers,deadline,bound)
+            try:
+                found=captured_attachment_reference_present(lines,reference)
+            finally:
+                close=getattr(lines,'close',None)
+                if close is not None:
+                    close()
+        return 'reference_present' if found else 'reference_not_found'
+    except TimeoutError:
+        return 'incomplete'
+    except (OSError,ValueError,TypeError,KeyError):
+        return 'unavailable'
 
 
 def compare_retained_attachment(spec,root,reference):

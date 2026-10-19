@@ -228,6 +228,15 @@ def register_odoo_upgrade_rehearsal_routes(
                         else {}
                     ),
                     **(
+                        {
+                            "capture_database_reference_validation": result[
+                                "capture_database_reference_validation"
+                            ]
+                        }
+                        if result.get("capture_database_reference_validation") is not None
+                        else {}
+                    ),
+                    **(
                         {"failure_events_unavailable": True}
                         if result.get("failure_events_unavailable")
                         else {}
