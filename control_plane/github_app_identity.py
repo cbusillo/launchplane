@@ -31,6 +31,7 @@ _ALLOWED_INSTALLATION_PERMISSIONS = {"checks": "write", "metadata": "read"}
 _MERGE_TRAIN_TOKEN_PERMISSIONS = {
     "checks": "read",
     "contents": "write",
+    "issues": "write",
     "metadata": "read",
     "pull_requests": "write",
     "statuses": "read",
