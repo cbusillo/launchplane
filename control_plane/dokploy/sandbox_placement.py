@@ -6,6 +6,8 @@ import re
 
 from control_plane.dokploy import api, source
 
+REHEARSAL_PROJECT_DESCRIPTION = "Isolated Odoo rehearsal"
+
 
 class IsolatedPlacementObservationRequired(ValueError):
     """A dispatched create lacks its identity; observe the original operation."""
@@ -88,12 +90,71 @@ def create_isolated_placement(
             api.dokploy_request(host=host, token=token, path=path, method="POST", payload=payload())
         )
         identifier = (response or {}).get(response_key)
+        nested = (response or {}).get(response_key.removesuffix("Id"))
+        if isinstance(nested, dict):
+            nested_identifier = nested.get(response_key)
+            if identifier is not None and identifier != nested_identifier:
+                raise IsolatedPlacementObservationRequired("Creation identities disagree.")
+            identifier = nested_identifier
         if not isinstance(identifier, str) or not identifier.strip():
             raise IsolatedPlacementObservationRequired(
                 "Isolated creation is uncertain; use original-key observation."
             )
         record_identity(field, identifier)
         identities[field] = identifier
+
+
+def observe_empty_isolated_project(root: Path, namespace: str) -> str:
+    """Qualify only the empty project left at the original project-create phase.
+
+    This is observation, not adoption. Its caller must prove the original
+    operation checkpoint and take the execution lease before recording custody.
+    No absent, ambiguous, populated or later-phase placement is retry-safe.
+    """
+    if not re.fullmatch(r"lp-rehearsal-[a-f0-9]{32}", namespace):
+        raise ValueError("Original rehearsal namespace required.")
+    host, token = source.read_dokploy_config(control_plane_root=root)
+    projects = [
+        project
+        for project in api.fetch_dokploy_projects(host=host, token=token)
+        if project.get("name") == namespace
+    ]
+    if len(projects) != 1:
+        raise ValueError("Original project is absent or ambiguous.")
+    project = projects[0]
+    identifier = project.get("projectId")
+    environments = project.get("environments")
+    if (
+        not isinstance(identifier, str)
+        or not identifier.strip()
+        or project.get("description") != REHEARSAL_PROJECT_DESCRIPTION
+        or not isinstance(environments, list)
+        or len(environments) != 1
+    ):
+        raise ValueError("Original project custody is unverified.")
+    environment = environments[0]
+    if (
+        not isinstance(environment, dict)
+        or environment.get("name") != "production"
+        or environment.get("isDefault") is not True
+        or not isinstance(environment.get("environmentId"), str)
+        or not environment["environmentId"]
+        or any(
+            environment.get(key) != []
+            for key in (
+                "applications",
+                "postgres",
+                "mysql",
+                "mariadb",
+                "mongo",
+                "redis",
+                "libsql",
+            )
+        )
+        or [environment[key] for key in ("compose", "composes") if key in environment] != [[]]
+    ):
+        raise ValueError("Original project is not provably empty.")
+    return identifier
 
 
 def created_placement(root: Path, namespace: str) -> tuple[str, str, str]:

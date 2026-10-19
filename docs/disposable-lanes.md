@@ -2531,15 +2531,39 @@ artifact identities and elapsed times are value-free receipts. Provider ids,
 source coordinates and local passwords never reach the client's output.
 
 An uncertain effect stays fenced under its original key. Readback is not replay;
-repeat the original apply only for the provider journal's observation of a completed host receipt,
+repeat the original apply only for a supported original-operation observation,
 never with a new key. An incomplete provider create or partial host operation
 keeps its namespace, phase journal, raw failure custody and storage for diagnosis.
 The route does not guess that absence or a timeout permits another create,
 restore, capture or deletion. Fixed prerequisite codes and the trace identify
 unavailable source, artifact, placement, credentials, state or recovery evidence;
 no provider exception text is returned.
-An interrupted provider create has no automatic adoption path; its partial
-placement remains fenced for diagnosis, with no fresh-key abandonment inferred.
+Before a compose exists, prepare readback uses the original intent and key to
+read its exact journal instead of trying to run a host schedule. It returns
+`completed: false`, the operation state, effect phase and checkpoint time, and
+either `continue_original_prepare` or `hold_unknown`. The read neither changes
+custody nor completes the operation.
+Its fixed `recovery_reason` distinguishes unavailable observation from
+unqualified placement or source/credential prerequisites; provider authorization
+denials retain their HTTP refusal and trace rather than becoming a hold.
+
+`continue_original_prepare` is limited to an interrupted `project_id` effect:
+the original reviewed intent, unchanged source/artifact/placement and existing
+purpose-local credential bindings must agree, and complete provider inventory
+must prove exactly one service-named project with its original description and
+only its empty default environment. Under the original journal and reacquired
+execution lease, the service rechecks that project, records its identity, and
+creates only the remaining children and storage. It never repeats project
+creation or regenerates the existing passwords. Both flat and nested provider
+create receipts record parent custody before creating children.
+
+After reviewing that readback, submit **once** with the original private prepare
+intent, original saved dry-run evidence and original key through the same client
+`apply --reviewed-dry-run` command, then read back. Preserve the original review;
+a fresh plan does not replace the interrupted operation's fingerprint. Missing,
+ambiguous, populated or changed projects, credential/source drift, later effect
+phases and partial host work remain held for diagnosis. No new-key abandonment,
+direct provider cleanup, source capture or later rehearsal action is implied.
 
 Elapsed times describe this isolated simulation. Real source writer drain,
 public DNS/TLS switching, business integration resumption and the actual

@@ -2,18 +2,21 @@
 
 import base64
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hmac
 import json
 from pathlib import Path
 import re
 
+import click
+
 from control_plane import secrets
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.odoo_stable_target_replacement import artifact_odoo_version
 from control_plane.contracts.odoo_upgrade_rehearsal import (
+    ODOO_UPGRADE_REHEARSAL_ROUTE,
     OdooUpgradeRehearsalRecord,
     OdooUpgradeRehearsalRequest,
     RehearsalPrerequisite,
@@ -474,6 +477,102 @@ class OdooRehearsalAdapter:
     request: OdooUpgradeRehearsalRequest
     principal: str
     trace: str
+    _observed_project_id: str = field(default="", init=False)
+
+    @staticmethod
+    def initial_prepare_binding(record: OdooUpgradeRehearsalRecord) -> str:
+        return record.model_copy(
+            update={
+                "project_id": "",
+                "environment_id": "",
+                "compose_id": "",
+                "credential_bindings_sha256": "",
+            }
+        ).binding_sha256
+
+    def partial_prepare_project(self, record: OdooUpgradeRehearsalRecord, phase: str) -> str:
+        from control_plane.dokploy.sandbox_placement import observe_empty_isolated_project
+
+        if (
+            self.request.action != "prepare"
+            or record.state != "planned"
+            or phase != "project_id"
+            or record.environment_id
+            or record.compose_id
+            or record.copies
+            or record.elapsed_seconds
+            or not record.credential_bindings_sha256
+            or record.credential_bindings_sha256
+            != rehearsal_credential_bindings(self.store, record.rehearsal_id)
+        ):
+            raise RehearsalRefused(RehearsalPrerequisite.RECOVERY_REQUIRED)
+        fresh, _, _ = self.inputs()
+        if fresh != record:
+            raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
+        identifier = observe_empty_isolated_project(self.root, record.rehearsal_id)
+        if record.project_id and record.project_id != identifier:
+            raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
+        return identifier
+
+    def prepare_readback(
+        self, record: OdooUpgradeRehearsalRecord, idempotency_key: str
+    ) -> dict[str, object]:
+        """Read the original journal before a compose/host receipt exists."""
+        from control_plane.http_routes.mutation_support import request_fingerprint
+
+        reservation = self.store.read_idempotency_record(
+            scope=record.principal,
+            route_path=ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=record.product),
+            idempotency_key=idempotency_key,
+        )
+        original = self.request.model_copy(
+            update={
+                "mode": "apply",
+                "reviewed_plan_sha256": self.initial_prepare_binding(record),
+            }
+        )
+        if (
+            not idempotency_key
+            or reservation is None
+            or reservation.provider_target_key != record.rehearsal_id
+            or reservation.reconciliation_key != self.reconciliation_key()
+            or reservation.request_fingerprint
+            != request_fingerprint(
+                {
+                    "product": record.product,
+                    **original.model_dump(mode="json"),
+                }
+            )
+        ):
+            raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
+        disposition = "hold_unknown"
+        reason = "operation_not_recoverable"
+        if reservation.state == "reconcile_required":
+            try:
+                self.partial_prepare_project(record, reservation.provider_effect_phase)
+                disposition = "continue_original_prepare"
+                reason = "empty_original_project_observed"
+            except api.DokployRequestFailed as error:
+                if error.status_code in {401, 403}:
+                    raise
+                reason = "observation_unavailable"
+            except RehearsalRefused as error:
+                reason = error.code.value
+            except ValueError:
+                reason = "placement_not_qualified"
+            except (RuntimeError, OSError, click.ClickException):
+                reason = "observation_unavailable"
+        return {
+            "state": record.state,
+            "copies": [],
+            "completed": False,
+            "raw_source_retained": False,
+            "operation_state": reservation.state,
+            "provider_effect_phase": reservation.provider_effect_phase,
+            "provider_effect_started_at": reservation.provider_effect_started_at,
+            "recovery_disposition": disposition,
+            "recovery_reason": reason,
+        }
 
     def target_key(self) -> str:
         return self.request.rehearsal_id
@@ -687,6 +786,16 @@ class OdooRehearsalAdapter:
                 if record is None or record.product != self.product:
                     return ProviderObservation("unknown")
                 require_unaliased_rehearsal(self.store, record)
+                if self.request.action == "prepare" and provider_effect_phase == "project_id":
+                    if self.initial_prepare_binding(record) != self.request.reviewed_plan_sha256:
+                        return ProviderObservation("unknown")
+                    self._observed_project_id = self.partial_prepare_project(
+                        record, provider_effect_phase
+                    )
+                    check()
+                    # Only remaining child creation may continue. The project
+                    # is recorded later, under the reacquired provider lease.
+                    return ProviderObservation("absent", retry_safe=True)
                 result = self.host(record, "observe", check, operation_key=provider_operation_key)
                 if result.get("refusal_code"):
                     return ProviderObservation(
@@ -718,6 +827,7 @@ class OdooRehearsalAdapter:
         )
         from control_plane.dokploy.sandbox_placement import (
             IsolatedPlacementObservationRequired,
+            REHEARSAL_PROJECT_DESCRIPTION,
             create_isolated_placement,
             created_placement,
         )
@@ -731,7 +841,13 @@ class OdooRehearsalAdapter:
             record, _, _ = self.inputs()
             require_rehearsal_transition(record, self.request.action)
             require_unaliased_rehearsal(self.store, record)
-            if record.binding_sha256 != self.request.reviewed_plan_sha256:
+            recovering_project = bool(self._observed_project_id)
+            reviewed_binding = (
+                self.initial_prepare_binding(record)
+                if recovering_project
+                else record.binding_sha256
+            )
+            if reviewed_binding != self.request.reviewed_plan_sha256:
                 raise ProviderMutationRejectedError(
                     RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
                 )
@@ -745,7 +861,17 @@ class OdooRehearsalAdapter:
                 require_unaliased_rehearsal(self.store, fresh)
 
             if self.request.action == "prepare":
-                if any(created_placement(self.root, record.rehearsal_id)):
+                if recovering_project:
+                    checkpoint()
+                    if (
+                        self.partial_prepare_project(record, "project_id")
+                        != self._observed_project_id
+                    ):
+                        raise RehearsalRefused(RehearsalPrerequisite.RECOVERY_REQUIRED)
+                    updated = record.model_copy(update={"project_id": self._observed_project_id})
+                    self.store.compare_and_write_odoo_upgrade_rehearsal(record, updated)
+                    record = updated
+                elif any(created_placement(self.root, record.rehearsal_id)):
                     raise ProviderMutationRejectedError(
                         RehearsalRefused(RehearsalPrerequisite.RECOVERY_REQUIRED)
                     )
@@ -775,10 +901,15 @@ class OdooRehearsalAdapter:
                         self.root,
                         namespace=record.rehearsal_id,
                         server_id=record.server_id,
-                        description="Isolated Odoo rehearsal",
+                        description=REHEARSAL_PROJECT_DESCRIPTION,
                         checkpoint=checkpoint,
                         before_create=lease.checkpoint_effect,
                         record_identity=record_identity,
+                        recorded_placement=(
+                            record.project_id,
+                            record.environment_id,
+                            record.compose_id,
+                        ),
                     )
                 except IsolatedPlacementObservationRequired:
                     raise RehearsalRefused(RehearsalPrerequisite.RECOVERY_REQUIRED) from None
