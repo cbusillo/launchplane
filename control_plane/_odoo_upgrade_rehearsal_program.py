@@ -5,9 +5,13 @@ only, and raw failure material remains outside every application mount.
 """
 
 from control_plane._odoo_rehearsal_source_reader import REHEARSAL_SOURCE_READER_LIBRARY
+from control_plane._odoo_rehearsal_attachment_validation import ATTACHMENT_VALIDATION_PROGRAM
 
 ODOO_UPGRADE_REHEARSAL_PROGRAM = (
     REHEARSAL_SOURCE_READER_LIBRARY
+    + "\nATTACHMENT_VALIDATION_PROGRAM = "
+    + repr(ATTACHMENT_VALIDATION_PROGRAM)
+    + "\n"
     + r"""
 import base64
 import fcntl
@@ -27,11 +31,15 @@ import time
 from datetime import datetime, timezone
 
 
+class RehearsalCommandFailure(RuntimeError):
+    pass
+
+
 def command(arguments, *, stdin=None, stdout=None, environment=None):
     result = subprocess.run(arguments, input=stdin, stdout=stdout or subprocess.PIPE,
         stderr=subprocess.PIPE, env=environment, check=False)
     if result.returncode:
-        raise RuntimeError('Rehearsal command failed; preserve its private custody')
+        raise RehearsalCommandFailure('Rehearsal command failed; preserve its private custody')
     return result.stdout if stdout is None else b''
 
 
@@ -295,8 +303,9 @@ def capture(spec,root,containers,database):
         raise RuntimeError('Captured source version differs from the selected source version')
     # Check the dump's attachment set against the copied bytes, so a concurrent
     # source deletion or incomplete rsync cannot be called a consistent capture.
-    validation="import hashlib,os,stat,psycopg2;from pathlib import Path\nc=psycopg2.connect(host='database',user=os.environ['ODOO_DB_USER'],password=os.environ['ODOO_DB_PASSWORD'],dbname=os.environ['ODOO_DB_NAME'])\nwith c.cursor() as q:\n q.execute('SELECT store_fname,checksum,file_size FROM ir_attachment WHERE store_fname IS NOT NULL')\n for name,checksum,size in q:\n  assert name==checksum[:2]+'/'+checksum and len(checksum)==40 and all(ch in '0123456789abcdef' for ch in checksum); p=Path('/volumes/data/filestore')/os.environ['ODOO_DB_NAME']/name; assert not p.is_symlink() and not p.parent.is_symlink() and stat.S_ISREG(p.stat().st_mode); assert p.stat().st_size==size; h=hashlib.sha1(); f=p.open('rb')\n  for chunk in iter(lambda:f.read(1048576),b''): h.update(chunk)\n  f.close(); assert h.hexdigest()==checksum\nc.close()\n"
-    docker('exec','-e','ODOO_DB_NAME='+database,containers['script-runner'][0],'python3','-c',validation)
+    reason=attachment_validation(containers,database,'validate')
+    if reason!='verified':
+        raise RuntimeError('Attachment validation refused: '+reason)
     return raw
 
 
@@ -388,7 +397,32 @@ def custody_observation(spec, root, action):
         'source_snapshot_directory_present':directory(root/database_names(spec)['source'])}
 
 
-def observe(spec, root, receipt):
+def capture_attachment_observation(spec):
+    database=database_names(spec)['source']
+    containers=inspection(spec,database,spec['source_image'])
+    if containers['web'][1].get('State',{}).get('Running') is not False:
+        return 'writer_active'
+    return attachment_validation(containers,database,'observe')
+
+
+def attachment_validation(containers, database, mode):
+    result=docker('exec','-i','-e','PYTHONDONTWRITEBYTECODE=1','-e','ODOO_DB_NAME='+database,
+        containers['script-runner'][0],'python3','-',mode,
+        stdin=ATTACHMENT_VALIDATION_PROGRAM.encode()).decode()
+    rows=[line.split('=',1)[1] for line in result.splitlines() if line.startswith('attachment_validation=')]
+    if len(rows)!=1:
+        raise RuntimeError('Attachment observation is unverified')
+    value=json.loads(bytes.fromhex(rows[0]))
+    if not isinstance(value,dict) or set(value)!={'reason'} or not isinstance(value['reason'],str) or value['reason'] not in {
+        'dependency_unavailable','environment_unavailable','database_unavailable',
+        'attachment_query_unavailable','attachment_metadata_invalid','attachment_path_unsafe',
+        'attachment_missing','attachment_unreadable','attachment_size_mismatch',
+        'attachment_hash_mismatch','verified','incomplete'}:
+        raise RuntimeError('Attachment observation is unverified')
+    return value['reason']
+
+
+def observe(spec, root, receipt, lock_held=False):
     record=spec['record']
     namespace=record['rehearsal_id']
     action=spec['action']
@@ -422,6 +456,17 @@ def observe(spec, root, receipt):
             'business_host_frozen':False,'completed':False,'raw_source_retained':raw.is_dir(),
             'prepare_not_started':prepare_not_started,
             'custody':custody_observation(spec,root,action)}
+        custody=result['custody']
+        if (lock_held and spec.get('inspect_capture') is True and action=='execute'
+                and record['state']=='prepared' and not copies and custody['effect_started']
+                and custody['raw_database_bytes'] and custody['raw_filestore_bytes']
+                and custody['raw_filestore_extracted'] and custody['capture_receipt_present']
+                and not custody['capture_pending_present']
+                and not custody['source_snapshot_directory_present']):
+            try:
+                result['capture_attachment_validation']=capture_attachment_observation(spec)
+            except RehearsalCommandFailure:
+                result['capture_attachment_validation']='runtime_unavailable'
         print('rehearsal_result='+json.dumps(result).encode().hex())
         return
     result=json.loads(receipt.read_text())
@@ -469,7 +514,7 @@ def main():
                     print('rehearsal_result='+json.dumps({
                         'intent_sha256':record['intent_sha256'],'host_busy':True}).encode().hex())
                 else:
-                    observe(spec,root,receipt)
+                    observe(spec,root,receipt,lock_held=True)
         return
     root.mkdir(mode=0o700,parents=True,exist_ok=True)
     os.chmod(root,0o700)

@@ -2619,6 +2619,29 @@ filestore directory and source snapshot directory exist, plus raw dump/archive
 byte counts. Presence and size do not prove a complete or usable copy. Readback
 holds the existing host execution lock while inspecting custody and reports a
 fixed busy observation if a host process still owns it. It creates no replacement lock.
+For a bound, checkpointed original execute with a retained raw capture and no
+source snapshot, readback may also return `capture_attachment_validation`.
+Under that existing host lock, the verified isolated runtime must have stopped
+web before the probe reads the restored source database and copied filestore.
+The probe uses the same emitted validator as capture, an explicitly read-only
+database session, connection/statement timeouts and a bounded streaming scan.
+Its fixed code distinguishes runtime/login/query availability, invalid metadata,
+unsafe or missing files, size/hash mismatches, verification and an incomplete
+scan. It returns no attachment values or exception text and writes no host
+receipts, markers or Python bytecode. `verified` applies only to this attachment
+scan; it proves neither the raw capture hashes nor completed sanitization or
+recovery eligibility. Every probe result retains `hold_unknown` and the original
+key. It never restores, recaptures, sanitizes, starts a runtime or resumes execute.
+Read the code together with the original failure locations: capture receipt
+presence alone does not establish that restore or sanitization finished. The
+probe checks metadata, file presence and sizes before hashing, within one
+read-only repeatable-read snapshot and the same bounded budget. A failed Docker
+command reports `runtime_unavailable` while retaining the custody observation;
+isolation contradictions and malformed observation output still refuse.
+The observation allows up to ten minutes of scanning within the existing host
+job limit, so a large retained filestore can reach its content checks. It holds
+the existing execution lock for that scan; an incomplete scan still grants no
+continuation and starts from the beginning on a later observation.
 `failure_events_after_checkpoint` projects bounded provider event identities,
 times, fixed provider statuses, traceback presence, host function names and
 native traceback line numbers from

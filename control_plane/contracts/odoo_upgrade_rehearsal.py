@@ -175,6 +175,25 @@ class RehearsalHostResult(BaseModel):
     raw_source_retained: bool = False
     prepare_not_started: bool = False
     custody: RehearsalCustodyObservation | None = None
+    capture_attachment_validation: (
+        Literal[
+            "dependency_unavailable",
+            "environment_unavailable",
+            "database_unavailable",
+            "attachment_query_unavailable",
+            "attachment_metadata_invalid",
+            "attachment_path_unsafe",
+            "attachment_missing",
+            "attachment_unreadable",
+            "attachment_size_mismatch",
+            "attachment_hash_mismatch",
+            "verified",
+            "incomplete",
+            "writer_active",
+            "runtime_unavailable",
+        ]
+        | None
+    ) = None
     refusal_code: Literal[
         "", "rehearsal_storage_capacity_insufficient", "rehearsal_precheck_refused"
     ] = ""
