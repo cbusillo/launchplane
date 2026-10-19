@@ -76,16 +76,21 @@ class SourceMeasurementTests(unittest.TestCase):
         self, *, result: subprocess.CompletedProcess[bytes] | None = None
     ) -> tuple[dict[str, Any], Mock]:
         output = io.StringIO()
+
+        def psql(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+            if result is not None:
+                return result
+            # Older psql prints only COMMIT's suppressed tag for one multi-command -c.
+            stdout = b"" if "-c" in arguments else json.dumps(self.database).encode()
+            return subprocess.CompletedProcess(arguments, 0, stdout=stdout, stderr=b"")
+
         with (
             patch.object(
                 sys, "argv", ["measure", "fixture_db_reader", "fixture_db", str(self.filestore)]
             ),
             patch(
                 "subprocess.run",
-                return_value=result
-                or subprocess.CompletedProcess(
-                    [], 0, stdout=json.dumps(self.database).encode(), stderr=b""
-                ),
+                side_effect=psql,
             ) as database,
             redirect_stdout(output),
         ):
@@ -120,7 +125,7 @@ class SourceMeasurementTests(unittest.TestCase):
         database.assert_called_once()
         arguments = database.call_args.args[0]
         self.assertEqual(arguments[:6], ["sudo", "-n", "-u", "fixture_db_reader", "--", "psql"])
-        self.assertIn("BEGIN READ ONLY;", arguments[-1])
+        self.assertIn(b"BEGIN READ ONLY;", database.call_args.kwargs["input"])
         self.assertEqual(arguments[arguments.index("-d") + 1], "fixture_db")
         self.assertTrue(database.call_args.kwargs["capture_output"])
         self.assertNotIn("pg_dump", arguments)
@@ -141,7 +146,7 @@ class SourceMeasurementTests(unittest.TestCase):
                 self.assertEqual(set(self.filestore.iterdir()), {member})
                 member.unlink()
 
-    def test_selected_filestore_refuses_links_aliasing_parents_and_a_regular_file(self) -> None:
+    def test_selected_filestore_follows_root_aliases_like_capture_and_refuses_a_file(self) -> None:
         original = self.filestore
         selected = self.root / "selected-filestore"
         selected.symlink_to(original, target_is_directory=True)
@@ -149,11 +154,15 @@ class SourceMeasurementTests(unittest.TestCase):
         alias.symlink_to(self.root, target_is_directory=True)
         regular = self.root / "regular-file"
         regular.write_bytes(b"fixture file is not a filestore directory")
-        for path in (selected, alias / original.name, regular):
+        for path in (selected, alias / original.name):
             with self.subTest(path=path):
                 self.filestore = path
                 result, _ = self.measure()
-                self.assertEqual(result, {"type": "failed"})
+                self.assertEqual(result["type"], "measurements")
+                self.assertEqual(result["filestore_apparent_bytes"], original.stat().st_size)
+        self.filestore = regular
+        result, _ = self.measure()
+        self.assertEqual(result, {"type": "failed"})
 
     def test_database_denial_stops_before_filestore_traversal(self) -> None:
         for message in (

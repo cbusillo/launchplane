@@ -8,8 +8,8 @@ from pathlib import Path
 
 def measurements():
     query="BEGIN READ ONLY; SET LOCAL statement_timeout='60s'; SELECT json_build_object('database_bytes',pg_database_size(current_database()),'odoo_version',(SELECT latest_version FROM ir_module_module WHERE name='base')); COMMIT;"
-    result=subprocess.run(['sudo','-n','-u',sys.argv[1],'--','psql','-X','-qAt','-v','ON_ERROR_STOP=1','-d',sys.argv[2],'-c',query],
-        capture_output=True,check=False,timeout=70)
+    result=subprocess.run(['sudo','-n','-u',sys.argv[1],'--','psql','-X','-qAt','-v','ON_ERROR_STOP=1','-d',sys.argv[2]],
+        input=query.encode(),capture_output=True,check=False,timeout=70)
     if result.returncode:
         denied=any(value in result.stderr.lower() for value in
             (b'permission denied',b'authentication failed',b'no password supplied',b'password is required',
@@ -17,8 +17,9 @@ def measurements():
         return {'type':'denied' if denied else 'failed'}
     data=json.loads(result.stdout)
     apparent=allocated=0
-    selected=Path(sys.argv[3])
-    if selected.resolve(strict=True)!=selected.absolute() or not selected.is_dir():
+    # Match capture's tar -C root while still refusing links inside the tree.
+    selected=Path(sys.argv[3]).resolve(strict=True)
+    if not selected.is_dir():
         raise ValueError('Source filestore is unverified')
     pending=[selected]
     while pending:
