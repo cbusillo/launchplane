@@ -152,6 +152,122 @@ class ApplicationStateVolumeAdapter:
     operation_key: str = ""
 
     @classmethod
+    def completed_for_testing_lane(
+        cls,
+        root: Path,
+        store: PostgresRecordStore,
+        *,
+        product: str,
+        context: str,
+        scope: str,
+        trace: str,
+    ) -> "ApplicationStateVolumeAdapter":
+        """Resolve this caller's original allocation from its service-owned markers."""
+        from control_plane.application_state_volume_retention import (
+            state_volume_progress_operation_key,
+        )
+        from control_plane.dokploy_target_setup_http import DokployTargetSetupEnvelope
+
+        target = store.read_dokploy_target_record(context_name=context, instance_name="testing")
+        marker = re.fullmatch(r"lp-testing-project-([a-f0-9]{32})", target.project_name)
+        if target.target_type != "application" or marker is None:
+            raise ValueError("Testing continuation requires an original application allocation.")
+        plan_id = marker[1]
+        plan = store.read_idempotency_record(
+            scope=scope, route_path=PLAN_ROUTE, idempotency_key=plan_id
+        )
+        if plan is None or plan.state != "completed":
+            raise ValueError(
+                "Original application allocation belongs to another caller or is absent."
+            )
+        intent = plan.response_payload
+        if (
+            intent.get("product") != product
+            or intent.get("plan_id") != plan_id
+            or not isinstance(intent.get("request"), dict)
+            or not isinstance(intent.get("plan_sha256"), str)
+            or any(
+                intent.get(key) != value
+                for key, value in state_volume_allocation_names(plan_id).items()
+            )
+        ):
+            raise ValueError("Original application allocation identity differs from this lane.")
+        request = DokployTargetSetupEnvelope.model_validate(
+            {
+                **intent["request"],
+                "mode": "readback",
+                "state_volume_plan_id": plan_id,
+                "expected_plan_sha256": intent["plan_sha256"],
+            }
+        )
+        if request.context != context:
+            raise ValueError("Original application allocation belongs to another lane.")
+        key = state_volume_progress_operation_key(store, scope, plan_id)
+        adapter = cls.prepare(root, store, request, scope, trace, product, key)
+        receipt = store.read_idempotency_record(scope=scope, route_path=ROUTE, idempotency_key=key)
+        if (
+            receipt is None
+            or receipt.state != "completed"
+            or receipt.provider_target_key != adapter.target_key()
+            or receipt.reconciliation_key != adapter.reconciliation_key()
+            or receipt.request_fingerprint != adapter.reconciliation_key()
+            or store.read_original_mutation_intent(receipt) != intent
+        ):
+            raise ValueError("Original application allocation has no completed matching receipt.")
+        result = receipt.response_payload.get("result", {})
+        if (
+            not isinstance(result, dict)
+            or result.get("allocation_state") != "adopted"
+            or result.get("applied") is not True
+            or result.get("deployment_performed") is not False
+        ):
+            raise ValueError("Original application allocation was not completed and adopted.")
+        return adapter
+
+    def qualify_testing_continuation(self, *, inspect_provider: bool) -> str:
+        """Verify the adopted allocation; history alone never attests its current state."""
+        from control_plane.application_state_volume_retention import require_state_volume_owner
+
+        require_state_volume_owner(self.store, product=self.product, context=self.request.context)
+        phase = self._progress_phase()
+        data = json.loads(phase)
+        if not isinstance(data, dict) or not all(
+            isinstance(data.get(key), str) and data[key]
+            for key in ("application", "environment", "project", "app_name")
+        ):
+            raise ValueError("Original application allocation progress is incomplete.")
+        self._verify_adopted(phase, configuration_verified=False)
+        if inspect_provider:
+            from control_plane.dokploy.application_domains import (
+                require_private_application_domains,
+            )
+            from control_plane.dokploy.fresh_application import require_fresh_application_runtime
+
+            live = self._live(data["application"], data["environment"], data["app_name"])
+            require_fresh_application_runtime(
+                live, environment_id=data["environment"], project_id=data["project"]
+            )
+            target = self.store.read_dokploy_target_record(
+                context_name=self.request.context, instance_name="testing"
+            )
+            profile = self.store.read_product_profile_record(self.product)
+            require_private_application_domains(
+                live.get("domains"),
+                hostname=target.domains[0] if len(target.domains) == 1 else None,
+                runtime_port=profile.runtime_port,
+                application_id=data["application"],
+            )
+            if not self._mount_matches(live):
+                raise ValueError("Application source, execution, storage or placement changed.")
+        return request_fingerprint(
+            {
+                "intent": self.intent,
+                "phase": phase,
+                "binding": _binding(self.store, self.request.context),
+            }
+        )
+
+    @classmethod
     def prepare(
         cls,
         root: Path,

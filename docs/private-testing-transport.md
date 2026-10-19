@@ -46,6 +46,56 @@ application testing lanes. Q453 accepted this topology instead of the
 Compose-only upstream binding and its host firewall requirement. It does not
 change the restrictions on the Compose path below or any production record.
 
+### Continue a freshly allocated application
+
+Keep the `isolation_staging` hold through endpoint and private-route preparation.
+After testing inputs are configured, use the existing `testing-hold-dry-run` and
+`testing-hold-apply` helpers with `--lift --purpose isolation_staging` and the same
+product, context, testing instance and audit reason. Save the dry run, review its
+digest, then apply with that evidence and a stable original idempotency key.
+Put the helper's global `--timeout 360` before the apply subcommand so its
+300-second bounded host inspection can finish and return its receipt.
+
+The original Director agent can lift only its own staging interlock on the
+fresh conventional application and lane-only volume it already allocated. The
+service resolves that caller's completed allocation receipt itself and checks
+current exclusive ownership, placement, empty source/environment, sole mount and
+absence of deployment, protected use, needed data, aliases and uncertain effects.
+The original environment and project IDs and their inherited environment inputs
+must also match the empty allocation. The application must retain its vanilla
+single-replica runtime: no custom Swarm options, networks, published ports,
+execution, registry bindings, security or redirects. Nullable Swarm options must
+stay null, since even empty objects override provider defaults. Supported testing
+domain setup remains available: either no provider domain or the lane's one exact
+private HTTP application origin at the runtime port, with root paths and no TLS,
+middleware, authentication or entrypoint override. The hostname must remain
+exclusive of other lanes' domains, public hosts and pending hostname effects.
+Dockerfile/build-path settings skipped by
+Docker-source deployment do not block continuation.
+This boundary follows Dokploy's
+[application defaults](https://github.com/Dokploy/dokploy/blob/e0c8d80cdea15a4ac3fe495a6ad38e043b4b80b5/packages/server/src/db/schema/application.ts)
+and [runtime construction](https://github.com/Dokploy/dokploy/blob/e0c8d80cdea15a4ac3fe495a6ad38e043b4b80b5/packages/server/src/utils/builders/index.ts),
+including the [domain defaults and API fields](https://github.com/Dokploy/dokploy/blob/e0c8d80cdea15a4ac3fe495a6ad38e043b4b80b5/packages/server/src/db/schema/domain.ts).
+Staff, foreign, legacy and Compose interlocks keep their existing protections.
+
+Dry-run remains an inert hold plan and does not qualify provider readiness.
+Apply runs a fixed read-only
+inspection through a disabled manual job on the recorded server before clearing
+the hold. The allocated Docker volume and its backing directory must still be
+absent, and no running or stopped container may consume the allocation or overlap
+its storage through a writable path. Administrative read-only parent mounts are
+allowed; exact allocation paths and children remain protected consumers.
+Existing volumes, incomplete inspection and drift remain held for
+separate recovery; this path creates or deletes no storage. The hold and replay
+receipt commit atomically. Keep the original key after an uncertain reply.
+The disabled inspection job reuses one per-lane slot on the recorded server.
+
+A staging lift requests no reconcile and performs no workload deployment. The
+normal testing event/sweep then delivers managed inputs and the verified build
+through the existing deployment gates. Standalone runtime sync remains subject
+to its normal qualification; do not bypass a refusal. Actual runtime identity,
+health, monitor cadence and Chris's authenticated receiver proof remain separate.
+
 ### Health probes with public wildcard DNS
 
 An application testing endpoint may retain the existing public wildcard DNS.
