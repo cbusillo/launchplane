@@ -223,6 +223,11 @@ def register_odoo_upgrade_rehearsal_routes(
                     "prepare_not_started": result.get("prepare_not_started", False),
                     **({"custody": result["custody"]} if result.get("custody") else {}),
                     **(
+                        {"capture_attachment_validation": result["capture_attachment_validation"]}
+                        if result.get("capture_attachment_validation") is not None
+                        else {}
+                    ),
+                    **(
                         {"failure_events_unavailable": True}
                         if result.get("failure_events_unavailable")
                         else {}

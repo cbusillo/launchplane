@@ -798,7 +798,18 @@ class OdooRehearsalAdapter:
                 except (ValueError, OSError, click.ClickException):
                     diagnostics["failure_events_unavailable"] = True
         try:
-            observation = self.host(record, "observe", checkpoint, operation_key=operation_key)
+            observation = self.host(
+                record,
+                "observe",
+                checkpoint,
+                operation_key=operation_key,
+                inspect_capture=(
+                    journal_status == "bound"
+                    and journal.get("operation_state") == "reconcile_required"
+                    and journal.get("provider_effect_phase") == "execute"
+                    and bool(journal.get("provider_effect_started_at"))
+                ),
+            )
         except api.DokployRequestFailed as error:
             if error.status_code in {401, 403}:
                 raise
@@ -969,6 +980,7 @@ class OdooRehearsalAdapter:
         mode: str,
         *,
         operation_key: str = "",
+        inspect_capture: bool = False,
     ) -> str:
         if mode == "observe" or self.request.action in {"verify", "retire"}:
             source_values: dict[str, str] = {}
@@ -982,6 +994,7 @@ class OdooRehearsalAdapter:
         )
         spec["attempt_sha256"] = canonical_json_sha256({"operation_key": operation_key})
         spec["record_binding_sha256"] = record.binding_sha256
+        spec["inspect_capture"] = mode == "observe" and inspect_capture
         program = str(spec.pop("program"))
         encoded = base64.b64encode(json.dumps(spec, sort_keys=True).encode()).decode()
         # Keep both Dokploy's remote shell materializer and Python's argv small.
@@ -1022,11 +1035,14 @@ class OdooRehearsalAdapter:
         *,
         operation_key: str = "",
         prepared_script: str | None = None,
+        inspect_capture: bool = False,
     ) -> dict[str, object]:
         script = (
             prepared_script
             if prepared_script is not None
-            else self.host_script(record, mode, operation_key=operation_key)
+            else self.host_script(
+                record, mode, operation_key=operation_key, inspect_capture=inspect_capture
+            )
         )
         evidence = self.run_script(record, script, checkpoint)
         try:

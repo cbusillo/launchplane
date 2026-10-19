@@ -1545,6 +1545,152 @@ class RehearsalScenario(unittest.TestCase):
 
 
 class RehearsalHostSafetyTests(unittest.TestCase):
+    def test_capture_attachment_probe_refuses_a_running_writer_before_exec(self) -> None:
+        import json
+        from control_plane._odoo_rehearsal_attachment_validation import (
+            ATTACHMENT_VALIDATION_PROGRAM,
+        )
+
+        spec, _, containers = self.storage_fixture(
+            {"database_bytes": 40, "filestore_bytes": 80, "staging_bytes": 20, "reserve_bytes": 10}
+        )
+        spec["source_image"] = self.spec["image_reference"]
+        self.host["inspection"] = Mock(return_value=containers)
+        self.host["docker"] = Mock(
+            return_value=(
+                "attachment_validation="
+                + json.dumps({"reason": "database_unavailable"}).encode().hex()
+            ).encode()
+        )
+        containers["web"][1]["State"]["Running"] = True
+        self.assertEqual(self.host["capture_attachment_observation"](spec), "writer_active")
+        self.host["docker"].assert_not_called()
+        containers["web"][1]["State"]["Running"] = False
+        self.assertEqual(self.host["capture_attachment_observation"](spec), "database_unavailable")
+        self.assertEqual(
+            self.host["docker"].call_args.kwargs["stdin"], ATTACHMENT_VALIDATION_PROGRAM.encode()
+        )
+
+    def test_emitted_attachment_validator_classifies_runtime_and_read_only_database_failures(
+        self,
+    ) -> None:
+        import os
+        import sys
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+        from control_plane._odoo_rehearsal_attachment_validation import (
+            ATTACHMENT_VALIDATION_PROGRAM,
+        )
+
+        program: dict[str, Any] = {"__name__": "attachment_fixture"}
+        exec(compile(ATTACHMENT_VALIDATION_PROGRAM, "attachment_fixture", "exec"), program)
+        connection = MagicMock()
+        cursor = connection.cursor.return_value.__enter__.return_value
+        driver = SimpleNamespace(connect=Mock(return_value=connection))
+        environment = {
+            "ODOO_DB_NAME": "fixture",
+            "ODOO_DB_USER": "fixture",
+            "ODOO_DB_PASSWORD": "fixture-private",
+        }
+        with (
+            patch.dict(sys.modules, {"psycopg2": driver}),
+            patch.dict(os.environ, environment, clear=True),
+            patch.object(sys, "argv", ["validator", "observe"]),
+        ):
+            # The emitted entry function uses an explicitly read-only session;
+            # file cases below execute its real file validator separately.
+            program["validate_attachment_files"] = Mock(return_value="verified")
+            self.assertEqual(program["attachment_validation_main"](), "verified")
+            connection.set_session.assert_called_once_with(readonly=True)
+            connection.rollback.assert_called_once()
+            connection.close.assert_called_once()
+            self.assertGreater(driver.connect.call_args.kwargs["connect_timeout"], 0)
+            cursor.execute.side_effect = [None, RuntimeError("private SQL detail")]
+            self.assertEqual(
+                program["attachment_validation_main"](), "attachment_query_unavailable"
+            )
+            driver.connect.side_effect = RuntimeError("private login detail")
+            self.assertEqual(program["attachment_validation_main"](), "database_unavailable")
+        with patch.dict(sys.modules, {"psycopg2": None}):
+            self.assertEqual(program["attachment_validation_main"](), "dependency_unavailable")
+        with patch.dict(sys.modules, {"psycopg2": driver}), patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(program["attachment_validation_main"](), "environment_unavailable")
+
+    def test_emitted_attachment_validator_preserves_bytes_and_distinguishes_integrity_failures(
+        self,
+    ) -> None:
+        from types import SimpleNamespace
+        import sys
+        from unittest.mock import MagicMock
+        from control_plane._odoo_rehearsal_attachment_validation import (
+            ATTACHMENT_VALIDATION_PROGRAM,
+        )
+
+        program: dict[str, Any] = {"__name__": "attachment_fixture"}
+        exec(compile(ATTACHMENT_VALIDATION_PROGRAM, "attachment_fixture", "exec"), program)
+        root = (self.fixture.root / "attachments").resolve()
+        root.mkdir()
+        content = b"captured attachment fixture"
+        checksum = hashlib.sha1(content).hexdigest()
+        name = checksum[:2] + "/" + checksum
+        path = root / name
+        path.parent.mkdir()
+        path.write_bytes(content)
+        validate = program["validate_attachment_files"]
+        connection = MagicMock()
+        connection.cursor.return_value.__enter__.return_value.__iter__.return_value = iter(
+            [(name, checksum, len(content))]
+        )
+        program["Path"] = lambda _: root.parent
+        with (
+            patch.dict(sys.modules, {"psycopg2": SimpleNamespace(connect=lambda **_: connection)}),
+            patch.dict(
+                os.environ,
+                {
+                    "ODOO_DB_NAME": root.name,
+                    "ODOO_DB_USER": "fixture",
+                    "ODOO_DB_PASSWORD": "fixture",
+                },
+                clear=True,
+            ),
+            patch.object(sys, "argv", ["validator", "observe"]),
+        ):
+            self.assertEqual(program["attachment_validation_main"](), "verified")
+        for rows, expected in (
+            ([(name, checksum, len(content))], "verified"),
+            ([(name, None, len(content))], "attachment_metadata_invalid"),
+            ([("../private", checksum, len(content))], "attachment_metadata_invalid"),
+            ([(name, checksum, len(content) + 1)], "attachment_size_mismatch"),
+        ):
+            with self.subTest(expected=expected):
+                self.assertEqual(validate(rows, root, None), expected)
+                self.assertEqual(path.read_bytes(), content)
+        program["time"] = SimpleNamespace(monotonic=lambda: 2)
+        self.assertEqual(validate([(name, checksum, len(content))], root, 1), "incomplete")
+        path.write_bytes(b"x" * len(content))
+        self.assertEqual(
+            validate([(name, checksum, len(content))], root, None), "attachment_hash_mismatch"
+        )
+        self.assertEqual(path.read_bytes(), b"x" * len(content))
+        path.unlink()
+        self.assertEqual(
+            validate([(name, checksum, len(content))], root, None), "attachment_missing"
+        )
+        target = root / "private-fixture"
+        target.write_bytes(content)
+        path.symlink_to(target)
+        self.assertEqual(
+            validate([(name, checksum, len(content))], root, None), "attachment_path_unsafe"
+        )
+        self.assertEqual(target.read_bytes(), content)
+        path.unlink()
+        path.write_bytes(content)
+        with patch.object(program["os"], "open", side_effect=PermissionError("private path")):
+            self.assertEqual(
+                validate([(name, checksum, len(content))], root, None), "attachment_unreadable"
+            )
+        self.assertEqual(path.read_bytes(), content)
+
     def setUp(self) -> None:
         from tests.test_odoo_testing_restore import FreshTestingHostProgramTests
         from control_plane.odoo_upgrade_rehearsal import rehearsal_host_program
@@ -1709,6 +1855,22 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         self.assertFalse(observed["completed"])
         self.assertEqual((raw / "database.dump").read_bytes(), before)
         self.host["docker"].assert_not_called()
+        # A complete retained capture can be inspected without restoring,
+        # sanitizing, recapturing or releasing its original effect.
+        (root / "capture.json").write_text("{}")
+        (raw / "filestore.tar").write_bytes(b"archive fixture")
+        (raw / "filestore").mkdir()
+        spec["inspect_capture"] = True
+        self.host["capture_attachment_observation"] = Mock(return_value="database_unavailable")
+        self.assertNotIn("capture_attachment_validation", self.run_host(spec))
+        self.host["capture_attachment_observation"].assert_not_called()
+        (root / ".execution.lock").touch()
+        observed = self.run_host(spec)
+        self.assertEqual(observed["capture_attachment_validation"], "database_unavailable")
+        self.assertFalse(observed["completed"])
+        self.assertEqual((raw / "database.dump").read_bytes(), before)
+        self.host["docker"].assert_not_called()
+        (raw / "filestore").rmdir()
         import fcntl
 
         with (root / ".execution.lock").open("w") as lock:
@@ -2400,6 +2562,7 @@ class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
             "completed": False,
             "raw_source_retained": True,
             "custody": custody,
+            "capture_attachment_validation": "verified",
         }
         payload = fixture.request.model_copy(
             update={"mode": "readback", "action": "execute"}
@@ -2443,6 +2606,20 @@ class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(result["original_key_required"])
                 self.assertNotIn("_provider_operation_key", result)
                 self.assertTrue(host.call_args.kwargs["operation_key"])
+                self.assertTrue(host.call_args.kwargs["inspect_capture"])
+                self.assertEqual(result["capture_attachment_validation"], "verified")
+                self.assertEqual(result["recovery_disposition"], "hold_unknown")
+        with patch.object(OdooRehearsalAdapter, "host", return_value=observed) as host:
+            response = await request(
+                app,
+                "POST",
+                ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=fixture.product),
+                payload=payload,
+                headers={"Idempotency-Key": "unbound-key"},
+            )
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertFalse(host.call_args.kwargs["inspect_capture"])
+        self.assertEqual(response.json()["result"]["recovery_disposition"], "hold_unknown")
         self.assertEqual(fixture.store.list_held_provider_target_reservations(), before)
         self.assertEqual(fixture.store.read_odoo_upgrade_rehearsal(fixture.identifier), prepared)
 
