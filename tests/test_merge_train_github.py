@@ -1910,6 +1910,8 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 "metadata_incomplete",
                 "metadata_unavailable",
                 "suite_mismatch",
+                "old_failed",
+                "canonical_case",
             ):
                 with self.subTest(consumer=consumer, change=change):
                     head = "candidate-sha"
@@ -1952,6 +1954,8 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                         old["run_started_at"] = "2026-01-01T10:02:00Z"
                     elif change == "suite_mismatch":
                         old["check_suite_id"] = 30
+                    elif change == "old_failed":
+                        old["conclusion"] = "failure"
                     checks = [
                         {
                             **_required_check_run("security-gate", "completed", result),
@@ -1966,6 +1970,11 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                             (12, 102, 20, "success"),
                         )
                     ]
+                    if change == "canonical_case":
+                        for check in checks:
+                            check["details_url"] = str(check["details_url"]).replace(
+                                "example/tool", "Example/Tool"
+                            )
                     responses = (
                         *(
                             ()
@@ -2003,7 +2012,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                             )
                             .required_checks_status
                         )
-                    if change == "replacement":
+                    if change in {"replacement", "canonical_case"}:
                         self.assertEqual(status, "pass")
                     else:
                         self.assertNotEqual(status, "pass")

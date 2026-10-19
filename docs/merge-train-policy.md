@@ -830,9 +830,11 @@ The GitHub adapter distinguishes superseded Actions executions from independent
 check suites using the shared workflow execution selector. A failed or pending
 Actions job triggers a bounded, complete exact-head workflow inventory. Only a
 completed superseded execution with matching job link, head and suite can be
-removed, after all current executions have settled successfully. Different
+removed if its workflow was cancelled, after all current executions have settled
+successfully. Genuine failed executions keep their existing blockers. Different
 workflows, events, source repositories and PR targets remain independent; newer
 reruns and incomplete or unavailable metadata retain the existing blockers.
+Unavailable metadata emits a bounded warning without provider bodies or credentials.
 This applies to original-head, candidate and base check reads without changing
 required-check identities, admission, or landing protection.
 

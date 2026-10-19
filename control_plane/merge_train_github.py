@@ -5550,6 +5550,7 @@ def _actions_check_identity(
     match = re.fullmatch(
         rf"https://github\.com/{re.escape(repository_path)}/actions/runs/([1-9][0-9]*)/job/([1-9][0-9]*)",
         str(check.get("details_url") or ""),
+        re.IGNORECASE,
     )
     if match is None or check.get("id") != int(match[2]):
         return None
@@ -5564,7 +5565,7 @@ def _without_superseded_actions_checks(
     check_runs: list[object],
 ) -> list[object]:
     """Retain blockers unless complete execution evidence proves they are history."""
-    from github_plan_status.workflow_runs import current_workflow_runs, workflow_execution_identity
+    from github_plan_status.workflow_runs import current_workflow_runs
 
     identities = [
         _actions_check_identity(check, repository_path=repository_path, head_sha=head_sha)
@@ -5576,6 +5577,14 @@ def _without_superseded_actions_checks(
     ):
         return check_runs
     runs: list[dict[str, object]] = []
+
+    def unavailable(reason: str) -> list[object]:
+        logger.warning(
+            "Cannot select current Actions executions; retaining existing check blockers: %s",
+            reason,
+        )
+        return check_runs
+
     try:
         for page in range(1, 11):
             query = urlencode({"head_sha": head_sha, "per_page": "100", "page": str(page)})
@@ -5592,14 +5601,14 @@ def _without_superseded_actions_checks(
                 or not isinstance(total, int)
                 or isinstance(total, bool)
             ):
-                return check_runs
+                return unavailable("malformed_workflow_inventory")
             runs.extend(_json_object(value, "GitHub workflow run") for value in values)
             if len(values) < 100:
                 if len(runs) != total:
-                    return check_runs
+                    return unavailable("incomplete_workflow_inventory")
                 break
         else:
-            return check_runs
+            return unavailable("workflow_inventory_bound")
         selection = current_workflow_runs(runs, head_sha)
         current = selection["current"]
         # A new run without jobs must never turn an old failed head green.
@@ -5614,10 +5623,18 @@ def _without_superseded_actions_checks(
         superseded = {
             (run["id"], run["check_suite_id"])
             for run in selection["superseded"]
-            if run["id"] not in current_ids and workflow_execution_identity(run) is not None
+            if run["id"] not in current_ids and run.get("conclusion") == "cancelled"
         }
-    except (MergeTrainGitHubError, HTTPError, URLError, OSError, ValueError, KeyError, TypeError):
-        return check_runs
+    except (
+        MergeTrainGitHubError,
+        HTTPError,
+        URLError,
+        OSError,
+        ValueError,
+        KeyError,
+        TypeError,
+    ) as error:
+        return unavailable(type(error).__name__)
     return [
         check
         for check, identity in zip(check_runs, identities, strict=True)
@@ -5722,6 +5739,7 @@ def _github_request_route_template(path: str) -> str:
         "/repos/{owner}/{repo}/commits/{sha}",
         "/repos/{owner}/{repo}/commits/{sha}/check-runs",
         "/repos/{owner}/{repo}/commits/{sha}/status",
+        "/repos/{owner}/{repo}/actions/runs",
         "/repos/{owner}/{repo}/compare/{comparison}",
         "/repos/{owner}/{repo}/git/commits/{sha}",
         "/repos/{owner}/{repo}/git/refs",
