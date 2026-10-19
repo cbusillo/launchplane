@@ -70,6 +70,7 @@ class DisposableLaneObservationRequest(BaseModel):
     instance: str = Field(min_length=1)
     preview_id: str = ""
     expected_binding_sha256: str = ""
+    expected_observation_sha256: str = ""
     usage: Literal["unknown", "unused", "in_use"] = "unknown"
     data: Literal["unknown", "reproducible", "only_copy"] = "unknown"
     production_resources: Literal["unknown", "isolated", "separation_ready", "shared"] = "unknown"

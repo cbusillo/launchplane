@@ -387,7 +387,7 @@
         ],
         "operation_id": "record_disposable_lane_safety",
         "path": "/v1/disposable-lanes/observations",
-        "purpose": "Inspect or collect exact-lane service safety evidence, record unknown assertions, clear evidence or prepare a retained testing replacement; unavailable facts stay unknown.",
+        "purpose": "Inspect or collect exact-lane service safety evidence, record unknown assertions or prepare a retained testing replacement. Clear requires the reviewed inspection's expected_binding_sha256 and expected_observation_sha256, comparing the exact current report or its absence on the same owned preview or declared testing lane; changed bindings or later reports refuse without deleting evidence. Unavailable facts stay unknown.",
         "response_statuses": [
           "202",
           "400",
@@ -398,9 +398,10 @@
           "503"
         ],
         "reviewed_evidence": [
-          "expected_binding_sha256"
+          "expected_binding_sha256",
+          "expected_observation_sha256"
         ],
-        "schema_fingerprint_sha256": "544c4ee51320540564d30bcddd3d12450555631efa403b2ca519964b8a975458",
+        "schema_fingerprint_sha256": "08c156407604b4c48a65eb9f97abd8eda48cac03628cd23df288eb9cb441d043",
         "supported_surfaces": [
           "service_api"
         ]
@@ -885,8 +886,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "391b954bb0e74b2d92eda5dadfacaee940b02621"
+    "source_commit_sha": "b6977ea1570cbe76f323a7e431a9243485eb2dd0"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "1d73f8d14a89eacb7cc6a0a12c45230546209aad31de56e05477254285ec68cf"
+  "semantic_digest_sha256": "4089385dbcfae5074aac56a439ee8ecfe9b1b3062ca9903f7ec938bbae9da722"
 }

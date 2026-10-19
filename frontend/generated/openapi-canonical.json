@@ -5953,6 +5953,11 @@
             "title": "Expected Binding Sha256",
             "type": "string"
           },
+          "expected_observation_sha256": {
+            "default": "",
+            "title": "Expected Observation Sha256",
+            "type": "string"
+          },
           "instance": {
             "minLength": 1,
             "title": "Instance",
