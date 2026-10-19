@@ -321,6 +321,19 @@ fifteen-minute cap; expiry still requires fresh facts before another effect.
 Unknown facts stay unknown. Existing protected reports cannot be overwritten by
 an unverified safe assertion. This supplies scheduled preview cleanup's facts
 through the existing service API, without direct record edits.
+Scheduled preview cleanup requires current unused/reproducible facts and a
+confirmed closed PR. It does not require `production_resources: isolated`:
+credentials the preview reads are outside its destroy set. Production lanes,
+inexact preview identities and targets shared with another lane still refuse.
+The destroy path remains limited to the preview's own target and storage;
+production-shared targets, volumes or databases are not disposable. Runtime
+sync, rebuild and refresh retain their existing isolation rules. Credential
+separation is independent work, not a prerequisite for deleting a preview.
+Driver-managed preview database destruction checks the database and role against
+that preview's generated identifiers and the template server before any effect.
+A foreign database, role or server is held without deleting the application or
+issuing database commands. The shared resolver also protects refresh from
+altering a foreign role.
 For testing lanes, caller-supplied facts and references remain assertions: while an authoritative collector is unavailable, the service
 stores usage, custody and isolation as `unknown`, even if the request asserts
 `unused`, `reproducible` or `isolated`. Those assertions never permit an apply.

@@ -1109,7 +1109,15 @@ def _runtime_identity_mismatch_is_hard(detail: str) -> bool:
 
 def _resolve_existing_preview_database(
     existing_application: JsonObject | None,
+    *,
+    database_name: str,
+    role_name: str,
+    template_database: _DatabaseParts,
 ) -> _DatabaseParts | None:
+    if database_name == template_database.database or role_name == template_database.username:
+        raise VeriReelPreviewRefreshConfigError(
+            "Preview database ownership is unverified; no database or application changes allowed."
+        )
     if existing_application is None:
         return None
     database_url = dokploy_api.parse_dokploy_env_text(
@@ -1120,7 +1128,16 @@ def _resolve_existing_preview_database(
     )
     if not database_url:
         return None
-    return _parse_database_url(database_url)
+    database = _parse_database_url(database_url)
+    if (
+        database.database != database_name
+        or database.username != role_name
+        or (database.host, database.port) != (template_database.host, template_database.port)
+    ):
+        raise VeriReelPreviewRefreshConfigError(
+            "Preview database ownership is unverified; no database or application changes allowed."
+        )
+    return database
 
 
 def execute_verireel_preview_refresh(
@@ -1196,11 +1213,16 @@ def execute_verireel_preview_refresh(
             if _is_dokploy_provider_failure(exc):
                 raise VeriReelPreviewRefreshTransportError(str(exc)) from exc
             raise VeriReelPreviewRefreshConfigError(str(exc)) from exc
-    existing_database = _resolve_existing_preview_database(existing_snapshot)
+    database_name, role_name = _preview_database_identifiers(request.preview_slug, database_prefix)
+    existing_database = _resolve_existing_preview_database(
+        existing_snapshot,
+        database_name=database_name,
+        role_name=role_name,
+        template_database=template_database,
+    )
     existing_env_map = dokploy_api.parse_dokploy_env_text(
         str((existing_snapshot or {}).get("env") or "")
     )
-    database_name, role_name = _preview_database_identifiers(request.preview_slug, database_prefix)
     database_parts = existing_database or _DatabaseParts(
         host=template_database.host,
         port=template_database.port,
@@ -1484,15 +1506,21 @@ def execute_verireel_preview_destroy(
         )
     application_id = str((application or {}).get("applicationId") or "").strip()
     database_name, role_name = _preview_database_identifiers(request.preview_slug, database_prefix)
-    existing_database = None
+    template_database = _parse_database_url(template_database_url)
+    application_payload = None
     if application_id:
         application_payload = _fetch_application(
             host=host, token=token, application_id=application_id
         )
-        existing_database = _resolve_existing_preview_database(application_payload)
+    existing_database = _resolve_existing_preview_database(
+        application_payload,
+        database_name=database_name,
+        role_name=role_name,
+        template_database=template_database,
+    )
     database_parts = existing_database or _DatabaseParts(
-        host=_parse_database_url(template_database_url).host,
-        port=_parse_database_url(template_database_url).port,
+        host=template_database.host,
+        port=template_database.port,
         database=database_name,
         username=role_name,
         password="",
