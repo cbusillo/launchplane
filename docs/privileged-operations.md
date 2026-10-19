@@ -100,7 +100,11 @@ repository identity pins are selector identifiers and are displayed; credential
 values are never read. An ID's login is used for role evaluation only when
 observed in the signed-in identity or an ID-bound provider reply; a rule's login
 selector is never substituted for a failed lookup. Unknown effects assert no
-before/after role.
+before/after role. Exact login-only selectors use the public account lookup in
+the other direction, keeping both its returned immutable ID and canonical
+login. An unavailable lookup stays unknown, and a renamed account does not
+silently satisfy its former login selector. Both lookup directions share the
+same per-response admission budget.
 
 Across one response, at most ten account lookups may start within a one-second
 admission window. Each uses a three-second socket timeout; this is not a hard

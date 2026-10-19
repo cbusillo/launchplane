@@ -9,6 +9,7 @@ from control_plane.access_policy_review import (
     _principal,
     _scope,
     _role_effects,
+    _public_github_login_account,
 )
 from control_plane.authz_grant_service import AuthzManagedRuleEntry
 from control_plane.contracts.ordinary_agent import OrdinaryAgentPolicyRule, OrdinaryAgentTarget
@@ -126,11 +127,12 @@ class AccessPolicyReviewTests(unittest.TestCase):
         _public_github_account_login.cache_clear()
         reader = Mock(return_value="fixture-person")
         with patch("control_plane.access_policy_review.monotonic", return_value=0) as clock:
-            bounded = bounded_account_logins(reader)
+            bounded, by_login = bounded_account_logins(reader, lambda _: (789, "fixture-person"))
             self.assertEqual(bounded(789), "fixture-person")
             self.assertEqual(bounded(789), "fixture-person")
             clock.return_value = 2
             self.assertEqual(bounded(790), "")
+            self.assertIsNone(by_login("fixture-person"))
         reader.assert_called_once_with(789)
 
     def test_scope_display_preserves_target_and_workflow_conditions(self) -> None:
@@ -210,3 +212,29 @@ class AccessPolicyReviewTests(unittest.TestCase):
         uncertain = _role_effects(team, uncertain_before, remaining, lambda _: "fixture-name")[0]
         self.assertEqual(uncertain.state, "unknown")
         self.assertIsNone(uncertain.before)
+
+    def test_login_only_roles_use_verified_account_metadata_and_canonical_login(self) -> None:
+        rule = GitHubHumanPolicyRule(logins=("fixture-name",), roles=("read_only",))
+        admin = GitHubHumanPolicyRule(github_ids=(123,), roles=("admin",))
+        before = LaunchplaneAuthzPolicy(github_humans=(rule, admin))
+        after = LaunchplaneAuthzPolicy(github_humans=(admin,))
+        effects = _role_effects(rule, before, after, lambda _: "", lambda _: (789, "fixture-name"))
+        self.assertEqual(effects[0].state, "lost")
+        self.assertEqual(effects[0].before, "read_only")
+        renamed = _role_effects(
+            rule, before, after, lambda _: "", lambda _: (789, "renamed-person")
+        )
+        self.assertEqual(renamed[0].state, "unaffected")
+        unknown = _role_effects(rule, before, after, lambda _: "")
+        self.assertEqual(unknown[0].state, "unknown")
+        _public_github_login_account.cache_clear()
+        response = Mock()
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        response.read.return_value = b'{"id":789,"login":"renamed-person"}'
+        with patch("control_plane.access_policy_review.urlopen", return_value=response) as read:
+            self.assertEqual(
+                _public_github_login_account("fixture-name", 0), (789, "renamed-person")
+            )
+            self.assertIsNone(read.call_args.args[0].get_header("Authorization"))
+        _public_github_login_account.cache_clear()

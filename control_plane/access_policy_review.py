@@ -8,6 +8,7 @@ import re
 from time import monotonic
 from typing import Literal, cast
 from urllib.error import URLError
+from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from control_plane.authz_grant_service import (
@@ -30,45 +31,82 @@ from control_plane.contracts.ordinary_agent import OrdinaryAgentPolicyRule
 from control_plane.service_auth import GitHubHumanPolicyRule, LaunchplaneAuthzPolicy
 
 
+Account = tuple[int, str]
+AccountReader = Callable[[str], Account | None]
+
+
 def github_account_login(github_id: int) -> str:
     return _public_github_account_login(github_id, int(monotonic() // 300))
 
 
+def github_account_for_login(login: str) -> Account | None:
+    return _public_github_login_account(login, int(monotonic() // 300))
+
+
 @lru_cache(maxsize=256)
 def _public_github_account_login(github_id: int, cache_window: int) -> str:
-    """Public display metadata only. No credential, membership or policy changes."""
+    account = _read_public_github_account(f"/user/{github_id}", expected_id=github_id)
+    return account[1] if account else ""
+
+
+@lru_cache(maxsize=256)
+def _public_github_login_account(login: str, cache_window: int) -> Account | None:
+    if re.fullmatch(r"[A-Za-z0-9-]{1,39}", login) is None:
+        return None
+    return _read_public_github_account(f"/users/{quote(login, safe='')}")
+
+
+def _read_public_github_account(path: str, *, expected_id: int = 0) -> Account | None:
+    """Keep verified public account metadata only; no credentials or membership."""
     request = Request(
-        f"https://api.github.com/user/{github_id}",
+        "https://api.github.com" + path,
         headers={"Accept": "application/vnd.github+json", "User-Agent": "Launchplane"},
     )
     try:
         with urlopen(request, timeout=3) as response:
             payload = json.loads(response.read(65536))
-        login = payload.get("login")
+        login, github_id = payload.get("login"), payload.get("id")
         if (
-            payload.get("id") == github_id
+            isinstance(github_id, int)
+            and not isinstance(github_id, bool)
+            and github_id > 0
+            and (not expected_id or github_id == expected_id)
             and isinstance(login, str)
             and re.fullmatch(r"[A-Za-z0-9-]{1,39}", login)
         ):
-            return login
+            return github_id, login
     except (URLError, OSError, ValueError, AttributeError, HTTPException):
         pass
-    return ""
+    return None
 
 
-def bounded_account_logins(reader: Callable[[int], str]) -> Callable[[int], str]:
-    """Limit lookup starts across the response; socket/DNS time is not a wall deadline."""
+def bounded_account_logins(
+    reader: Callable[[int], str],
+    account_reader: AccountReader = lambda _: None,
+) -> tuple[Callable[[int], str], AccountReader]:
+    """Share admission/count limits across both directions of account lookup."""
     deadline = monotonic() + 1
     logins: dict[int, str] = {}
+    accounts: dict[str, Account | None] = {}
+
+    def admit() -> bool:
+        return len(logins) + len(accounts) < 10 and monotonic() < deadline
 
     def read(github_id: int) -> str:
         if github_id not in logins:
-            if len(logins) >= 10 or monotonic() >= deadline:
+            if not admit():
                 return ""
             logins[github_id] = reader(github_id)
         return logins[github_id]
 
-    return read
+    def read_login(login: str) -> Account | None:
+        if login not in accounts:
+            if not admit():
+                return None
+            accounts[login] = account_reader(login)
+        return accounts[login]
+
+    return read, read_login
 
 
 def _principal(entry: AuthzManagedRuleEntry, login_for_id: Callable[[int], str]) -> str:
@@ -173,13 +211,14 @@ def _role_effects(
     before: LaunchplaneAuthzPolicy,
     after: LaunchplaneAuthzPolicy,
     login_for_id: Callable[[int], str],
+    account_for_login: AccountReader = lambda _: None,
 ) -> tuple[AccessPolicyRoleEffect, ...]:
     # Selectors describe who a rule could match. They are never evidence that
     # an account ID belongs to a login. Only an ID-bound lookup establishes that.
     principals = (
         tuple((github_id, login_for_id(github_id)) for github_id in rule.github_ids)
         if rule.github_ids
-        else tuple((0, login) for login in rule.logins)
+        else tuple(account_for_login(login) or (0, login) for login in rule.logins)
     )
     effects = []
     for github_id, login in principals:
@@ -225,6 +264,7 @@ def build_access_policy_review(
     request: ManagedAuthzPolicySetProposalInput,
     evidence: ManagedAuthzPolicySetHumanEvidence,
     login_for_id: Callable[[int], str] = lambda _: "",
+    account_for_login: AccountReader = lambda _: None,
 ) -> AccessPolicyReview:
     # The planner owns reconciliation, diffing and candidate construction.
     # A stale plan remains readable but cannot be described as current evidence.
@@ -270,7 +310,9 @@ def build_access_policy_review(
                         scope_summary=_scope(
                             AuthzManagedRuleEntry(principal_type, rule), policy.schema_version
                         ),
-                        role_effects=_role_effects(rule, active.policy, candidate, login_for_id)
+                        role_effects=_role_effects(
+                            rule, active.policy, candidate, login_for_id, account_for_login
+                        )
                         if isinstance(rule, GitHubHumanPolicyRule)
                         else (),
                     )
