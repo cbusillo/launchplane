@@ -2256,6 +2256,9 @@ supplies no authority. Missing target scope and another account require review;
 there is no source-token, default-main or alternate-credential fallback. Current
 policy reconstructs this resolver for initial delivery and terminal retries;
 tokens and callbacks are never persisted in feedback.
+Scoped token resolution preserves failed-mint transport evidence for that retry
+path. A proved transient mint failure retries; a missing binding or grant remains
+review, and a real provider refusal never selects another credential.
 
 Fresh issue, native graph, wait and configuration reads guard writes and verify
 readback. The hidden `launchplane-planning-reconciliation` receipt retains the
@@ -2281,7 +2284,10 @@ preserves its existing comment with an explicit `not_applicable`, `ok: false`
 receipt: no issue discovery or metadata mutation applies. Missing or mismatched
 provider identity remains a hold. GitHub's keyword-closure projection and a
 slightly future merge timestamp wait only within 15 minutes of the verified
-merge time. Still-open sources after that grace require owning review.
+merge time. Every still-open closing source receives this projection check before
+its planning, authorship or wait-history guards, so a non-plan or reporter-owned
+source cannot leave a delivered receipt before its dependent sees closure.
+Still-open sources after that grace require owning review.
 
 The persisted feedback record schema remains compatible with older workers
 through rolling deployment and rollback. A receipt is evidence, never authority.

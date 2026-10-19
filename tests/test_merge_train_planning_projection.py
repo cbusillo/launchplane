@@ -4,6 +4,8 @@ import copy
 import json
 from email.message import Message
 from io import BytesIO
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 from unittest import TestCase
 from unittest.mock import Mock, patch
@@ -20,6 +22,7 @@ from control_plane.merge_train_pr_feedback import (
     build_merge_train_pr_feedback_record,
     deliver_merge_train_pr_feedback_record,
 )
+from control_plane.storage.filesystem import FilesystemRecordStore
 from tests.test_merge_train_planning_completion import (
     PlanningProvider,
     _BOT,
@@ -227,6 +230,65 @@ class NativePlanningProjectionTests(TestCase):
         self.assertEqual(source.issue["body"], before["body"])
         self.assertEqual(source.issue["state"], before["state"])
         self.assertEqual(source.comments[0]["body"], _wait("waiting"))
+
+    def test_open_source_projection_retries_before_shape_or_acceptance_guards(self) -> None:
+        for shape in ("nonplan", "reporter", "unmanaged", "nonplan_unread"):
+            with self.subTest(shape=shape), TemporaryDirectory() as directory:
+                self.graph = NativeGraphProvider()
+                source = self.graph.nodes[_REPO, 7]
+                source.issue.update(state="open", state_reason=None)
+                if shape.startswith("nonplan"):
+                    source.issue["labels"] = [{"name": "bug"}]
+                elif shape == "reporter":
+                    source.issue["user"]["id"] = 99
+                else:
+                    source.issue["body"] = _wait()
+                if shape == "nonplan_unread":
+
+                    def unread(call: dict[str, Any]) -> None:
+                        if "/issues/7/comments?" in call["path"]:
+                            raise click.ClickException("unread unrelated history") from URLError(
+                                "fixture unavailable"
+                            )
+
+                    self.graph.fail = unread
+                neighbor = self.graph.add(_REPO, 8)
+                neighbor.blockers = [{"number": 7, "state": "open"}]
+                self.graph.blocking = [self.graph.ref(_REPO, 8)]
+                source_before = copy.deepcopy(source.issue)
+                store = FilesystemRecordStore(Path(directory))
+                store.write_merge_train_pr_feedback_record(self.record())
+                saved = store.list_merge_train_pr_feedback_records(repository=_REPO)[0]
+                self.assertTrue(saved.retryable)
+                self.assertEqual(self.rows(saved)[_REPO, 7]["status"], "review_projection_pending")
+                self.assertIn(
+                    _LABELS["blocked"], {item["name"] for item in neighbor.issue["labels"]}
+                )
+
+                source.issue.update(state="closed", state_reason="completed")
+                neighbor.blockers[0]["state"] = "closed"
+                self.graph.fail = None
+                retried = deliver_merge_train_pr_feedback_record(
+                    record=saved,
+                    token="fixture",
+                    attempted_at="2026-10-01T00:02:00Z",
+                    planning_author_ids=(_BOT,),
+                    planning_scope_resolver=self.graph.scope,
+                )
+                self.assertFalse(retried.retryable)
+                self.assertTrue(self.rows(retried)[_REPO, 8]["verified"])
+                self.assertEqual(self.rows(retried)[_REPO, 8]["blocked_by"], [])
+                self.assertEqual(
+                    {item["name"] for item in neighbor.issue["labels"]},
+                    {_LABELS["plan"], _LABELS["active"]},
+                )
+                if shape in {"reporter", "unmanaged"}:
+                    self.assertEqual(retried.delivery_status, "failed")
+                    self.assertFalse(self.rows(retried)[_REPO, 7]["verified"])
+                    self.assertEqual(source.issue["body"], source_before["body"])
+                    self.assertFalse(source.writes)
+                else:
+                    self.assertEqual(retried.delivery_status, "delivered")
 
     def test_known_denial_skips_only_its_repository_and_keeps_independent_target(self) -> None:
         denied = "example/other"

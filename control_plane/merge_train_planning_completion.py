@@ -408,12 +408,21 @@ def _parent(scope: PlanningRepositoryScope, number: int) -> dict[str, Any] | Non
         raise
 
 
-def _snapshot(target: _Target, *, config: dict[str, Any] | None = None) -> _Snapshot:
+def _snapshot(
+    target: _Target,
+    *,
+    config: dict[str, Any] | None = None,
+    initial_issue: dict[str, Any] | None = None,
+) -> _Snapshot:
     assert target.scope is not None
     scope = target.scope
     path = f"/repos/{scope.repository}/issues/{target.number}"
     configuration = _configuration(scope) if config is None else config
-    issue = _object(github_api_request(path=path, token=scope.token))
+    issue = (
+        initial_issue
+        if initial_issue is not None
+        else _object(github_api_request(path=path, token=scope.token))
+    )
     _labels(issue)
     names = _label_names(configuration)
     blockers = _pages(scope.token, path + "/dependencies/blocked_by")
@@ -503,7 +512,20 @@ def _reconcile_target(
 ) -> None:
     assert target.scope is not None
     scope = target.scope
-    snapshot = _snapshot(target, config=config)
+    initial_issue = None
+    if target.source:
+        initial_issue = _object(
+            github_api_request(
+                path=f"/repos/{scope.repository}/issues/{target.number}", token=scope.token
+            )
+        )
+        if initial_issue.get("state") == "open":
+            # Every keyword source can still be awaiting GitHub's closure,
+            # including non-plan and reporter-owned records. Its shape or wait
+            # history must not turn that temporary graph projection into a
+            # terminal receipt that never refreshes its dependent again.
+            _require_projection(initial_issue, merged_at, attempted)
+    snapshot = _snapshot(target, config=config, initial_issue=initial_issue)
     if not is_planning_issue(snapshot.issue, snapshot.labels):
         row["status"] = "not_planning_issue"
         return

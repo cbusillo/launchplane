@@ -423,6 +423,7 @@ def _run_controller(
                     source=target.github_token,
                     repository=target.repository,
                     control_plane_root=control_plane_root,
+                    raise_resolution_errors=True,
                 ),
             ),
         )

@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import copy
+from email.message import Message
+from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 from unittest import IsolatedAsyncioTestCase, TestCase
 from unittest.mock import patch
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 
 import click
 from github_plan_status import DEFAULT_STATUS_LABELS
 
+from control_plane import merge_train_github_token as token_module
 from control_plane import merge_train_planning_completion as completion
 from control_plane import merge_train_planning_scope as scope_module
 from control_plane import merge_train_scheduler as scheduler
@@ -100,6 +103,104 @@ def _token_reader(graph: NativeGraphProvider, record: MergeTrainPolicyRecord) ->
 
 
 class NativePlanningHttpTests(IsolatedAsyncioTestCase):
+    async def test_target_token_resolution_preserves_transient_cause_for_saved_retry(self) -> None:
+        for failure in ("network", "503", "403", "missing"):
+            with self.subTest(failure=failure), TemporaryDirectory() as directory:
+                graph, _names = _graph()
+                target = graph.nodes[_TARGET, 8]
+                policy = _policy()
+                store = FilesystemRecordStore(Path(directory))
+                store.write_merge_train_policy_record(policy)
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_merge_train_service_identity()),
+                    authz_policy=_merge_train_service_policy(),
+                    record_store_factory=lambda: store,
+                    control_plane_root_path=Path(directory),
+                )
+                cause: BaseException
+                if failure == "network":
+                    cause = URLError("fixture disconnected")
+                else:
+                    headers = Message()
+                    headers["X-GitHub-Request-Id"] = "fixture-token-mint"
+                    cause = HTTPError(
+                        "https://example.test/app/installations/1/access_tokens",
+                        503 if failure == "503" else 403,
+                        "fixture rejection",
+                        headers,
+                        BytesIO(b"{}"),
+                    )
+                    self.addCleanup(cause.close)
+                error = click.ClickException("fixture token mint failed")
+                error.__cause__ = cause
+
+                def resolve(**kwargs: Any) -> str:
+                    if kwargs["repository"] == _REPO:
+                        self.assertEqual(kwargs["source"], policy.policy.policies[0].github_token)
+                        return graph.token(_REPO)
+                    self.assertEqual(kwargs["repository"], _TARGET)
+                    self.assertEqual(kwargs["source"], policy.policy.policies[1].github_token)
+                    return token_module.resolve_merge_train_github_token(**kwargs)
+
+                with (
+                    patch.object(completion, "github_api_request", side_effect=graph.request),
+                    patch.object(scope_module, "github_api_request", side_effect=graph.request),
+                    patch(
+                        "control_plane.http_app.resolve_merge_train_github_token",
+                        side_effect=resolve,
+                    ) as resolve_request,
+                    patch(
+                        "control_plane.merge_train_github_token.secrets.resolve_context_secret_value",
+                        return_value="" if failure == "missing" else "noncredential-test-fixture",
+                    ) as secret,
+                    patch.object(
+                        token_module, "mint_merge_train_installation_token", side_effect=error
+                    ) as mint,
+                    patch("control_plane.http_app.utc_now_timestamp", return_value=_TIME),
+                    patch(
+                        "control_plane.merge_train_pr_feedback.upsert_github_issue_comment",
+                        return_value={
+                            "action": "updated_comment",
+                            "comment_id": 3,
+                            "comment_url": "",
+                        },
+                    ),
+                ):
+                    response = await _post_merge_train_pr_feedback(
+                        app,
+                        {
+                            "repository": _REPO,
+                            "base_branch": "main",
+                            "pull_request_number": 9,
+                            "event": "completed",
+                            "controller_action": "land_batch",
+                        },
+                    )
+                saved = store.list_merge_train_pr_feedback_records(repository=_REPO)
+                self.assertEqual(len(saved), 1, response.json())
+                record = saved[0]
+                self.assertEqual(
+                    [call.kwargs["repository"] for call in resolve_request.call_args_list],
+                    [_REPO, _TARGET],
+                )
+                secret.assert_called_once()
+                self.assertEqual(mint.call_count, failure != "missing")
+                self.assertFalse(target.writes)
+                self.assertFalse(any(call["repo"] == _TARGET for call in graph.calls))
+                self.assertEqual(record.retryable, failure in {"network", "503"})
+                rows = {(row["repo"], row["number"]): row for row in _receipt(record)["issues"]}
+                if failure in {"network", "503"}:
+                    self.assertEqual(record.delivery_status, "failed")
+                    self.assertEqual(
+                        rows[_TARGET, 8]["failure"]["cause"], "transient_provider_failure"
+                    )
+                    self.assertEqual(
+                        rows[_TARGET, 8]["failure"]["status_code"],
+                        503 if failure == "503" else None,
+                    )
+                elif failure == "missing":
+                    self.assertEqual(rows[_TARGET, 8]["status"], "review_posting_authority")
+
     async def test_completed_feedback_projects_only_current_identity_authorized_targets(
         self,
     ) -> None:

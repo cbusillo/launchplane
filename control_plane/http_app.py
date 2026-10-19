@@ -12394,6 +12394,7 @@ def create_launchplane_fastapi_app(
                     source=target.github_token,
                     repository=target.repository,
                     control_plane_root=resolved_control_plane_root,
+                    raise_resolution_errors=True,
                 ),
             ),
         )
