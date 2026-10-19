@@ -307,6 +307,7 @@ from control_plane.http_routes.odoo_prod_release_operation import (
     OdooProdReleaseOperationRouteDependencies,
     register_odoo_prod_release_operation_routes,
 )
+from control_plane.http_routes.testing_retry import register_testing_retry_routes
 from control_plane.http_routes.testing_rebuild import (
     TestingRebuildRouteDependencies,
     register_testing_rebuild_routes,
@@ -29360,6 +29361,9 @@ def create_launchplane_fastapi_app(
             cancel_pending_operation=cancel_pending_durable_operation,
             control_plane_root=resolved_control_plane_root,
         ),
+    )
+    register_testing_retry_routes(
+        app, dependencies=read_route_dependencies, mutation_identity=read_operator_mutation_identity
     )
     register_testing_rebuild_routes(
         app,
