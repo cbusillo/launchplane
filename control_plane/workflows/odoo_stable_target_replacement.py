@@ -1675,6 +1675,10 @@ def build_odoo_stable_target_replacement_plan(
             # integration setting kept off this lane); the retirement wins and the key
             # is not delivered. Declared and driver keys still cannot be retired.
             control_plane_live_target_runtime.validate_provider_key_retirement(
+                record_store=record_store,
+                product_name=profile.product,
+                context_name=lane.context,
+                instance_name=lane.instance,
                 retired_keys=retired_provider_keys,
                 application_keys=declared_runtime_keys | ODOO_REPLACEMENT_DRIVER_ENV_KEYS,
             )
@@ -2404,6 +2408,10 @@ def execute_odoo_stable_target_replacement_apply(
                     tuple(retired_provider_keys ^ set(plan.retired_provider_keys)),
                 )
             control_plane_live_target_runtime.validate_provider_key_retirement(
+                record_store=record_store,
+                product_name=plan.product,
+                context_name=plan.context,
+                instance_name=plan.instance,
                 retired_keys=retired_provider_keys,
                 application_keys=declared_runtime_keys | ODOO_REPLACEMENT_DRIVER_ENV_KEYS,
             )

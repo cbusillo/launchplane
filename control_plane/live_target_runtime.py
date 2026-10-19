@@ -11,7 +11,11 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane import runtime_platform_credentials
 from control_plane import secrets as control_plane_secrets
-from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    is_exclusive_product_context,
+    product_context_owner_map,
+)
 from control_plane.contracts.runtime_identity import COMPOSE_IMAGE_REFERENCE_ENV_KEYS
 from control_plane.disposable_lanes import (
     DisposableLaneStore,
@@ -183,10 +187,128 @@ def retained_database_password_changed(
     )
 
 
-def validate_provider_key_retirement(*, retired_keys: set[str], application_keys: set[str]) -> None:
-    if any(provider_key_retirement_blocked(key, application_keys) for key in retired_keys):
+def _unused_testing_override_pointers(
+    record_store: object,
+    *,
+    retired_keys: set[str],
+    product_name: str,
+    context_name: str,
+    instance_name: str,
+) -> set[str]:
+    from control_plane.odoo_instance_overrides import (
+        addon_setting_secret_env_key,
+        config_parameter_secret_env_key,
+    )
+
+    if instance_name != "testing":
+        return set()
+    try:
+        profiles = getattr(record_store, "list_product_profile_records")()
+        owners = product_context_owner_map(profiles)
+        if not product_name:
+            context_owners = owners.get(context_name, frozenset())
+            if len(context_owners) != 1:
+                return set()
+            product_name = next(iter(context_owners))
+        if not is_exclusive_product_context(
+            context=context_name, product=product_name, owners=owners
+        ):
+            return set()
+        profile = getattr(record_store, "read_product_profile_record")(product_name)
+        if not any(
+            (lane.context, lane.instance) == (context_name, instance_name) for lane in profile.lanes
+        ):
+            return set()
+        required = declared_runtime_keys(
+            profile=profile, context_name=context_name, instance_name=instance_name
+        )
+        # Read only names from persisted consumers, never resolved credential values.
+        for record in getattr(record_store, "list_runtime_environment_records")():
+            if record.context == context_name and (
+                record.scope == "context"
+                or (record.scope == "instance" and record.instance == instance_name)
+            ):
+                required.update(record.env)
+        try:
+            target = getattr(record_store, "read_dokploy_target_record")(
+                context_name=context_name, instance_name=instance_name
+            )
+        except FileNotFoundError:
+            target = None
+        if target is not None:
+            if (target.context, target.instance) != (context_name, instance_name):
+                return set()
+            required.update(target.env)
+        try:
+            overrides = getattr(record_store, "read_odoo_instance_override_record")(
+                context_name=context_name, instance_name=instance_name
+            )
+        except FileNotFoundError:
+            overrides = None
+        if overrides is not None:
+            if (overrides.context, overrides.instance) != (context_name, instance_name):
+                return set()
+            # Protect pointers used by any phase, including restore-only intent.
+            required.update(
+                config_parameter_secret_env_key(item.key)
+                for item in overrides.config_parameters
+                if item.value.source == "secret_binding"
+            )
+            required.update(
+                addon_setting_secret_env_key(addon_name=item.addon, setting_name=item.setting)
+                for item in overrides.addon_settings
+                if item.value.source == "secret_binding"
+            )
+        return {
+            key
+            for key in retired_keys - required
+            if key.startswith(ODOO_OVERRIDE_SECRET_ENV_PREFIX)
+        }
+    except (AttributeError, FileNotFoundError, ValueError, click.ClickException):
+        # Missing ownership or consumer authority never permits a protected retirement.
+        return set()
+
+
+def validate_provider_key_retirement(
+    *,
+    retired_keys: set[str],
+    application_keys: set[str],
+    record_store: object | None = None,
+    product_name: str = "",
+    context_name: str = "",
+    instance_name: str = "",
+    database_url: str | None = None,
+) -> None:
+    unused: set[str] = set()
+    if instance_name == "testing" and any(
+        key.startswith(ODOO_OVERRIDE_SECRET_ENV_PREFIX) for key in retired_keys
+    ):
+        if record_store is not None:
+            unused = _unused_testing_override_pointers(
+                record_store,
+                retired_keys=retired_keys,
+                product_name=product_name,
+                context_name=context_name,
+                instance_name=instance_name,
+            )
+        elif resolved_url := resolve_database_url(database_url):
+            store = PostgresRecordStore(database_url=resolved_url)
+            try:
+                unused = _unused_testing_override_pointers(
+                    store,
+                    retired_keys=retired_keys,
+                    product_name=product_name,
+                    context_name=context_name,
+                    instance_name=instance_name,
+                )
+            finally:
+                store.close()
+    if any(
+        provider_key_retirement_blocked(key, application_keys)
+        for key in retired_keys - (unused - application_keys)
+    ):
         raise LiveTargetRuntimeError(
-            "Provider key retirement conflicts with declared application or driver settings.",
+            "Provider key retirement conflicts with application, driver, or stored instance override settings.",
             code="runtime_retirement_conflict",
         )
 
@@ -724,7 +846,14 @@ def apply_live_target_runtime_environment(
 
     # Protected driver and identity keys are never retirable, with or without
     # product scoping; the product branch below also checks application keys.
-    validate_provider_key_retirement(retired_keys=retired_keys, application_keys=set())
+    validate_provider_key_retirement(
+        retired_keys=retired_keys,
+        application_keys=set(),
+        product_name=product_name,
+        context_name=context_name,
+        instance_name=instance_name,
+        database_url=database_url,
+    )
     database_url = resolve_database_url(database_url)
     if product_name.strip():
         if database_url is None:
@@ -745,6 +874,10 @@ def apply_live_target_runtime_environment(
             # A key only a managed secret supplies may be retired from a lane; plain
             # settings, declared keys and driver keys may not.
             validate_provider_key_retirement(
+                record_store=postgres_store,
+                product_name=product_name,
+                context_name=context_name,
+                instance_name=instance_name,
                 retired_keys=retired_keys,
                 application_keys=control_plane_runtime_environments.site_application_keys(
                     site_environment.setting_keys
@@ -823,8 +956,20 @@ def apply_live_target_runtime_environment(
                         "Provider key retirement changed during execution; review current configuration.",
                         code="runtime_retirement_changed",
                     )
+                validate_provider_key_retirement(
+                    retired_keys=retired_keys,
+                    application_keys=set(),
+                    record_store=postgres_store,
+                    product_name=product_name,
+                    context_name=context_name,
+                    instance_name=instance_name,
+                )
                 if product_name.strip():
                     validate_provider_key_retirement(
+                        record_store=postgres_store,
+                        product_name=product_name,
+                        context_name=context_name,
+                        instance_name=instance_name,
                         retired_keys=retired_keys,
                         application_keys=control_plane_runtime_environments.site_application_keys(
                             control_plane_runtime_environments.resolve_site_runtime_environment(
