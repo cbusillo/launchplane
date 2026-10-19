@@ -425,8 +425,11 @@ empty-set readback are recorded on #2006. Its dedicated
 `manager-preview-approval-retirement` wrapper selection is removed after that
 operation; it is no longer a dispatch path.
 
-A PR that retires a caller carries the matching grant-removal proposal in the
-same change, so the Director can review it at retirement time.
+A PR that retires a caller links the matching grant-removal proposal in the
+same change, prepared with `privileged-policy-propose` through the
+[Launchplane helper](privileged-operations.md#agent-policy-proposals); if that
+path is unavailable, record the exact blocker on the owning issue for the
+Director while continuing independently authorized source cleanup.
 
 ## The Admin
 

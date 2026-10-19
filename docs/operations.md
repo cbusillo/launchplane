@@ -1131,8 +1131,8 @@ apply fence and storage fences continue to reject persistence.
 
 The signed trusted-maintenance webhook and its independent
 `LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET` remain in use. Client review
-uses the Client identity on the product profile, not retired owner-acceptance
-or product-owner policy grants; see [Client acceptance](owner-acceptance.md).
+uses the Client identity on the product profile, not retired `owner-acceptance`
+or `product-owner` policy grants; see [Client acceptance](owner-acceptance.md).
 
 Generic-web preview caller grants are generated from typed onboarding input
 and persisted in the DB-backed `operator.generic-web-preview` managed set.
