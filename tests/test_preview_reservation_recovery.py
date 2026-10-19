@@ -620,12 +620,16 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
         self.assertEqual(recorded.status_code, 202, recorded.text)
 
     def cleanup(
-        self, *, previous_plan: dict[str, object] | None = None, **hooks: object
+        self,
+        *,
+        previous_plan: dict[str, object] | None = None,
+        pr_state: str | None = "closed",
+        **hooks: object,
     ) -> ReconcileOutcome:
         from tests.test_product_reconcile import FakePreviewProvider
 
         self.transport = Mock()
-        self.transport.get_json.return_value = {"state": "closed", "head": {"sha": "a" * 40}}
+        self.transport.get_json.return_value = {"state": pr_state, "head": {"sha": "a" * 40}}
         self.provider = FakePreviewProvider()
         provider_hooks = self.provider.hooks()
         provider_hooks = type(provider_hooks)(**{**provider_hooks.__dict__, **hooks})
@@ -670,8 +674,6 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
             ("usage", "unknown"),
             ("data", "only_copy"),
             ("data", "unknown"),
-            ("production_resources", "shared"),
-            ("production_resources", "unknown"),
         ):
             with self.subTest(condition=condition, value=value):
                 self.prepare_cleanup(**{condition: value})
@@ -681,6 +683,124 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
                 self.assertFalse(self.provider.applied)
                 self.assertEqual(self.store.list_preview_records()[0].state, "active")
                 self.assertTrue(held_preview_reservations(self.store, product=self.profile.product))
+
+    def test_cleanup_leaves_shared_credentials_untouched(self) -> None:
+        from control_plane.contracts.secret_record import SecretRecord, SecretBinding
+
+        self.remove_original_intent()
+        secret = SecretRecord(
+            secret_id="shared-integration",
+            scope="context",
+            integration="runtime_environment",
+            name="INTEGRATION_PASSWORD",
+            context=self.profile.preview.context,
+            current_version_id="fixture-version",
+            created_at=self.profile.updated_at,
+            updated_at=self.profile.updated_at,
+        )
+        self.store.write_secret_record(secret)
+        for instance in ("prod", "pr-42"):
+            self.store.write_secret_binding(
+                SecretBinding(
+                    binding_id=f"integration-{instance}",
+                    secret_id=secret.secret_id,
+                    integration=secret.integration,
+                    binding_key=secret.name,
+                    context=secret.context,
+                    instance=instance,
+                    created_at=secret.created_at,
+                    updated_at=secret.updated_at,
+                )
+            )
+        bindings = self.store.list_secret_bindings()
+        self.prepare_cleanup(production_resources="shared")
+        result = self.cleanup()
+        self.assertFalse(result.error, result.plan)
+        self.assertEqual(self.provider.applied, [("destroy", 42)])
+        self.assertEqual(self.store.list_preview_records()[0].state, "destroyed")
+        self.assertEqual(self.store.read_secret_record(secret.secret_id), secret)
+        self.assertEqual(self.store.list_secret_bindings(), bindings)
+
+    def test_only_cleanup_can_ignore_credential_isolation(self) -> None:
+        from control_plane.disposable_lanes import (
+            DisposableLaneSafetyUnknown,
+            require_disposable_lane,
+        )
+        from tests.support.disposable_lanes import record_safety
+        from control_plane.product_reconcile import _preview_cleanup_guard
+        from functools import partial
+
+        self.prepare_cleanup(production_resources="shared")
+        preview = self.store.list_preview_records()[0]
+        lane = dict(product=self.profile.product, context=preview.context, instance="pr-42")
+        require_lane = partial(
+            require_disposable_lane,
+            self.store,
+            product=self.profile.product,
+            context=preview.context,
+            instance="pr-42",
+        )
+        for isolation in ("shared", "unknown", "separation_ready"):
+            with self.subTest(isolation=isolation):
+                record_safety(
+                    self.store,
+                    **lane,
+                    preview=preview,
+                    production_resources=isolation,
+                )
+                with self.assertRaises(DisposableLaneSafetyUnknown):
+                    require_lane()
+                if isolation != "unknown":
+                    with self.assertRaises(DisposableLaneSafetyUnknown):
+                        require_lane(preview_refresh=True)
+                require_lane(preview_cleanup=True)
+                _preview_cleanup_guard(self.store, self.profile, 42)
+        record_safety(
+            self.store,
+            self.profile.product,
+            preview.context,
+            "testing",
+            production_resources="shared",
+        )
+        with self.assertRaises(DisposableLaneSafetyUnknown):
+            require_disposable_lane(
+                self.store,
+                product=self.profile.product,
+                context=preview.context,
+                instance="testing",
+                preview_cleanup=True,
+            )
+
+    def test_cleanup_refuses_a_production_shared_target(self) -> None:
+        from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+
+        self.remove_original_intent()
+        for instance in ("prod", "pr-42"):
+            self.store.write_dokploy_target_id_record(
+                DokployTargetIdRecord(
+                    context=self.profile.preview.context,
+                    instance=instance,
+                    target_id="production-shared-target",
+                    updated_at=self.profile.updated_at,
+                )
+            )
+        self.prepare_cleanup(production_resources="shared")
+        result = self.cleanup()
+        self.assertTrue(result.plan["held"])
+        self.assertEqual(result.plan["reason"], "preview_cleanup_safety_unknown")
+        self.assertFalse(self.provider.applied)
+        self.assertEqual(self.store.list_preview_records()[0].state, "active")
+
+    def test_cleanup_holds_when_closed_pr_is_not_confirmed(self) -> None:
+        self.remove_original_intent()
+        self.prepare_cleanup(production_resources="shared")
+        for state in (None, "unavailable", "open"):
+            with self.subTest(state=state):
+                result = self.cleanup(pr_state=state)
+                self.assertFalse(self.provider.applied)
+                self.assertEqual(self.store.list_preview_records()[0].state, "active")
+                if state != "open":
+                    self.assertEqual(result.plan["reason"], "preview_cleanup_pr_state_unknown")
 
     def test_cleanup_names_invalid_retained_intent_without_spending_retry_budget(self) -> None:
         self.prepare_cleanup()

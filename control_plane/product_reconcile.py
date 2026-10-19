@@ -1745,7 +1745,6 @@ def _preview_cleanup_guard(
     for condition, value, required in (
         ("usage", evidence.usage if evidence else "unknown", "unused"),
         ("data", evidence.data if evidence else "unknown", "reproducible"),
-        ("isolation", evidence.production_resources if evidence else "unknown", "isolated"),
     ):
         if value != required:
             raise ProductReconcileError(

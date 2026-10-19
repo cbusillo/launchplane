@@ -326,7 +326,12 @@ def require_disposable_lane(
     if (
         usage.protected
         or evidence.data != "reproducible"
-        or evidence.production_resources not in allowed_resources
+        # Cleanup removes the exact preview target, not credentials it reads.
+        # Target aliases are refused above; resource deletion owns its destroy set.
+        or (
+            not (preview_cleanup and owned_preview)
+            and evidence.production_resources not in allowed_resources
+        )
     ):
         raise DisposableLaneSafetyUnknown(
             "The lane is in use, holds needed data, shares production resources, or safety is unknown."
