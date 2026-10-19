@@ -15,6 +15,33 @@ from control_plane.dokploy.testing_route import (
 )
 
 
+def add_proxy_internal_routes(raw: dict[str, Any]) -> None:
+    """Captured provider frame shape, with no deployed host or application names."""
+    for name, rule, points, offset, middlewares in (
+        ("acme-http", "PathPrefix(`/.well-known/acme-challenge/`)", ["web"], 0, []),
+        ("api", "PathPrefix(`/api`)", ["traefik"], 1, []),
+        (
+            "dashboard",
+            "PathPrefix(`/`)",
+            ["traefik"],
+            2,
+            ["dashboard_redirect@internal", "dashboard_stripprefix@internal"],
+        ),
+    ):
+        raw["routers"][name + "@internal"] = {
+            "rule": rule,
+            "ruleSyntax": "default",
+            "entryPoints": points,
+            "service": name + "@internal",
+            "priority": 2**63 - 1 - offset,
+            "middlewares": middlewares,
+            "status": "enabled",
+        }
+        raw["services"][name + "@internal"] = {"status": "enabled"}
+    for name in ("dashboard_redirect", "dashboard_stripprefix"):
+        raw["middlewares"][name + "@internal"] = {"status": "enabled"}
+
+
 class RoutingRuleTests(unittest.TestCase):
     def test_boolean_host_ownership_does_not_ignore_broad_or_negated_rules(self) -> None:
         host = "testing.example.invalid"
@@ -114,6 +141,90 @@ class TestingRouteTests(unittest.TestCase):
         )
         self.assertNotIn(self.old_address, str(document))
         self.assertEqual(observe_testing_route(plan, self.raw, None), self.old)
+
+    def test_internal_acme_and_admin_routes_survive_application_takeover(self) -> None:
+        add_proxy_internal_routes(self.raw)
+        original = deepcopy(self.raw)
+        plan = self.plan()
+        self.assertEqual(self.raw, original)
+        self.assertFalse(any(name.endswith("@internal") for name in plan.legacy_routers))
+        document = route_document(plan, self.new)
+        applied = self.apply(plan, self.new)
+        self.assertEqual(observe_testing_route(plan, applied, document), self.new)
+        self.assertEqual(
+            applied["routers"]["acme-http@internal"], original["routers"]["acme-http@internal"]
+        )
+
+    def test_equivalent_docker_aliases_are_bound_and_observed_individually(self) -> None:
+        self.raw["services"]["alias@docker"] = deepcopy(self.raw["services"]["old@docker"])
+        for name, router in list(self.raw["routers"].items()):
+            self.raw["routers"]["alias-" + name] = {**deepcopy(router), "service": "alias@docker"}
+        plan = self.plan()
+        self.assertEqual(set(plan.legacy_routers), set(self.raw["routers"]))
+        document = route_document(plan, self.new)
+        applied = self.apply(plan, self.new)
+        self.assertEqual(observe_testing_route(plan, applied, document), self.new)
+        applied["services"]["alias@docker"]["loadBalancer"]["servers"] = [
+            {"url": "http://another-copy:8069"}
+        ]
+        with self.assertRaises(ValueError):
+            observe_testing_route(plan, applied, document)
+
+    def test_conflicting_alias_behavior_or_physical_backend_still_refuses(self) -> None:
+        original = deepcopy(self.raw)
+        changes: tuple[dict[str, Any], ...] = ({"priority": 900}, {"tls": {}}, {"middlewares": []})
+        for change in changes:
+            with self.subTest(change=change):
+                self.raw = deepcopy(original)
+                self.raw["routers"]["alias@docker"] = {
+                    **deepcopy(self.raw["routers"]["old-http@docker"]),
+                    **change,
+                }
+                with self.assertRaises(ValueError):
+                    self.plan()
+        for balance in (
+            {"servers": [{"url": "http://foreign:8069"}]},
+            {
+                **original["services"]["old@docker"]["loadBalancer"],
+                "responseForwarding": {"flushInterval": "1s"},
+            },
+        ):
+            with self.subTest(balance=balance), self.assertRaises(ValueError):
+                self.raw = deepcopy(original)
+                self.raw["services"]["foreign@docker"] = {
+                    "status": "enabled",
+                    "loadBalancer": balance,
+                }
+                self.raw["routers"]["alias@docker"] = {
+                    **deepcopy(original["routers"]["old-http@docker"]),
+                    "service": "foreign@docker",
+                }
+                self.plan()
+
+    def test_only_canonical_internal_challenge_is_exempt_on_application_entrypoints(self) -> None:
+        add_proxy_internal_routes(self.raw)
+        original = deepcopy(self.raw)
+        mutations: tuple[dict[str, Any], ...] = (
+            {"rule": "PathPrefix(`/`)"},
+            {"service": "old@docker"},
+            {"priority": 1},
+            {"middlewares": ["foreign@file"]},
+            {"tls": {}},
+            {"status": "disabled"},
+        )
+        for changes in mutations:
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                self.raw = deepcopy(original)
+                self.raw["routers"]["acme-http@internal"].update(changes)
+                self.plan()
+        self.raw = deepcopy(original)
+        self.raw["routers"]["spoof@docker"] = deepcopy(self.raw["routers"]["acme-http@internal"])
+        with self.assertRaises(ValueError):
+            self.plan()
+        self.raw = deepcopy(original)
+        self.raw["routers"]["api@internal"]["entryPoints"] = ["web"]
+        with self.assertRaises(ValueError):
+            self.plan()
 
     def test_owned_route_refuses_an_ip_backend_or_another_host_template(self) -> None:
         plan = self.plan()

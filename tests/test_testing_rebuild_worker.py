@@ -518,6 +518,60 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertEqual(self.effects, [])
         self.assertEqual(self.current(), self.fixture.before)
 
+    def test_capture_derives_only_application_ingress_from_the_complete_proxy_frame(self) -> None:
+        frame = self.route_read()
+        route_tests.add_proxy_internal_routes(frame["raw"])
+        frame["raw"]["services"]["alias@docker"] = deepcopy(frame["raw"]["services"]["old@docker"])
+        for name, router in list(frame["raw"]["routers"].items()):
+            if name.endswith("@docker"):
+                frame["raw"]["routers"]["alias-" + name] = {
+                    **deepcopy(router),
+                    "service": "alias@docker",
+                }
+        with patch.object(DokployTestingRouteTransport, "read", return_value=frame):
+            captured = self.capture_function(
+                root=self.root, store=self.store, operation=self.operation
+            )
+        self.assertEqual(captured.public_entrypoints, ("web", "websecure"))
+        self.assertEqual(captured.old.runtime_identity, self.original_identity)
+        self.assertEqual(self.effects, [])
+        self.assertEqual(self.current(), self.fixture.before)
+
+    def test_capture_reports_route_checkpoints_without_provider_details_or_writes(self) -> None:
+        from control_plane.dokploy.native_copy_stream import (
+            NativeSourceUnavailable,
+            NativeSourceAuthorizationDenied,
+        )
+
+        for failure in (
+            NativeSourceUnavailable("private-host-message"),
+            NativeSourceAuthorizationDenied("private-denial-message"),
+        ):
+            with patch.object(DokployTestingRouteTransport, "read", side_effect=failure):
+                if isinstance(failure, NativeSourceAuthorizationDenied):
+                    with self.assertRaises(NativeSourceAuthorizationDenied):
+                        self.capture_function(
+                            root=self.root, store=self.store, operation=self.operation
+                        )
+                else:
+                    with self.assertRaises(service.TestingRebuildRefused) as refused:
+                        self.capture_function(
+                            root=self.root, store=self.store, operation=self.operation
+                        )
+                    self.assertEqual(refused.exception.code, "testing_route_read_unavailable")
+                    self.assertNotIn("private-", str(refused.exception))
+        frame = self.route_read()
+        frame["raw"]["routers"]["conflict@docker"] = {
+            **deepcopy(frame["raw"]["routers"]["old-http@docker"]),
+            "priority": 900,
+        }
+        with patch.object(DokployTestingRouteTransport, "read", return_value=frame):
+            with self.assertRaises(service.TestingRebuildRefused) as refused:
+                self.capture_function(root=self.root, store=self.store, operation=self.operation)
+            self.assertEqual(refused.exception.code, "testing_route_compilation_failed")
+        self.assertEqual(self.effects, [])
+        self.assertEqual(self.current(), self.fixture.before)
+
     def test_one_action_preserves_address_credentials_and_retires_only_after_publication(
         self,
     ) -> None:

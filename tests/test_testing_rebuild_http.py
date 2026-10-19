@@ -106,6 +106,53 @@ class TestingRebuildHttpFixture(unittest.TestCase):
 
 
 class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_native_preflight_exposes_fixed_checkpoint_without_private_exception(
+        self,
+    ) -> None:
+        from control_plane.testing_rebuild_service import TestingRebuildRefused
+        from control_plane.odoo_target_replacement_plan_http import (
+            ODOO_TARGET_REPLACEMENT_PLAN_ROUTE,
+        )
+        from control_plane.service_auth import BearerIdentityConfig
+        from control_plane.contracts.odoo_stable_target_replacement import (
+            OdooStableTargetReplacementRequest,
+        )
+
+        before = self.store.list_odoo_stable_target_replacement_operation_records()
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=self.policy,
+            record_store_factory=lambda: self.store,
+            control_plane_root_path=self.fixture.root,
+            bearer_identity_config=BearerIdentityConfig(
+                local_operator_token="fixture-operator",
+                local_operator_subject="fixture-agent",
+                local_operator_token_label="fixture-agent-token",
+            ),
+        )
+        failure = TestingRebuildRefused(
+            "testing_route_compilation_failed",
+            "The observed testing ingress cannot be safely compiled for its retained copy.",
+        )
+        with patch.object(preflight, "inspect_testing_rebuild", side_effect=failure):
+            response = await request(
+                app,
+                "POST",
+                ODOO_TARGET_REPLACEMENT_PLAN_ROUTE,
+                headers={"Authorization": "Bearer fixture-operator"},
+                payload={
+                    "product": self.product,
+                    "replacement": self.fixture.operation.request.model_dump(
+                        mode="json", include=set(OdooStableTargetReplacementRequest.model_fields)
+                    ),
+                },
+            )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()["error"]["code"], failure.code)
+        self.assertTrue(response.json()["trace_id"])
+        self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), before)
+        self.assertEqual(self.fixture.effects, [])
+
     async def test_read_only_preflight_does_not_admit_artifact_or_candidate(self) -> None:
         before = self.store.list_odoo_stable_target_replacement_operation_records()
         response = await self.call("GET", path=self.url + "/inputs")

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, NoReturn
 from urllib.parse import urlsplit
 
+import click
 from pydantic import Field
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
@@ -59,6 +60,7 @@ from control_plane.dokploy.testing_route import (
     TestingLaneRoute,
     TestingRoutePending,
     compile_testing_route,
+    testing_ingress_entrypoints,
     observe_testing_route,
     testing_route_id,
 )
@@ -245,20 +247,31 @@ def capture_rebuild_intent(
         entrypoints=(),
         old_runtime_identity=identity,
     )
-    frame = transport.read()
+    try:
+        frame = transport.read()
+    except NativeSourceAuthorizationDenied:
+        raise
+    except (ValueError, click.ClickException) as error:
+        raise TestingRebuildRefused(
+            "testing_route_read_unavailable", "The applied testing ingress could not be read."
+        ) from error
     previous = published_testing_copy(
         store, product=operation.product, context=operation.context, for_rebuild_admission=True
     )
     template = previous.plan.route.template if previous else None
     endpoints = frame["old_endpoints"]
     if not endpoints:
-        raise ValueError("The original testing private backend is unavailable.")
+        raise TestingRebuildRefused(
+            "testing_route_backend_unavailable",
+            "The original testing private backend is unavailable.",
+        )
     raw = frame["raw"]
-    points = tuple(
-        sorted({point for router in raw["routers"].values() for point in router["entryPoints"]})
-    )
-    if not points:
-        raise ValueError("The original testing entrypoints are unavailable.")
+    try:
+        points = testing_ingress_entrypoints(raw, str(urlsplit(lane.base_url).hostname))
+    except ValueError as error:
+        raise TestingRebuildRefused(
+            "testing_route_entrypoints_unavailable", "The testing application's ingress is unbound."
+        ) from error
     # Bind the actual selected backend, not an arbitrary address on the old process.
     owned = json.loads(frame["owned_file"]) if frame["owned_file"] is not None else None
     namespace = testing_candidate_namespace(
@@ -283,7 +296,10 @@ def capture_rebuild_intent(
             continue
         possible.append(endpoint)
     if not possible:
-        raise ValueError("A physically verified retained testing DNS backend is required.")
+        raise TestingRebuildRefused(
+            "testing_route_compilation_failed",
+            "The observed testing ingress cannot be safely compiled for its retained copy.",
+        )
     # The host binds all these aliases to the same exact, unshared web process.
     # An owned route already restricts this set to its recorded selected alias.
     endpoint = sorted(possible)[0]

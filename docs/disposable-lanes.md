@@ -982,6 +982,24 @@ qualifies the predecessor against its recorded physical port and prepares its
 successor at the desired current port, without reverting the profile or changing
 the public address.
 
+Native route admission derives listeners from the application's exact host
+routes. The proxy's canonical internal API/dashboard listeners do not become
+application ingress. Its enabled, canonical high-priority ACME challenge route
+remains outside takeover and above every application winner. A changed internal
+route on an application listener still refuses. Duplicate Docker router families
+may describe one predecessor only when every alias binds the same physically
+verified backend and has equivalent host, listeners, effective priority,
+middleware, TLS and load-balancer behavior. The plan retains every alias for
+subsequent drift checks and emits one owned winner per equivalent group. It
+never deletes a live router or changes proxy configuration to make admission pass.
+
+The native plan API returns fixed, traced prerequisite codes for route-read,
+private-backend, application-entrypoint and compiler failures:
+`testing_route_read_unavailable`, `testing_route_backend_unavailable`,
+`testing_route_entrypoints_unavailable`, and `testing_route_compilation_failed`.
+These are preflight conflicts (HTTP 409), not request-schema errors. Provider
+authorization denials remain denials; exception/provider payloads are not exposed.
+
 Staff holds and the hold writer's timestamp/source label are excluded from the
 shared serving-target input projection. A hold pauses preparation and cutover;
 lifting it resumes the same candidate rather than changing its input authority.

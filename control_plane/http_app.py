@@ -309,6 +309,7 @@ from control_plane.http_routes.testing_rebuild import (
     TestingRebuildRouteDependencies,
     register_testing_rebuild_routes,
 )
+from control_plane.testing_rebuild_service import TestingRebuildRefused
 from control_plane.http_routes.production_backup_credentials import (
     register_production_backup_credential_routes,
 )
@@ -10711,6 +10712,13 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 code="authorization_denied",
                 message="The provider refused the native testing preflight read.",
+            ) from error
+        except TestingRebuildRefused as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code=error.code,
+                message=str(error),
             ) from error
         except (ValueError, click.ClickException) as error:
             raise _launchplane_http_error(
