@@ -139,7 +139,9 @@ def _change_link(change: InvitationChange) -> str:
     # Keep Client instructions; name constituents instead of their batch PR.
     item = change.item
     name = change.feature_name.replace("@", "@\u200b")
-    notes = " ".join(item.owner_test_notes.splitlines()).replace("@", "@\u200b")
+    notes = " ".join((change.release_test_notes or item.owner_test_notes).splitlines()).replace(
+        "@", "@\u200b"
+    )
     return f"- [#{item.pull_request_number}]({item.url}): " + (
         f"{name} — {notes}" if name else notes
     )
@@ -746,6 +748,9 @@ def publish_release_invitation(
             return False
         assert review.checklist is not None
         client_changes = client_invitation_changes(store, profile, review.checklist)
+        notification_changes = {
+            key: change for key, change in client_changes.items() if change.client_review_requested
+        }
         marker = release_invitation_marker(profile.product, review.checklist.candidate)
         issue_marker = release_request_issue_marker(profile.product)
         lane = next(lane for lane in profile.lanes if lane.instance == "testing")
@@ -769,7 +774,7 @@ def publish_release_invitation(
             if len(issues) > 1:
                 raise ValueError("Release invitation destination is ambiguous.")
             if not issues:
-                if not client_changes and not urgent_reason:
+                if not notification_changes and not urgent_reason:
                     return False
                 created = github_api_request(
                     path=path,
@@ -795,7 +800,7 @@ def publish_release_invitation(
             request = _open_request(comments, request_marker, last_decision)
             # Engineering-only changes never open a release review on their own;
             # they ride with the next Client-facing release or an urgent opening.
-            if request is None and not client_changes and not urgent_reason:
+            if request is None and not notification_changes and not urgent_reason:
                 return False
             reminder_marker = request_marker.replace("release-request:", "release-reminder:")
             reminded = any(reminder_marker in _comment_lines(comment) for comment in comments)
@@ -840,7 +845,9 @@ def publish_release_invitation(
                 else _now() + timedelta(days=3)
             )
             announced = _announced_changes(request, client_changes, marker)
-            added = {key: item for key, item in client_changes.items() if key not in announced}
+            added = {
+                key: item for key, item in notification_changes.items() if key not in announced
+            }
             # A matching candidate receipt still needs the one-time migration
             # to plain wording and cleanup of older duplicate invitations.
             formatted = (
@@ -887,10 +894,14 @@ def publish_release_invitation(
                 _remember_delivery(backoff, receipt, due, True)
                 return True
             notify = not request or bool(added)
-            changes = [
-                _change_link(change)
-                for change in (added if request and added else client_changes).values()
-            ]
+            display_changes = client_changes
+            if request and added:
+                display_changes = added | {
+                    key: change
+                    for key, change in client_changes.items()
+                    if not change.client_review_requested
+                }
+            changes = [_change_link(change) for change in display_changes.values()]
             if not changes:
                 changes = ["- Engineering updates only; no new Client change needs checking."]
             client = f"@{profile.owner.github_login}" if notify else profile.owner.github_login
@@ -899,7 +910,7 @@ def publish_release_invitation(
             )
             receipts = "\n".join(
                 f"<!-- launchplane:release-client-change:{key} -->"
-                for key in sorted(announced | client_changes.keys())
+                for key in sorted(announced | notification_changes.keys())
             )
             if reminded:
                 receipts += f"\n{reminder_marker}"
