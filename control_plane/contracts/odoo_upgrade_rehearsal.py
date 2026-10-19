@@ -169,7 +169,7 @@ class RehearsalAttachmentFacts(BaseModel):
     store_fname: str = Field(pattern=r"^[a-f0-9]{2}/[a-f0-9]{40}$")
     name: str | None = Field(max_length=ATTACHMENT_METADATA_LIMITS["name"])
     res_model: str | None = Field(max_length=ATTACHMENT_METADATA_LIMITS["res_model"])
-    res_id: int | None = Field(ge=0)
+    res_id: int | None
     mimetype: str | None = Field(max_length=ATTACHMENT_METADATA_LIMITS["mimetype"])
     database_size: int = Field(ge=0)
     database_checksum: str = Field(pattern=r"^[a-f0-9]{40}$")

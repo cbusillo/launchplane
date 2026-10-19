@@ -1634,7 +1634,10 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         }
 
     def test_failing_capture_names_its_attachment_without_content_or_another_scan(self) -> None:
-        from control_plane._odoo_rehearsal_attachment_validation import ATTACHMENT_METADATA_LIMITS
+        from control_plane._odoo_rehearsal_attachment_validation import (
+            ATTACHMENT_METADATA_LIMITS,
+            ATTACHMENT_MISMATCH_RECEIPT_NAME,
+        )
         import io
         import json
         import tarfile
@@ -1661,7 +1664,8 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         self.host["sql"] = Mock(return_value="18.0")
         self.host["docker"] = Mock()
         mismatch = self.attachment_mismatch_fixture()
-        mismatch["name"] = "\U0001f680" * ATTACHMENT_METADATA_LIMITS["name"]
+        for field, limit in ATTACHMENT_METADATA_LIMITS.items():
+            mismatch[field] = "\U0001f680" * limit
 
         def capture_file(arguments: list[str], path: Path, bound: int) -> None:
             if path.suffix == ".dump":
@@ -1679,7 +1683,7 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         (root / ".execution.lock").touch(mode=0o600)
         with self.assertRaises(RuntimeError):
             self.host["capture"](spec, root, containers, self.fixture.database)
-        saved = root / "execute.attachment-mismatch.json"
+        saved = root / ATTACHMENT_MISMATCH_RECEIPT_NAME
         evidence = json.loads(saved.read_text())
         self.assertEqual(evidence["attachment"], mismatch)
         self.assertEqual(evidence["attempt_sha256"], spec["attempt_sha256"])
@@ -1687,7 +1691,7 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         self.assertEqual(saved.stat().st_mode & 0o777, 0o600)
         self.assertNotIn("private contents", saved.read_text())
         self.assertNotIn("private database contents", saved.read_text())
-        probe.assert_called_once_with(containers, self.fixture.database, "validate")
+        probe.assert_called_once()
         spec.update(mode="observe", inspect_capture=True)
         self.host["capture_attachment_observation"] = Mock(side_effect=AssertionError("extra scan"))
         self.host["inspection"] = Mock(side_effect=AssertionError("runtime lookup"))
@@ -1709,7 +1713,7 @@ class RehearsalHostSafetyTests(unittest.TestCase):
             self.host["capture"](spec, clean_root, containers, self.fixture.database),
             clean_root / "raw-source",
         )
-        self.assertFalse((clean_root / "execute.attachment-mismatch.json").exists())
+        self.assertFalse((clean_root / ATTACHMENT_MISMATCH_RECEIPT_NAME).exists())
         self.assertTrue((clean_root / "capture.json").is_file())
         self.assertEqual(
             (clean_root / "raw-source/filestore" / mismatch["store_fname"]).read_bytes(),
@@ -1772,6 +1776,18 @@ class RehearsalHostSafetyTests(unittest.TestCase):
             program["validate_attachment_files"]([row], root, None, mismatch=clean), "verified"
         )
         self.assertEqual(clean, {})
+        path.write_bytes(b"private contents")
+        for record_id in (-7, None):
+            mismatch = {}
+            signed_row = (*row[:5], record_id, row[6])
+            self.assertEqual(
+                program["validate_attachment_files"]([signed_row], root, None, mismatch=mismatch),
+                expected["reason"],
+            )
+            self.assertEqual(mismatch["res_id"], record_id)
+            self.assertEqual(
+                RehearsalAttachmentFacts.model_validate(mismatch).model_dump(), mismatch
+            )
         for field in ("name", "res_model", "mimetype"):
             long_value = "\U0001f680" * (ATTACHMENT_METADATA_LIMITS[field] + 1)
             details = {**expected, field: long_value}
@@ -1805,11 +1821,21 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         real_fstat = program["os"].fstat
         for status in ("changed", "unreadable"):
             mismatch = {}
+            reads = 0
+
+            def observed_metadata(descriptor: int) -> Any:
+                nonlocal reads
+                actual = real_fstat(descriptor)
+                if actual.st_ino != metadata.st_ino:
+                    return actual
+                reads += 1
+                return metadata if reads == 1 else changed
+
             with (
                 patch.object(
                     program["os"],
                     "fstat",
-                    side_effect=[metadata, changed] if status == "changed" else real_fstat,
+                    side_effect=observed_metadata if status == "changed" else real_fstat,
                 ),
                 patch.object(
                     program["os"], "fdopen", side_effect=OSError("private filesystem error")
@@ -1834,7 +1860,6 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         connection.cursor.return_value.__enter__.return_value.__iter__.side_effect = lambda: iter(
             [row]
         )
-        program["Path"] = lambda _: root.parent
         output = io.StringIO()
         with (
             patch.dict(sys.modules, {"psycopg2": SimpleNamespace(connect=lambda **_: connection)}),

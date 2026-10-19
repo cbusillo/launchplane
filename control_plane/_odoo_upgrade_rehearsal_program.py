@@ -313,7 +313,7 @@ def capture(spec,root,containers,database):
     reason=validation['reason']
     if reason!='verified':
         if 'mismatch' in validation:
-            save(root/'execute.attachment-mismatch.json',{
+            save(root/ATTACHMENT_MISMATCH_RECEIPT_NAME,{
                 'intent_sha256':spec['record']['intent_sha256'],
                 'attempt_sha256':spec['attempt_sha256'],
                 'record_binding_sha256':spec['record_binding_sha256'],
@@ -453,7 +453,7 @@ def attachment_validation_payload(containers, database, mode):
 
 
 def read_attachment_mismatch(spec,root):
-    path=root/'execute.attachment-mismatch.json'
+    path=root/ATTACHMENT_MISMATCH_RECEIPT_NAME
     try:
         descriptor=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
     except FileNotFoundError:

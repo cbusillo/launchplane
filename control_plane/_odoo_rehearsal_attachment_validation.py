@@ -2,10 +2,12 @@
 
 ATTACHMENT_METADATA_LIMITS = {"name": 4096, "res_model": 255, "mimetype": 255}
 ATTACHMENT_EVIDENCE_MAX_BYTES = 128 * 1024
+ATTACHMENT_MISMATCH_RECEIPT_NAME = "execute.attachment-mismatch.json"
 
 ATTACHMENT_MISMATCH_LIBRARY = (
     f"ATTACHMENT_METADATA_LIMITS = {ATTACHMENT_METADATA_LIMITS!r}\n"
     f"ATTACHMENT_EVIDENCE_MAX_BYTES = {ATTACHMENT_EVIDENCE_MAX_BYTES!r}\n"
+    f"ATTACHMENT_MISMATCH_RECEIPT_NAME = {ATTACHMENT_MISMATCH_RECEIPT_NAME!r}\n"
     + r"""
 def valid_attachment_mismatch(value):
     fields={'reason','store_fname','name','res_model','res_id','mimetype',
@@ -19,7 +21,7 @@ def valid_attachment_mismatch(value):
     if (not isinstance(truncated,list) or any(not isinstance(key,str) or key not in ATTACHMENT_METADATA_LIMITS for key in truncated)
             or len(truncated)!=len(set(truncated))):
         return False
-    if value['res_id'] is not None and (type(value['res_id']) is not int or value['res_id']<0):
+    if value['res_id'] is not None and type(value['res_id']) is not int:
         return False
     if any(type(value[key]) is not int or value[key]<0 for key in ('database_size','file_size')):
         return False
