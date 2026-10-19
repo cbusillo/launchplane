@@ -136,6 +136,7 @@ class MergeTrainPullRequestSnapshot(BaseModel):
     owner_review_required: bool = Field(default=False, exclude_if=lambda value: not value)
     client_test_notes_error: str = Field(default="", exclude_if=lambda value: not value)
     required_checks_status: MergeTrainCheckStatus = "unknown"
+    required_checks_observation_error: str = ""
     branch_update_required: bool = False
     # Set only for bot-authored pull requests; see merge_train_dependency_updates.
     dependency_update_class: DependencyUpdateClass | None = Field(
@@ -807,6 +808,11 @@ def _build_queue_entry(
     label_refusal = enqueue_label_refusal(
         repository_policy, labels=pull_request.labels, label_actors=pull_request.label_actors
     )
+    if (
+        pull_request.required_checks_observation_error
+        and pull_request.required_checks_status != "pass"
+    ):
+        ineligible_reasons.append(pull_request.required_checks_observation_error)
     handoff_refusal = ready_handoff_refusal(
         repository_policy, pull_request.ready_handoff, pull_request.head_sha
     )

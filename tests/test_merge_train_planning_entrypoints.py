@@ -158,7 +158,9 @@ class NativePlanningHttpTests(IsolatedAsyncioTestCase):
                         return graph.token(_REPO)
                     self.assertEqual(kwargs["repository"], _TARGET)
                     self.assertEqual(kwargs["source"], policy.policy.policies[1].github_token)
-                    return token_module.resolve_merge_train_github_token(**kwargs)
+                    return token_module.merge_train_github_token_value(
+                        token_module.resolve_merge_train_github_token(**kwargs)
+                    )
 
                 def request(**kwargs: Any) -> Any:
                     result = graph.request(**kwargs)

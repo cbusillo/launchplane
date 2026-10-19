@@ -250,6 +250,7 @@ def run_stall_monitor_pass(
                         source=target.github_token,
                         repository=target.repository,
                         control_plane_root=root,
+                        include_permissions=True,
                     )
                     client = GitHubMergeTrainClient(
                         transport=UrllibMergeTrainGitHubTransport(token=token)

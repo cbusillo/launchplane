@@ -87,6 +87,26 @@ class _FakeSnapshotReader:
 
 
 class MergeTrainDryRunTests(unittest.TestCase):
+    def test_unavailable_check_observation_names_its_queue_blocker(self) -> None:
+        reason = "actions_read_not_granted"
+        for status in ("fail", "pass"):
+            with self.subTest(status=status):
+                pr = _pull_request(1, created_at="2026-05-08T10:00:00Z").model_copy(
+                    update={
+                        "required_checks_status": status,
+                        "required_checks_observation_error": reason,
+                    }
+                )
+                result = build_merge_train_dry_run_result(
+                    policy=build_test_merge_train_policy(),
+                    snapshot=MergeTrainDryRunSnapshot(
+                        repository="cbusillo/sellyouroutboard",
+                        base_branch="main",
+                        pull_requests=(pr,),
+                    ),
+                )
+                self.assertEqual(reason in result.queue[0].ineligible_reasons, status == "fail")
+
     def test_remaining_planned_unknown_head_keeps_an_older_unaccepted_feature_out(self) -> None:
         waiting = _pull_request(1, created_at="2026-05-08T10:00:00Z").model_copy(
             update={"owner_review_required": True, "required_checks_status": "pending"}

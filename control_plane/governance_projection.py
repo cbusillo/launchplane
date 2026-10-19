@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from control_plane.contracts.github_app_installation_token import GitHubAppInstallationToken
+
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal, Protocol, cast
@@ -76,9 +78,9 @@ class GovernanceMergeTrainReadStore(Protocol):
 
 @dataclass(frozen=True)
 class LiveGovernanceCurrentReadinessProvider:
-    github_token: Callable[[MergeTrainGitHubTokenSource, str], str]
+    github_token: Callable[[MergeTrainGitHubTokenSource, str], str | GitHubAppInstallationToken]
     evaluator_factory: Callable[
-        [object, RepositoryEvidenceProvider, str],
+        [object, RepositoryEvidenceProvider, str | GitHubAppInstallationToken],
         object,
     ] = lambda store, provider, token: LiveMergeAdmissionEvaluator(
         store=store,
@@ -175,7 +177,7 @@ class LiveGovernanceCurrentReadinessProvider:
                 )
             ):
                 return _unavailable_readiness()
-            token = self.github_token(github_token_source, repository).strip()
+            token = self.github_token(github_token_source, repository)
             if not token:
                 return _unavailable_readiness()
             evaluator = cast(

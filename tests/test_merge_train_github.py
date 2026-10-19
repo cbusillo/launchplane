@@ -2085,6 +2085,15 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                     )
                 self.assertEqual(result["check_runs"], [check])
                 self.assertNotIn("private provider response", "\n".join(logs.output))
+                if isinstance(metadata, MergeTrainGitHubError) and metadata.status_code is not None:
+                    self.assertIn(f"HTTP {metadata.status_code}", "\n".join(logs.output))
+                    self.assertIn(
+                        "/repos/{owner}/{repo}/actions/runs",
+                        str(result["actions_observation_error"]),
+                    )
+                    self.assertNotIn(
+                        "private provider response", str(result["actions_observation_error"])
+                    )
 
     def test_observe_batch_candidate_checks_keeps_latest_duplicate_pending(self) -> None:
         candidate = _batch_candidate().model_copy(

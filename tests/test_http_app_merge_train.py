@@ -1,3 +1,4 @@
+from control_plane.contracts.github_app_installation_token import GitHubAppInstallationToken
 from tests.support.auth import scoped_agent_test
 from datetime import datetime, timezone
 import asyncio
@@ -2347,8 +2348,18 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(served_while_controller_ran)
 
     async def test_controller_uses_only_the_declared_managed_token_source(self) -> None:
+        credential = GitHubAppInstallationToken(
+            token="managed-test-token",
+            app_id=42,
+            installation_id=77,
+            repository_id=123,
+            repository="cbusillo/sellyouroutboard",
+            expires_at="unused",
+            permissions=("checks:read",),
+        )
         for managed_token, expected_status in (
             ("managed-test-token", 202),
+            (credential, 202),
             ("", 503),
             (SQLAlchemyError("database temporarily unavailable"), 503),
         ):
@@ -2358,7 +2369,9 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
                 patch.dict("os.environ", {"GH_TOKEN": "unrelated-bootstrap-token"}, clear=True),
                 patch(
                     "control_plane.http_app.resolve_merge_train_github_token",
-                    return_value=managed_token if isinstance(managed_token, str) else "",
+                    return_value=managed_token
+                    if isinstance(managed_token, (str, GitHubAppInstallationToken))
+                    else "",
                 ) as resolve_token,
                 patch("control_plane.http_app.UrllibMergeTrainGitHubTransport") as transport,
                 patch(
@@ -2406,6 +2419,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
                         policy["policies"][0]["github_token"]
                     ),
                     repository=policy["policies"][0]["repository"],
+                    include_permissions=True,
                 )
                 self.assertNotIn("managed-test-token", response.text)
                 self.assertNotIn("unrelated-bootstrap-token", response.text)

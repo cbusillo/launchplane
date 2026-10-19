@@ -2,6 +2,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from email.message import Message
 from urllib.error import HTTPError
+from urllib.parse import urlsplit
+from urllib.request import Request
 from tempfile import TemporaryDirectory
 from typing import Any
 import unittest
@@ -22,6 +24,7 @@ from control_plane.contracts.merge_train_policy import (
 )
 from control_plane.github_app_identity import (
     GitHubAppIdentity,
+    GitHubAppInstallationToken,
     mint_build_provenance_installation_token,
     mint_pull_request_feedback_installation_token,
 )
@@ -77,6 +80,7 @@ class MergeTrainGitHubTokenTests(unittest.TestCase):
             "statuses": "read",
             "workflows": "write",
         }
+        self.returned_permissions: dict[str, str] | None = None
         self.installation_permissions = {
             **self.token_permissions,
             "actions": "write",
@@ -105,6 +109,13 @@ class MergeTrainGitHubTokenTests(unittest.TestCase):
         if path != "/app/installations/77/access_tokens" or kwargs["method"] != "POST":
             raise AssertionError(f"Unexpected provider request: {path}")
         self.minted += 1
+        body = kwargs["body"]
+        assert isinstance(body, dict)
+        self.token_permissions = (
+            self.returned_permissions
+            if self.returned_permissions is not None
+            else {"metadata": "read", **body["permissions"]}
+        )
         return {
             "token": f"example-installation-token-{self.minted}",
             "expires_at": (datetime.now(timezone.utc) + self.token_lifetime).isoformat(),
@@ -249,6 +260,150 @@ class MergeTrainGitHubTokenTests(unittest.TestCase):
             )
             self.assertEqual(http.used, 2)
 
+    def test_native_mint_supports_the_current_execution_reader(self) -> None:
+        from control_plane.merge_train_github import _check_runs_status, _list_check_runs
+
+        for installed in (None, "read", "write"):
+            with self.subTest(installed=installed):
+                self.setUp()
+                if installed is None:
+                    self.installation_permissions.pop("actions")
+                else:
+                    self.installation_permissions["actions"] = installed
+                head = "candidate-sha"
+                old = {
+                    "id": 11,
+                    "workflow_id": 7,
+                    "run_number": 1,
+                    "run_attempt": 1,
+                    "head_sha": head,
+                    "head_branch": "work/feature",
+                    "head_repository": {"id": 9},
+                    "event": "pull_request",
+                    "pull_requests": [{"number": 14, "base": {"ref": "main", "repo": {"id": 9}}}],
+                    "check_suite_id": 10,
+                    "status": "completed",
+                    "conclusion": "cancelled",
+                    "run_started_at": "2026-01-01T10:00:00Z",
+                }
+                current = {
+                    **old,
+                    "id": 12,
+                    "run_number": 2,
+                    "check_suite_id": 20,
+                    "conclusion": "success",
+                    "run_started_at": "2026-01-01T10:01:00Z",
+                }
+                checks = [
+                    {
+                        "name": "security-gate",
+                        "status": "completed",
+                        "conclusion": conclusion,
+                        "app": {"id": 15368, "slug": "github-actions"},
+                        "id": job,
+                        "head_sha": head,
+                        "check_suite": {"id": suite},
+                        "details_url": (
+                            f"https://github.com/{self.repository}/actions/runs/{run}/job/{job}"
+                        ),
+                    }
+                    for run, job, suite, conclusion in (
+                        (11, 101, 10, "failure"),
+                        (12, 102, 20, "success"),
+                    )
+                ]
+                http = _Provider()
+                http.payloads[f"/repos/{self.repository}/commits/{head}/check-runs"] = {
+                    "check_runs": checks
+                }
+                http.payloads[f"/repos/{self.repository}/actions/runs"] = {
+                    "total_count": 2,
+                    "workflow_runs": [current, old],
+                }
+
+                def mint(request: object, **kwargs: object) -> object:
+                    if kwargs.get("method") == "POST":
+                        body = kwargs["body"]
+                        assert isinstance(body, dict)
+                        self.token_permissions = {"metadata": "read", **body["permissions"]}
+                    return self.provider(request, **kwargs)
+
+                def permission_enforcing_http(request: Request, *, timeout: int) -> object:
+                    self.assertEqual(request.get_header("Authorization"), f"Bearer {issued}")
+                    if urlsplit(request.full_url).path.endswith("/actions/runs"):
+                        if self.token_permissions.get("actions") not in {"read", "write"}:
+                            raise HTTPError(
+                                request.full_url, 403, "private-provider-message", Message(), None
+                            )
+                    return http(request, timeout=timeout)
+
+                with (
+                    patch(
+                        "control_plane.merge_train_github_token.secrets.resolve_context_secret_value",
+                        return_value=self.private_key,
+                    ),
+                    patch(
+                        "control_plane.github_app_identity._github_api_request", side_effect=mint
+                    ),
+                    patch(
+                        "control_plane.merge_train_github.urlopen",
+                        side_effect=permission_enforcing_http,
+                    ),
+                ):
+                    credential = resolve_merge_train_github_token(
+                        source=self.source,
+                        repository=self.repository,
+                        control_plane_root=Path("/unused"),
+                        include_permissions=True,
+                    )
+                    self.assertIsInstance(credential, GitHubAppInstallationToken)
+                    assert isinstance(credential, GitHubAppInstallationToken)
+                    issued = credential.token
+                    cached = resolve_merge_train_github_token(
+                        source=self.source,
+                        repository=self.repository,
+                        control_plane_root=Path("/unused"),
+                        include_permissions=True,
+                    )
+                    self.assertIs(cached, credential)
+                    for _ in range(2):
+                        payload = _list_check_runs(
+                            transport=UrllibMergeTrainGitHubTransport(
+                                token=credential, read_cache=GitHubReadCache()
+                            ),
+                            repository_path=self.repository,
+                            encoded_head_sha=head,
+                        )
+                        self.assertEqual(
+                            _check_runs_status(payload), "fail" if installed is None else "pass"
+                        )
+                        if installed is None:
+                            self.assertEqual(
+                                payload["actions_observation_error"], "actions_read_not_granted"
+                            )
+                    if installed is None:
+                        # A missing optional grant must not block healthy trains.
+                        for check in checks:
+                            check["conclusion"] = "success"
+                        healthy = _list_check_runs(
+                            transport=UrllibMergeTrainGitHubTransport(
+                                token=credential, read_cache=GitHubReadCache()
+                            ),
+                            repository_path=self.repository,
+                            encoded_head_sha=head,
+                        )
+                        self.assertEqual(_check_runs_status(healthy), "pass")
+                        self.assertFalse(healthy["actions_observation_error"])
+                reads = [
+                    request
+                    for request in http.requests
+                    if urlsplit(request.full_url).path.endswith("/actions/runs")
+                ]
+                self.assertEqual(len(reads), 0 if installed is None else 2)
+                if installed is not None:
+                    self.assertIn("actions:read", credential.permissions)
+                    self.assertNotIn("actions:write", credential.permissions)
+
     def test_auth_failures_refresh_issued_token_but_quota_failures_preserve_it(self) -> None:
         for status, quota_limited in ((401, False), (403, False), (403, True)):
             with (
@@ -316,7 +471,7 @@ class MergeTrainGitHubTokenTests(unittest.TestCase):
         permissions = body["permissions"]
         self.assertEqual(permissions["checks"], "read")
         self.assertEqual(permissions["statuses"], "read")
-        self.assertNotIn("actions", permissions)
+        self.assertEqual(permissions["actions"], "read")
         self.assertNotIn("administration", permissions)
 
     def test_missing_or_invalid_installation_capability_fails_before_mint(self) -> None:
@@ -359,12 +514,19 @@ class MergeTrainGitHubTokenTests(unittest.TestCase):
             "repository",
             "administration",
             "actions",
+            "unrequested_actions_read",
+            "missing_actions_read",
             "workflow_permission",
             "issues_permission",
         ):
             with self.subTest(failure=failure):
                 self.setUp()
-                if failure == "repository":
+                self.token_permissions["actions"] = "read"
+                if failure == "unrequested_actions_read":
+                    self.installation_permissions.pop("actions")
+                elif failure == "missing_actions_read":
+                    self.token_permissions.pop("actions")
+                elif failure == "repository":
                     self.returned_repository = "example/another-product"
                 elif failure in {"workflow_permission", "issues_permission"}:
                     self.token_permissions[
@@ -372,6 +534,7 @@ class MergeTrainGitHubTokenTests(unittest.TestCase):
                     ] = "read"
                 else:
                     self.token_permissions[failure] = "write"
+                self.returned_permissions = dict(self.token_permissions)
                 with (
                     patch.dict("os.environ", {"GH_TOKEN": "must-not-be-used"}),
                     patch(

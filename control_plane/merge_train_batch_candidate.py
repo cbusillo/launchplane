@@ -1,3 +1,4 @@
+from control_plane.contracts.github_app_installation_token import GitHubAppInstallationToken
 from dataclasses import dataclass
 from typing import Callable, Literal, Protocol, cast
 
@@ -137,7 +138,7 @@ def execute_merge_train_batch_candidate_run_once(
     request: MergeTrainBatchCandidateRunOnceEnvelope,
     policy: MergeTrainPolicy,
     policy_sha256: str,
-    token: str,
+    token: str | GitHubAppInstallationToken,
     trace_id: str,
     recorded_at: str,
     batch_store: MergeTrainBatchCandidateRecordStore,

@@ -1,3 +1,4 @@
+from control_plane.contracts.github_app_installation_token import GitHubAppInstallationToken
 from datetime import datetime, timezone
 from dataclasses import dataclass
 import json
@@ -281,12 +282,18 @@ class UrllibMergeTrainGitHubTransport:
     def __init__(
         self,
         *,
-        token: str,
+        token: str | GitHubAppInstallationToken,
         api_base_url: str = "https://api.github.com",
         response_headers_observer: GitHubResponseHeadersObserver | None = None,
         read_cache: GitHubReadCache | None = None,
     ) -> None:
-        self.token = _required_value(token, "GitHub token is required.")
+        self.token_permissions = (
+            token.permissions if isinstance(token, GitHubAppInstallationToken) else None
+        )
+        self.token = _required_value(
+            token.token if isinstance(token, GitHubAppInstallationToken) else token,
+            "GitHub token is required.",
+        )
         self.api_base_url = _required_value(
             api_base_url, "GitHub API base URL is required."
         ).rstrip("/")
@@ -3480,10 +3487,10 @@ class GitHubMergeTrainSnapshotReader:
                 base_branch=str(base.get("ref") or ""),
                 base_sha=str(base.get("sha") or ""),
             )
-        checks_status = (
-            "fail"
+        checks_observation: tuple[MergeTrainCheckStatus, str] = (
+            ("fail", "")
             if review_intent.error
-            else self._required_checks_status(
+            else self._required_checks_observation(
                 repository_path=repository_path,
                 head_sha=head_sha,
                 owner_review_required=owner_review_required,
@@ -3497,8 +3504,9 @@ class GitHubMergeTrainSnapshotReader:
                 ),
             )
             if enrich
-            else "unknown"
+            else ("unknown", "")
         )
+        checks_status, checks_error = checks_observation
         return MergeTrainPullRequestSnapshot(
             ready_handoff=ready_handoff,
             owner_review_required=owner_review_required,
@@ -3523,6 +3531,7 @@ class GitHubMergeTrainSnapshotReader:
             base_repository=base_repository,
             mergeable=_mergeable_state(source) if enrich else "unknown",
             required_checks_status="fail" if vetoed else checks_status,
+            required_checks_observation_error=checks_error,
             branch_update_required=_branch_update_required(source),
             dependency_update_class=dependency_update_class,
         )
@@ -4234,8 +4243,23 @@ class GitHubMergeTrainSnapshotReader:
         owner_review_required: bool = False,
         config_comparison: "_ConfigComparison | None" = None,
     ) -> MergeTrainCheckStatus:
+        return self._required_checks_observation(
+            repository_path=repository_path,
+            head_sha=head_sha,
+            owner_review_required=owner_review_required,
+            config_comparison=config_comparison,
+        )[0]
+
+    def _required_checks_observation(
+        self,
+        *,
+        repository_path: str,
+        head_sha: str,
+        owner_review_required: bool = False,
+        config_comparison: "_ConfigComparison | None" = None,
+    ) -> tuple[MergeTrainCheckStatus, str]:
         encoded_head_sha = quote(head_sha, safe="")
-        return _required_checks_status(
+        return _required_checks_observation(
             transport=self.transport,
             repository_path=repository_path,
             encoded_head_sha=encoded_head_sha,
@@ -4829,6 +4853,25 @@ def _required_checks_status(
     owner_review_app_id: int | None = None,
     config_comparison: "_ConfigComparison | None" = None,
 ) -> MergeTrainCheckStatus:
+    return _required_checks_observation(
+        transport=transport,
+        repository_path=repository_path,
+        encoded_head_sha=encoded_head_sha,
+        owner_review_required=owner_review_required,
+        owner_review_app_id=owner_review_app_id,
+        config_comparison=config_comparison,
+    )[0]
+
+
+def _required_checks_observation(
+    *,
+    transport: MergeTrainGitHubTransport,
+    repository_path: str,
+    encoded_head_sha: str,
+    owner_review_required: bool = False,
+    owner_review_app_id: int | None = None,
+    config_comparison: "_ConfigComparison | None" = None,
+) -> tuple[MergeTrainCheckStatus, str]:
     status_payload = _list_commit_statuses(
         transport=transport,
         repository_path=repository_path,
@@ -4855,7 +4898,9 @@ def _required_checks_status(
                 advisory_app_id=owner_review_app_id,
             )
         )
-    return _combine_check_statuses(*statuses)
+    return _combine_check_statuses(*statuses), str(
+        check_runs_payload.get("actions_observation_error") or ""
+    )
 
 
 @runtime_checkable
@@ -5519,7 +5564,7 @@ def _list_check_runs(
             break
         page += 1
     latest = _latest_check_runs(check_runs)
-    latest = _without_superseded_actions_checks(
+    latest, observation_error = _without_superseded_actions_checks(
         transport=transport,
         repository_path=repository_path,
         head_sha=encoded_head_sha,
@@ -5528,6 +5573,7 @@ def _list_check_runs(
     return {
         "total_count": total_count if total_count is not None else len(check_runs),
         "check_runs": latest,
+        "actions_observation_error": observation_error,
     }
 
 
@@ -5563,7 +5609,7 @@ def _without_superseded_actions_checks(
     repository_path: str,
     head_sha: str,
     check_runs: list[object],
-) -> list[object]:
+) -> tuple[list[object], str]:
     """Retain blockers unless complete execution evidence proves they are history."""
     from github_plan_status.workflow_runs import current_workflow_runs
 
@@ -5575,14 +5621,18 @@ def _without_superseded_actions_checks(
         identity is not None and _check_run_status(cast(dict[str, object], check)) == "fail"
         for check, identity in zip(check_runs, identities, strict=True)
     ):
-        return check_runs
+        return check_runs, ""
 
-    def unavailable(reason: str) -> list[object]:
+    def unavailable(reason: str) -> tuple[list[object], str]:
         logger.warning(
             "Cannot select current Actions executions; retaining existing check blockers: %s",
             reason,
         )
-        return check_runs
+        return check_runs, reason
+
+    permissions = getattr(transport, "token_permissions", None)
+    if permissions is not None and "actions:read" not in permissions:
+        return unavailable("actions_read_not_granted")
 
     try:
         runs = _read_actions_workflow_inventory(
@@ -5596,7 +5646,11 @@ def _without_superseded_actions_checks(
             not malformed and (error.status_code is None or error.status_code >= 500)
         ):
             raise  # Preserve retry classification, cause and quota reset evidence.
-        return unavailable(type(error).__name__)
+        return unavailable(
+            f"actions_history_unavailable: GET /repos/{{owner}}/{{repo}}/actions/runs HTTP {error.status_code}"
+            if error.status_code is not None
+            else "actions_history_response_malformed"
+        )
     if runs is None:
         return unavailable("workflow_inventory_incomplete_or_malformed")
     try:
@@ -5608,7 +5662,7 @@ def _without_superseded_actions_checks(
             or run.get("conclusion") not in {"success", "neutral", "skipped"}
             for run in current
         ):
-            return check_runs
+            return check_runs, ""
         current_ids = {run["id"] for run in current}
         superseded = {
             (run["id"], run["check_suite_id"])
@@ -5621,7 +5675,7 @@ def _without_superseded_actions_checks(
         check
         for check, identity in zip(check_runs, identities, strict=True)
         if identity not in superseded
-    ]
+    ], ""
 
 
 def _read_actions_workflow_inventory(
