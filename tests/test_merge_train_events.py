@@ -352,8 +352,13 @@ class MergeTrainEventTests(TestCase):
         )
         wake = MergeTrainEventListener("postgresql://test").wait(300, Event())
         self.assertEqual(wake.target_keys, frozenset({"alpha", "beta"}))
-        self.assertEqual(wake.for_target("alpha").event_receipts, (first, second))
-        self.assertEqual(wake.for_target("beta").event_receipts, ())
+        self.assertEqual(
+            tuple(item.receipt for item in wake.receipts if item.target_key == "alpha"),
+            (first, second),
+        )
+        self.assertEqual(
+            tuple(item.receipt for item in wake.receipts if item.target_key == "beta"), ()
+        )
         self.assertFalse(wake.receipts_truncated)
 
     def test_receipt_budget_never_stops_draining_or_erases_a_full_sweep(self) -> None:
@@ -369,7 +374,10 @@ class MergeTrainEventTests(TestCase):
         self.assertTrue(wake.receipts_truncated)
         self.assertEqual(len(wake.receipts), MAX_MERGE_TRAIN_WAKE_RECEIPTS)
         self.assertEqual(wake.receipts[-1].receipt.request_trace_id, str(index))
-        self.assertNotIn(self._receipt("0"), wake.for_target("alpha").event_receipts)
+        self.assertNotIn(
+            self._receipt("0"),
+            tuple(item.receipt for item in wake.receipts if item.target_key == "alpha"),
+        )
 
     def test_due_sweep_retains_observed_receipts_without_repeating_routing_hints(self) -> None:
         receipt = self._receipt("queued-request")
@@ -378,14 +386,18 @@ class MergeTrainEventTests(TestCase):
         self.assertEqual(pending, [])
         self.assertIsNone(wake.target_keys)
         self.assertEqual(wake.reason, "timer_sweep")
-        self.assertEqual(wake.for_target("alpha").event_receipts, (receipt,))
+        self.assertEqual(
+            tuple(item.receipt for item in wake.receipts if item.target_key == "alpha"), (receipt,)
+        )
 
     def test_one_notification_binds_routing_and_receipt_without_a_second_read(self) -> None:
         receipt = self._receipt("single-notification")
         self._notifications(self._hint("alpha", receipt))
         wake = MergeTrainEventListener("postgresql://test").wait(300, Event())
         self.assertEqual(wake.target_keys, frozenset({"alpha"}))
-        self.assertEqual(wake.for_target("alpha").event_receipts, (receipt,))
+        self.assertEqual(
+            tuple(item.receipt for item in wake.receipts if item.target_key == "alpha"), (receipt,)
+        )
 
     def test_invalid_optional_receipt_in_an_envelope_keeps_its_routing_hint(self) -> None:
         receipt = self._receipt("request")

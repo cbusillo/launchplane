@@ -57,15 +57,6 @@ class MergeTrainTargetReceipt:
 
 
 @dataclass(frozen=True)
-class MergeTrainWakeObservation:
-    reason: str
-    pass_started_at: str
-    hint_observed_at: str = ""
-    event_receipts: tuple[MergeTrainEventReceipt, ...] = ()
-    receipts_truncated: bool = False
-
-
-@dataclass(frozen=True)
 class MergeTrainWake:
     target_keys: frozenset[str] | None
     reason: str
@@ -74,17 +65,6 @@ class MergeTrainWake:
     pass_started_at: str = ""
     hint_observed_at: str = ""
     pass_error_code: str = ""
-
-    def for_target(self, target_key: str) -> MergeTrainWakeObservation:
-        return MergeTrainWakeObservation(
-            reason=self.reason,
-            pass_started_at=self.pass_started_at,
-            hint_observed_at=self.hint_observed_at,
-            event_receipts=tuple(
-                item.receipt for item in self.receipts if item.target_key == target_key
-            ),
-            receipts_truncated=self.receipts_truncated,
-        )
 
 
 def encode_merge_train_hint(target_key: str, receipt: MergeTrainEventReceipt | None) -> str | None:

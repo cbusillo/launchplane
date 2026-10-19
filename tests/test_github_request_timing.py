@@ -20,25 +20,28 @@ class _Clock:
 
 
 class GitHubRequestTimingTests(unittest.TestCase):
-    def test_worker_serializes_receipts_with_traces_and_reports_a_failed_empty_pass(self) -> None:
+    def test_worker_binds_partial_pass_receipts_and_actual_actions_in_one_observation(self) -> None:
         script = textwrap.dedent("""
             import logging
             from dataclasses import replace
             from unittest.mock import patch
             from control_plane.cli import main
+            from control_plane.contracts.merge_train_controller_state import build_merge_train_controller_key
             from control_plane.merge_train_scheduler import MergeTrainScheduledTargetResult
             from control_plane.merge_train_wake import (
                 MergeTrainEventReceipt, MergeTrainTargetReceipt, MergeTrainWake,
             )
 
-            key = "merge-train-controller:example:repo:main"
+            key = build_merge_train_controller_key(repository="example/repo", base_branch="main")
+            skipped = build_merge_train_controller_key(repository="example/skipped", base_branch="main")
             receipt = MergeTrainEventReceipt(
                 delivery_id="completion", request_trace_id="receiver-trace",
                 received_at="2026-10-19T09:00:00Z", event="check_run", action="completed",
             )
             wake = MergeTrainWake(
-                frozenset({key}), "event_hints",
-                receipts=(MergeTrainTargetReceipt(key, receipt),),
+                frozenset({key, skipped}), "event_hints",
+                receipts=(MergeTrainTargetReceipt(key, receipt),
+                          MergeTrainTargetReceipt(skipped, replace(receipt, request_trace_id="skipped-request"))),
                 pass_started_at="2026-10-19T09:00:02Z",
                 hint_observed_at="2026-10-19T09:00:01Z",
             )
@@ -46,9 +49,13 @@ class GitHubRequestTimingTests(unittest.TestCase):
                 row = MergeTrainScheduledTargetResult(
                     repository="example/repo", base_branch="main", runner_mode="controller",
                     mutate=False, status="ran", trace_id="action-trace",
-                    records={"candidate_id": "candidate-record"}, wake=wake.for_target(key),
+                    records={"candidate_id": "candidate-record"},
                 )
-                kwargs["pass_callback"]((row,), wake)
+                continuation = replace(row, trace_id="continuation-trace",
+                                       records={"landing_id": "landing-record"})
+                refused = replace(row, repository="example/refused", status="deferred",
+                                  reason_code="backoff_pending", trace_id="", records={})
+                kwargs["pass_callback"]((row, continuation, refused), wake)
                 kwargs["pass_callback"]((), replace(wake, pass_error_code="OSError"))
                 logging.getLogger("unrelated_library").info("unrelated INFO")
                 return 2
@@ -69,21 +76,40 @@ class GitHubRequestTimingTests(unittest.TestCase):
         lines = result.stdout.splitlines()
         rows, empty = [json.loads(line) for line in lines[:2]]
         stopped = json.loads("\n".join(lines[2:]))
-        self.assertEqual(rows[0]["trace_id"], "action-trace")
-        self.assertEqual(rows[0]["records"], {"candidate_id": "candidate-record"})
-        self.assertEqual(rows[0]["wake"]["event_receipts"][0]["delivery_id"], "completion")
-        self.assertEqual(rows[0]["wake"]["event_receipts"][0]["request_trace_id"], "receiver-trace")
         self.assertEqual(empty, [])
         self.assertEqual(stopped, {"status": "stopped"})
-        diagnostic = next(
+        diagnostics = [
             value
             for line in result.stderr.splitlines()
             if line.startswith("{")
             and (value := json.loads(line)).get("event") == "merge_train_pass"
+        ]
+        self.assertEqual(len(diagnostics), 2)
+        observation, failed = diagnostics
+        for row, binding in zip(rows, observation["results"], strict=True):
+            self.assertEqual(binding["repository"], row["repository"])
+            self.assertEqual(binding["base_branch"], row["base_branch"])
+            self.assertEqual(binding["status"], row["status"])
+            self.assertEqual(binding["reason_code"], row["reason_code"])
+            self.assertEqual(binding["controller_action"], row["controller_action"])
+            self.assertEqual(binding["trace_id"], row["trace_id"])
+            self.assertEqual(binding["records"], row["records"])
+        self.assertNotEqual(
+            observation["results"][0]["trace_id"], observation["results"][1]["trace_id"]
         )
-        self.assertEqual(diagnostic["wake"]["pass_error_code"], "OSError")
-        self.assertEqual(diagnostic["wake"]["receipts"][0]["receipt"]["delivery_id"], "completion")
-        self.assertIsInstance(diagnostic["wake"]["target_keys"], list)
+        self.assertEqual(observation["results"][2]["trace_id"], "")
+        receipts = observation["wake"]["receipts"]
+        self.assertEqual(len(receipts), 2)
+        result_keys = {row["target_key"] for row in observation["results"]}
+        unmatched = [item for item in receipts if item["target_key"] not in result_keys]
+        self.assertEqual(
+            [item["receipt"]["request_trace_id"] for item in unmatched], ["skipped-request"]
+        )
+        self.assertEqual(failed["wake"]["pass_error_code"], "OSError")
+        self.assertEqual(failed["wake"]["receipts"], receipts)
+        self.assertEqual(failed["results"], [])
+        self.assertIsInstance(observation["wake"]["target_keys"], list)
+        self.assertNotIn("unrelated INFO", result.stderr)
 
     def test_worker_commands_emit_short_pass_tallies_to_stderr(self) -> None:
         script = textwrap.dedent("""

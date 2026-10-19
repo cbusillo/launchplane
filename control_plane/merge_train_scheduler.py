@@ -79,7 +79,7 @@ from control_plane.merge_train_stack_collapse import (
     require_merge_train_stack_collapse_plan_record_store,
 )
 from control_plane.repository_evidence import GitHubRepositoryEvidenceProvider
-from control_plane.merge_train_wake import MergeTrainWake, MergeTrainWakeObservation
+from control_plane.merge_train_wake import MergeTrainWake
 from control_plane.workflows.launchplane import github_api_request
 from control_plane.workflows.ship import utc_now_timestamp
 
@@ -106,7 +106,6 @@ class MergeTrainScheduledTargetResult:
     feedback_delivered: int = 0
     feedback_failed: int = 0
     continue_pass: bool = False
-    wake: MergeTrainWakeObservation | None = None
 
 
 def run_merge_train_scheduler_pass(
@@ -116,14 +115,8 @@ def run_merge_train_scheduler_pass(
     now: Callable[[], str] = utc_now_timestamp,
     should_stop: Callable[[], bool] = lambda: False,
     target_keys: Collection[str] | None = None,
-    wake: MergeTrainWake | None = None,
 ) -> tuple[MergeTrainScheduledTargetResult, ...]:
     """Run every enabled target, or only those named by controller key."""
-    pass_wake = wake or MergeTrainWake(
-        None if target_keys is None else frozenset(target_keys),
-        "manual",
-        pass_started_at=now(),
-    )
     try:
         policy_record = resolve_merge_train_policy_record(record_store)
     except MergeTrainPolicyStoreMissingError:
@@ -149,11 +142,6 @@ def run_merge_train_scheduler_pass(
         if should_stop():
             break
         repository_policy = listed_policy
-        target_wake = pass_wake.for_target(
-            build_merge_train_controller_key(
-                repository=repository_policy.repository, base_branch=repository_policy.base_branch
-            )
-        )
         # Each train is independent: one failing target never stops the others.
         try:
             # An earlier target can take minutes; act only on the policy as it is now.
@@ -172,8 +160,7 @@ def run_merge_train_scheduler_pass(
                     repository_policy=repository_policy,
                     now=now,
                 )
-                results.append(replace(result, wake=target_wake))
-                target_wake = replace(target_wake, event_receipts=())
+                results.append(result)
                 if not result.continue_pass or should_stop():
                     break
                 policy_record = resolve_merge_train_policy_record(record_store)
@@ -196,7 +183,7 @@ def run_merge_train_scheduler_pass(
             result = _target_result(
                 repository_policy, status="failed", reason_code=type(error).__name__
             )
-        results.append(replace(result, wake=target_wake))
+        results.append(result)
     return tuple(results)
 
 
@@ -241,7 +228,6 @@ def run_merge_train_scheduler_loop(
                 control_plane_root=control_plane_root,
                 should_stop=scheduler_stop_event.is_set,
                 target_keys=None if sweep else woken.target_keys,
-                wake=woken,
             )
         except Exception as error:  # noqa: BLE001 - a bad pass waits one interval.
             _LOGGER.exception("Scheduled merge train pass failed.")

@@ -136,77 +136,6 @@ class MergeTrainSchedulerPassTests(TestCase):
 
         self.assertEqual(self._run(), ())
 
-    def test_sweep_receipts_join_only_their_target_and_real_controller_trace(self) -> None:
-        self.mocks["resolve_merge_train_policy_record"].return_value = _policy_record(
-            ("cbusillo/alpha", MergeTrainSchedulerPolicy(enabled=True, mutate=False)),
-            ("cbusillo/beta", MergeTrainSchedulerPolicy(enabled=True, mutate=False)),
-        )
-        self.mocks["evaluate_merge_train_admission_from_store"].return_value = _admission(
-            "admitted"
-        )
-        alpha_key = "merge-train-controller:cbusillo:alpha:main"
-        receipt = MergeTrainEventReceipt(
-            delivery_id="completion",
-            request_trace_id="receiver-request",
-            received_at="2026-10-19T09:00:00Z",
-            event="check_run",
-            action="completed",
-        )
-        wake = MergeTrainWake(
-            None,
-            "timer_sweep",
-            receipts=(MergeTrainTargetReceipt(alpha_key, receipt),),
-            pass_started_at="2026-10-19T09:00:02Z",
-            hint_observed_at="2026-10-19T09:00:01Z",
-        )
-        alpha, beta = run_merge_train_scheduler_pass(
-            record_store=self.record_store, control_plane_root=_ROOT, wake=wake
-        )
-        assert alpha.wake is not None and beta.wake is not None
-        self.assertEqual(alpha.wake.event_receipts, (receipt,))
-        self.assertEqual(beta.wake.event_receipts, ())
-        self.assertEqual(alpha.wake.reason, wake.reason)
-        self.assertEqual(beta.wake.reason, wake.reason)
-        self.assertEqual(alpha.wake.pass_started_at, wake.pass_started_at)
-        self.assertEqual(alpha.wake.hint_observed_at, wake.hint_observed_at)
-        calls = self.mocks["execute_merge_train_controller_run_once"].call_args_list
-        for result, call in zip((alpha, beta), calls, strict=True):
-            self.assertEqual(result.trace_id, call.kwargs["trace_id"])
-            self.assertEqual(result.records, _controller_result().records)
-
-    def test_refused_targets_keep_receipts_without_inventing_an_action_trace(self) -> None:
-        self.mocks["resolve_merge_train_policy_record"].return_value = _policy_record(
-            ("cbusillo/alpha", MergeTrainSchedulerPolicy(enabled=True))
-        )
-        receipt = MergeTrainEventReceipt(
-            delivery_id="completion",
-            request_trace_id="receiver-request",
-            received_at="2026-10-19T09:00:00Z",
-            event="check_run",
-        )
-        wake = MergeTrainWake(
-            frozenset({"merge-train-controller:cbusillo:alpha:main"}),
-            "event_hints",
-            receipts=(
-                MergeTrainTargetReceipt("merge-train-controller:cbusillo:alpha:main", receipt),
-            ),
-        )
-        for admission, token, expected in (
-            (_admission("deferred"), "token", "deferred"),
-            (_admission("admitted"), "", "failed"),
-        ):
-            with self.subTest(expected=expected):
-                self.mocks["evaluate_merge_train_admission_from_store"].return_value = admission
-                self.mocks["resolve_merge_train_github_token"].return_value = token
-                (result,) = run_merge_train_scheduler_pass(
-                    record_store=self.record_store, control_plane_root=_ROOT, wake=wake
-                )
-                self.assertEqual(result.status, expected)
-                self.assertEqual(result.trace_id, "")
-                assert result.wake is not None
-                self.assertEqual(result.wake.event_receipts, (receipt,))
-        self.mocks["execute_merge_train_controller_run_once"].assert_not_called()
-
     def test_worker_summary_keeps_the_canonical_controller_diagnosis(self) -> None:
         self.mocks["resolve_merge_train_policy_record"].return_value = _policy_record(
             ("cbusillo/alpha", MergeTrainSchedulerPolicy(enabled=True)),
@@ -305,24 +234,9 @@ class MergeTrainSchedulerPassTests(TestCase):
             MergeTrainControllerRunOnceResult(accepted_result=action, records={})
             for action in actions
         ]
-        key = "merge-train-controller:cbusillo:alpha:main"
-        receipt = MergeTrainEventReceipt(
-            "completion", "receiver-request", "2026-10-19T09:00:00Z", "check_run"
-        )
-        wake = MergeTrainWake(
-            frozenset({key}), "event_hints", receipts=(MergeTrainTargetReceipt(key, receipt),)
-        )
-        results = run_merge_train_scheduler_pass(
-            record_store=self.record_store, control_plane_root=_ROOT, wake=wake
-        )
+        results = self._run()
         self.assertEqual(len(results), len(actions))
         self.assertFalse(results[-1].continue_pass)
-        assert results[0].wake is not None
-        self.assertEqual(results[0].wake.event_receipts, (receipt,))
-        for result in results[1:]:
-            assert result.wake is not None
-            self.assertEqual(result.wake.event_receipts, ())
-            self.assertEqual(result.wake.pass_started_at, results[0].wake.pass_started_at)
 
     def test_an_unfinished_landing_ends_the_pass(self) -> None:
         feedback = patch.object(
@@ -720,6 +634,7 @@ class MergeTrainSchedulerLoopTests(TestCase):
             frozenset({key}), "event_hints", receipts=(MergeTrainTargetReceipt(key, receipt),)
         )
         clock = iter((0.0, 0.0, 300.0, 300.0, 600.0))
+        observations: list[MergeTrainWake] = []
         with patch.object(
             merge_train_scheduler, "run_merge_train_scheduler_pass", return_value=()
         ) as run:
@@ -728,14 +643,17 @@ class MergeTrainSchedulerLoopTests(TestCase):
                 control_plane_root=_ROOT,
                 max_passes=3,
                 monotonic=lambda: next(clock),
+                pass_callback=lambda results, wake: observations.append(wake),
                 wait_for_event=MagicMock(side_effect=(event, MergeTrainWake(None, "timer_sweep"))),
             )
         startup, coincident, later = [call.kwargs for call in run.call_args_list]
-        self.assertEqual(startup["wake"].reason, "startup")
+        self.assertEqual(observations[0].reason, "startup")
         self.assertIsNone(coincident["target_keys"])
-        self.assertEqual(coincident["wake"].reason, "timer_sweep")
-        self.assertEqual(coincident["wake"].for_target(key).event_receipts, (receipt,))
-        self.assertEqual(later["wake"].receipts, ())
+        self.assertEqual(observations[1].reason, "timer_sweep")
+        self.assertEqual(observations[1].receipts, event.receipts)
+        self.assertEqual(observations[2].receipts, ())
+        self.assertIsNone(startup["target_keys"])
+        self.assertIsNone(later["target_keys"])
 
     def test_event_wait_starts_a_fresh_pass_without_waiting_for_the_sweep(self) -> None:
         stop_event = MagicMock(spec=Event)

@@ -586,8 +586,14 @@ class RealPostgresMergeTrainNotificationTests(unittest.TestCase):
         self.listener.connection.execute("SELECT 1")
         wake = self.listener.wait(2, threading.Event())
         self.assertEqual(wake.target_keys, frozenset({"alpha", "beta"}))
-        self.assertEqual(wake.for_target("alpha").event_receipts, (self.receipt, second))
-        self.assertEqual(wake.for_target("beta").event_receipts, (self.receipt,))
+        self.assertEqual(
+            tuple(item.receipt for item in wake.receipts if item.target_key == "alpha"),
+            (self.receipt, second),
+        )
+        self.assertEqual(
+            tuple(item.receipt for item in wake.receipts if item.target_key == "beta"),
+            (self.receipt,),
+        )
         assert self.listener.connection is not None
         self.assertEqual(list(self.listener.connection.notifies(timeout=0)), [])
 
@@ -623,7 +629,10 @@ class RealPostgresMergeTrainNotificationTests(unittest.TestCase):
         self.assertEqual(len(notifications), 1)
         wake = decode_merge_train_wake([notifications[0].payload], reason="event_hints")
         self.assertEqual(wake.target_keys, frozenset({"alpha"}))
-        self.assertEqual(wake.for_target("alpha").event_receipts, (self.receipt,))
+        self.assertEqual(
+            tuple(item.receipt for item in wake.receipts if item.target_key == "alpha"),
+            (self.receipt,),
+        )
 
 
 def _tenant_repository_classification_record(
