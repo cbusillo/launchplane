@@ -79,7 +79,7 @@ def _controller_result() -> MergeTrainControllerRunOnceResult:
             "controller_action": "wait_for_checks",
             "candidate": {"entries": [{"pull_request_number": 7}]},
         },
-        records={"merge_train_controller_state_record_id": "controller-1"},
+        records={"merge_train_batch_candidate_record_id": "candidate-1"},
     )
 
 

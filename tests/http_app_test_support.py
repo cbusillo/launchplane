@@ -40,6 +40,9 @@ from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestRecord,
 )
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+from control_plane.contracts.merge_train_controller_reply import (
+    validate_merge_train_controller_reply,
+)
 from control_plane.contracts.merge_train_policy import (
     MergeTrainPolicyRecord,
 )
@@ -3557,13 +3560,18 @@ async def _post_merge_train_controller_run_once(
     headers = {"Authorization": authorization} if authorization else {}
     if idempotency_key:
         headers["Idempotency-Key"] = idempotency_key
-    return await _asgi_request(
+    response = await _asgi_request(
         app,
         "POST",
         "/v1/work-graph/merge-train/controller/run-once",
         headers=headers,
         payload=payload,
     )
+    if 200 <= response.status_code < 300:
+        # Every accepted reply the route serves, replays included, must match
+        # the published contract that clients pin.
+        validate_merge_train_controller_reply(response.json())
+    return response
 
 
 async def _post_merge_train_batch_landing_run_once(
