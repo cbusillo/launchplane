@@ -123,6 +123,48 @@ class ApplicationStateVolumeTests(_DirectorTestingSetupFixture):
         )
         return plan
 
+    async def test_compose_replacement_reads_source_outside_authority_commit(self) -> None:
+        provider = self.register_unused_testing_compose(source_type="github")
+        self.payload.update(
+            expected_current_provider_target=provider.to_deployed_target_reference().model_dump(
+                mode="json"
+            )
+        )
+        writing_authority = False
+        write_bundle = self.store._write_product_authority_bundle
+
+        def write(*args: Any, **kwargs: Any) -> None:
+            nonlocal writing_authority
+            writing_authority = True
+            try:
+                write_bundle(*args, **kwargs)
+            finally:
+                writing_authority = False
+
+        def read(_host: str, _token: str, target_type: str, target_id: str) -> dict[str, Any]:
+            self.assertFalse(writing_authority, "Provider I/O must stay outside authority commit")
+            if target_type == "compose":
+                return {
+                    "composeId": target_id,
+                    "environmentId": "old-environment",
+                    "sourceType": "github",
+                    "composePath": "./docker-compose.yml",
+                }
+            return deepcopy(self.live)
+
+        with (
+            patch.object(self.store, "_write_product_authority_bundle", side_effect=write),
+            patch(
+                "control_plane.dokploy_target_setup_http.fetch_dokploy_target_payload_for_setup",
+                side_effect=read,
+            ),
+        ):
+            await self.plan()
+            result = await self.post()
+        self.assertEqual(result.status_code, 202, result.text)
+        self.assertTrue(result.json()["result"]["applied"])
+        self.assert_production_unchanged()
+
     async def test_creates_only_new_testing_volume_then_replays_and_reads_back(self) -> None:
         plan = await self.plan()
         result = await self.post()

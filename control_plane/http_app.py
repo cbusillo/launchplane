@@ -92,6 +92,7 @@ from control_plane.dokploy_target_setup_http import (
     execute_dokploy_target_setup,
     first_testing_replacement_lock_name,
     require_empty_testing_target_creation,
+    TestingTargetSourceEvidenceUnavailable,
 )
 from control_plane import product_config as control_plane_product_config
 from control_plane import product_public_hosts
@@ -26192,6 +26193,13 @@ def create_launchplane_fastapi_app(
                     in_progress_message="Application storage setup is running under its original key.",
                     reconcile_message="Preserve the original key and storage plan; inspect readback before recovery.",
                 )
+            except TestingTargetSourceEvidenceUnavailable as error:
+                raise _launchplane_http_error(
+                    status_code=503,
+                    trace_id=trace_id,
+                    code="testing_target_source_evidence_unavailable",
+                    message=str(error),
+                ) from error
             except (ValueError, FileNotFoundError) as error:
                 raise _launchplane_http_error(
                     status_code=409,
@@ -26324,6 +26332,13 @@ def create_launchplane_fastapi_app(
                 status_code=403,
                 trace_id=trace_id,
                 code="local_operator_lane_scope_required",
+                message=str(error),
+            ) from error
+        except TestingTargetSourceEvidenceUnavailable as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="testing_target_source_evidence_unavailable",
                 message=str(error),
             ) from error
         except DokployTargetComparisonEvidenceUnavailableError as error:

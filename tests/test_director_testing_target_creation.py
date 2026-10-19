@@ -159,6 +159,98 @@ class _DirectorTestingSetupFixture(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.list_deployment_records(instance_name="prod"), ())
         self.assertEqual(self.store.list_promotion_records(), ())
 
+    def register_testing_lane(self) -> None:
+        if all(lane.instance != "testing" for lane in self.profile.lanes):
+            self.profile = self.profile.model_copy(
+                update={
+                    "lanes": (
+                        *self.profile.lanes,
+                        self.profile.lanes[0].model_copy(update={"instance": "testing"}),
+                    )
+                }
+            )
+            self.store.write_product_profile_record(self.profile)
+
+    def apply_testing_hold(self, purpose: Literal["staff_testing", "isolation_staging"]) -> None:
+        """Hold the lane through the supported path, which relabels its target record."""
+        dry_run = TestingHoldApplyRequest(
+            product=self.profile.product,
+            context=self.context,
+            instance="testing",
+            hold=True,
+            purpose=purpose,
+            reason="Stage the application lane.",
+        )
+        plan, _ = build_testing_hold_plan(
+            record_store=self.store, request=dry_run, actor="operator"
+        )
+        apply_testing_hold_plan(
+            record_store=self.store,
+            request=dry_run.model_copy(
+                update={"mode": "apply", "reviewed_plan_sha256": plan.plan_sha256}
+            ),
+            actor="operator",
+        )
+
+    def register_unused_testing_compose(
+        self,
+        *,
+        created_by: str = CREATE_COMPOSE_SOURCE_LABEL,
+        completed_source: bool = False,
+        hold_purpose: Literal["staff_testing", "isolation_staging"] | None = "isolation_staging",
+        source_type: Literal["raw", "github"] = "raw",
+    ) -> ProviderTargetRecord:
+        self.register_testing_lane()
+        target = self.production.model_copy(
+            update={"instance": "testing", "source_type": source_type, "source_label": created_by}
+        )
+        if completed_source:
+            target = target.model_copy(update={"source_type": "git", "custom_git_branch": "a" * 40})
+        target_id = self.production_id.model_copy(
+            update={
+                "instance": "testing",
+                "target_id": "empty-testing-compose",
+                "source_label": created_by,
+            }
+        )
+        provider = ProviderTargetRecord.from_dokploy_records(
+            target_record=target, target_id_record=target_id
+        )
+        self.store.write_dokploy_target_record(target)
+        self.store.write_dokploy_target_id_record(target_id)
+        self.store.write_provider_target_record(provider)
+        if hold_purpose:
+            self.apply_testing_hold(hold_purpose)
+        return provider
+
+    def record_testing_deploy(self, status: Literal["pass", "fail"]) -> None:
+        self.store.write_deployment_record(
+            DeploymentRecord(
+                record_id=f"testing-deploy-{status}",
+                context=self.context,
+                instance="testing",
+                source_git_ref="abc123",
+                deploy=DeploymentEvidence(
+                    target_name="empty-testing-compose",
+                    target_type="compose",
+                    deploy_mode="dokploy-compose-api",
+                    status=status,
+                ),
+            )
+        )
+
+    def current_testing_target_id(self) -> str:
+        return self.store.read_provider_target_record(
+            context_name=self.context, instance_name="testing"
+        ).target_id
+
+    def expected(self, provider: ProviderTargetRecord) -> dict[str, Any]:
+        return {
+            "expected_current_provider_target": provider.to_deployed_target_reference().model_dump(
+                mode="json"
+            )
+        }
+
 
 class DirectorTestingTargetCreationTests(_DirectorTestingSetupFixture):
     async def test_director_stages_new_empty_target_without_grants_and_replays(self) -> None:
@@ -336,97 +428,6 @@ class DirectorTestingApplicationLaneTests(_DirectorTestingSetupFixture):
             )
         )
 
-    def register_testing_lane(self) -> None:
-        if all(lane.instance != "testing" for lane in self.profile.lanes):
-            self.profile = self.profile.model_copy(
-                update={
-                    "lanes": (
-                        *self.profile.lanes,
-                        self.profile.lanes[0].model_copy(update={"instance": "testing"}),
-                    )
-                }
-            )
-            self.store.write_product_profile_record(self.profile)
-
-    def apply_testing_hold(self, purpose: Literal["staff_testing", "isolation_staging"]) -> None:
-        """Hold the lane through the supported path, which relabels its target record."""
-        dry_run = TestingHoldApplyRequest(
-            product=self.profile.product,
-            context=self.context,
-            instance="testing",
-            hold=True,
-            purpose=purpose,
-            reason="Stage the application lane.",
-        )
-        plan, _ = build_testing_hold_plan(
-            record_store=self.store, request=dry_run, actor="operator"
-        )
-        apply_testing_hold_plan(
-            record_store=self.store,
-            request=dry_run.model_copy(
-                update={"mode": "apply", "reviewed_plan_sha256": plan.plan_sha256}
-            ),
-            actor="operator",
-        )
-
-    def register_unused_testing_compose(
-        self,
-        *,
-        created_by: str = CREATE_COMPOSE_SOURCE_LABEL,
-        completed_source: bool = False,
-        hold_purpose: Literal["staff_testing", "isolation_staging"] | None = "isolation_staging",
-    ) -> ProviderTargetRecord:
-        self.register_testing_lane()
-        target = self.production.model_copy(
-            update={"instance": "testing", "source_type": "raw", "source_label": created_by}
-        )
-        if completed_source:
-            target = target.model_copy(update={"source_type": "git", "custom_git_branch": "a" * 40})
-        target_id = self.production_id.model_copy(
-            update={
-                "instance": "testing",
-                "target_id": "empty-testing-compose",
-                "source_label": created_by,
-            }
-        )
-        provider = ProviderTargetRecord.from_dokploy_records(
-            target_record=target, target_id_record=target_id
-        )
-        self.store.write_dokploy_target_record(target)
-        self.store.write_dokploy_target_id_record(target_id)
-        self.store.write_provider_target_record(provider)
-        if hold_purpose:
-            self.apply_testing_hold(hold_purpose)
-        return provider
-
-    def record_testing_deploy(self, status: Literal["pass", "fail"]) -> None:
-        self.store.write_deployment_record(
-            DeploymentRecord(
-                record_id=f"testing-deploy-{status}",
-                context=self.context,
-                instance="testing",
-                source_git_ref="abc123",
-                deploy=DeploymentEvidence(
-                    target_name="empty-testing-compose",
-                    target_type="compose",
-                    deploy_mode="dokploy-compose-api",
-                    status=status,
-                ),
-            )
-        )
-
-    def current_testing_target_id(self) -> str:
-        return self.store.read_provider_target_record(
-            context_name=self.context, instance_name="testing"
-        ).target_id
-
-    def expected(self, provider: ProviderTargetRecord) -> dict[str, Any]:
-        return {
-            "expected_current_provider_target": provider.to_deployed_target_reference().model_dump(
-                mode="json"
-            )
-        }
-
     async def test_director_creates_a_first_application_lane_without_grants(self) -> None:
         dry = await self.post(mode="dry-run")
         self.assertEqual(dry.status_code, 202, dry.text)
@@ -478,7 +479,7 @@ class DirectorTestingApplicationLaneTests(_DirectorTestingSetupFixture):
         self.assert_production_unchanged()
 
     async def test_replacement_requires_complete_live_empty_source_evidence(self) -> None:
-        provider = self.register_unused_testing_compose()
+        provider = self.register_unused_testing_compose(source_type="github")
         for changes in (
             {"repository": "configured-repository"},
             {"customGitSSHKeyId": "bound-key"},
@@ -507,13 +508,21 @@ class DirectorTestingApplicationLaneTests(_DirectorTestingSetupFixture):
             "control_plane.dokploy_target_setup_http.fetch_dokploy_target_payload_for_setup",
             side_effect=TimeoutError("fixture unavailable"),
         ):
-            result = await self.post(**self.expected(provider))
-            self.assertEqual(result.status_code, 400, result.text)
+            for storage in (False, True):
+                result = await self.post(
+                    mode="dry-run" if storage else "apply",
+                    state_volume_path="/var/lib/example" if storage else "",
+                    **self.expected(provider),
+                )
+                self.assertEqual(result.status_code, 503, result.text)
+                self.assertEqual(
+                    result.json()["error"]["code"], "testing_target_source_evidence_unavailable"
+                )
         self.provider.assert_not_called()
         self.assertEqual(self.current_testing_target_id(), provider.target_id)
         self.assert_production_unchanged()
 
-    async def test_source_configured_after_storage_plan_refuses_before_provider_effects(
+    async def test_changed_or_unavailable_source_after_storage_plan_refuses_before_effects(
         self,
     ) -> None:
         provider = self.register_unused_testing_compose()
@@ -528,6 +537,20 @@ class DirectorTestingApplicationLaneTests(_DirectorTestingSetupFixture):
             expected_plan_sha256=plan["plan_sha256"],
         )
         self.assertEqual(result.status_code, 409, result.text)
+        self.created_targets["compose"].pop("repository")
+        with patch(
+            "control_plane.dokploy_target_setup_http.fetch_dokploy_target_payload_for_setup",
+            side_effect=TimeoutError("fixture unavailable after review"),
+        ):
+            unavailable = await self.post(
+                **intent,
+                state_volume_plan_id=plan["state_volume_plan_id"],
+                expected_plan_sha256=plan["plan_sha256"],
+            )
+        self.assertEqual(unavailable.status_code, 503, unavailable.text)
+        self.assertEqual(
+            unavailable.json()["error"]["code"], "testing_target_source_evidence_unavailable"
+        )
         self.provider.assert_not_called()
         self.assertEqual(self.current_testing_target_id(), provider.target_id)
         self.assert_production_unchanged()
