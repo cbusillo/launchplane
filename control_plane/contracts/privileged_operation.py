@@ -7,6 +7,7 @@ from typing import Literal, TypeAlias
 from pydantic import field_validator, BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
+from control_plane.contracts.access_policy_review import AccessPolicyReview
 from control_plane.contracts.merge_train_policy import (
     MergeTrainEnqueuePolicy,
     MergeTrainFailurePolicy,
@@ -1560,6 +1561,11 @@ class PrivilegedOperationSemanticReview(BaseModel):
     rollback: PrivilegedOperationSemanticReviewRollback
     evidence: PrivilegedOperationSemanticReviewEvidence
     activity: tuple[PrivilegedOperationSemanticReviewActivityEntry, ...] = ()
+    access_policy: AccessPolicyReview | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     can_approve: bool
     can_revoke: bool
     authorizes_approval: Literal[False] = False

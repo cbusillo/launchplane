@@ -1,4 +1,5 @@
 from control_plane import browser_route_repair
+from control_plane.access_policy_review import github_account_login, github_account_for_login
 from control_plane.dokploy_target_comparison import (
     DokployTargetComparisonEvidenceUnavailableError,
     require_provider_target_expectation,
@@ -5627,6 +5628,8 @@ def create_launchplane_fastapi_app(
         read_github_human_mutation_identity=read_github_human_browser_mutation_identity,
         policy_reader=lambda: resolved_authz_policy_runtime.policy,
         policy_record_reader=lambda: read_active_authz_policy_record(get_record_store()),
+        github_login_reader=github_account_login,
+        github_account_reader=github_account_for_login,
         read_configured_terminal_identity=lambda: configured_terminal_agent_identity(
             bearer_identity_config or BearerIdentityConfig()
         ),
