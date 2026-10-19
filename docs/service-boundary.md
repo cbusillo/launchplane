@@ -1440,26 +1440,13 @@ preview context; awareness entries do not imply Launchplane runtime ownership.
 current Launchplane-assembled work graph snapshot for the same authorization
 boundary. It composes product overviews and Every Code work-request records into
 the typed snapshot contract.
-General planning and work graphs inside Launchplane are retired (see
-`DIRECTION.md`); the planning provider, ranking, and issue-inbox reconcile
-described here remain only until their code is deleted.
-When a caller-owned planning ingestion provider is configured, the route can
-overlay compact GitHub/Code Plans facts. The first provider is opt-in via
-`LAUNCHPLANE_WORK_GRAPH_PROJECT_OWNER` and
-`LAUNCHPLANE_WORK_GRAPH_PROJECT_NUMBER`, reads `gh project item-list --format
-json`, and supplies Project Focus, Manager, Finish Line, labels, status, updated
-time, PR-vs-issue type, dependency counts, subissue counts, and PR check state.
-`LAUNCHPLANE_WORK_GRAPH_PROJECT_SIGNAL_LIMIT` bounds the per-snapshot fan-out for
-dependency, subissue, and check reads after Project items are loaded. The route
-reports product, work-request, and planning-fact source counts, does not fetch or
-store GitHub issue bodies, and writes no state. A configured Project or signal
-read failure returns an error instead of a silently incomplete snapshot.
-The production image includes `gh` for this provider, and deploy automation maps
-the `LAUNCHPLANE_WORK_GRAPH_GH_TOKEN` repository secret into service `GH_TOKEN`
-when present. Deploy automation also withholds the Project provider env bundle
-until that secret exists, so prepared repo variables do not enable
-unauthenticated runtime reads. That token is not a Launchplane record and must
-remain outside the repo.
+The deployed service assembles the work graph from product profiles and durable
+work-request records. It does not read GitHub Projects, list inbox issues, or
+reconcile Project membership. Engineering > Work graph keeps these non-Project
+items; source counts report zero planning facts. The inbox read remains empty
+and unconfigured, and reconcile refuses without a provider. No Project/inbox
+environment bundle or `GH_TOKEN` is delivered by self-deploy. See
+[Q543](https://github.com/cbusillo/launchplane/issues/2436#issuecomment-6273441298).
 
 `GET /v1/agent/context` is a native FastAPI thin read-only aggregation endpoint
 for public-safe skill preflight. It requires `product_environment.read` for

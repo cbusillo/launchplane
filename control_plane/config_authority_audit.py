@@ -545,9 +545,6 @@ WORKFLOW_LAUNCHPLANE_BOOTSTRAP_CONTEXT_PATH_VALUES = {
             ("${{ secrets.LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN }}",)
         ),
         "LAUNCHPLANE_SESSION_SECRET": frozenset(("${{ secrets.LAUNCHPLANE_SESSION_SECRET }}",)),
-        "LAUNCHPLANE_WORK_GRAPH_GH_TOKEN": frozenset(
-            ("${{ secrets.LAUNCHPLANE_WORK_GRAPH_GH_TOKEN }}",)
-        ),
     },
 }
 WORKFLOW_JQ_OPERATOR_FIELD_PATH_KEYS = {
@@ -676,7 +673,6 @@ WORKFLOW_OPERATOR_VARIABLE_FORWARD_PATHS = frozenset(
 )
 WORKFLOW_SERVICE_ENV_PAYLOAD_PATH_VALUES = {
     ".github/workflows/deploy-launchplane.yml": {
-        "GH_TOKEN": frozenset(("$work_graph_gh_token",)),
         "LAUNCHPLANE_GITHUB_CLIENT_ID": frozenset(("$github_client_id",)),
         "LAUNCHPLANE_GITHUB_CLIENT_SECRET": frozenset(("$github_client_secret",)),
         "LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET": frozenset(

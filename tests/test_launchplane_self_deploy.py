@@ -40,6 +40,61 @@ class LaunchplaneSelfDeployWorkflowTests(unittest.TestCase):
             separators=(",", ":"),
         )
 
+    def test_retired_work_graph_env_can_be_removed_but_not_delivered(self) -> None:
+        retired_env = {
+            "GH_TOKEN": "synthetic-retired-credential",
+            "LAUNCHPLANE_WORK_GRAPH_PROJECT_OWNER": "example-owner",
+            "LAUNCHPLANE_WORK_GRAPH_PROJECT_NUMBER": "4",
+            "LAUNCHPLANE_WORK_GRAPH_PROJECT_LIMIT": "200",
+            "LAUNCHPLANE_WORK_GRAPH_PROJECT_SIGNAL_LIMIT": "50",
+            "LAUNCHPLANE_WORK_GRAPH_ISSUE_INBOX_REPOSITORIES": "example/repo",
+            "LAUNCHPLANE_WORK_GRAPH_ISSUE_INBOX_LIMIT": "100",
+            "LAUNCHPLANE_WORK_GRAPH_GH_BINARY": "gh",
+        }
+        payload = {
+            "target_type": "compose",
+            "target_id": "compose-test",
+            "image_reference": "registry.invalid/image@sha256:abc",
+        }
+        for key, value in retired_env.items():
+            with (
+                patch(
+                    "control_plane.workflows.launchplane_self_deploy.dokploy_source.read_dokploy_config",
+                    return_value=("https://dokploy.example.test", "synthetic-provider-token"),
+                ),
+                self.subTest(key=key),
+                self.assertRaisesRegex(ValueError, "does not accept oauth_env key"),
+            ):
+                LaunchplaneSelfDeployRequest.model_validate({**payload, "oauth_env": {key: value}})
+        request = LaunchplaneSelfDeployRequest.model_validate(
+            {**payload, "oauth_env_removals": tuple(retired_env)}
+        )
+        target_env = (
+            self._BOOTSTRAP_ENV
+            + "".join(f"{key}={value}\n" for key, value in retired_env.items())
+            + "UNRELATED_SETTING=keep\n"
+        )
+        with (
+            patch(
+                "control_plane.workflows.launchplane_self_deploy.dokploy_source.read_dokploy_config",
+                return_value=("https://dokploy.example.test", "synthetic-provider-token"),
+            ),
+            patch(
+                "control_plane.workflows.launchplane_self_deploy.dokploy_api.fetch_dokploy_target_payload",
+                return_value=self._compose_target(target_env),
+            ),
+            patch(
+                "control_plane.workflows.launchplane_self_deploy.dokploy_api.update_dokploy_target_env"
+            ) as update,
+            patch("control_plane.workflows.launchplane_self_deploy.dokploy_api.trigger_deployment"),
+        ):
+            execute_launchplane_self_deploy(control_plane_root_path=Path("."), request=request)
+        delivered = update.call_args.kwargs["env_text"]
+        delivered_keys = {line.split("=", 1)[0] for line in delivered.splitlines()}
+        self.assertFalse(delivered_keys & retired_env.keys())
+        self.assertIn("UNRELATED_SETTING=keep", delivered)
+        self.assertIn("LAUNCHPLANE_DATABASE_URL=", delivered)
+
     def test_retired_worker_replica_input_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
             LaunchplaneSelfDeployRequest.model_validate(
