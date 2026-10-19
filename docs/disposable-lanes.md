@@ -2543,6 +2543,9 @@ read its exact journal instead of trying to run a host schedule. It returns
 `completed: false`, the operation state, effect phase and checkpoint time, and
 either `continue_original_prepare` or `hold_unknown`. The read neither changes
 custody nor completes the operation.
+Its fixed `recovery_reason` distinguishes unavailable observation from
+unqualified placement or source/credential prerequisites; provider authorization
+denials retain their HTTP refusal and trace rather than becoming a hold.
 
 `continue_original_prepare` is limited to an interrupted `project_id` effect:
 the original reviewed intent, unchanged source/artifact/placement and existing

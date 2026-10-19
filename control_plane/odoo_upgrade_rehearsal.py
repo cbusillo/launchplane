@@ -544,14 +544,24 @@ class OdooRehearsalAdapter:
                 }
             )
         ):
-            raise RehearsalRefused(RehearsalPrerequisite.RECOVERY_REQUIRED)
+            raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
         disposition = "hold_unknown"
+        reason = "operation_not_recoverable"
         if reservation.state == "reconcile_required":
             try:
                 self.partial_prepare_project(record, reservation.provider_effect_phase)
                 disposition = "continue_original_prepare"
-            except (ValueError, RuntimeError, OSError, click.ClickException):
-                pass
+                reason = "empty_original_project_observed"
+            except api.DokployRequestFailed as error:
+                if error.status_code in {401, 403}:
+                    raise
+                reason = "observation_unavailable"
+            except RehearsalRefused as error:
+                reason = error.code.value
+            except ValueError:
+                reason = "placement_not_qualified"
+            except (RuntimeError, OSError, click.ClickException):
+                reason = "observation_unavailable"
         return {
             "state": record.state,
             "copies": [],
@@ -561,6 +571,7 @@ class OdooRehearsalAdapter:
             "provider_effect_phase": reservation.provider_effect_phase,
             "provider_effect_started_at": reservation.provider_effect_started_at,
             "recovery_disposition": disposition,
+            "recovery_reason": reason,
         }
 
     def target_key(self) -> str:
@@ -816,6 +827,7 @@ class OdooRehearsalAdapter:
         )
         from control_plane.dokploy.sandbox_placement import (
             IsolatedPlacementObservationRequired,
+            REHEARSAL_PROJECT_DESCRIPTION,
             create_isolated_placement,
             created_placement,
         )
@@ -889,7 +901,7 @@ class OdooRehearsalAdapter:
                         self.root,
                         namespace=record.rehearsal_id,
                         server_id=record.server_id,
-                        description="Isolated Odoo rehearsal",
+                        description=REHEARSAL_PROJECT_DESCRIPTION,
                         checkpoint=checkpoint,
                         before_create=lease.checkpoint_effect,
                         record_identity=record_identity,

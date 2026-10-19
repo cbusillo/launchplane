@@ -6,6 +6,8 @@ import re
 
 from control_plane.dokploy import api, source
 
+REHEARSAL_PROJECT_DESCRIPTION = "Isolated Odoo rehearsal"
+
 
 class IsolatedPlacementObservationRequired(ValueError):
     """A dispatched create lacks its identity; observe the original operation."""
@@ -125,7 +127,7 @@ def observe_empty_isolated_project(root: Path, namespace: str) -> str:
     if (
         not isinstance(identifier, str)
         or not identifier.strip()
-        or project.get("description") != "Isolated Odoo rehearsal"
+        or project.get("description") != REHEARSAL_PROJECT_DESCRIPTION
         or not isinstance(environments, list)
         or len(environments) != 1
     ):

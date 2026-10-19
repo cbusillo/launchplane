@@ -168,12 +168,14 @@ class RehearsalClientTests(unittest.TestCase):
         lost: bool = False,
         changed: bool = False,
         failure: tuple[int, dict[str, Any]] | None = None,
+        action: str = "prepare",
     ) -> tuple[int, dict[str, Any], Mock]:
         client = runpy.run_path(
             str(Path(__file__).resolve().parents[1] / "scripts/odoo-upgrade-rehearsal.py")
         )
         draft = OdooUpgradeRehearsalRequest.model_validate(
             {
+                "action": action,
                 "source_context": "fixture",
                 "source_odoo_version": "1.0",
                 "target_artifact_id": "target-artifact",
@@ -295,5 +297,32 @@ class RehearsalClientTests(unittest.TestCase):
             with self.subTest(mode=mode):
                 code, result, post = self.call(mode, lost=True)
                 self.assertNotEqual(code, 0)
-                self.assertTrue(result["original_key_required"])
+                self.assertEqual(result["original_key_required"], mode == "apply")
+                self.assertEqual(
+                    result["status"],
+                    "reconciliation_required" if mode == "apply" else "unavailable",
+                )
+                post.assert_called_once()
+
+    def test_readback_only_preserves_prepare_key_for_a_recovery_refusal(self) -> None:
+        from control_plane.contracts.odoo_upgrade_rehearsal import RehearsalPrerequisite
+
+        for action, status, code, required in (
+            ("prepare", 409, RehearsalPrerequisite.RECOVERY_REQUIRED, True),
+            ("prepare", 403, "authorization_denied", False),
+            ("prepare", 404, "not_found", False),
+            ("prepare", 409, RehearsalPrerequisite.STATE_UNVERIFIED, False),
+            ("execute", 409, RehearsalPrerequisite.RECOVERY_REQUIRED, False),
+        ):
+            with self.subTest(action=action, status=status, code=code):
+                result_code, result, post = self.call(
+                    "readback",
+                    action=action,
+                    failure=(
+                        status,
+                        {"trace_id": "fixture-trace", "error": {"code": code}},
+                    ),
+                )
+                self.assertNotEqual(result_code, 0)
+                self.assertEqual(result["original_key_required"], required)
                 post.assert_called_once()

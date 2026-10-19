@@ -195,6 +195,7 @@ def register_odoo_upgrade_rehearsal_routes(
                             "provider_effect_phase",
                             "provider_effect_started_at",
                             "recovery_disposition",
+                            "recovery_reason",
                         )
                         if key in result
                     },

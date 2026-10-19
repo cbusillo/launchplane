@@ -579,7 +579,7 @@ class RehearsalScenario(unittest.TestCase):
                 projects.append(
                     {
                         "name": self.identifier,
-                        "description": "Isolated Odoo rehearsal",
+                        "description": kwargs["payload"]["description"],
                         "projectId": "partial-project",
                         "environments": [
                             {
@@ -656,6 +656,52 @@ class RehearsalScenario(unittest.TestCase):
             host.assert_not_called()
             with self.assertRaises(RehearsalRefused):
                 adapter.prepare_readback(partial, "replacement-key")
+            with patch.object(
+                api,
+                "fetch_dokploy_projects",
+                side_effect=api.DokployRequestFailed(
+                    method="GET",
+                    path="/api/project.all",
+                    detail="private failure",
+                    status_code=503,
+                ),
+            ):
+                unavailable = adapter.prepare_readback(partial, "original-prepare")
+                self.assertEqual(unavailable["recovery_disposition"], "hold_unknown")
+                self.assertEqual(unavailable["recovery_reason"], "observation_unavailable")
+                self.assertNotIn("private failure", str(unavailable))
+            with (
+                patch.object(
+                    api,
+                    "fetch_dokploy_projects",
+                    side_effect=api.DokployRequestFailed(
+                        method="GET",
+                        path="/api/project.all",
+                        detail="private denial",
+                        status_code=403,
+                    ),
+                ),
+                self.assertRaises(api.DokployRequestFailed),
+            ):
+                adapter.prepare_readback(partial, "original-prepare")
+            original_project = projects[0]
+            for inventory in ([], [original_project, original_project]):
+                projects[:] = inventory
+                self.assertEqual(
+                    self.run_operation(adapter, "original-prepare").status, "reconcile_required"
+                )
+                self.assertEqual(calls, ["/api/project.create"])
+            projects[:] = [original_project]
+            with patch(
+                "control_plane.odoo_upgrade_rehearsal.rehearsal_credential_bindings",
+                return_value="f" * 64,
+            ):
+                self.assertEqual(
+                    self.run_operation(adapter, "original-prepare").status, "reconcile_required"
+                )
+                self.assertEqual(calls, ["/api/project.create"])
+            with self.assertRaises(RehearsalRefused):
+                adapter.partial_prepare_project(partial, "environment_id")
             default_environment = projects[0]["environments"][0]
             for broken in (
                 {"applications": [{"applicationId": "foreign"}]},
@@ -668,6 +714,8 @@ class RehearsalScenario(unittest.TestCase):
                     projects[0]["environments"][0] = {**default_environment, **broken}
                     held = self.run_operation(adapter, "original-prepare")
                     self.assertEqual(held.status, "reconcile_required")
+                    observed = adapter.prepare_readback(partial, "original-prepare")
+                    self.assertEqual(observed["recovery_reason"], "placement_not_qualified")
                     self.assertEqual(calls, ["/api/project.create"])
                     self.assertEqual(
                         self.store.read_odoo_upgrade_rehearsal(self.identifier), partial
