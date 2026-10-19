@@ -8,7 +8,7 @@ from pathlib import Path
 import runpy
 import sys
 from tempfile import TemporaryDirectory
-from typing import Any
+from typing import Any, ClassVar
 import unittest
 from unittest.mock import Mock, patch
 
@@ -16,6 +16,9 @@ from unittest.mock import Mock, patch
 class BoundedTestingClientContract(unittest.TestCase):
     script_filename: str
     original_key = "original-continuation-key"
+    # Identity fields and arguments a client binds beyond the shared ones.
+    extra_result: ClassVar[dict[str, Any]] = {}
+    extra_arguments: ClassVar[tuple[str, ...]] = ()
 
     def setUp(self) -> None:
         self.client = runpy.run_path(
@@ -35,6 +38,7 @@ class BoundedTestingClientContract(unittest.TestCase):
                 "context": "example",
                 "instance": "testing",
                 "operation_id": "original-generation",
+                **self.extra_result,
                 "plan_sha256": "a" * 64,
                 "applied": False,
             },
@@ -64,6 +68,7 @@ class BoundedTestingClientContract(unittest.TestCase):
             "example",
             "--operation-id",
             "original-generation",
+            *self.extra_arguments,
             "--reason",
             "fixture testing continuation",
             "--evidence-file",
