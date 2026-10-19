@@ -4967,6 +4967,68 @@ changes no configuration, binding, account, grants, runtime, source data or
 business data, and invokes no importer, deployment or synchronization.
 
 
+#### Installed importer prerequisites
+
+`GET /v1/products/{product}/environments/testing/odoo-source-prerequisites`
+is a separate fixed, value-free read requiring the product's existing
+`operations.read` authority. It accepts no query parameters or caller-supplied
+SQL, paths, endpoints or credentials, and returns `Cache-Control: no-store`.
+It does not use an Odoo HTTP account or initialize an Odoo registry.
+
+The service binds the current runtime to its verified release artifact and the
+canonical complete source inventory. The host verifies the actual Docker image's
+immutable repository digest, then brackets execution with container/image
+inspection. The container checks the fixed importer producer, getter, client and
+package files against the tenant inventory. It rejects symlinks, code-overlay
+mounts and duplicate addon copies across configured roots, platform addons,
+the image's `/odoo` framework/community roots and existing data-addon version
+directories. It neither creates directories nor imports Odoo. Legacy, missing,
+incomplete or ambiguous provenance remains unknown.
+
+Each supported installed producer supplies `PARAMETER_KEYS`,
+`OPTION_PARAMETER_KEYS`, `resolve_connection_settings` and the password-free
+`resolve_connection_options`. The reader compiles the same verified producer
+bytes it hashed, suppresses producer output and consumes that producer's own
+defaults and parsing. Launchplane contains no copy of the tenant defaults.
+A bounded local PostgreSQL transaction explicitly requests and verifies
+read-only mode, reads only those parameter keys and the three fixed addons'
+installation states, then rolls back and closes. An addon must be installed
+before its effective settings are reported. No source database connection,
+import, synchronization, account, configuration or lifecycle change occurs.
+
+The closed response reports per-option `explicit`, `empty`, `absent` or
+`unknown` input provenance and effective agreement between authority, delivered
+and applied settings. Empty and absent optional inputs use the verified
+producer's defaults.
+Origins concern consumed producer keys: a constant enabled SSL setting can have
+an absent `use_ssl` input, as with the Fishbowl producer that ignores that key.
+Authority uses only the site's context/instance records;
+global settings are not site delivery authority. Retired keys, managed overlays
+and target overrides remain unknown rather than being treated as omissions.
+Authority resolves only nonsecret options. Full delivered/applied settings and
+their password comparison stay inside the container, and their option
+projections must agree with the password-free resolver before evidence is used.
+Raw values, settings objects, passwords, hashes and exception text are never
+returned. Host and service independently validate the bounded, closed frame.
+
+TLS fields describe **configuration only**: `disabled`,
+`verification_disabled`, `enabled_with_verification` or `unknown`.
+`use_ssl=False` is always disabled even when certificate verification is enabled.
+These fields prove no handshake, privileges or credential safety. Safe binding
+selection, stored password-reference agreement and current version metadata are
+separate evidence. `managed_password_value_agreement` remains unknown: equality
+of applied and delivered passwords does not attest the selected managed value.
+This read supplies prerequisite evidence and does not replace or make the
+existing source-grant gate pass.
+
+The service rechecks authority, artifact, selection and delivered environment;
+the host rechecks image/container state; the container rereads local parameters,
+module state, configuration, roots and verified files. Drift discards evidence.
+Reads have a bounded concurrency limit, local SQL timeouts, a container timeout
+with forced cleanup and a provider deadline. Missing runtime support remains
+unknown and requires qualification after delivery; source tests do not qualify
+a live runtime.
+
 #### Runtime-origin source grants
 
 `GET /v1/products/{product}/environments/testing/odoo-source-grants` is the

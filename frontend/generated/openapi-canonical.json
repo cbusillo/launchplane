@@ -24251,6 +24251,30 @@
         "title": "OdooSlotReadiness",
         "type": "object"
       },
+      "OdooSourcePrerequisiteResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "result": {
+            "$ref": "#/components/schemas/SourcePrerequisiteResult"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "result"
+        ],
+        "title": "OdooSourcePrerequisiteResponse",
+        "type": "object"
+      },
       "OdooStableBootstrapOperationStatusResponse": {
         "additionalProperties": false,
         "properties": {
@@ -25328,6 +25352,89 @@
           "committed"
         ],
         "title": "OdooWebsiteSettingsReceipt",
+        "type": "object"
+      },
+      "OptionEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "applied": {
+            "enum": [
+              "explicit",
+              "empty",
+              "absent",
+              "unknown"
+            ],
+            "title": "Applied",
+            "type": "string"
+          },
+          "authority": {
+            "enum": [
+              "explicit",
+              "empty",
+              "absent",
+              "unknown"
+            ],
+            "title": "Authority",
+            "type": "string"
+          },
+          "authority_applied": {
+            "enum": [
+              "match",
+              "mismatch",
+              "unknown"
+            ],
+            "title": "Authority Applied",
+            "type": "string"
+          },
+          "authority_delivered": {
+            "enum": [
+              "match",
+              "mismatch",
+              "unknown"
+            ],
+            "title": "Authority Delivered",
+            "type": "string"
+          },
+          "delivered": {
+            "enum": [
+              "explicit",
+              "empty",
+              "absent",
+              "unknown"
+            ],
+            "title": "Delivered",
+            "type": "string"
+          },
+          "delivered_applied": {
+            "enum": [
+              "match",
+              "mismatch",
+              "unknown"
+            ],
+            "title": "Delivered Applied",
+            "type": "string"
+          },
+          "field": {
+            "enum": [
+              "port",
+              "use_ssl",
+              "ssl_verify",
+              "batch_size"
+            ],
+            "title": "Field",
+            "type": "string"
+          }
+        },
+        "required": [
+          "field",
+          "authority",
+          "delivered",
+          "applied",
+          "authority_delivered",
+          "authority_applied",
+          "delivered_applied"
+        ],
+        "title": "OptionEvidence",
         "type": "object"
       },
       "OrdinaryAgentDeliveryActivationExecutionEvidence": {
@@ -49073,6 +49180,187 @@
           "source"
         ],
         "title": "SourceDiagnostic",
+        "type": "object"
+      },
+      "SourcePrerequisiteResult": {
+        "additionalProperties": false,
+        "properties": {
+          "applied": {
+            "const": false,
+            "default": false,
+            "title": "Applied",
+            "type": "boolean"
+          },
+          "runtime": {
+            "default": "unknown",
+            "enum": [
+              "verified",
+              "unknown"
+            ],
+            "title": "Runtime",
+            "type": "string"
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/SourcePrerequisites"
+            },
+            "maxItems": 3,
+            "minItems": 3,
+            "title": "Sources",
+            "type": "array"
+          },
+          "values_redacted": {
+            "const": true,
+            "default": true,
+            "title": "Values Redacted",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "sources"
+        ],
+        "title": "SourcePrerequisiteResult",
+        "type": "object"
+      },
+      "SourcePrerequisites": {
+        "additionalProperties": false,
+        "properties": {
+          "addon_state": {
+            "default": "unknown",
+            "enum": [
+              "installed",
+              "unknown"
+            ],
+            "title": "Addon State",
+            "type": "string"
+          },
+          "applied_delivered_password": {
+            "default": "unknown",
+            "enum": [
+              "match",
+              "mismatch",
+              "unknown"
+            ],
+            "title": "Applied Delivered Password",
+            "type": "string"
+          },
+          "applied_settings": {
+            "default": "unknown",
+            "enum": [
+              "valid",
+              "unknown"
+            ],
+            "title": "Applied Settings",
+            "type": "string"
+          },
+          "applied_tls_configuration": {
+            "default": "unknown",
+            "enum": [
+              "enabled_with_verification",
+              "disabled",
+              "verification_disabled",
+              "unknown"
+            ],
+            "title": "Applied Tls Configuration",
+            "type": "string"
+          },
+          "authority_tls_configuration": {
+            "default": "unknown",
+            "enum": [
+              "enabled_with_verification",
+              "disabled",
+              "verification_disabled",
+              "unknown"
+            ],
+            "title": "Authority Tls Configuration",
+            "type": "string"
+          },
+          "binding": {
+            "default": "missing_or_unsafe",
+            "enum": [
+              "selected",
+              "missing_or_unsafe"
+            ],
+            "title": "Binding",
+            "type": "string"
+          },
+          "delivered_settings": {
+            "default": "unknown",
+            "enum": [
+              "valid",
+              "unknown"
+            ],
+            "title": "Delivered Settings",
+            "type": "string"
+          },
+          "delivered_tls_configuration": {
+            "default": "unknown",
+            "enum": [
+              "enabled_with_verification",
+              "disabled",
+              "verification_disabled",
+              "unknown"
+            ],
+            "title": "Delivered Tls Configuration",
+            "type": "string"
+          },
+          "managed_password_value_agreement": {
+            "const": "unknown",
+            "default": "unknown",
+            "title": "Managed Password Value Agreement",
+            "type": "string"
+          },
+          "options": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/OptionEvidence"
+            },
+            "maxItems": 4,
+            "title": "Options",
+            "type": "array"
+          },
+          "producer": {
+            "default": "unknown",
+            "enum": [
+              "verified",
+              "unknown"
+            ],
+            "title": "Producer",
+            "type": "string"
+          },
+          "secret_reference": {
+            "default": "unknown",
+            "enum": [
+              "match",
+              "mismatch",
+              "unknown"
+            ],
+            "title": "Secret Reference",
+            "type": "string"
+          },
+          "selected_version_metadata": {
+            "default": "unknown",
+            "enum": [
+              "current",
+              "unknown"
+            ],
+            "title": "Selected Version Metadata",
+            "type": "string"
+          },
+          "source": {
+            "enum": [
+              "cm_data",
+              "repairshopr",
+              "fishbowl"
+            ],
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source"
+        ],
+        "title": "SourcePrerequisites",
         "type": "object"
       },
       "StoredRecordSnapshot": {
@@ -90763,6 +91051,134 @@
           }
         },
         "summary": "Read value-free source grants from the verified Odoo testing runtime without an Odoo login"
+      }
+    },
+    "/v1/products/{product}/environments/{environment}/odoo-source-prerequisites": {
+      "get": {
+        "operationId": "read_odoo_source_prerequisites",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "environment",
+            "required": true,
+            "schema": {
+              "title": "Environment",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OdooSourcePrerequisiteResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Gone"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read value-free installed importer options in testing without a source connection"
       }
     },
     "/v1/products/{product}/environments/{environment}/outgoing-email": {
