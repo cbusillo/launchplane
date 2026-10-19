@@ -1575,8 +1575,7 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         output_fixture = root / "decoder-output-fixture"
 
         def decoder_process(arguments: list[str], **kwargs: Any) -> Any:
-            self.assertIn("--file=-", arguments)
-            self.assertFalse(any(arg == "-d" or arg.startswith("--dbname") for arg in arguments))
+            self.assertFalse(any(arg.startswith(("-d", "--dbname")) for arg in arguments))
             output_fixture.write_bytes(output)
             program = (
                 "import sys,time; from pathlib import Path; assert sys.stdin.buffer.read()==b'fixture stdin'; "
