@@ -255,6 +255,16 @@ class TestingOverrideSanitizationTests(TestingOverrideSanitizationScenario):
             modules="website",
             encoded_payload=rendered.inline_environment[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY],
         )
+        from control_plane.live_target_runtime import validate_provider_key_retirement
+
+        validate_provider_key_retirement(
+            retired_keys=set(self.generation.omitted_runtime_keys),
+            application_keys=set(),
+            record_store=self.store,
+            product_name=self.profile.product,
+            context_name=self.fixture.context,
+            instance_name="testing",
+        )
         self.assertTrue(sanitization_readback(self.store, self.profile.product, body).applied)
         self.assertEqual(
             self.store.read_fresh_odoo_testing_generation(
