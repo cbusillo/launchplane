@@ -134,7 +134,12 @@ def main() -> int:
                 os.open(evidence, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w"
             ) as output:
                 json.dump({"intent": intent, "plan": result}, output)
-        if (
+        unobserved_readback = (
+            args.mode == "readback"
+            and result.get("completed") is False
+            and result.get("host_observation_unavailable") is True
+        )
+        if not unobserved_readback and (
             result.get("public_route") is not False
             or result.get("business_host_frozen") is not False
         ):
@@ -143,7 +148,9 @@ def main() -> int:
             print(
                 json.dumps(
                     {
-                        "status": "reconciliation_required",
+                        "status": "unavailable"
+                        if result.get("recovery_disposition") == "completed_refusal"
+                        else "reconciliation_required",
                         "trace_id": transport["public_trace_id"](response["trace_id"]),
                         "mode": args.mode,
                         "original_key_required": True,

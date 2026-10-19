@@ -156,6 +156,12 @@ class RehearsalCustodyObservation(BaseModel):
     source_snapshot_directory_present: bool
 
 
+class RehearsalHostBusy(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    intent_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    host_busy: Literal[True]
+
+
 class RehearsalHostResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
     intent_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")

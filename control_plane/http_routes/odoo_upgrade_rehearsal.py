@@ -177,52 +177,24 @@ def register_odoo_upgrade_rehearsal_routes(
                         fresh = record_store.read_odoo_upgrade_rehearsal(record.rehearsal_id)
                         if fresh != record:
                             raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
-                        if body.action == "prepare" and record.state == "planned":
-                            try:
-                                journal = adapter.prepare_readback(record, idempotency_key)
-                            except RehearsalRefused as error:
-                                if not record.compose_id or error.code not in {
-                                    RehearsalPrerequisite.STATE_UNVERIFIED,
-                                    RehearsalPrerequisite.OPERATION_UNAVAILABLE,
-                                }:
-                                    raise
-                                return {
-                                    **adapter.host(record, "observe", check),
-                                    "original_key_required": True,
-                                }
-                            if not record.compose_id:
-                                return journal
-                            observation = adapter.host(record, "observe", check)
-                            if journal[
-                                "operation_state"
-                            ] == "reconcile_required" and adapter.can_continue_prepare_host(
-                                record, observation, str(journal["provider_effect_phase"])
-                            ):
-                                journal.update(
-                                    {
-                                        "recovery_disposition": "continue_original_prepare",
-                                        "recovery_reason": "prepare_host_not_started",
-                                    }
-                                )
-                            return {
-                                **observation,
-                                **{
-                                    key: journal[key]
-                                    for key in (
-                                        "operation_state",
-                                        "provider_effect_phase",
-                                        "provider_effect_started_at",
-                                        "recovery_disposition",
-                                        "recovery_reason",
-                                    )
-                                },
-                            }
+                        if (
+                            body.action == "prepare"
+                            and record.state == "planned"
+                            and not record.compose_id
+                        ):
+                            return adapter.prepare_readback(record, idempotency_key)
                         return adapter.native_readback(record, idempotency_key, check)
 
                 result = await run_in_worker_thread(observe)
                 public_record = adapter.public(record)
                 if result.get("host_observation_unavailable"):
-                    public_record.pop("copies")
+                    for field in (
+                        "copies",
+                        "public_route",
+                        "business_host_frozen",
+                        "resources_preserved",
+                    ):
+                        public_record.pop(field)
                 result = {
                     **public_record,
                     **{
@@ -236,6 +208,7 @@ def register_odoo_upgrade_rehearsal_routes(
                             "original_key_required",
                             "operation_journal_status",
                             "host_observation_unavailable",
+                            "host_observation_reason",
                         )
                         if key in result
                     },

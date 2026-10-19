@@ -789,6 +789,8 @@ class OdooRehearsalAdapter:
                     if error.status_code in {401, 403}:
                         raise
                     diagnostics["failure_events_unavailable"] = True
+                except RehearsalRefused:
+                    raise
                 except (ValueError, OSError, click.ClickException):
                     diagnostics["failure_events_unavailable"] = True
         try:
@@ -797,7 +799,15 @@ class OdooRehearsalAdapter:
             if error.status_code in {401, 403}:
                 raise
             observation = {"completed": False, "host_observation_unavailable": True}
-        except (RehearsalRefused, OSError, click.ClickException):
+        except RehearsalRefused as error:
+            if error.code != RehearsalPrerequisite.RECOVERY_REQUIRED:
+                raise
+            observation = {
+                "completed": False,
+                "host_observation_unavailable": True,
+                "host_observation_reason": error.code.value,
+            }
+        except (ValueError, RuntimeError, OSError):
             observation = {"completed": False, "host_observation_unavailable": True}
         result = {
             **observation,
@@ -815,6 +825,8 @@ class OdooRehearsalAdapter:
             reason = (
                 str(stored_refusal)
                 if terminal
+                else "host_observation_unavailable"
+                if observation.get("host_observation_unavailable")
                 else "operation_journal_" + journal_status
                 if journal_status != "bound"
                 else "no_effect_checkpoint"
@@ -826,6 +838,19 @@ class OdooRehearsalAdapter:
                 recovery_disposition="completed_refusal" if terminal else "hold_unknown",
                 recovery_reason=reason,
                 original_key_required=not terminal,
+            )
+        if (
+            self.request.action == "prepare"
+            and record.state == "planned"
+            and journal.get("operation_state") == "reconcile_required"
+            and not observation.get("host_observation_unavailable")
+            and self.can_continue_prepare_host(
+                record, observation, str(journal["provider_effect_phase"])
+            )
+        ):
+            result.update(
+                recovery_disposition="continue_original_prepare",
+                recovery_reason="prepare_host_not_started",
             )
         return result
 
@@ -977,9 +1002,19 @@ class OdooRehearsalAdapter:
         )
         evidence = self.run_script(record, script, checkpoint)
         try:
-            result = RehearsalHostResult.model_validate_json(
-                bytes.fromhex(evidence["rehearsal_result"])
-            ).model_dump(mode="json")
+            payload = json.loads(bytes.fromhex(evidence["rehearsal_result"]))
+            if mode == "observe" and isinstance(payload, dict) and payload.get("host_busy") is True:
+                from control_plane.contracts.odoo_upgrade_rehearsal import RehearsalHostBusy
+
+                busy = RehearsalHostBusy.model_validate(payload)
+                if busy.intent_sha256 != record.intent_sha256:
+                    raise ValueError("Unbound observation")
+                return {
+                    "completed": False,
+                    "host_observation_unavailable": True,
+                    "host_observation_reason": "host_busy",
+                }
+            result = RehearsalHostResult.model_validate(payload).model_dump(mode="json")
         except (KeyError, ValueError):
             raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED) from None
         if (

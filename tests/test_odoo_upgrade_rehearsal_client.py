@@ -161,6 +161,24 @@ class RehearsalClientTests(unittest.TestCase):
         read.assert_called_once()
         write.assert_not_called()
 
+    def test_incomplete_readback_preserves_unknown_isolation_and_terminal_status(self) -> None:
+        for terminal in (False, True):
+            observation = {
+                "completed": False,
+                "original_key_required": not terminal,
+                "recovery_disposition": "completed_refusal" if terminal else "hold_unknown",
+                "host_observation_unavailable": not terminal,
+            }
+            if terminal:
+                observation.update(public_route=False, business_host_frozen=False)
+            code, result, post = self.call("readback", response_result=observation)
+            self.assertNotEqual(code, 0)
+            self.assertEqual(
+                result["status"], "unavailable" if terminal else "reconciliation_required"
+            )
+            self.assertEqual(result["original_key_required"], not terminal)
+            post.assert_called_once()
+
     def call(
         self,
         mode: str,
@@ -169,6 +187,7 @@ class RehearsalClientTests(unittest.TestCase):
         changed: bool = False,
         failure: tuple[int, dict[str, Any]] | None = None,
         action: str = "prepare",
+        response_result: dict[str, Any] | None = None,
     ) -> tuple[int, dict[str, Any], Mock]:
         client = runpy.run_path(
             str(Path(__file__).resolve().parents[1] / "scripts/odoo-upgrade-rehearsal.py")
@@ -200,6 +219,12 @@ class RehearsalClientTests(unittest.TestCase):
             "business_host_frozen": False,
             "resources_preserved": True,
         }
+        if response_result is not None:
+            result = {
+                "product": result["product"],
+                "rehearsal_id": result["rehearsal_id"],
+                **response_result,
+            }
         post = Mock(
             return_value={"status": "accepted", "trace_id": "fixture-trace", "result": result}
         )

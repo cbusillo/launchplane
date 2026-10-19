@@ -463,8 +463,13 @@ def main():
             observe(spec,root,receipt)
         else:
             with lock:
-                fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-                observe(spec,root,receipt)
+                try:
+                    fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                except BlockingIOError:
+                    print('rehearsal_result='+json.dumps({
+                        'intent_sha256':record['intent_sha256'],'host_busy':True}).encode().hex())
+                else:
+                    observe(spec,root,receipt)
         return
     root.mkdir(mode=0o700,parents=True,exist_ok=True)
     os.chmod(root,0o700)
