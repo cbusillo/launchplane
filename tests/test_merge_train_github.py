@@ -3377,7 +3377,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
             f"{ENGINEERING_RELEASE_TESTS}\nCheck the imported parts at release.",
         ):
             for decisions, expected_status, expected_review in cases:
-                with self.subTest(decisions=decisions):
+                with self.subTest(notes=notes, decisions=decisions):
                     pull = _github_pull_request(42)
                     pull["body"] = "## Client test notes\n" + notes
                     pull["labels"] = [{"name": "ready-to-merge"}]

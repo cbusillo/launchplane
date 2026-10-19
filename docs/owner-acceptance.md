@@ -47,7 +47,7 @@ gates.
 The train carries the derived engineering-only explanation into batch and release
 notes; it requests no Client preview review and does not accept a release.
 Engineering changes with real Client checks at release use the explicit marker in
-[the shared ready-handoff notes contract](https://github.com/cbusillo/codex-skills/blob/main/skills/github/references/cli-reference.md#ready-handoffs)
+[the shared ready-handoff notes contract](https://github.com/cbusillo/codex-skills/blob/5d5379271bac82101c94de441541e3cb4d9ee095/skills/github/references/cli-reference.md#ready-handoffs)
 as a plain first notes line, followed by real release test steps. Launchplane
 imports that classification from its pinned shared package. Each notes section
 and batch member keeps its own review requirement. Unmarked steps and changes

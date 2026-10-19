@@ -25,6 +25,7 @@ def owner_test_notes(body: str) -> str:
     Pull requests written before the role words changed say "Owner test notes"; both
     headings are read.
     """
+    # Keep display whitespace: existing accepted checklist digests bind these notes.
     lines: list[str] = []
     collecting = False
     level = 0
