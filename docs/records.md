@@ -59,8 +59,10 @@ job-claim records, have no remaining reader. Their ORM models are deleted, and
 the privileged-operation worker no longer requires them at startup. Prepared
 migration `e7c1d5e9a3b6` drops those sixteen tables, provider-delivery inspections,
 and the five older unmodeled authorization/recovery/requirement-authority tables.
-Hosted startup remains on `e6b0c4d8f2a5`, so shipping this migration does not drop
-the shared tables or their rows. The candidate runtime accepts both revisions;
+Hosted startup targets the independent Q533 preview drop, `e8d2f6a0b4c7`, so
+shipping the prepared delivery migration does not drop these shared tables or
+their rows. The candidate runtime accepts the common predecessor, both branches
+and their empty join, as described in the operations migration hold;
 its schema invariants require only tables with retained consumers.
 
 Enrollment, authentication/credential claim, session admission, finite-job
@@ -2784,10 +2786,17 @@ credential, runtime grant, or stored record is changed by this code retirement.
 - Retired in #2875. Every open pull request gets a preview (#2735), so opt-in
   enablement has nothing left to decide. No command writes the record and
   tenant renders no longer show enablement rows or request recipes.
-- The `launchplane_preview_enablement` table and its existing rows stay in
-  place; dropping the table would delete data. Detached application retirement
-  still scans those stored payloads, and any `launchplane_preview_enablement/`
-  files left in filesystem state, as an authority source.
+- Director decision Q533 authorizes deletion of Launchplane's own retired
+  enablement rows. Migration `e8d2f6a0b4c7` drops the table on normal service
+  startup, independently of the held delivery-history drop in #2437.
+- Detached application retirement no longer treats enablement as authority,
+  and filesystem import skips it. Existing `launchplane_preview_enablement/`
+  JSON files stay in place; no reader or importer consumes them.
+- Schema adoption trusts an existing Alembic revision. Only unversioned
+  databases are matched against complete supported historical schema shapes;
+  the retired table's presence never advances a stamped database's revision.
+  Downgrade cannot recover deleted rows; recovery uses the pre-migration
+  database backup and matching image.
 
 ## Launchplane Preview Inventory Scan Record
 

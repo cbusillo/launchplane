@@ -7259,22 +7259,6 @@ class FilesystemRecordStore:
             records = records[:limit]
         return tuple(records)
 
-    def list_retired_preview_enablement_payloads(self) -> tuple[dict[str, object], ...]:
-        """Return stored payloads of the retired preview enablement record type.
-
-        Nothing writes these records any more. Detached application retirement
-        still scans existing payloads as an authority source, so they are read
-        as raw JSON without a record model.
-        """
-        with self._product_authority_bundle_lock():
-            record_dir = self._record_dir("launchplane_preview_enablement")
-            if not record_dir.exists():
-                return ()
-            return tuple(
-                json.loads(record_path.read_text(encoding="utf-8"))
-                for record_path in sorted(record_dir.glob("*.json"))
-            )
-
     def write_preview_generation_record(self, record: PreviewGenerationRecord) -> Path:
         return self._write_model("launchplane_preview_generations", record.generation_id, record)
 

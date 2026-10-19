@@ -2884,31 +2884,6 @@ class LaunchplaneTrustedMaintenanceEvidenceRow(Base):
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
-class LaunchplanePreviewEnablementRow(Base):
-    __tablename__ = "launchplane_preview_enablement"
-    __table_args__ = (
-        Index(
-            "launchplane_preview_enablement_context_idx",
-            "context",
-            desc("updated_at"),
-        ),
-        Index(
-            "launchplane_preview_enablement_anchor_idx",
-            "anchor_repo",
-            "anchor_pr_number",
-            desc("updated_at"),
-        ),
-    )
-
-    record_id: Mapped[str] = mapped_column(String, primary_key=True)
-    context: Mapped[str] = mapped_column(String, nullable=False)
-    anchor_repo: Mapped[str] = mapped_column(String, nullable=False)
-    anchor_pr_number: Mapped[int] = mapped_column(Integer, nullable=False)
-    pr_state: Mapped[str] = mapped_column(String, nullable=False)
-    updated_at: Mapped[str] = mapped_column(String, nullable=False)
-    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
-
-
 class LaunchplanePreviewInventoryScanRow(Base):
     __tablename__ = "launchplane_preview_inventory_scans"
     __table_args__ = (
@@ -19826,41 +19801,6 @@ class PostgresRecordStore(HumanSessionStore):
             rows = session.scalars(statement).all()
             return tuple(self._owner_acceptance_record_from_row(row) for row in rows)
 
-    def list_retired_preview_enablement_payloads(self) -> tuple[PayloadDict, ...]:
-        """Return stored payloads of the retired preview enablement record type.
-
-        Nothing writes these rows any more, and the table is kept so existing
-        data stays in place. Detached application retirement still scans the
-        existing payloads as an authority source, so they are read without a
-        record model.
-        """
-        statement = select(LaunchplanePreviewEnablementRow).order_by(
-            LaunchplanePreviewEnablementRow.updated_at.desc(),
-            LaunchplanePreviewEnablementRow.record_id.desc(),
-        )
-        with self._session_factory() as session:
-            rows = session.scalars(statement).all()
-            return tuple(_payload_from_row(row) for row in rows)
-
-    def _write_retired_preview_enablement_payload(self, payload: PayloadDict) -> None:
-        anchor_pr_number = payload.get("anchor_pr_number")
-        text_fields = ("record_id", "context", "anchor_repo", "pr_state", "updated_at")
-        if not isinstance(anchor_pr_number, int) or not all(
-            isinstance(payload.get(field), str) for field in text_fields
-        ):
-            raise ValueError("Stored preview enablement payload is incomplete.")
-        self._write_row(
-            LaunchplanePreviewEnablementRow(
-                record_id=payload["record_id"],
-                context=payload["context"],
-                anchor_repo=payload["anchor_repo"],
-                anchor_pr_number=anchor_pr_number,
-                pr_state=payload["pr_state"],
-                updated_at=payload["updated_at"],
-                payload=dict(payload),
-            )
-        )
-
     def write_preview_inventory_scan_record(self, record: PreviewInventoryScanRecord) -> None:
         self._write_row(
             LaunchplanePreviewInventoryScanRow(
@@ -31231,7 +31171,6 @@ class PostgresRecordStore(HumanSessionStore):
             "product_owner_requirements": 0,
             "product_owner_routing": 0,
             "preview_records": 0,
-            "preview_enablement": 0,
             "preview_generations": 0,
             "owner_acceptance_events": 0,
             "privileged_operation_events": 0,
@@ -31351,11 +31290,6 @@ class PostgresRecordStore(HumanSessionStore):
         for preview_record in filesystem_store.list_preview_records():
             self.write_preview_record(preview_record)
             counts["preview_records"] += 1
-        # Retirement scans these retired rows as authority, so carry them over unchanged.
-        if hasattr(filesystem_store, "list_retired_preview_enablement_payloads"):
-            for enablement_payload in filesystem_store.list_retired_preview_enablement_payloads():
-                self._write_retired_preview_enablement_payload(enablement_payload)
-                counts["preview_enablement"] += 1
         for generation_record in filesystem_store.list_preview_generation_records():
             self.write_preview_generation_record(generation_record)
             counts["preview_generations"] += 1
