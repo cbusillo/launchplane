@@ -76,6 +76,7 @@ class ActionEffectTests(unittest.TestCase):
                 ("product_profile.read", True),
                 ("product_config.plan", True),
                 ("ingress_route.audit", True),
+                ("product_profile.health_monitoring.apply", True),
                 ("ingress_route.apply", False),
                 ("product_config.apply", False),
                 ("dokploy_target.repair_domain_authority", False),
