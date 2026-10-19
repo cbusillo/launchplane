@@ -2660,9 +2660,12 @@ regular archive against the recorded digest. The standard tar reader visits
 bounded headers and reads the one matching member without filesystem extraction.
 It rejects unsafe/duplicate matching members and trailing archive data, keeps
 metadata memory bounded, and requires stable custody before publishing a comparison.
-An additional ten-minute archive budget stays inside the existing host job limit.
+The archive budget scales with its actual byte count for a full digest and
+member read, capped by a server-generated fraction of the existing native job
+limit. It leaves room for the copied-file scan and host overhead.
 Unsupported, changed, unavailable or untrusted evidence returns
-`capture_comparison_unavailable`; an expired budget returns `incomplete`.
+`capture_comparison_unavailable`; an expired archive budget returns
+`capture_comparison_incomplete`, preserving the established size/hash disagreement.
 
 `capture_attachment_matches_reference_copy_differs` means the captured member
 matches both database references while the inspected runner copy differs.

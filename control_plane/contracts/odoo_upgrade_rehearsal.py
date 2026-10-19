@@ -195,6 +195,7 @@ class RehearsalHostResult(BaseModel):
             "capture_attachment_differs_from_copy_and_reference",
             "capture_attachment_not_present",
             "capture_comparison_unavailable",
+            "capture_comparison_incomplete",
             "verified",
             "incomplete",
             "writer_active",

@@ -247,6 +247,13 @@ class RehearsalScenario(unittest.TestCase):
         self.assertEqual(
             cast(dict[str, str], spec["environment"])["ODOO_WORKERS"], self.shape["ODOO_WORKERS"]
         )
+        from control_plane.dokploy import post_deploy
+
+        comparison_limit = cast(int, spec["capture_comparison_timeout_seconds"])
+        self.assertGreater(comparison_limit, 0)
+        self.assertLess(
+            comparison_limit, post_deploy.DEFAULT_ODOO_UPSTREAM_RESTORE_EXECUTION_TIMEOUT_SECONDS
+        )
 
     def test_artifact_from_another_product_cannot_receive_copied_data(self) -> None:
         assert self.manifests[1].source_build is not None
@@ -1598,6 +1605,10 @@ class RehearsalHostSafetyTests(unittest.TestCase):
             )
 
         compare = self.host["compare_retained_attachment"]
+        limit = spec["capture_comparison_timeout_seconds"]
+        budget = self.host["capture_comparison_budget"]
+        self.assertGreater(budget(100 * 1024**3, limit), budget(1024, limit))
+        self.assertLessEqual(budget(100 * 1024**3, limit), limit)
         for data, expected in (
             (content, "capture_attachment_matches_reference_copy_differs"),
             (b"bad", "capture_attachment_matches_copy_reference_differs"),
@@ -1630,6 +1641,14 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         self.assertEqual(compare(spec, root, reference), "capture_comparison_unavailable")
         archive([("unrelated", b"fixture")])
         self.assertEqual(compare(spec, root, reference), "capture_attachment_not_present")
+        first_archive = (raw / "filestore.tar").read_bytes()
+        archive([(name, content)])
+        concatenated = first_archive + (raw / "filestore.tar").read_bytes()
+        (raw / "filestore.tar").write_bytes(concatenated)
+        concatenated_receipt = json.loads((root / "capture.json").read_text())
+        concatenated_receipt["filestore_sha256"] = hashlib.sha256(concatenated).hexdigest()
+        (root / "capture.json").write_text(json.dumps(concatenated_receipt))
+        self.assertEqual(compare(spec, root, reference), "capture_comparison_unavailable")
         archive([(name, content)])
         (raw / "filestore.tar").write_bytes((raw / "filestore.tar").read_bytes() + b"changed")
         self.assertEqual(compare(spec, root, reference), "capture_comparison_unavailable")
@@ -1640,7 +1659,7 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         self.assertEqual(compare(spec, root, reference), "capture_comparison_unavailable")
         archive([(name, content)])
         with patch.object(self.host["time"], "monotonic", side_effect=[0, 601]):
-            self.assertEqual(compare(spec, root, reference), "incomplete")
+            self.assertEqual(compare(spec, root, reference), "capture_comparison_incomplete")
         receipt = root / "capture.json"
         receipt.rename(root / "saved-capture.json")
         receipt.symlink_to(root / "saved-capture.json")
@@ -1683,8 +1702,11 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         self.host["docker"].return_value = (
             "attachment_validation=" + json.dumps(private).encode().hex()
         ).encode()
-        with self.assertRaisesRegex(RuntimeError, "Attachment observation is unverified"):
-            self.run_host(spec)
+        archive_comparison = Mock(wraps=compare)
+        with patch.dict(self.host, {"compare_retained_attachment": archive_comparison}):
+            with self.assertRaises(RuntimeError):
+                self.run_host(spec)
+        archive_comparison.assert_not_called()
         archive([(name, content)])
         spec["record"]["source_binding_sha256"] = hashlib.sha256(b"other fixture").hexdigest()
         self.assertEqual(compare(spec, root, reference), "capture_comparison_unavailable")
@@ -2020,6 +2042,7 @@ class RehearsalHostSafetyTests(unittest.TestCase):
             "record_binding_sha256": hashlib.sha256(b"fixture-record").hexdigest(),
             "mode": "apply",
             "action": "verify",
+            "capture_comparison_timeout_seconds": 1200,
             "target_image": self.spec["image_reference"],
         }
         return spec, root, containers
@@ -2829,6 +2852,7 @@ class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
             (None, "attachment_size_and_hash_mismatch"),
             (None, "capture_attachment_matches_reference_copy_differs"),
             (None, "capture_attachment_matches_copy_reference_differs"),
+            (None, "capture_comparison_incomplete"),
             (403, "verified"),
         ):
             with self.subTest(log_status=status, attachment_reason=attachment_reason):

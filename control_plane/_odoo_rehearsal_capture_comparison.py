@@ -18,6 +18,15 @@ def valid_attachment_reference(value):
         and value['copied_sha1']!=value['checksum'])
 
 
+def capture_comparison_budget(size,limit):
+    if type(size) is not int or size<0 or type(limit) is not int or limit<=0:
+        raise ValueError('Capture comparison budget is unverified')
+    # Allow a cold sequential digest plus a worst-case full member read at
+    # modest throughput. The service derives the cap from the native job limit.
+    throughput=32*1024*1024
+    return min(limit,max(600,60+(2*size+throughput-1)//throughput))
+
+
 @contextmanager
 def capture_comparison_file(path):
     descriptor=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
@@ -50,13 +59,14 @@ def compare_retained_attachment(spec,root,reference):
                 or any(not isinstance(receipt[key],str) or not re.fullmatch('[a-f0-9]{64}',receipt[key])
                     for key in receipt)):
             return 'capture_comparison_unavailable'
-        deadline=time.monotonic()+600
         target=None
         with capture_comparison_file(raw/'filestore.tar') as (stream,metadata):
             bound=spec['record']['storage']['filestore_bytes']
             if (type(bound) is not int or bound<=0 or metadata.st_size>bound
                     or metadata.st_size%tarfile.BLOCKSIZE):
                 return 'capture_comparison_unavailable'
+            deadline=time.monotonic()+capture_comparison_budget(
+                metadata.st_size,spec['capture_comparison_timeout_seconds'])
             value=hashlib.sha256()
             consumed=0
             def read(size):
@@ -152,7 +162,7 @@ def compare_retained_attachment(spec,root,reference):
             return 'capture_attachment_matches_copy_reference_differs'
         return 'capture_attachment_differs_from_copy_and_reference'
     except TimeoutError:
-        return 'incomplete'
+        return 'capture_comparison_incomplete'
     except (OSError,ValueError,TypeError,KeyError,tarfile.TarError):
         # Exception text may contain a Client attachment path. Never publish it.
         return 'capture_comparison_unavailable'
