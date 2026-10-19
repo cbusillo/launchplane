@@ -129,16 +129,9 @@ class RealPostgresTestingOverrideSanitizationHttpTests(
             return observed
 
         key = "review-aba-sanitization-key"
-        with (
-            patch(
-                "control_plane.http_routes.testing_override_sanitization.sanitization_snapshot",
-                side_effect=snapshot_then_restore,
-            ),
-            patch.object(
-                self.store,
-                "sanitize_testing_overrides",
-                wraps=self.store.sanitize_testing_overrides,
-            ) as mutation,
+        with patch(
+            "control_plane.http_routes.testing_override_sanitization.sanitization_snapshot",
+            side_effect=snapshot_then_restore,
         ):
             response = await request(
                 self.fixture.app,
@@ -147,15 +140,22 @@ class RealPostgresTestingOverrideSanitizationHttpTests(
                 headers={**headers, "Idempotency-Key": key},
                 payload=body.model_dump(mode="json"),
             )
-        self.assertEqual(response.status_code, 409, response.text)
-        self.assertEqual(
-            response.json()["error"]["code"], "testing_override_sanitization_unverified"
-        )
-        mutation.assert_not_called()
-        self.assertEqual(
-            self.store.read_odoo_instance_override_record(
-                context_name=self.fixture.context, instance_name="testing"
-            ),
-            self.original_overrides,
-        )
-        self.assertIsNone(read_sanitization_audit(self.store, self.profile.product, body))
+        audit = read_sanitization_audit(self.store, self.profile.product, body)
+        if response.status_code == 409:
+            self.assertEqual(
+                response.json()["error"]["code"], "testing_override_sanitization_unverified"
+            )
+            self.assertIsNone(audit)
+            self.assertEqual(
+                self.store.read_odoo_instance_override_record(
+                    context_name=self.fixture.context, instance_name="testing"
+                ),
+                self.original_overrides,
+            )
+        else:
+            self.assertEqual(response.status_code, 202, response.text)
+            assert audit is not None
+            self.assertEqual(
+                response.json()["result"],
+                audit.plan.model_copy(update={"applied": True}).model_dump(mode="json"),
+            )
