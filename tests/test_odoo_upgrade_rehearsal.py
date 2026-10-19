@@ -1669,6 +1669,16 @@ class RehearsalHostSafetyTests(unittest.TestCase):
             ticks = iter([0])
             program["time"] = SimpleNamespace(monotonic=lambda: next(ticks, 30))
             self.assertEqual(program["attachment_validation_main"](), "verified")
+            rows[0] = (name, checksum, len(content) + 1)
+            self.assertEqual(
+                program["attachment_validation_main"](),
+                "attachment_content_matches_checksum_size_mismatch",
+            )
+            with patch.object(sys, "argv", ["validator", "validate"]):
+                self.assertEqual(
+                    program["attachment_validation_main"](), "attachment_size_mismatch"
+                )
+            rows[0] = (name, checksum, len(content))
             missing = hashlib.sha1(b"missing fixture").hexdigest()
             rows.append((missing[:2] + "/" + missing, missing, 1))
             # A slow earlier content scan must not hide a later missing file.
@@ -1687,6 +1697,35 @@ class RehearsalHostSafetyTests(unittest.TestCase):
             with self.subTest(expected=expected):
                 self.assertEqual(validate(case_rows, root, None), expected)
                 self.assertEqual(path.read_bytes(), content)
+        # Readback can distinguish stale size metadata from changed content
+        # without granting capture/apply permission to accept either one.
+        mismatch = [(name, checksum, len(content) + 1)]
+        self.assertEqual(
+            validate(mismatch, root, None, classify_size=True),
+            "attachment_content_matches_checksum_size_mismatch",
+        )
+        self.assertEqual(validate(mismatch, root, None), "attachment_size_mismatch")
+        self.assertEqual(path.read_bytes(), content)
+        program["time"] = SimpleNamespace(monotonic=Mock(side_effect=[0, 1, 2]))
+        self.assertEqual(validate(mismatch, root, 2, classify_size=True), "incomplete")
+        before = path.stat()
+        changed = SimpleNamespace(
+            st_size=before.st_size,
+            st_mtime_ns=before.st_mtime_ns,
+            st_ctime_ns=before.st_ctime_ns + 1,
+        )
+        with patch.object(program["os"], "fstat", side_effect=[before, changed]):
+            self.assertEqual(
+                validate(mismatch, root, None, classify_size=True), "attachment_unreadable"
+            )
+        self.assertEqual(path.read_bytes(), content)
+        path.write_bytes(b"damaged copy fixture")
+        self.assertEqual(
+            validate(mismatch, root, None, classify_size=True),
+            "attachment_size_and_hash_mismatch",
+        )
+        self.assertEqual(path.read_bytes(), b"damaged copy fixture")
+        path.write_bytes(content)
         program["time"] = SimpleNamespace(monotonic=lambda: 2)
         self.assertEqual(validate([(name, checksum, len(content))], root, 1), "incomplete")
         path.write_bytes(b"x" * len(content))
@@ -1892,6 +1931,15 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         self.assertFalse(observed["completed"])
         self.assertEqual((raw / "database.dump").read_bytes(), before)
         self.host["docker"].assert_not_called()
+        self.host["capture_attachment_observation"].reset_mock()
+        spec.update(action="prepare")
+        spec["record"]["state"] = "planned"
+        partial_prepare = self.run_host(spec)
+        self.assertNotIn("capture_attachment_validation", partial_prepare)
+        self.assertFalse(partial_prepare["completed"])
+        self.host["capture_attachment_observation"].assert_not_called()
+        spec.update(action="execute")
+        spec["record"]["state"] = "prepared"
         from types import SimpleNamespace
 
         with (
@@ -2608,8 +2656,14 @@ class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
         payload = fixture.request.model_copy(
             update={"mode": "readback", "action": "execute"}
         ).model_dump(mode="json")
-        for status in (None, 503, 403):
+        for status, attachment_reason in (
+            (None, "verified"),
+            (503, "attachment_content_matches_checksum_size_mismatch"),
+            (None, "attachment_size_and_hash_mismatch"),
+            (403, "verified"),
+        ):
             with self.subTest(log_status=status):
+                observed["capture_attachment_validation"] = attachment_reason
                 error = api.DokployRequestFailed(
                     method="GET",
                     path="/api/deployment.allByType",
@@ -2648,7 +2702,7 @@ class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("_provider_operation_key", result)
                 self.assertTrue(host.call_args.kwargs["operation_key"])
                 self.assertTrue(host.call_args.kwargs["inspect_capture"])
-                self.assertEqual(result["capture_attachment_validation"], "verified")
+                self.assertEqual(result["capture_attachment_validation"], attachment_reason)
                 self.assertEqual(result["recovery_disposition"], "hold_unknown")
         with patch.object(OdooRehearsalAdapter, "host", return_value=observed) as host:
             response = await request(

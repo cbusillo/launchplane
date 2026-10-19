@@ -11,7 +11,7 @@ import sys
 import time
 
 
-def validate_attachment_files(rows, root, deadline, *, check_content=True):
+def validate_attachment_files(rows, root, deadline, *, check_content=True, classify_size=False):
     if root.resolve() != root.absolute() or not root.is_dir():
         return 'attachment_path_unsafe'
     for name, checksum, size in rows:
@@ -30,9 +30,10 @@ def validate_attachment_files(rows, root, deadline, *, check_content=True):
             metadata = os.fstat(descriptor)
             if not stat.S_ISREG(metadata.st_mode):
                 return 'attachment_path_unsafe'
-            if metadata.st_size != size:
+            size_mismatch = metadata.st_size != size
+            if size_mismatch and not classify_size:
                 return 'attachment_size_mismatch'
-            if not check_content:
+            if not check_content and not size_mismatch:
                 continue
             value = hashlib.sha1()
             with os.fdopen(descriptor, 'rb') as stream:
@@ -44,8 +45,14 @@ def validate_attachment_files(rows, root, deadline, *, check_content=True):
                     if not chunk:
                         break
                     value.update(chunk)
+                after = os.fstat(stream.fileno())
+                if (metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns) != (
+                        after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+                    return 'attachment_unreadable'
             if value.hexdigest() != checksum:
-                return 'attachment_hash_mismatch'
+                return 'attachment_size_and_hash_mismatch' if size_mismatch else 'attachment_hash_mismatch'
+            if size_mismatch:
+                return 'attachment_content_matches_checksum_size_mismatch'
         except FileNotFoundError:
             return 'attachment_missing'
         except OSError:
@@ -87,7 +94,7 @@ def attachment_validation_main():
                 cursor.execute('SELECT store_fname,checksum,file_size FROM ir_attachment WHERE store_fname IS NOT NULL')
                 reason = validate_attachment_files(cursor,
                     Path('/volumes/data/filestore')/database, deadline,
-                    check_content=check_content)
+                    check_content=check_content, classify_size=bounded)
                 if reason != 'verified':
                     return reason
         return 'verified'
