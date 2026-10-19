@@ -399,14 +399,18 @@ def custody_observation(spec, root, action):
         'source_snapshot_directory_present':directory(root/database_names(spec)['source'])}
 
 
-def capture_attachment_observation(spec,root):
+def capture_attachment_observation(spec,root,observations=None):
     database=database_names(spec)['source']
     containers=inspection(spec,database,spec['source_image'])
     if containers['web'][1].get('State',{}).get('Running') is not False:
         return 'writer_active'
     value=attachment_validation_payload(containers,database,'compare')
     if value['reason']=='attachment_size_and_hash_mismatch':
-        return compare_retained_attachment(spec,root,value['reference'])
+        comparison=compare_retained_attachment(spec,root,value['reference'])
+        if comparison=='capture_attachment_matches_copy_reference_differs' and observations is not None:
+            observations['capture_database_reference_validation']=compare_captured_database_reference(
+                spec,root,containers,value['reference'])
+        return comparison
     return value['reason']
 
 
@@ -479,7 +483,7 @@ def observe(spec, root, receipt, lock_held=False):
                 and not custody['capture_pending_present']
                 and not custody['source_snapshot_directory_present']):
             try:
-                result['capture_attachment_validation']=capture_attachment_observation(spec,root)
+                result['capture_attachment_validation']=capture_attachment_observation(spec,root,result)
             except RehearsalCommandFailure:
                 result['capture_attachment_validation']='runtime_unavailable'
         print('rehearsal_result='+json.dumps(result).encode().hex())
