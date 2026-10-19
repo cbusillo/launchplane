@@ -12,6 +12,10 @@ from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBu
 
 
 ODOO_UPGRADE_REHEARSAL_ROUTE = "/v1/products/{product}/odoo-upgrade-rehearsal"
+REHEARSAL_PUBLIC_FAILURE_MESSAGES = {
+    "rehearsal_storage_capacity_insufficient": "No rehearsal action started. Requalify storage capacity and review a new operation key.",
+    "rehearsal_precheck_refused": "No rehearsal action started. Requalify the prerequisite and review a new operation key.",
+}
 RehearsalAction = Literal["prepare", "execute", "simulate-final", "verify", "retire"]
 RehearsalState = Literal["planned", "prepared", "upgraded", "switched", "verified", "retired"]
 
@@ -104,6 +108,10 @@ class RehearsalHostResult(BaseModel):
     business_host_frozen: Literal[False]
     completed: bool = True
     raw_source_retained: bool = False
+    refusal_code: Literal[
+        "", "rehearsal_storage_capacity_insufficient", "rehearsal_precheck_refused"
+    ] = ""
+    attempt_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
 
 
 def rehearsal_identity(product: str, principal: str, key: str) -> str:

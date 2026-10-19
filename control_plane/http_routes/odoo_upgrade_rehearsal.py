@@ -9,6 +9,7 @@ from fastapi import Depends, Header, Path as PathParameter
 
 from control_plane.contracts.odoo_upgrade_rehearsal import (
     ODOO_UPGRADE_REHEARSAL_ROUTE as ROUTE,
+    REHEARSAL_PUBLIC_FAILURE_MESSAGES,
     OdooUpgradeRehearsalRequest,
     RehearsalPrerequisite,
     rehearsal_identity,
@@ -113,6 +114,7 @@ def register_odoo_upgrade_rehearsal_routes(
                     adapter=adapter,
                     in_progress_message="This rehearsal retains the original operation; do not replay an uncertain effect.",
                     reconcile_message="The rehearsal outcome is uncertain. Observe the original operation before continuing.",
+                    public_failure_messages=REHEARSAL_PUBLIC_FAILURE_MESSAGES,
                 )
             if body.mode == "readback":
                 if previous is None:

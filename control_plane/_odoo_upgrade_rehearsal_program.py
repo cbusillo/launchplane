@@ -313,6 +313,66 @@ def capture(spec,root,containers,database):
     return raw
 
 
+def rehearsal_storage_capacity(spec, root, containers, action):
+    budget=spec['record']['storage']
+    database=budget['database_bytes']; filestore=budget['filestore_bytes']
+    # Free space already excludes every completed phase's working/recovery
+    # copies. Charge only this phase's new allocations, including transients.
+    working=2 if action in {'execute','simulate-final'} else 0
+    host=database+filestore+budget['staging_bytes']
+    if action=='execute':
+        # Raw dump + tar + extracted filestore remain until upgrade succeeds,
+        # overlapping the sanitized source snapshot and both working copies.
+        host+=database+2*filestore
+    elif action=='simulate-final':
+        # Restoring the retained source extracts on the host and copies its
+        # dump into the database container, not the runner's writable layer.
+        host+=filestore
+    elif action!='verify':
+        raise RuntimeError('Unsupported storage phase')
+    return storage_capacity(
+        {'generation':{'namespace':spec['record']['rehearsal_id']},'staging_directory':str(root)},
+        containers,{**budget,'database_bytes':working*database,'filestore_bytes':working*filestore},
+        runner_staging_bytes=database if action=='execute' else 0,
+        host_staging_bytes=host,
+        database_staging_bytes=database if action=='simulate-final' else 0)
+
+
+def refusal_receipt(spec, root, code):
+    attempt=spec.get('attempt_sha256','')
+    binding=spec.get('record_binding_sha256','')
+    if not all(re.fullmatch(r'[a-f0-9]{64}',value) for value in (attempt,binding)):
+        return None
+    kind={'rehearsal_storage_capacity_insufficient':'capacity',
+        'rehearsal_precheck_refused':'precheck'}[code]
+    return root/(spec['action']+'.refused-'+attempt+'-'+binding+'-'+kind)
+
+
+def refusal_result(spec, code):
+    record=spec['record']
+    return {'intent_sha256':record['intent_sha256'],'state':record['state'],
+        'copies':record['copies'],'elapsed_seconds':record['elapsed_seconds'],
+        'resources_preserved':True,'public_route':False,'business_host_frozen':False,
+        'completed':False,'refusal_code':code,'attempt_sha256':spec['attempt_sha256']}
+
+
+def read_refusal(spec, root):
+    result=None
+    for code in ('rehearsal_storage_capacity_insufficient','rehearsal_precheck_refused'):
+        path=refusal_receipt(spec,root,code)
+        if path is None:
+            continue
+        try:
+            metadata=path.lstat()
+        except FileNotFoundError:
+            continue
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_size!=0
+            or stat.S_IMODE(metadata.st_mode)!=0o600 or result is not None):
+            raise RuntimeError('Refusal custody is unverified')
+        result=refusal_result(spec,code)
+    return result
+
+
 def main():
     spec=json.loads(base64.b64decode(sys.argv[1],validate=True))
     record=spec['record']
@@ -326,6 +386,11 @@ def main():
     receipt=root/(action+'.json')
     if spec['mode']=='observe':
         if not receipt.is_file() or receipt.is_symlink():
+            if not (root/(action+'.started')).exists():
+                refused=read_refusal(spec,root)
+                if refused is not None:
+                    print('rehearsal_result='+json.dumps(refused).encode().hex())
+                    return
             copies=[]
             for database in database_names(spec).values():
                 saved=root/database/'receipt.json'
@@ -362,12 +427,16 @@ def main():
             raise RuntimeError('Completed effect requires observation, never replay')
         if (root/(action+'.started')).exists():
             raise RuntimeError('Uncertain original effect retains its custody')
-        (root/(action+'.started')).touch(mode=0o600)
+        refused=read_refusal(spec,root)
+        if refused is not None:
+            print('rehearsal_result='+json.dumps(refused).encode().hex())
+            return
         started=time.monotonic()
         spec['phase_elapsed']={}
         names=database_names(spec)
         database,image=current(spec)
         if action=='prepare':
+            (root/(action+'.started')).touch(mode=0o600)
             compose(spec,root,image=spec['source_image'],database=names['source'])
             deadline=time.monotonic()+120
             while True:
@@ -384,15 +453,39 @@ def main():
             docker('exec',containers['script-runner'][0],'python3','-c',"import sys;sys.path.insert(0,'/volumes/scripts');from run_odoo_data_workflows import OdooDataWorkflowRunner as R;assert all(callable(getattr(R,k,None)) for k in ('prepare_credentials_before_registry','_prepare_restored_database','module_update_witnesses','_module_states_by_name'))")
             state='prepared'; copies=[]
         else:
-            containers=inspection(spec,database,image)
-            validate_snapshots(spec,root,containers,record['copies'])
-            budget=record['storage']
-            headroom={**budget,'database_bytes':budget['database_bytes']*4,
-                'filestore_bytes':budget['filestore_bytes']*4,
-                'staging_bytes':budget['staging_bytes']+4*(budget['database_bytes']+budget['filestore_bytes'])}
-            if action in {'execute','simulate-final'} and not storage_capacity(
-                {'generation':{'namespace':namespace},'staging_directory':str(root)},containers,headroom):
-                raise RuntimeError('Insufficient independent backing capacity')
+            code=''
+            try:
+                containers=inspection(spec,database,image)
+                validate_snapshots(spec,root,containers,record['copies'])
+                if action in {'execute','simulate-final','verify'} and not rehearsal_storage_capacity(
+                    spec,root,containers,action):
+                    code='rehearsal_storage_capacity_insufficient'
+                if action=='retire' and not {names['final_source'],names['final_upgrade']} <= {copy['database'] for copy in record['copies']}:
+                    raise RuntimeError('Both recovery states are required before retirement')
+            except Exception:
+                # These checks are read-only and no effect marker exists yet;
+                # malformed provider observations are determinate refusals too.
+                code='rehearsal_precheck_refused'
+            if code:
+                path=refusal_receipt(spec,root,code)
+                if path is None:
+                    raise RuntimeError('Missing refusal attempt identity')
+                # Creation itself is the complete no-effect proof. There is no
+                # partial JSON/rename window to strand a killed refusal writer.
+                descriptor=os.open(path,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+                descriptor=os.open(root,os.O_RDONLY|os.O_DIRECTORY)
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+                result=refusal_result(spec,code)
+                print('rehearsal_result='+json.dumps(result).encode().hex())
+                return
+            (root/(action+'.started')).touch(mode=0o600)
             copies=list(record['copies'])
             if action=='execute':
                 raw=capture(spec,root,containers,names['source'])
@@ -440,8 +533,6 @@ def main():
                 copies.append(snapshot(spec,root,containers,names['final_upgrade']))
                 state='verified'
             elif action=='retire':
-                if not {names['final_source'],names['final_upgrade']} <= {copy['database'] for copy in copies}:
-                    raise RuntimeError('Both recovery states are required before retirement')
                 docker('stop',*[item[0] for item in containers.values()])
                 state='retired'
             else:

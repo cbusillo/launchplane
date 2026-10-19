@@ -11,6 +11,7 @@ from urllib.parse import quote
 
 from control_plane.contracts.odoo_upgrade_rehearsal import (
     ODOO_UPGRADE_REHEARSAL_ROUTE,
+    REHEARSAL_PUBLIC_FAILURE_MESSAGES,
     OdooUpgradeRehearsalRequest,
 )
 
@@ -130,15 +131,18 @@ def main() -> int:
         except (ValueError, TypeError, AttributeError):
             trace = ""
             code = "rehearsal_unavailable"
+        refused = error.code == 409 and code in REHEARSAL_PUBLIC_FAILURE_MESSAGES
         print(
             json.dumps(
                 {
-                    "status": "reconciliation_required" if args.mode == "apply" else "unavailable",
+                    "status": "reconciliation_required"
+                    if args.mode == "apply" and not refused
+                    else "unavailable",
                     "mode": args.mode,
                     "http_status": error.code,
                     "trace_id": trace,
                     "error_code": code if code.isidentifier() else "rehearsal_unavailable",
-                    "original_key_required": args.mode == "apply",
+                    "original_key_required": args.mode == "apply" and not refused,
                 }
             )
         )

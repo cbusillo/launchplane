@@ -1,6 +1,7 @@
 """The operator client binds its exact saved review and never replays unknown effects."""
 
 from contextlib import redirect_stdout
+from email.message import Message
 import http.client
 import io
 import json
@@ -11,6 +12,7 @@ from tempfile import TemporaryDirectory
 from typing import Any
 import unittest
 from unittest.mock import Mock, patch
+import urllib.error
 
 from control_plane.contracts.odoo_upgrade_rehearsal import (
     OdooUpgradeRehearsalRequest,
@@ -20,7 +22,12 @@ from control_plane.contracts.odoo_upgrade_rehearsal import (
 
 class RehearsalClientTests(unittest.TestCase):
     def call(
-        self, mode: str, *, lost: bool = False, changed: bool = False
+        self,
+        mode: str,
+        *,
+        lost: bool = False,
+        changed: bool = False,
+        failure: tuple[int, dict[str, Any]] | None = None,
     ) -> tuple[int, dict[str, Any], Mock]:
         client = runpy.run_path(
             str(Path(__file__).resolve().parents[1] / "scripts/odoo-upgrade-rehearsal.py")
@@ -56,6 +63,16 @@ class RehearsalClientTests(unittest.TestCase):
         )
         if lost:
             post.side_effect = http.client.IncompleteRead(b"", 1)
+        if failure is not None:
+            status, failure_payload = failure
+            post.side_effect = urllib.error.HTTPError(
+                "https://service.invalid",
+                status,
+                "Fixture refusal",
+                Message(),
+                io.BytesIO(json.dumps(failure_payload).encode()),
+            )
+            self.addCleanup(post.side_effect.close)
         transport = {
             "resolve_settings": lambda args: {
                 "service_url": "https://service.invalid",
@@ -116,7 +133,7 @@ class RehearsalClientTests(unittest.TestCase):
             ):
                 code = client["main"]()
             self.assertNotIn("private-fixture-token", output.getvalue())
-            if mode == "dry-run" and not lost:
+            if mode == "dry-run" and not lost and failure is None:
                 self.assertEqual(
                     json.loads(evidence.read_text())["plan"]["rehearsal_id"], identifier
                 )

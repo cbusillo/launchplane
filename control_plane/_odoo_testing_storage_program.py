@@ -29,7 +29,8 @@ def storage_maintenance(spec, containers):
     print(sys.argv[2] + json.dumps({'type':'complete', 'disposals':results, 'capacity':capacity}), flush=True)
 
 
-def storage_capacity(spec, containers, budget, staged_bytes=0, assembly_bytes=0):
+def storage_capacity(spec, containers, budget, staged_bytes=0, assembly_bytes=0, *,
+        runner_staging_bytes=None, host_staging_bytes=None, database_staging_bytes=0):
     gen = spec['generation']
     # Group demands on the same actual backing filesystem. Comparing each
     # volume independently would admit two allocations against the same free bytes.
@@ -40,7 +41,8 @@ def storage_capacity(spec, containers, budget, staged_bytes=0, assembly_bytes=0)
         device = path.stat().st_dev
         stat = os.statvfs(path)
         free = stat.f_bavail * stat.f_frsize
-        required[device] = required.get(device, 0) + size
+        if size:
+            required[device] = required.get(device, 0) + size
         available[device] = min(available.get(device, free), free)
     for suffix, size in (('-db', budget['database_bytes']), ('-data', budget['filestore_bytes'])):
         volume = json.loads(docker('volume', 'inspect', gen['namespace'] + suffix))[0]
@@ -51,9 +53,17 @@ def storage_capacity(spec, containers, budget, staged_bytes=0, assembly_bytes=0)
     upper = driver.get('Data', {}).get('UpperDir')
     if not upper:
         raise RuntimeError('Runner staging backing is unavailable')
-    demand(upper, max(assembly_bytes, budget['staging_bytes'] - staged_bytes))
-    if gen.get('source_mode', 'ssh') != 'container-export':
+    demand(upper, max(assembly_bytes, budget['staging_bytes'] - staged_bytes)
+        if runner_staging_bytes is None else runner_staging_bytes)
+    if host_staging_bytes is not None:
+        demand(spec['staging_directory'], host_staging_bytes)
+    elif gen.get('source_mode', 'ssh') != 'container-export':
         demand(spec.get('staging_directory', tempfile.gettempdir()), budget['staging_bytes'])
+    if database_staging_bytes:
+        upper = containers['database'][1].get('GraphDriver', {}).get('Data', {}).get('UpperDir')
+        if not upper:
+            raise RuntimeError('Database staging backing is unavailable')
+        demand(upper, database_staging_bytes)
     capacity = all(available[device] >= size + budget['reserve_bytes'] for device, size in required.items())
     return capacity
 """.replace("__MAX_DISPOSALS__", str(MAX_DISPOSALS_PER_PASS))

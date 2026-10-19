@@ -16688,25 +16688,33 @@ def create_launchplane_fastapi_app(
         route_path: str,
         in_progress_message: str,
         reconcile_message: str,
+        public_failure_messages: Mapping[str, str] | None = None,
     ) -> AcceptedEvidenceResponse:
+        def terminal_failure(payload: dict[str, object], status: int) -> NoReturn:
+            error = payload.get("error")
+            code = error.get("code") if isinstance(error, dict) else None
+            messages = public_failure_messages or {}
+            if isinstance(code, str) and code in messages:
+                raise _launchplane_http_error(
+                    status_code=status, trace_id=trace_id, code=code, message=messages[code]
+                )
+            raise _launchplane_http_error(
+                status_code=status,
+                trace_id=trace_id,
+                code="provider_mutation_failed",
+                message=_provider_mutation_failure_message(payload),
+            )
+
         if result.status in {"completed", "unstored", "adopted"}:
             if result.response_status_code >= 400:
-                raise _launchplane_http_error(
-                    status_code=result.response_status_code,
-                    trace_id=trace_id,
-                    code="provider_mutation_failed",
-                    message=_provider_mutation_failure_message(result.response_payload),
-                )
+                terminal_failure(result.response_payload, result.response_status_code)
             return AcceptedEvidenceResponse.model_validate(result.response_payload)
         if result.status == "replayed":
             if result.record is None:
                 raise RuntimeError("Replayed provider mutation requires a stored record.")
             if (result.record.response_status_code or 0) >= 400:
-                raise _launchplane_http_error(
-                    status_code=result.record.response_status_code or 502,
-                    trace_id=trace_id,
-                    code="provider_mutation_failed",
-                    message=_provider_mutation_failure_message(result.record.response_payload),
+                terminal_failure(
+                    result.record.response_payload, result.record.response_status_code or 502
                 )
             return replay_idempotent_response(
                 trace_id=trace_id,
@@ -16785,6 +16793,7 @@ def create_launchplane_fastapi_app(
         reconcile_message: str,
         reservation_scope: str = "",
         target_supersession: ProviderTargetSupersession | None = None,
+        public_failure_messages: Mapping[str, str] | None = None,
     ) -> AcceptedEvidenceResponse:
         def operation(store: PostgresRecordStore) -> DurableProviderOperationResult:
             return run_durable_provider_operation(
@@ -16806,6 +16815,7 @@ def create_launchplane_fastapi_app(
             operation=operation,
             in_progress_message=in_progress_message,
             reconcile_message=reconcile_message,
+            public_failure_messages=public_failure_messages,
         )
 
     async def run_provider_operation_http(
@@ -16816,6 +16826,7 @@ def create_launchplane_fastapi_app(
         operation: Callable[[PostgresRecordStore], DurableProviderOperationResult],
         in_progress_message: str,
         reconcile_message: str,
+        public_failure_messages: Mapping[str, str] | None = None,
     ) -> AcceptedEvidenceResponse:
         reservation_store = require_provider_operation_store(
             record_store=record_store,
@@ -16855,6 +16866,7 @@ def create_launchplane_fastapi_app(
             route_path=route_path,
             in_progress_message=in_progress_message,
             reconcile_message=reconcile_message,
+            public_failure_messages=public_failure_messages,
         )
 
     async def execute_product_config_request(

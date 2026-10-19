@@ -559,7 +559,12 @@ class OdooRehearsalAdapter:
         )
 
     def host(
-        self, record: OdooUpgradeRehearsalRecord, mode: str, checkpoint: Callable[[], None]
+        self,
+        record: OdooUpgradeRehearsalRecord,
+        mode: str,
+        checkpoint: Callable[[], None],
+        *,
+        operation_key: str = "",
     ) -> dict[str, object]:
         if mode == "observe" or self.request.action in {"verify", "retire"}:
             source_values: dict[str, str] = {}
@@ -571,6 +576,8 @@ class OdooRehearsalAdapter:
         spec = rehearsal_host_spec(
             record, self.request.action, mode, source_values, shape, credentials
         )
+        spec["attempt_sha256"] = canonical_json_sha256({"operation_key": operation_key})
+        spec["record_binding_sha256"] = record.binding_sha256
         program = str(spec.pop("program"))
         encoded = base64.b64encode(json.dumps(spec, sort_keys=True).encode()).decode()
         script = (
@@ -592,9 +599,24 @@ class OdooRehearsalAdapter:
             or result["public_route"] is not False
             or result["business_host_frozen"] is not False
             or result["resources_preserved"] is not True
+            or (
+                result["refusal_code"]
+                and (
+                    result["attempt_sha256"] != spec["attempt_sha256"]
+                    or result["completed"] is not False
+                    or result["state"] != record.state
+                    or result["copies"] != [copy.model_dump(mode="json") for copy in record.copies]
+                )
+            )
         ):
             raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
         return result
+
+    def refusal_response(self, result: dict[str, object]) -> dict[str, object]:
+        return {
+            "trace_id": self.trace,
+            "error": {"code": result["refusal_code"]},
+        }
 
     def publish(
         self, record: OdooUpgradeRehearsalRecord, result: dict[str, object]
@@ -665,7 +687,13 @@ class OdooRehearsalAdapter:
                 if record is None or record.product != self.product:
                     return ProviderObservation("unknown")
                 require_unaliased_rehearsal(self.store, record)
-                result = self.host(record, "observe", check)
+                result = self.host(record, "observe", check, operation_key=provider_operation_key)
+                if result.get("refusal_code"):
+                    return ProviderObservation(
+                        "present",
+                        response_status_code=409,
+                        response_payload=self.refusal_response(result),
+                    )
                 if result.get("completed") is not True:
                     return ProviderObservation("unknown")
                 public = self.publish(record, result)
@@ -765,7 +793,9 @@ class OdooRehearsalAdapter:
                     raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
             checkpoint()
             lease.checkpoint_effect(self.request.action)
-            result = self.host(record, "apply", checkpoint)
+            result = self.host(record, "apply", checkpoint, operation_key=provider_operation_key)
+            if result.get("refusal_code"):
+                return ProviderMutationOutcome(409, self.refusal_response(result))
             public = self.publish(record, result)
             return ProviderMutationOutcome(
                 202,
