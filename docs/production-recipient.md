@@ -200,6 +200,15 @@ different current plan, or authenticated terminal capture-time ineligibility can
 complete the original terminal witness without qualification. Unclassified
 validation, read and persistence errors remain unknown.
 
+Confirmed drift requires readable observations. Incomplete required provider
+identity or malformed source, environment, converted services or labels cannot
+establish changed authority. Optional fields retain the provider's existing
+omitted/null semantics. A changed retained-target digest also needs a readable
+source description; an identity-only response is not enough. These minimum
+readability checks do not claim to validate a complete provider schema.
+Unreadable observations retain the original operation so a later valid read can
+adopt its existing proof without another capture.
+
 The proof records publication and authority digests, capture and logical-data
 digests, exact host container/storage identity, capture start, completion and
 measured duration. The immutable `recovery_fresh_until` timestamp is 15 minutes
@@ -246,6 +255,13 @@ refuses before SQL. A late queued exec after restart cannot receive permission
 from a dead parent, even when `/tmp` cancellation state was lost. Docker exec
 processes end with the container's PID1 and are not restarted with it; see the
 [Docker exec lifecycle contract](https://docs.docker.com/reference/cli/docker/container/exec/).
+
+The provider host bootstrap must keep the worker's intended local Docker endpoint
+stable throughout capture and original-key inspection. The fixed program reads
+local volume backing directories and uses that same daemon for immutable-ID
+execution, cleanup and absence checks. Switching the host's Docker context or
+endpoint during an attempt is outside this provider contract; host administrators
+remain inside its custody boundary.
 This uses no database-volume metadata, image configuration or ownership repair.
 
 One monotonic host journal and lock own that attempt. A missing journal can be

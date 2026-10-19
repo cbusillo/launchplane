@@ -21,7 +21,11 @@ from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRec
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.integration_allowances import canonical_sha256
-from control_plane.production_recipient import authority_snapshot, same_recipient_authority
+from control_plane.production_recipient import (
+    RecipientAuthorityChanged,
+    authority_snapshot,
+    same_recipient_authority,
+)
 from control_plane.storage.product_authority_bundle import (
     ProductAuthorityBundle,
     ProviderTargetWrite,
@@ -276,7 +280,7 @@ def commit_publication(
         return result
 
 
-class RecipientOwnedAuthorityChanged(ValueError):
+class RecipientOwnedAuthorityChanged(RecipientAuthorityChanged):
     """A scoped inverse must preserve an intervening edit to a row it would restore."""
 
 

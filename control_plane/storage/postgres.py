@@ -11563,6 +11563,7 @@ class PostgresRecordStore(HumanSessionStore):
 
                 require_publication_lease(self, session, reservation)
             from control_plane.production_recipient import (
+                RecipientAuthorityChanged,
                 authority_snapshot,
                 same_recipient_authority,
             )
@@ -11571,7 +11572,9 @@ class PostgresRecordStore(HumanSessionStore):
             if expected_authority is not None and not same_recipient_authority(
                 authority_snapshot(self, record.product, record.context), expected_authority
             ):
-                raise ValueError("Published recovery authority changed before custody committed.")
+                raise RecipientAuthorityChanged(
+                    "Published recovery authority changed before custody committed."
+                )
             if (
                 expected is None
                 or superseding
@@ -11586,7 +11589,9 @@ class PostgresRecordStore(HumanSessionStore):
                     record.authority_snapshot,
                 )
             ):
-                raise ValueError("Production authority changed before custody committed.")
+                raise RecipientAuthorityChanged(
+                    "Production authority changed before custody committed."
+                )
             row = session.get(
                 LaunchplaneProductionRecipientRow,
                 (record.product, record.context),

@@ -13,6 +13,7 @@ from control_plane.contracts.production_recipient import (
 from control_plane.integration_allowances import canonical_sha256
 from control_plane.production_recipient import (
     ProductionRecipientAdapter,
+    RecipientAuthorityChanged,
     authority_snapshot,
     custody,
     qualified_render,
@@ -239,7 +240,7 @@ def record_published_result(
     return adapter.current()[1]
 
 
-class PublishedAuthorityChanged(ValueError):
+class PublishedAuthorityChanged(RecipientAuthorityChanged):
     """An exact authority/publication comparison proved the capture outdated."""
 
 
@@ -275,6 +276,8 @@ def merge_published_entry(
                 expected_authority=authority,
             )
             return replacement
+        except RecipientAuthorityChanged:
+            raise
         except ValueError as error:
             observed = custody(adapter.store, adapter.product, record.context)
             if observed is None:

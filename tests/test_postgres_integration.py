@@ -12507,6 +12507,7 @@ class RealPostgresRecipientRecoveryTests(unittest.TestCase):
         from tests import test_production_recipient_qualification as qualification
 
         self.fixture = qualification.RecipientRecoveryTests()
+        self.fixture.scenario_database = _head_postgres_database
         database = _head_postgres_database()
         self.fixture.database_url = database.__enter__()
         self.addCleanup(database.__exit__, None, None, None)
@@ -12543,12 +12544,22 @@ class RealPostgresRecipientRecoveryTests(unittest.TestCase):
     def test_cold_current_validation_refusal_remains_unknown(self) -> None:
         self.fixture.test_passed_cold_witness_keeps_unclassified_current_refusal_unknown()
 
+    def test_terminal_provider_drift_completes_historically(self) -> None:
+        self.fixture.test_terminal_provider_drift_completes_historically()
+
+    def test_terminal_authority_facts_complete_historically(self) -> None:
+        self.fixture.test_terminal_authority_facts_complete_historically()
+
+    def test_unreadable_observations_retry_the_original_proof(self) -> None:
+        self.fixture.test_unreadable_observations_retry_the_original_proof()
+
 
 class RealPostgresPublishedRecipientRecoveryTests(unittest.TestCase):
     def setUp(self) -> None:
         from tests import test_production_recipient_published_recovery as recovery
 
         self.fixture = recovery.PublishedRecoveryTests()
+        self.fixture.scenario_database = _head_postgres_database
         database = _head_postgres_database()
         self.fixture.database_url = database.__enter__()
         self.addCleanup(database.__exit__, None, None, None)
@@ -12581,6 +12592,18 @@ class RealPostgresPublishedRecipientRecoveryTests(unittest.TestCase):
 
     def test_prepublication_terminal_capture_completes_without_qualification(self) -> None:
         self.fixture.test_prepublication_terminal_capture_completes_without_qualification()
+
+    def test_terminal_provider_drift_completes_historically(self) -> None:
+        self.fixture.test_terminal_provider_drift_completes_historically()
+
+    def test_terminal_authority_facts_complete_historically(self) -> None:
+        self.fixture.test_terminal_authority_facts_complete_historically()
+
+    def test_unreadable_observations_retry_the_original_proof(self) -> None:
+        self.fixture.test_unreadable_observations_retry_the_original_proof()
+
+    def test_owned_authority_race_completes_the_original_witness(self) -> None:
+        self.fixture.test_owned_authority_race_completes_the_original_witness()
 
 
 class RealPostgresProductionRecipientTests(unittest.TestCase):

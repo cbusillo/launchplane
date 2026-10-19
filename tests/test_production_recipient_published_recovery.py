@@ -1,6 +1,8 @@
 """Published recovery keeps historical bootstrap proof and owns its exact capture."""
 
 from dataclasses import replace
+from collections.abc import Callable
+from contextlib import AbstractContextManager
 from datetime import datetime, timedelta, timezone
 import json
 from typing import Any, cast
@@ -18,10 +20,18 @@ from control_plane.production_recipient_published_recovery import (
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.provider_operations import run_durable_provider_operation
 from tests import test_production_recipient_publication as publication_tests
+from tests.support.recipient_recovery_observation import (
+    AUTHORITY_DRIFT,
+    PROVIDER_DRIFT,
+    UNREADABLE_OBSERVATIONS,
+    assert_observation_scenarios,
+    assert_optional_provider_fields_remain_qualified,
+)
 
 
 class PublishedRecoveryTests(unittest.TestCase):
     database_url = ""
+    scenario_database: Callable[[], AbstractContextManager[str]] | None = None
 
     def setUp(self) -> None:
         self.publication = publication_tests.RecipientPublicationTests()
@@ -130,7 +140,7 @@ class PublishedRecoveryTests(unittest.TestCase):
         calls: list[str] = []
         observable = False
 
-        def host(root: Any, record: Any, spec: Any, program: Any, checkpoint: Any) -> Any:
+        def host(_root: Any, _record: Any, spec: Any, _program: Any, checkpoint: Any) -> Any:
             calls.append("inspect" if spec.get("inspect") else "apply")
             checkpoint("original_capture")
             if not spec.get("inspect"):
@@ -169,6 +179,21 @@ class PublishedRecoveryTests(unittest.TestCase):
         self.assertEqual(saved.execution["published_recovery_owner:" + original_binding], owner)
         self.assertEqual(self.store.list_held_provider_target_reservations(), ())
         self.assertEqual(calls.count("apply"), 1)
+
+    def test_terminal_provider_drift_completes_historically(self) -> None:
+        assert_observation_scenarios(self, PROVIDER_DRIFT, qualifies=False)
+
+    def test_terminal_authority_facts_complete_historically(self) -> None:
+        assert_observation_scenarios(self, AUTHORITY_DRIFT, qualifies=False)
+
+    def test_unreadable_observations_retry_the_original_proof(self) -> None:
+        assert_observation_scenarios(self, UNREADABLE_OBSERVATIONS, qualifies=True)
+
+    def test_optional_provider_fields_preserve_qualification(self) -> None:
+        assert_optional_provider_fields_remain_qualified(self)
+
+    def test_owned_authority_race_completes_the_original_witness(self) -> None:
+        assert_observation_scenarios(self, ("owned_row_race",), qualifies=False)
 
     def test_capture_only_empty_or_stale_evidence_never_qualifies(self) -> None:
         _, plan = self.adapter.current()

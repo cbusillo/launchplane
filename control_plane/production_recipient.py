@@ -18,7 +18,10 @@ from control_plane.contracts.production_recipient import (
     ProductionRecipientRequest,
 )
 from control_plane.dokploy import api, compose, source
-from control_plane.generic_web_deploy_http import resolve_generic_web_deploy_lane
+from control_plane.generic_web_deploy_http import (
+    GenericWebDeployProductMismatchError,
+    resolve_generic_web_deploy_lane,
+)
 from control_plane.production_recipient_resources import inspect_resources
 from control_plane.production_recipient_upstreams import (
     require_delivered_upstreams,
@@ -79,20 +82,82 @@ class RecipientAuthorityChanged(ValueError):
     """Successful authority or provider comparisons proved the review outdated."""
 
 
-def authority_snapshot(store: PostgresRecordStore, product: str, context: str) -> dict[str, Any]:
-    from control_plane.product_config_service import resolve_product_config_profile
+def require_readable_provider_payload(payload: dict[str, Any], *, prepared: bool = False) -> None:
+    """A partial/error object cannot establish a changed provider projection.
 
-    resolve_product_config_profile(store, product=product, context=context, instance="prod")
-    profile, lane = resolve_generic_web_deploy_lane(
-        record_store=store, product=product, instance="prod"
+    Dokploy's optional fields keep their existing omitted/null semantics. The
+    retained target may use another source mode; its source is not parsed as the
+    prepared recipient's JSON Compose document.
+    """
+    if any(
+        not isinstance(payload.get(key), str) or not payload[key]
+        for key in ("composeId", "appName")
+    ):
+        raise ValueError("Provider recipient identity is unavailable.")
+    for key in (
+        "serverId",
+        "environmentId",
+        "composeFile",
+        "sourceType",
+        "composeType",
+        "env",
+        "customGitUrl",
+        "customGitBranch",
+        "composePath",
+    ):
+        if payload.get(key) is not None and not isinstance(payload[key], str):
+            raise ValueError("Provider recipient text is unreadable.")
+    for key in ("autoDeploy", "randomize", "isolatedDeployment"):
+        if payload.get(key) is not None and not isinstance(payload[key], bool):
+            raise ValueError("Provider recipient settings are unreadable.")
+    for key in ("domains", "mounts", "serviceNetworks"):
+        if payload.get(key) is not None and not isinstance(payload[key], (list, dict)):
+            raise ValueError("Provider recipient isolation inventory is unreadable.")
+    if prepared and (
+        any(
+            not isinstance(payload.get(key), str) or not payload[key]
+            for key in ("environmentId", "sourceType")
+        )
+        or not isinstance(payload.get("autoDeploy"), bool)
+    ):
+        raise ValueError("Prepared provider configuration is incomplete.")
+
+
+def readable_provider_compose(document: Any) -> dict[str, Any]:
+    """Validate observation shape before comparing source or converted output."""
+    if (
+        not isinstance(document, dict)
+        or not isinstance(document.get("services"), dict)
+        or not document["services"]
+        or any(not isinstance(service, dict) for service in document["services"].values())
+        or not isinstance(document.get("volumes", {}), dict)
+    ):
+        raise ValueError("Provider Compose observation is unreadable.")
+    return document
+
+
+def authority_snapshot(store: PostgresRecordStore, product: str, context: str) -> dict[str, Any]:
+    from control_plane.product_config_service import (
+        ProductConfigOwnershipMismatchError,
+        resolve_product_config_profile,
     )
+
+    try:
+        resolve_product_config_profile(store, product=product, context=context, instance="prod")
+        profile, lane = resolve_generic_web_deploy_lane(
+            record_store=store, product=product, instance="prod"
+        )
+    except (ProductConfigOwnershipMismatchError, GenericWebDeployProductMismatchError) as error:
+        raise RecipientAuthorityChanged("Production lane ownership or driver changed.") from error
     if (
         lane.context != context
         or not profile.is_active
         or profile.public_website != "none"
         or lane.generic_web_extensions.configured
     ):
-        raise ValueError("A private, active generic-web production lane is required.")
+        raise RecipientAuthorityChanged(
+            "A private, active generic-web production lane is required."
+        )
     target = store.read_dokploy_target_record(context_name=context, instance_name="prod")
     target_id = store.read_dokploy_target_id_record(context_name=context, instance_name="prod")
     provider = store.read_provider_target_record(context_name=context, instance_name="prod")
@@ -104,13 +169,15 @@ def authority_snapshot(store: PostgresRecordStore, product: str, context: str) -
         or target.public_hosts
         or target.pending_public_host_effects
     ):
-        raise ValueError("Exact Compose authority without public traffic is required.")
+        raise RecipientAuthorityChanged(
+            "Exact Compose authority without public traffic is required."
+        )
     if any(
         row.target_id == target_id.target_id and (row.context, row.instance) != (context, "prod")
         for rows in (store.list_provider_target_records(), store.list_dokploy_target_id_records())
         for row in rows
     ):
-        raise ValueError("Another lane shares this production target.")
+        raise RecipientAuthorityChanged("Another lane shares this production target.")
     bindings = store.list_secret_bindings()
     # Include inherited bindings and their version metadata; never resolved values.
     selected_bindings = [
@@ -537,7 +604,13 @@ class ProductionRecipientAdapter:
             target_type="compose",
             target_id=record.retained_target_id.target_id,
         )
+        require_readable_provider_payload(old)
         if provider_binding_digest(old) != record.retained_provider_sha256:
+            # An identity-only response is not a readable changed configuration.
+            # This is minimum readability, not a new provider schema: legacy
+            # retained sources need not declare sourceType or use JSON Compose.
+            if not isinstance(old.get("composeFile"), str) and not old.get("sourceType"):
+                raise ValueError("Retained provider configuration is incomplete.")
             raise RecipientAuthorityChanged(
                 "The retained production recipient changed after review."
             )
@@ -555,7 +628,8 @@ class ProductionRecipientAdapter:
         payload = api.fetch_dokploy_target_payload(
             host=host, token=token, target_type="compose", target_id=record.target_id
         )
-        expected = json.loads(record.compose_source)
+        require_readable_provider_payload(payload, prepared=True)
+        expected = readable_provider_compose(json.loads(record.compose_source))
         for volume in expected["volumes"].values():
             volume["external"] = True
         if (
@@ -576,9 +650,16 @@ class ProductionRecipientAdapter:
                 )
             )
         ):
-            raise ValueError("Recipient identity, isolation or configuration changed.")
-        if json.loads(str(payload.get("composeFile") or "null")) != expected:
-            raise ValueError("The provider source differs from the reviewed immutable source.")
+            raise RecipientAuthorityChanged(
+                "Recipient identity, isolation or configuration changed."
+            )
+        if (
+            readable_provider_compose(json.loads(str(payload.get("composeFile") or "null")))
+            != expected
+        ):
+            raise RecipientAuthorityChanged(
+                "The provider source differs from the reviewed immutable source."
+            )
         values = runtime_values(self.store, self.root, record, published=published)
         allowed_environments = [values]
         if record.execution.get("runtime_identity"):
@@ -597,19 +678,26 @@ class ProductionRecipientAdapter:
                 [values] if not record.execution.get("trigger_requested_at") else []
             ) + [deployed_values]
         if api.parse_dokploy_env_text(str(payload.get("env") or "")) not in allowed_environments:
-            raise ValueError("The provider environment differs from managed production inputs.")
-        actual = yaml.safe_load(
-            compose.fetch_dokploy_converted_compose_file(
-                host=host, token=token, compose_id=record.target_id
+            raise RecipientAuthorityChanged(
+                "The provider environment differs from managed production inputs."
+            )
+        actual = readable_provider_compose(
+            yaml.safe_load(
+                compose.fetch_dokploy_converted_compose_file(
+                    host=host, token=token, compose_id=record.target_id
+                )
             )
         )
-        if not isinstance(actual, dict):
-            raise ValueError("Provider Compose conversion is unavailable.")
         actual.pop("name", None)
         for name, service in actual.get("services", {}).items():
             labels = service.pop("labels", {})
             if isinstance(labels, list):
                 labels = dict(label.split("=", 1) for label in labels)
+            if not isinstance(labels, dict) or any(
+                not isinstance(key, str) or not isinstance(value, str)
+                for key, value in labels.items()
+            ):
+                raise ValueError("Provider labels are unreadable.")
             allowed = {
                 "dokploy.organization.id",
                 "dokploy.project.id",
@@ -620,20 +708,20 @@ class ProductionRecipientAdapter:
                 "dokploy.application",
                 "dokploy.service",
             }
-            if (
-                not isinstance(labels, dict)
-                or set(labels) - allowed
-                or (
-                    labels
-                    and (
-                        labels.get("dokploy.application.id") != record.target_id
-                        or labels.get("dokploy.service") != name
-                    )
+            if set(labels) - allowed or (
+                labels
+                and (
+                    labels.get("dokploy.application.id") != record.target_id
+                    or labels.get("dokploy.service") != name
                 )
             ):
-                raise ValueError("Provider-added labels are not private recipient metadata.")
+                raise RecipientAuthorityChanged(
+                    "Provider-added labels are not private recipient metadata."
+                )
         if interpolate(actual, values) != interpolate(expected, values):
-            raise ValueError("The actual provider render differs from reviewed source and limits.")
+            raise RecipientAuthorityChanged(
+                "The actual provider render differs from reviewed source and limits."
+            )
         qualified_render(record, values)
 
     def unused_recipient(self, record: ProductionRecipientRecord) -> dict[str, Any]:

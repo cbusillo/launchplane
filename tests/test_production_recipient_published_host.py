@@ -48,6 +48,7 @@ class PublishedHostTests(unittest.TestCase):
         }
         self.network = "none"
         self.mount = ""
+        self.scratch_id = "e" * 64
         self.containers: set[str] = set()
         self.roundtrip = (
             b"CREATE DATABASE fixture; INSERT INTO fixture.items VALUES ('business-row');\n"
@@ -78,8 +79,8 @@ class PublishedHostTests(unittest.TestCase):
         self.calls.append(args)
         if args[0] == "create":
             self.mount = next(value for value in args if value.startswith("type=bind,src="))
-            self.containers.add("e" * 64)
-            return "e" * 64
+            self.containers.add(self.scratch_id)
+            return self.scratch_id
         if args[0] == "rm":
             self.containers.remove(args[2])
             return ""
@@ -91,7 +92,7 @@ class PublishedHostTests(unittest.TestCase):
             return json.dumps(
                 [
                     {
-                        "Id": "e" * 64,
+                        "Id": self.scratch_id,
                         "Config": {
                             "Image": self.spec["database_image"],
                             "Labels": {
@@ -160,7 +161,7 @@ class PublishedHostTests(unittest.TestCase):
                     ).read_text()
                 )
                 self.assertEqual(outcome["state"], "failed_safe")
-                self.assertIn(("rm", "-f", "e" * 64), self.calls)
+                self.assertIn(("rm", "-f", self.scratch_id), self.calls)
                 self.assertFalse(self.containers)
                 attempt = (
                     self.root / "captures" / self.spec["recovery_binding"] / outcome["attempt"]
@@ -620,7 +621,7 @@ class PublishedSourceTests(unittest.TestCase):
 
             namespace["docker"] = docker
             paths, source, identity = namespace["published_source"](spec)
-            self.assertEqual(source, "database")
+            self.assertEqual(source, containers[spec["database_service"]]["Id"])
             self.assertEqual(set(paths), {"database", "config"})
             self.assertTrue(identity)
             containers["application"]["Mounts"][0]["Destination"] = "/wrong-config"

@@ -1,6 +1,8 @@
 """Production connection purpose, isolated recovery, custody and refusal behavior."""
 
 from copy import deepcopy
+from collections.abc import Callable
+from contextlib import AbstractContextManager
 from dataclasses import replace
 from datetime import datetime
 import json
@@ -23,6 +25,13 @@ from control_plane.provider_operations import (
     run_durable_provider_operation,
 )
 from tests import test_production_recipient as preparation_tests
+from tests.support.recipient_recovery_observation import (
+    AUTHORITY_DRIFT,
+    PROVIDER_DRIFT,
+    UNREADABLE_OBSERVATIONS,
+    assert_observation_scenarios,
+    assert_optional_provider_fields_remain_qualified,
+)
 
 
 class RecipientUpstreamTests(unittest.TestCase):
@@ -302,6 +311,7 @@ class RecipientUpstreamTests(unittest.TestCase):
 
 class RecipientRecoveryTests(unittest.TestCase):
     database_url = ""
+    scenario_database: Callable[[], AbstractContextManager[str]] | None = None
 
     def setUp(self) -> None:
         self.fixture = preparation_tests.ProductionRecipientTests()
@@ -417,6 +427,18 @@ class RecipientRecoveryTests(unittest.TestCase):
         self.assertEqual(result.status, "adopted")
         self.assertFalse(result.response_payload["result"]["recovered"])
         self.assertEqual(self.fixture.store.list_held_provider_target_reservations(), ())
+
+    def test_terminal_provider_drift_completes_historically(self) -> None:
+        assert_observation_scenarios(self, PROVIDER_DRIFT, qualifies=False)
+
+    def test_terminal_authority_facts_complete_historically(self) -> None:
+        assert_observation_scenarios(self, AUTHORITY_DRIFT, qualifies=False)
+
+    def test_unreadable_observations_retry_the_original_proof(self) -> None:
+        assert_observation_scenarios(self, UNREADABLE_OBSERVATIONS, qualifies=True)
+
+    def test_optional_provider_fields_preserve_qualification(self) -> None:
+        assert_optional_provider_fields_remain_qualified(self)
 
     def _assert_passed_witness_failure_stays_recoverable(
         self, error: Exception, *, fail_current: bool = False

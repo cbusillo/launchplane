@@ -6,12 +6,13 @@ from typing import TYPE_CHECKING
 
 from control_plane.contracts.production_recipient import RecipientRecoveryPlan
 from control_plane.integration_allowances import canonical_sha256
-from control_plane.production_recipient import authority_snapshot, custody
-from control_plane.production_recipient_published_host import PUBLISHED_RECOVERY_INSPECT_PROGRAM
-from control_plane.production_recipient_published_recovery import (
-    PublishedAuthorityChanged,
-    PublishedWitnessUnqualified,
+from control_plane.production_recipient import (
+    RecipientAuthorityChanged,
+    authority_snapshot,
+    custody,
 )
+from control_plane.production_recipient_published_host import PUBLISHED_RECOVERY_INSPECT_PROGRAM
+from control_plane.production_recipient_published_recovery import PublishedWitnessUnqualified
 from control_plane.provider_operations import (
     ProviderObservation,
     build_provider_operation_key,
@@ -117,20 +118,22 @@ def observe_published(
         if passed:
             # Explicit drift alone permits historical completion. A render, I/O,
             # lease or CAS failure must not be mistaken for changed authority.
-            changed = (
-                canonical_sha256(authority_snapshot(adapter.store, adapter.product, record.context))
-                != owner["authority_sha256"]
-                or record.publication.get("published_sha256") != owner["publication_sha256"]
-            )
-            if not changed:
-                try:
+            try:
+                changed = (
+                    canonical_sha256(
+                        authority_snapshot(adapter.store, adapter.product, record.context)
+                    )
+                    != owner["authority_sha256"]
+                    or record.publication.get("published_sha256") != owner["publication_sha256"]
+                )
+                if not changed:
                     current_record, current = adapter.current()
                     if current.plan_sha256 == binding:
                         result = adapter.record_host_result(current_record, current, evidence)
                     # A successfully resolved different plan cannot qualify this
                     # terminal witness. Complete its original binding historically.
-                except (PublishedAuthorityChanged, PublishedWitnessUnqualified):
-                    pass
+            except (RecipientAuthorityChanged, PublishedWitnessUnqualified):
+                pass
         return ProviderObservation(
             "present",
             response_payload=provider_operation_response_payload(
