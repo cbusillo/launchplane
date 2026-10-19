@@ -23,7 +23,7 @@ class ActionDeclaration:
     # Global aggregate responses need every product scope; service-owned metadata
     # is explicit. Context and product targets still resolve their own owner.
     service_scope: Literal["products", "service"] = "products"
-    director_standing: bool = False
+    director_agent_write: bool = False
 
 
 # This is the source of truth for effects, not a grant list. Unknown actions
@@ -209,10 +209,10 @@ ACTION_DECLARATIONS: Mapping[str, ActionDeclaration] = MappingProxyType(
         "product_owner_routing.write": ActionDeclaration("write"),
         "product_profile.expected_config.apply": ActionDeclaration("write"),
         # Monitoring records change Launchplane's observations, not a live site,
-        # credentials, access or merge authority. They remain writes for all
-        # principals other than the authenticated Director's agents.
+        # credentials, access or merge authority. The action remains a write;
+        # only authenticated Director agents inherit its standing permission.
         "product_profile.health_monitoring.apply": ActionDeclaration(
-            "write", director_standing=True
+            "write", director_agent_write=True
         ),
         "product_profile.health_monitoring.plan": ActionDeclaration("plan"),
         "product_profile.prelaunch_rebuild.apply": ActionDeclaration("write"),
@@ -298,5 +298,6 @@ def agent_read_role_covers(action: str) -> bool:
 def director_agent_standing_covers(action: str) -> bool:
     declaration = ACTION_DECLARATIONS.get(action)
     return declaration is not None and (
-        declaration.effect in {"read", "plan", "projection_sync"} or declaration.director_standing
+        declaration.effect in {"read", "plan", "projection_sync"}
+        or declaration.director_agent_write
     )

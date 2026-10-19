@@ -107,7 +107,8 @@ terminal transport restrictions remain; `local_operator` supplies the full
 planning surface, including mixed plan/apply routes.
 
 Health-monitoring record apply also inherits the authenticated Director-agent
-standing permission, on testing and production instances. It stays classified as
+standing permission for the product's declared lanes, including testing and
+production. It stays classified as
 `write`, with an explicit standing declaration in the same action catalog. It
 changes Launchplane's monitoring records, not the live site, credentials, access
 or merge authority. Only this monitoring route admits the Director's terminal
