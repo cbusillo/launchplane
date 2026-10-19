@@ -840,11 +840,17 @@ The native token selects Actions read only when the policy's verified installati
 already advertises it, and verifies the issued token against that exact selection.
 It never requests Actions write or changes installation grants. Its issued scopes
 travel with the credential through HTTP, scheduler, admission, governance and
-recovery readers, including cache hits. A known absent Actions read skips the
-inventory request and records `actions_read_not_granted`; passing and pending-only
-heads keep their existing behavior. Existing cached tokens retain their verified
+recovery readers, including cache hits. For a proved private repository, a known
+absent Actions read skips the inventory request and records `actions_read_not_granted`. Public or unknown
+visibility keeps the provider-read path with the same credential, since public
+workflow history needs no Actions grant. Visibility comes from the exact issued
+token's repository response. Passing and pending-only heads keep their existing
+behavior. Existing cached tokens retain their verified
 scopes until the normal refresh, rather than gaining inferred capabilities.
-Unavailable metadata emits a bounded warning and an original-head queue reason.
+Unavailable metadata emits a bounded warning and a separate original-head queue
+diagnostic, without changing eligibility or dependency-hold reason cardinality.
+An already ineligible checked-ready head also includes it in its existing
+checks-failed reason; a selected failed head keeps its block action and detail.
 Provider refusals include the HTTP status and a redacted route, without provider
 bodies or credentials. A refused or invalid mint still fails closed without an
 alternate credential or retry through another carrier.

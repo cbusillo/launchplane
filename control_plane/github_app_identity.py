@@ -448,7 +448,7 @@ def _mint_repository_installation_token(
     optional_permissions = {
         permission: "read"
         for permission in optional_read_permissions
-        if installed_permissions.get(permission) in {"read", "write", "admin"}
+        if installed_permissions.get(permission) in {"read", "write"}
     }
     requested_permissions = {**requested_permissions, **optional_permissions}
     allowed_token_permissions = {**allowed_token_permissions, **optional_permissions}
@@ -520,6 +520,9 @@ def _mint_repository_installation_token(
             raise GitHubAppIdentityError(
                 "GitHub App installation token repository does not match exact repository name."
             )
+        repository_private = repository_payload.get("private")
+        if repository_private is not None and not isinstance(repository_private, bool):
+            raise GitHubAppIdentityError("GitHub App token repository visibility is invalid.")
         return GitHubAppInstallationToken(
             token=token,
             app_id=identity.app_id,
@@ -528,6 +531,7 @@ def _mint_repository_installation_token(
             repository=normalized_repository,
             expires_at=expires_at,
             app_slug=app_slug,
+            repository_private=repository_private,
             permissions=tuple(
                 f"{permission}:{access}"
                 for permission, access in sorted(observed_permissions.items())

@@ -71,6 +71,7 @@ class MergeTrainGitHubTokenTests(unittest.TestCase):
         self.token_lifetime = timedelta(hours=1)
         self.repository = "example/repo"
         self.returned_repository = self.repository
+        self.repository_private: object = True
         self.token_permissions = {
             "checks": "read",
             "contents": "write",
@@ -120,7 +121,13 @@ class MergeTrainGitHubTokenTests(unittest.TestCase):
             "token": f"example-installation-token-{self.minted}",
             "expires_at": (datetime.now(timezone.utc) + self.token_lifetime).isoformat(),
             "permissions": self.token_permissions,
-            "repositories": [{"id": 123, "full_name": self.returned_repository}],
+            "repositories": [
+                {
+                    "id": 123,
+                    "full_name": self.returned_repository,
+                    "private": self.repository_private,
+                }
+            ],
         }
 
     def resolve(self) -> str:
@@ -263,9 +270,17 @@ class MergeTrainGitHubTokenTests(unittest.TestCase):
     def test_native_mint_supports_the_current_execution_reader(self) -> None:
         from control_plane.merge_train_github import _check_runs_status, _list_check_runs
 
-        for installed in (None, "read", "write"):
-            with self.subTest(installed=installed):
+        for installed, private in (
+            (None, True),
+            (None, False),
+            (None, None),
+            ("read", True),
+            ("write", True),
+        ):
+            with self.subTest(installed=installed, private=private):
                 self.setUp()
+                self.repository_private = private
+                unavailable = installed is None and private is True
                 if installed is None:
                     self.installation_permissions.pop("actions")
                 else:
@@ -328,10 +343,16 @@ class MergeTrainGitHubTokenTests(unittest.TestCase):
                         self.token_permissions = {"metadata": "read", **body["permissions"]}
                     return self.provider(request, **kwargs)
 
+                actions_reads: list[Request] = []
+
                 def permission_enforcing_http(request: Request, *, timeout: int) -> object:
                     self.assertEqual(request.get_header("Authorization"), f"Bearer {issued}")
                     if urlsplit(request.full_url).path.endswith("/actions/runs"):
-                        if self.token_permissions.get("actions") not in {"read", "write"}:
+                        actions_reads.append(request)
+                        if private is True and self.token_permissions.get("actions") not in {
+                            "read",
+                            "write",
+                        }:
                             raise HTTPError(
                                 request.full_url, 403, "private-provider-message", Message(), None
                             )
@@ -375,9 +396,9 @@ class MergeTrainGitHubTokenTests(unittest.TestCase):
                             encoded_head_sha=head,
                         )
                         self.assertEqual(
-                            _check_runs_status(payload), "fail" if installed is None else "pass"
+                            _check_runs_status(payload), "fail" if unavailable else "pass"
                         )
-                        if installed is None:
+                        if unavailable:
                             self.assertEqual(
                                 payload["actions_observation_error"], "actions_read_not_granted"
                             )
@@ -394,12 +415,7 @@ class MergeTrainGitHubTokenTests(unittest.TestCase):
                         )
                         self.assertEqual(_check_runs_status(healthy), "pass")
                         self.assertFalse(healthy["actions_observation_error"])
-                reads = [
-                    request
-                    for request in http.requests
-                    if urlsplit(request.full_url).path.endswith("/actions/runs")
-                ]
-                self.assertEqual(len(reads), 0 if installed is None else 2)
+                self.assertEqual(len(actions_reads), 0 if unavailable else 2)
                 if installed is not None:
                     self.assertIn("actions:read", credential.permissions)
                     self.assertNotIn("actions:write", credential.permissions)
@@ -512,6 +528,7 @@ class MergeTrainGitHubTokenTests(unittest.TestCase):
     def test_wrong_repository_or_excess_token_authority_is_revoked_without_fallback(self) -> None:
         for failure in (
             "repository",
+            "visibility",
             "administration",
             "actions",
             "unrequested_actions_read",
@@ -526,6 +543,8 @@ class MergeTrainGitHubTokenTests(unittest.TestCase):
                     self.installation_permissions.pop("actions")
                 elif failure == "missing_actions_read":
                     self.token_permissions.pop("actions")
+                elif failure == "visibility":
+                    self.repository_private = "not-a-boolean"
                 elif failure == "repository":
                     self.returned_repository = "example/another-product"
                 elif failure in {"workflow_permission", "issues_permission"}:

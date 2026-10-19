@@ -290,6 +290,9 @@ class UrllibMergeTrainGitHubTransport:
         self.token_permissions = (
             token.permissions if isinstance(token, GitHubAppInstallationToken) else None
         )
+        self.repository_private = (
+            token.repository_private if isinstance(token, GitHubAppInstallationToken) else None
+        )
         self.token = _required_value(
             token.token if isinstance(token, GitHubAppInstallationToken) else token,
             "GitHub token is required.",
@@ -5631,7 +5634,11 @@ def _without_superseded_actions_checks(
         return check_runs, reason
 
     permissions = getattr(transport, "token_permissions", None)
-    if permissions is not None and "actions:read" not in permissions:
+    if (
+        permissions is not None
+        and "actions:read" not in permissions
+        and getattr(transport, "repository_private", None) is True
+    ):
         return unavailable("actions_read_not_granted")
 
     try:
@@ -5669,8 +5676,8 @@ def _without_superseded_actions_checks(
             for run in selection["superseded"]
             if run["id"] not in current_ids and run.get("conclusion") == "cancelled"
         }
-    except (ValueError, KeyError, TypeError, AttributeError) as error:
-        return unavailable(type(error).__name__)
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return unavailable("actions_history_selection_malformed")
     return [
         check
         for check, identity in zip(check_runs, identities, strict=True)

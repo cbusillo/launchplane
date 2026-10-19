@@ -13,3 +13,4 @@ class GitHubAppInstallationToken:
     expires_at: str
     permissions: tuple[str, ...] = ()
     app_slug: str = ""
+    repository_private: bool | None = None
