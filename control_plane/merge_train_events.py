@@ -21,13 +21,23 @@ from control_plane.merge_train_policy_source import (
     resolve_merge_train_policy_record,
 )
 from control_plane.repository_inventory import get_repository_inventory_read_model
+from control_plane.merge_train_wake import (
+    MergeTrainEventReceipt,
+    MergeTrainWake,
+    decode_merge_train_wake,
+)
+from control_plane.workflows.ship import utc_now_timestamp
 
 MERGE_TRAIN_EVENT_CHANNEL = "launchplane_merge_train_wake"
 _LOGGER = logging.getLogger(__name__)
 
 
 def wake_merge_train_for_event(
-    record_store: object, event: str, payload: dict[str, object]
+    record_store: object,
+    event: str,
+    payload: dict[str, object],
+    *,
+    receipt: MergeTrainEventReceipt | None = None,
 ) -> bool:
     """Select only inventoried, enabled trains; never use event data as merge evidence."""
     action = _string(payload, "action").lower()
@@ -84,7 +94,8 @@ def wake_merge_train_for_event(
                 repository=target.repository, base_branch=target.base_branch
             )
             for target in policies
-        )
+        ),
+        receipt=receipt,
     )
     return True
 
@@ -165,11 +176,12 @@ class MergeTrainEventListener:
 
     def wait(
         self, timeout: float, stop_event: Event, *, monotonic: Callable[[], float] = time.monotonic
-    ) -> frozenset[str] | None:
-        """Return the controller keys of the trains to wake, or None for a full sweep.
+    ) -> MergeTrainWake:
+        """Return routing keys, the actual wait outcome and bounded observed receipts.
 
-        A timeout, a listener failure or a hint that names no train asks for every
+        A timeout, a listener failure or an empty hint asks for every
         target, so an older publisher or a missed event never narrows the sweep.
+        Due sweeps drain routing hints while retaining their advisory observations.
         """
         deadline = monotonic() + timeout
         try:
@@ -179,14 +191,16 @@ class MergeTrainEventListener:
             if timeout <= 0:
                 # The sweep is due and rereads every train after these hints
                 # arrived, so drop them rather than repeat their trains.
-                for _ in self.connection.notifies(timeout=0):
-                    pass
-                return None
+                observed_at = utc_now_timestamp()
+                payloads = [item.payload for item in self.connection.notifies(timeout=0)]
+                return decode_merge_train_wake(
+                    payloads, reason="timer_sweep", hint_observed_at=observed_at if payloads else ""
+                )
             while not stop_event.is_set():
                 remaining = deadline - monotonic()
                 if remaining <= 0:
-                    return None
-                payloads: list[str] = []
+                    return MergeTrainWake(None, "timer_sweep")
+                payloads = []
                 # Fully consume the received batch: closing a generator after
                 # its first yield can retain backlog or discard a partial batch.
                 for notification in self.connection.notifies(
@@ -194,16 +208,17 @@ class MergeTrainEventListener:
                 ):
                     payloads.append(notification.payload)
                 if payloads:
+                    observed_at = utc_now_timestamp()
                     # Fold hints queued while the controller was busy into one
                     # fresh pass; timeout=0 polls without waiting for new events.
                     for notification in self.connection.notifies(timeout=0):
                         payloads.append(notification.payload)
-                    if not all(payloads):
-                        return None
-                    return frozenset(payloads)
-            return None
+                    return decode_merge_train_wake(
+                        payloads, reason="event_hints", hint_observed_at=observed_at
+                    )
+            return MergeTrainWake(None, "stopped")
         except Exception:  # noqa: BLE001 - the sweep remains available when notifications fail.
             _LOGGER.warning("Merge train event listener unavailable; using timed sweep.")
             self.close()
             stop_event.wait(timeout=max(0, deadline - monotonic()))
-            return None
+            return MergeTrainWake(None, "listener_fallback")

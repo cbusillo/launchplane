@@ -12,7 +12,7 @@ import logging
 import time
 from contextlib import nullcontext
 from collections.abc import Callable, Collection
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from threading import Event
 from typing import cast
@@ -79,6 +79,7 @@ from control_plane.merge_train_stack_collapse import (
     require_merge_train_stack_collapse_plan_record_store,
 )
 from control_plane.repository_evidence import GitHubRepositoryEvidenceProvider
+from control_plane.merge_train_wake import MergeTrainWake
 from control_plane.workflows.launchplane import github_api_request
 from control_plane.workflows.ship import utc_now_timestamp
 
@@ -193,14 +194,15 @@ def run_merge_train_scheduler_loop(
     interval_seconds: int = DEFAULT_MERGE_TRAIN_SCHEDULER_INTERVAL_SECONDS,
     stop_event: Event | None = None,
     max_passes: int | None = None,
-    pass_callback: Callable[[tuple[MergeTrainScheduledTargetResult, ...]], None] | None = None,
+    pass_callback: Callable[[tuple[MergeTrainScheduledTargetResult, ...], MergeTrainWake], None]
+    | None = None,
     monotonic: Callable[[], float] = time.monotonic,
-    wait_for_event: Callable[[float, Event], Collection[str] | None] | None = None,
+    wait_for_event: Callable[[float, Event], MergeTrainWake] | None = None,
 ) -> int:
     """Sweep every target on the interval; between sweeps, run only the woken trains.
 
-    ``wait_for_event`` returns the controller keys an event woke, or None when
-    the wait ended without naming trains; a sweep runs then, and whenever one is due.
+    ``wait_for_event`` reports routing keys and advisory observations. A full
+    sweep runs when no keys are specified, and whenever the independent clock is due.
     """
     if interval_seconds < 1:
         raise ValueError("Merge train scheduler interval_seconds must be positive.")
@@ -210,10 +212,13 @@ def run_merge_train_scheduler_loop(
     passes = 0
     # No trains named yet, so the first pass is a sweep.
     next_sweep_at = 0.0
-    woken: Collection[str] | None = None
+    woken = MergeTrainWake(None, "startup")
     while not scheduler_stop_event.is_set():
         started_at = monotonic()
-        sweep = woken is None or started_at >= next_sweep_at
+        sweep = woken.target_keys is None or started_at >= next_sweep_at
+        if sweep and woken.target_keys is not None:
+            woken = replace(woken, target_keys=None, reason="timer_sweep")
+        woken = replace(woken, pass_started_at=utc_now_timestamp())
         if sweep:
             # Sweeps start on the interval; event passes in between never delay one.
             next_sweep_at = started_at + interval_seconds
@@ -222,21 +227,22 @@ def run_merge_train_scheduler_loop(
                 record_store=record_store,
                 control_plane_root=control_plane_root,
                 should_stop=scheduler_stop_event.is_set,
-                target_keys=None if sweep else woken,
+                target_keys=None if sweep else woken.target_keys,
             )
-        except Exception:  # noqa: BLE001 - a bad pass (say, an unreadable policy) waits one interval.
+        except Exception as error:  # noqa: BLE001 - a bad pass waits one interval.
             _LOGGER.exception("Scheduled merge train pass failed.")
             results = ()
+            woken = replace(woken, pass_error_code=type(error).__name__)
         passes += 1
         if pass_callback is not None:
-            pass_callback(results)
+            pass_callback(results, woken)
         if max_passes is not None and passes >= max_passes:
             break
         # A long landing only shortens the wait for the next sweep.
         timeout = max(0.0, next_sweep_at - monotonic())
         if wait_for_event is None:
             scheduler_stop_event.wait(timeout=timeout)
-            woken = None
+            woken = MergeTrainWake(None, "timer_sweep")
         else:
             woken = wait_for_event(timeout, scheduler_stop_event)
     return passes
