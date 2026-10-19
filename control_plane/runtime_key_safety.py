@@ -15,7 +15,6 @@ from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeSecretClass,
     RuntimeSecretSafetyRule,
     RuntimeSecretSafetyTargetScope,
-    UnreasonedSharedIntegrationKeyMode,
 )
 from control_plane.contracts.secret_record import SecretBinding
 
@@ -197,7 +196,6 @@ def evaluate_preview_copied_runtime_key_safety(
         ),
         secret_rules=policy_record.rules,
         integration_key_markers=policy_record.integration_key_markers,
-        unreasoned_shared_integration_keys="report",
     )
 
 
@@ -241,7 +239,6 @@ def evaluate_runtime_key_safety_from_store(
     target: RuntimeKeySafetyTarget,
     required_binding_keys: Iterable[str],
     policy_record: RuntimeKeySafetyPolicyRecord | None = None,
-    unreasoned_shared_integration_keys: UnreasonedSharedIntegrationKeyMode = "refuse",
 ) -> RuntimeKeySafetyEvaluation:
     policy = policy_record or latest_active_runtime_key_safety_policy(record_store)
     return evaluate_runtime_key_safety(
@@ -253,7 +250,6 @@ def evaluate_runtime_key_safety_from_store(
         ),
         secret_rules=policy.rules,
         integration_key_markers=policy.integration_key_markers,
-        unreasoned_shared_integration_keys=unreasoned_shared_integration_keys,
     )
 
 
@@ -264,14 +260,12 @@ def evaluate_runtime_key_safety(
     secret_bindings: Iterable[SecretBinding],
     secret_rules: Iterable[RuntimeSecretSafetyRule],
     integration_key_markers: Iterable[str] = (),
-    unreasoned_shared_integration_keys: UnreasonedSharedIntegrationKeyMode = "refuse",
 ) -> RuntimeKeySafetyEvaluation:
     extra_integration_key_markers = tuple(integration_key_markers)
     checked_binding_keys = _normalize_required_binding_keys(required_binding_keys)
     rules_by_binding_key = _rules_by_binding_key(secret_rules)
     bindings_by_binding_key = _bindings_by_binding_key(secret_bindings)
     findings: list[RuntimeKeySafetyFinding] = []
-    reported: list[RuntimeKeySafetyFinding] = []
 
     if target.environment_class == "unknown":
         findings.append(
@@ -340,17 +334,13 @@ def evaluate_runtime_key_safety(
             extra_integration_key_markers=extra_integration_key_markers,
         )
         if missing_reason is not None and not binding_findings:
-            if unreasoned_shared_integration_keys == "refuse":
-                findings.append(missing_reason)
-            else:
-                reported.append(missing_reason)
+            findings.append(missing_reason)
 
     return RuntimeKeySafetyEvaluation(
         status="fail" if findings else "pass",
         target=target,
         checked_binding_keys=checked_binding_keys,
         findings=tuple(findings),
-        reported=tuple(reported),
     )
 
 

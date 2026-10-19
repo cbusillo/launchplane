@@ -14914,7 +14914,7 @@
       },
       "IntegrationKeyReadbackEvidence": {
         "additionalProperties": false,
-        "description": "Key safety of the integration keys a deploy delivered to its lane.\n\nNames and finding codes only, never values. ``reported`` means every key is\nallowed but a shared_safe production key has no recorded sharing reason;\n``fail`` means a key breaks the lane's key-safety rules. Both are recorded,\nnot enforced, after the deploy.",
+        "description": "Key safety of the integration keys a deploy delivered to its lane.\n\nNames and finding codes only, never values. ``fail`` means a key breaks the\nlane's key-safety rules, including a shared_safe production key with no\nrecorded sharing reason. It is recorded, not enforced, after the deploy.",
         "properties": {
           "checked_binding_keys": {
             "default": [],

@@ -6208,7 +6208,6 @@ def create_launchplane_fastapi_app(
                     ),
                 ),
                 required_binding_keys=request.secret_bindings,
-                unreasoned_shared_integration_keys="report",
             )
         except (AttributeError, ValueError):
             return secret_evidence_for_agent_write_intent(

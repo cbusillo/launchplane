@@ -92,16 +92,13 @@ def _integration_key_readback(
         policy_record=policy_record,
         target=target,
         required_binding_keys=delivered_integration_keys,
-        unreasoned_shared_integration_keys="report",
     )
-    status: IntegrationKeyReadbackStatus = (
-        "fail" if evaluation.findings else "reported" if evaluation.reported else "pass"
-    )
+    status: IntegrationKeyReadbackStatus = "fail" if evaluation.findings else "pass"
     return IntegrationKeyReadbackEvidence(
         status=status,
         checked_binding_keys=evaluation.checked_binding_keys,
         findings=tuple(
             IntegrationKeyReadbackFinding(binding_key=finding.binding_key, code=finding.code)
-            for finding in (*evaluation.findings, *evaluation.reported)
+            for finding in evaluation.findings
         ),
     )

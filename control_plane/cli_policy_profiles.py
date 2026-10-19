@@ -658,7 +658,6 @@ def runtime_key_safety_evaluate(
                 environment_class=environment_class,
             ),
             required_binding_keys=binding_keys,
-            unreasoned_shared_integration_keys="report",
         )
     except ValueError as error:
         raise click.ClickException(str(error)) from error
