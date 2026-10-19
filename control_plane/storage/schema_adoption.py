@@ -5,7 +5,7 @@ import sys
 from collections.abc import Mapping, Sequence
 from typing import Protocol, cast
 
-from sqlalchemy import inspect, text
+from sqlalchemy import inspect
 from sqlalchemy.engine import Engine
 
 from control_plane.storage.migrations.versions import (
@@ -23,7 +23,6 @@ from control_plane.storage.schema_invariants import (
 
 LEGACY_BASELINE_REVISION = "fe94a0486977"
 LEGACY_CURRENT_SCHEMA_REVISION = "b1c3d5e7f9a1"
-LEGACY_CURRENT_SCHEMA_MARKER_TABLE = "launchplane_preview_enablement"
 
 LEGACY_BASELINE_SCHEMA: dict[str, frozenset[str]] = {
     "launchplane_artifact_manifests": frozenset(
@@ -140,8 +139,10 @@ LEGACY_CURRENT_SCHEMA: dict[str, frozenset[str]] = {
 # Older unversioned installations may still contain these retired tables.
 # A table drop must not make their pre-stamp adoption silently acceptable.
 LEGACY_KNOWN_LATER_TABLES = (
-    frozenset(Base.metadata.tables) | frozenset(retired_delivery.RETIRED_TABLES)
-) - frozenset(LEGACY_CURRENT_SCHEMA)
+    frozenset(Base.metadata.tables)
+    | frozenset(retired_delivery.RETIRED_TABLES)
+    | frozenset(LEGACY_CURRENT_SCHEMA)
+) - frozenset(LEGACY_BASELINE_SCHEMA)
 
 
 class SchemaAdoptionError(RuntimeError):
@@ -233,46 +234,35 @@ def verify_existing_schema_for_stamp(
         )
 
 
-def expected_schema_for_existing_tables(existing_tables: set[str]) -> Mapping[str, frozenset[str]]:
-    if LEGACY_CURRENT_SCHEMA_MARKER_TABLE in existing_tables:
-        return LEGACY_CURRENT_SCHEMA
-    return LEGACY_BASELINE_SCHEMA
-
-
 def schema_stamp_revision_for_engine(engine: Engine) -> str:
     inspector = cast(SchemaInspectorProtocol, inspect(engine))
     existing_tables = set(inspector.get_table_names())
-    expected_schema = expected_schema_for_existing_tables(existing_tables)
-    has_current_marker_table = LEGACY_CURRENT_SCHEMA_MARKER_TABLE in existing_tables
-
+    # A recorded revision owns migration progress. Retired tables are never
+    # evidence that a stamped database has advanced to a different revision.
     if "alembic_version" in existing_tables:
-        with engine.connect() as connection:
-            version_rows = connection.execute(
-                text("select version_num from alembic_version")
-            ).fetchall()
-        version_numbers = {str(row[0]).strip() for row in version_rows if str(row[0]).strip()}
-        if version_numbers == {LEGACY_BASELINE_REVISION} and has_current_marker_table:
+        return ""
+    if not existing_tables.intersection(LEGACY_BASELINE_SCHEMA):
+        return ""
+    # Only unversioned installations need adoption. Match their complete
+    # historical shape, including unexpected managed tables, rather than
+    # treating any one table as a schema marker.
+    errors: list[str] = []
+    for revision, expected_schema in (
+        (LEGACY_CURRENT_SCHEMA_REVISION, LEGACY_CURRENT_SCHEMA),
+        (LEGACY_BASELINE_REVISION, LEGACY_BASELINE_SCHEMA),
+    ):
+        try:
             verify_existing_schema_for_stamp(
                 inspector=inspector,
                 expected_schema=expected_schema,
                 index_definitions=_index_definitions_for_engine(engine),
                 verify_column_types=_uses_postgresql(engine),
             )
-            return LEGACY_CURRENT_SCHEMA_REVISION
-        return ""
-
-    if not existing_tables.intersection(expected_schema):
-        return ""
-
-    verify_existing_schema_for_stamp(
-        inspector=inspector,
-        expected_schema=expected_schema,
-        index_definitions=_index_definitions_for_engine(engine),
-        verify_column_types=_uses_postgresql(engine),
-    )
-    if has_current_marker_table:
-        return LEGACY_CURRENT_SCHEMA_REVISION
-    return LEGACY_BASELINE_REVISION
+        except SchemaAdoptionError as error:
+            errors.append(str(error))
+        else:
+            return revision
+    raise SchemaAdoptionError("No supported legacy schema shape matches: " + "; ".join(errors))
 
 
 def schema_stamp_revision(database_url: str) -> str:

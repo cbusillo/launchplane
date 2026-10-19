@@ -111,7 +111,7 @@ export function EngineeringWorkGraphRoute({
           state={snapshotResource.state}
         />
       }
-      description="Launchplane ranks compact GitHub and Code Plans facts into a safe-to-start queue without becoming planning authority."
+      description="Rank existing product and work-request records without reading GitHub Projects."
       icon={Network}
       title="Work graph"
       view="work-graph"

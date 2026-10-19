@@ -4117,22 +4117,71 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
             finally:
                 store.close()
 
-    def test_prepared_retirement_startup_leaves_populated_history_at_previous_revision(
+    def test_prepared_retirement_startup_preserves_populated_held_history(
         self,
     ) -> None:
         from control_plane.storage.migrations.versions import (
             e7c1d5e9a3b6_drop_retired_delivery_tables as migration,
         )
         from tests.test_retired_delivery_migration import seed_retired_history, history_snapshot
+        from control_plane.storage.schema_migration import SCHEMA_MIGRATION_TARGET_REVISION
 
         with _isolated_postgres_database() as url:
-            self.assertEqual(migrate_schema(database_url=url), migration.down_revision)
+            self.assertEqual(migrate_schema(database_url=url), SCHEMA_MIGRATION_TARGET_REVISION)
             engine = create_engine(url)
             try:
                 seed_retired_history(engine)
                 before = history_snapshot(engine, migration.RETIRED_TABLES)
-                self.assertEqual(migrate_schema(database_url=url), migration.down_revision)
+                self.assertEqual(migrate_schema(database_url=url), SCHEMA_MIGRATION_TARGET_REVISION)
                 self.assertEqual(history_snapshot(engine, migration.RETIRED_TABLES), before)
+                verify_postgres_schema_invariants(engine)
+            finally:
+                engine.dispose()
+
+    def test_preview_enablement_release_drop_preserves_all_other_history(self) -> None:
+        from tests.test_retired_preview_enablement_migration import assert_preview_enablement_drop
+
+        with _isolated_postgres_database() as url:
+            assert_preview_enablement_drop(self, url)
+
+    def test_preview_drop_startup_joins_an_already_applied_delivery_drop(self) -> None:
+        from control_plane.storage.migrations.versions import (
+            e7c1d5e9a3b6_drop_retired_delivery_tables as held,
+        )
+
+        with _isolated_postgres_database() as url:
+            alembic_command.upgrade(_alembic_config(url), held.revision)
+            self.assertEqual(migrate_schema(database_url=url), EXPECTED_ALEMBIC_HEAD_REVISION)
+            self.assertEqual(migrate_schema(database_url=url), EXPECTED_ALEMBIC_HEAD_REVISION)
+
+    def test_preview_drop_refuses_busy_table_and_retained_dependency(self) -> None:
+        from control_plane.storage.migrations.versions import (
+            e8d2f6a0b4c7_drop_preview_enablement as migration,
+        )
+
+        with _isolated_postgres_database() as url:
+            config = _alembic_config(url)
+            alembic_command.upgrade(config, migration.down_revision)
+            engine = create_engine(url)
+            try:
+                with engine.begin() as holder:
+                    holder.execute(text(f"SELECT * FROM {migration.RETIRED_TABLE}"))
+                    with self.assertRaises(OperationalError):
+                        migrate_schema(database_url=url)
+                    self.assertIn(migration.RETIRED_TABLE, inspect(engine).get_table_names())
+                    self.assertEqual(_current_alembic_version(engine), migration.down_revision)
+                with engine.begin() as connection:
+                    connection.execute(
+                        text(
+                            f"CREATE VIEW retained_preview_dependency AS SELECT * FROM {migration.RETIRED_TABLE}"
+                        )
+                    )
+                with self.assertRaises(SQLAlchemyError):
+                    migrate_schema(database_url=url)
+                self.assertEqual(_current_alembic_version(engine), migration.down_revision)
+                with engine.begin() as connection:
+                    connection.execute(text("DROP VIEW retained_preview_dependency"))
+                self.assertEqual(migrate_schema(database_url=url), migration.revision)
                 verify_postgres_schema_invariants(engine)
             finally:
                 engine.dispose()

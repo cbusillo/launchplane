@@ -30,7 +30,7 @@ from control_plane.detached_application_retirement import (
 from control_plane.dokploy import api as dokploy_api
 from control_plane.provider_operations import ProviderMutationUnknownError
 from control_plane.storage.filesystem import FilesystemRecordStore
-from control_plane.storage.postgres import LaunchplanePreviewEnablementRow, PostgresRecordStore
+from control_plane.storage.postgres import PostgresRecordStore
 
 
 NOW = "2026-08-11T12:00:00Z"
@@ -75,8 +75,6 @@ class _Store:
                 source = "odoo_stable_bootstrap"
             if source == "verireel_prod_backup_gate_operation":
                 source = "verireel_prod_backup_gate"
-            if source == "retired_preview_enablement_payloads":
-                source = "preview_enablement"
             return lambda **_kwargs: self.sources.get(source, ())
         raise AttributeError(name)
 
@@ -645,7 +643,7 @@ class DetachedApplicationRetirementTests(unittest.TestCase):
                 candidate_application_name="detached-application",
             )
 
-    def test_stored_preview_enablement_payloads_still_block_retirement(self) -> None:
+    def test_retired_preview_enablement_does_not_block_retirement(self) -> None:
         payload: dict[str, object] = {
             "schema_version": 1,
             "record_id": "example-tenant-pr-7",
@@ -672,30 +670,17 @@ class DetachedApplicationRetirementTests(unittest.TestCase):
             database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
             postgres = PostgresRecordStore(database_url=f"sqlite+pysqlite:///{database_path}")
             postgres.ensure_schema()
-            with postgres._session_factory() as session:
-                session.add(
-                    LaunchplanePreviewEnablementRow(
-                        record_id="example-tenant-pr-7",
-                        context="example",
-                        anchor_repo="tenant",
-                        anchor_pr_number=7,
-                        pr_state="open",
-                        updated_at=NOW,
-                        payload=payload,
-                    )
-                )
-                session.commit()
             try:
                 for store in (filesystem, postgres):
-                    self.assertEqual(store.list_retired_preview_enablement_payloads(), (payload,))
-                    with self.assertRaisesRegex(
-                        DetachedApplicationRetirementBlockedError, "preview_enablement"
-                    ):
-                        prove_detached_application_authority_absence(
-                            record_store=cast(DetachedApplicationRetirementStore, store),
-                            candidate_target_id=CANDIDATE_ID,
-                            candidate_application_name="detached-application",
-                        )
+                    proof = prove_detached_application_authority_absence(
+                        record_store=cast(DetachedApplicationRetirementStore, store),
+                        candidate_target_id=CANDIDATE_ID,
+                        candidate_application_name="detached-application",
+                    )
+                    self.assertEqual(proof.match_count, 0)
+                self.assertEqual(
+                    json.loads((record_dir / "example-tenant-pr-7.json").read_text()), payload
+                )
             finally:
                 postgres.close()
 

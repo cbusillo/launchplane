@@ -5,9 +5,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import cast
 import unittest
+from unittest.mock import patch
 
 from alembic import command
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, inspect, text
 
 from control_plane.storage.schema_adoption import (
     LEGACY_BASELINE_SCHEMA,
@@ -15,6 +16,9 @@ from control_plane.storage.schema_adoption import (
     SchemaAdoptionError,
     SchemaInspectorProtocol,
     verify_existing_schema_for_stamp,
+    LEGACY_BASELINE_REVISION,
+    LEGACY_CURRENT_SCHEMA_REVISION,
+    schema_stamp_revision_for_engine,
 )
 from control_plane.storage.schema_invariants import (
     EXPECTED_ALEMBIC_HEAD_REVISION,
@@ -85,6 +89,51 @@ class LegacyWithHeadTable:
 
 
 class SchemaAdoptionTests(unittest.TestCase):
+    def test_stamped_revision_is_not_replaced_by_retired_table_presence(self) -> None:
+        with TemporaryDirectory() as directory:
+            engine = create_engine(f"sqlite+pysqlite:///{Path(directory) / 'records.db'}")
+            try:
+                with engine.begin() as connection:
+                    connection.execute(text("CREATE TABLE alembic_version (version_num TEXT)"))
+                    connection.execute(
+                        text("INSERT INTO alembic_version VALUES (:revision)"),
+                        {"revision": LEGACY_BASELINE_REVISION},
+                    )
+                    connection.execute(
+                        text("CREATE TABLE launchplane_preview_enablement (id TEXT)")
+                    )
+                self.assertEqual(schema_stamp_revision_for_engine(engine), "")
+            finally:
+                engine.dispose()
+
+    def test_unversioned_adoption_requires_a_complete_supported_shape(self) -> None:
+        engine = create_engine("sqlite://")
+        try:
+            for revision, schema in (
+                (LEGACY_BASELINE_REVISION, LEGACY_BASELINE_SCHEMA),
+                (LEGACY_CURRENT_SCHEMA_REVISION, LEGACY_CURRENT_SCHEMA),
+            ):
+                columns = {name: set(names) for name, names in schema.items()}
+                with (
+                    self.subTest(revision=revision),
+                    patch(
+                        "control_plane.storage.schema_adoption.inspect",
+                        return_value=FakeInspector(columns),
+                    ),
+                ):
+                    self.assertEqual(schema_stamp_revision_for_engine(engine), revision)
+            columns["launchplane_preview_enablement"].remove("payload")
+            with (
+                patch(
+                    "control_plane.storage.schema_adoption.inspect",
+                    return_value=FakeInspector(columns),
+                ),
+                self.assertRaises(SchemaAdoptionError),
+            ):
+                schema_stamp_revision_for_engine(engine)
+        finally:
+            engine.dispose()
+
     def _baseline_columns_by_table(self) -> dict[str, set[str]]:
         return {table_name: set(columns) for table_name, columns in LEGACY_BASELINE_SCHEMA.items()}
 

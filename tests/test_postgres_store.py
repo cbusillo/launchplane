@@ -7562,7 +7562,6 @@ private_key_context = "example_context"
                     "product_owner_requirements": 0,
                     "product_owner_routing": 0,
                     "preview_records": 1,
-                    "preview_enablement": 1,
                     "preview_generations": 1,
                     "owner_acceptance_events": 0,
                     "privileged_operation_events": 0,
@@ -7622,7 +7621,8 @@ private_key_context = "example_context"
                 "ready",
             )
             self.assertEqual(
-                store.list_retired_preview_enablement_payloads(), (enablement_payload,)
+                json.loads((enablement_dir / "verireel-testing-verireel-pr-123.json").read_text()),
+                enablement_payload,
             )
             self.assertEqual(
                 store.list_preview_inventory_scan_records(

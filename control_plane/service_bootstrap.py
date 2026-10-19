@@ -43,19 +43,6 @@ from control_plane.health_monitor_scheduler import HealthMonitorScheduler
 from control_plane.odoo_testing_drill import OdooTestingDrillScheduler
 from control_plane.preview_lifecycle_scheduler import PreviewLifecycleScheduler
 from control_plane.release_digest import ReleaseDigestScheduler
-from control_plane.work_graph_github_projects import (
-    build_github_project_planning_facts,
-    load_github_project_planning_facts_config_from_env,
-)
-from control_plane.work_graph_issue_inbox import (
-    build_github_issue_inbox_read_model,
-    load_github_issue_inbox_config_from_env,
-    reconcile_github_issue_inbox,
-)
-
-
-def _utc_now_timestamp() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _now_timestamp() -> str:
@@ -158,37 +145,6 @@ def create_launchplane_service_application(
         record_id=resolved_fastapi_policy.record_id,
         revision=resolved_fastapi_policy.revision,
     )
-    work_graph_project_config = load_github_project_planning_facts_config_from_env(dict(os.environ))
-    work_graph_planning_facts_provider = (
-        (lambda: build_github_project_planning_facts(work_graph_project_config))
-        if work_graph_project_config is not None
-        else None
-    )
-    work_graph_issue_inbox_config = load_github_issue_inbox_config_from_env(
-        dict(os.environ),
-        project_config=work_graph_project_config,
-    )
-    work_graph_issue_inbox_provider = (
-        (
-            lambda: build_github_issue_inbox_read_model(
-                generated_at=_utc_now_timestamp(),
-                config=work_graph_issue_inbox_config,
-            )
-        )
-        if work_graph_issue_inbox_config is not None
-        else None
-    )
-    work_graph_issue_inbox_reconcile_provider = (
-        (
-            lambda request: reconcile_github_issue_inbox(
-                generated_at=_utc_now_timestamp(),
-                config=work_graph_issue_inbox_config,
-                request=request,
-            )
-        )
-        if work_graph_issue_inbox_config is not None
-        else None
-    )
     github_oauth_config = load_github_oauth_config_from_env()
     human_session_manager = (
         HumanSessionManager(
@@ -227,9 +183,6 @@ def create_launchplane_service_application(
         oauth_login_state_store=oauth_login_state_store,
         control_plane_root_path=control_plane_root_path or control_plane_root(),
         state_dir=state_dir,
-        work_graph_planning_facts_provider=work_graph_planning_facts_provider,
-        work_graph_issue_inbox_provider=work_graph_issue_inbox_provider,
-        work_graph_issue_inbox_reconcile_provider=work_graph_issue_inbox_reconcile_provider,
         trusted_maintenance_github_webhook_handler=(
             handle_trusted_maintenance_github_webhook_request
         ),
