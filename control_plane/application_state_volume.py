@@ -166,7 +166,9 @@ class ApplicationStateVolumeAdapter:
 
         validate_volume_request(request)
         if request.mode == "dry-run":
-            require_empty_testing_target_creation(store, request, product=product)
+            require_empty_testing_target_creation(
+                store, request, product=product, control_plane_root_path=root
+            )
             if store.read_product_profile_record(product).driver_id != "generic-web":
                 raise ValueError("Application state storage requires a generic-web product.")
             allocation = uuid4().hex
@@ -252,7 +254,12 @@ class ApplicationStateVolumeAdapter:
         from control_plane.application_state_volume_retention import require_state_volume_owner
 
         require_state_volume_owner(self.store, product=self.product, context=self.request.context)
-        require_empty_testing_target_creation(self.store, self.request, product=self.product)
+        require_empty_testing_target_creation(
+            self.store,
+            self.request,
+            product=self.product,
+            control_plane_root_path=self.root,
+        )
         host, _token = source.read_dokploy_config(control_plane_root=self.root)
         if (
             host != self.intent["provider_host"]

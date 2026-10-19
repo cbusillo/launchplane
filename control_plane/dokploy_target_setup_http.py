@@ -46,6 +46,7 @@ def require_empty_testing_target_creation(
     request: "DokployTargetSetupEnvelope",
     *,
     product: str,
+    control_plane_root_path: Path,
 ) -> None:
     """Stage new empty resources without borrowing authority over an existing lane."""
     from control_plane.authz_candidate_preparation import (
@@ -86,7 +87,9 @@ def require_empty_testing_target_creation(
     ):
         raise ValueError("First testing setup requires an active exclusive context owner.")
     if request.operation == "create-application":
-        _require_never_deployed_testing_target(record_store, request)
+        _require_never_deployed_testing_target(
+            record_store, request, control_plane_root_path=control_plane_root_path
+        )
         return
     # An existing registered lane needs its own current disposable-lane facts;
     # first setup cannot replace it or take over its usage/data commitments.
@@ -107,6 +110,8 @@ def require_empty_testing_target_creation(
 def _require_never_deployed_testing_target(
     record_store: PostgresRecordStore,
     request: "DokployTargetSetupEnvelope",
+    *,
+    control_plane_root_path: Path,
 ) -> None:
     """Allow a conventional application lane to replace only a target that never ran.
 
@@ -162,7 +167,7 @@ def _require_never_deployed_testing_target(
     ).source_label
     if (
         created_by not in EMPTY_TARGET_SETUP_SOURCE_LABELS
-        or target.source_type not in {"", "raw"}
+        or (target.target_type != "compose" and target.source_type not in {"", "raw"})
         or target.custom_git_url
         or target.custom_git_branch
         or target.domains
@@ -172,6 +177,17 @@ def _require_never_deployed_testing_target(
     hold = target.policies.staff_testing_hold
     if hold is None or hold.purpose != "isolation_staging":
         raise ValueError("First testing setup replacement requires an isolation-staging hold.")
+    if target.target_type == "compose":
+        from control_plane.dokploy.target_source_setup import require_empty_compose_source
+
+        try:
+            host, token = dokploy_source.read_dokploy_config(
+                control_plane_root=control_plane_root_path
+            )
+            live = fetch_dokploy_target_payload_for_setup(host, token, "compose", current.target_id)
+        except (OSError, ValueError, click.ClickException) as error:
+            raise ValueError("Current testing Compose source evidence is unavailable.") from error
+        require_empty_compose_source(live, current.target_id)
 
 
 class DokployTargetSetupEnvelope(BaseModel):

@@ -321,13 +321,18 @@ class DirectorTestingApplicationLaneTests(_DirectorTestingSetupFixture):
                 "name": "new-testing-target",
                 "environmentId": "created-environment",
                 "serverId": self.payload["server_id"],
-                "sourceType": "raw",
+                "sourceType": "github",
+                "composePath": "./docker-compose.yml",
             },
         }
+        self.created_targets = created
         self.enterContext(
             patch(
                 "control_plane.dokploy_target_setup_http.fetch_dokploy_target_payload_for_setup",
-                side_effect=lambda _host, _token, target_type, _target_id: created[target_type],
+                side_effect=lambda _host, _token, target_type, target_id: {
+                    **created[target_type],
+                    f"{target_type}Id": target_id,
+                },
             )
         )
 
@@ -447,6 +452,11 @@ class DirectorTestingApplicationLaneTests(_DirectorTestingSetupFixture):
             context_name=self.context, instance_name="testing"
         )
         self.provider.reset_mock()
+        plan = await self.post(
+            mode="dry-run", state_volume_path="/var/lib/example", **self.expected(current)
+        )
+        self.assertEqual(plan.status_code, 202, plan.text)
+        self.provider.assert_not_called()
         result = await self.post(**self.expected(current), idempotency_key="application")
         self.assertEqual(result.status_code, 202, result.text)
         self.assertEqual(
@@ -465,6 +475,76 @@ class DirectorTestingApplicationLaneTests(_DirectorTestingSetupFixture):
         self.assertIsNotNone(hold)
         assert hold is not None
         self.assertEqual(hold.purpose, "isolation_staging")
+        self.assert_production_unchanged()
+
+    async def test_replacement_requires_complete_live_empty_source_evidence(self) -> None:
+        provider = self.register_unused_testing_compose()
+        for changes in (
+            {"repository": "configured-repository"},
+            {"customGitSSHKeyId": "bound-key"},
+            {"composeFile": "services: {}"},
+            {"composeId": "different-compose"},
+            {"environmentId": None},
+        ):
+            with self.subTest(changes=changes):
+                with patch(
+                    "control_plane.dokploy_target_setup_http.fetch_dokploy_target_payload_for_setup",
+                    return_value={
+                        **self.created_targets["compose"],
+                        "composeId": provider.target_id,
+                        **changes,
+                    },
+                ):
+                    for storage in (False, True):
+                        result = await self.post(
+                            mode="dry-run" if storage else "apply",
+                            state_volume_path="/var/lib/example" if storage else "",
+                            **self.expected(provider),
+                        )
+                        self.assertEqual(result.status_code, 409 if storage else 400, result.text)
+                self.provider.assert_not_called()
+        with patch(
+            "control_plane.dokploy_target_setup_http.fetch_dokploy_target_payload_for_setup",
+            side_effect=TimeoutError("fixture unavailable"),
+        ):
+            result = await self.post(**self.expected(provider))
+            self.assertEqual(result.status_code, 400, result.text)
+        self.provider.assert_not_called()
+        self.assertEqual(self.current_testing_target_id(), provider.target_id)
+        self.assert_production_unchanged()
+
+    async def test_source_configured_after_storage_plan_refuses_before_provider_effects(
+        self,
+    ) -> None:
+        provider = self.register_unused_testing_compose()
+        intent = {**self.expected(provider), "state_volume_path": "/var/lib/example"}
+        dry = await self.post(mode="dry-run", **intent)
+        self.assertEqual(dry.status_code, 202, dry.text)
+        plan = dry.json()["result"]
+        self.created_targets["compose"]["repository"] = "configured-after-review"
+        result = await self.post(
+            **intent,
+            state_volume_plan_id=plan["state_volume_plan_id"],
+            expected_plan_sha256=plan["plan_sha256"],
+        )
+        self.assertEqual(result.status_code, 409, result.text)
+        self.provider.assert_not_called()
+        self.assertEqual(self.current_testing_target_id(), provider.target_id)
+        self.assert_production_unchanged()
+
+    async def test_source_configured_during_replacement_stops_the_next_create(self) -> None:
+        provider = self.register_unused_testing_compose()
+
+        def create_project(*_args: Any) -> dict[str, str]:
+            self.created_targets["compose"]["repository"] = "configured-during-create"
+            return {"projectId": "created-project"}
+
+        self.provider.side_effect = create_project
+        result = await self.post(**self.expected(provider))
+        self.assertEqual(result.status_code, 400, result.text)
+        self.provider.assert_called_once()
+        self.assertEqual(self.provider.call_args.args[2], PROJECT_CREATE_PATH)
+        self.assertEqual(self.current_testing_target_id(), provider.target_id)
         self.assert_production_unchanged()
 
     async def test_replacement_needs_positive_evidence_nobody_used_the_lane(self) -> None:

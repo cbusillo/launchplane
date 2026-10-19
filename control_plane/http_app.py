@@ -26222,7 +26222,10 @@ def create_launchplane_fastapi_app(
         def rebuild_checkpoint() -> None:
             if first_testing_setup:
                 require_empty_testing_target_creation(
-                    database_store, setup_request, product=lane_owner
+                    database_store,
+                    setup_request,
+                    product=lane_owner,
+                    control_plane_root_path=resolved_control_plane_root,
                 )
                 return
             if not disposable_rebuild_setup or setup_request.mode != "apply":
