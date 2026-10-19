@@ -239,6 +239,7 @@ class _MonitoredPromotionStore(_PromotionStore):
         instance_name: str = "",
         check_name: str = "",
         check_kind: str = "",
+        check_name_prefix: str = "",
         incident_id: str = "",
         limit: int | None = None,
     ) -> tuple[PublicIngressObservationRecord, ...]:
@@ -254,6 +255,7 @@ class _MonitoredPromotionStore(_PromotionStore):
             )
             == (product, context_name, instance_name, check_name, check_kind)
             and (not incident_id or record.incident_id == incident_id)
+            and (not check_name_prefix or record.check_name.startswith(check_name_prefix))
         )
         return records[:limit] if limit is not None else records
 

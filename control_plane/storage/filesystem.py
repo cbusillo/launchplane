@@ -4553,6 +4553,7 @@ class FilesystemRecordStore:
         instance_name: str = "",
         check_name: str = "",
         check_kind: str = "",
+        check_name_prefix: str = "",
         incident_id: str = "",
         limit: int | None = None,
     ) -> tuple[PublicIngressObservationRecord, ...]:
@@ -4570,6 +4571,7 @@ class FilesystemRecordStore:
                 or canonical_health_check_record_token(record.check_name)
                 == canonical_health_check_record_token(check_name)
             )
+            and (not check_name_prefix or record.check_name.startswith(check_name_prefix))
             and (not check_kind or record.check_kind == check_kind)
             and (not incident_id or record.incident_id == incident_id)
         ]
