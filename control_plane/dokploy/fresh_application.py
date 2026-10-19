@@ -67,7 +67,7 @@ def require_fresh_application_runtime(
     if type(payload.get("replicas")) is not int or payload["replicas"] != 1:
         raise ValueError("Fresh application must retain its single default replica.")
     # application.one always hydrates these relations. Missing evidence is not an
-    # empty collection. Supported lane domains are qualified by their own route.
+    # empty collection. The caller separately rechecks the supported domain shape.
     for key in ("ports", "security", "redirects", "deployments", "previewDeployments"):
         if payload.get(key) != []:
             raise ValueError("Fresh application already has runtime or ingress configuration.")

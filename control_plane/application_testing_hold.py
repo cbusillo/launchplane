@@ -8,6 +8,7 @@ from control_plane.application_state_volume import (
     state_volume_target_key,
 )
 from control_plane.disposable_lanes import DisposableLaneSafetyUnknown
+from control_plane.dokploy.application_domains import require_exclusive_testing_application_hostname
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.generic_web_testing_exclusion import _target_reservations
@@ -67,6 +68,13 @@ def qualify_application_staging_lift(
         raise ValueError("Continuation requires its active, exact generic-web testing lane.")
     target = store.read_dokploy_target_record(
         context_name=request.context, instance_name=request.instance
+    )
+    if len(target.domains) > 1:
+        raise ValueError("Testing continuation requires at most one owned private hostname.")
+    require_exclusive_testing_application_hostname(
+        hostname=target.domains[0] if target.domains else None,
+        target=target,
+        targets=store.list_dokploy_target_records(),
     )
     hold = target.policies.staff_testing_hold
     if hold is None or hold.purpose != "isolation_staging" or hold.recorded_by != actor:

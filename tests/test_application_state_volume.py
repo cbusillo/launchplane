@@ -63,6 +63,7 @@ class _ApplicationStateVolumeFixture(_DirectorTestingSetupFixture):
                 "ports": [],
                 "security": [],
                 "redirects": [],
+                "domains": [],
                 "replicas": 1,
                 "applicationStatus": "idle",
                 "env": None,
@@ -218,6 +219,29 @@ class _ApplicationStateVolumeFixture(_DirectorTestingSetupFixture):
             mode="apply", reviewed_plan_sha256=plan.json()["result"]["plan_sha256"]
         )
 
+    def private_domain(self) -> dict[str, Any]:
+        """Hydrated domain.one defaults for the supported private-origin creation."""
+        return {
+            "domainId": "testing-domain",
+            "host": "testing.example.invalid",
+            "path": "/",
+            "internalPath": "/",
+            "port": self.profile.runtime_port,
+            "https": False,
+            "applicationId": self.live["applicationId"],
+            "certificateType": "none",
+            "customCertResolver": None,
+            "composeId": None,
+            "serviceName": None,
+            "domainType": "application",
+            "previewDeploymentId": None,
+            "stripPath": False,
+            "customEntrypoint": None,
+            "middlewares": [],
+            "forwardAuthEnabled": False,
+            "enabled": True,
+        }
+
 
 class ApplicationStateVolumeTests(_ApplicationStateVolumeFixture):
     async def test_application_lift_plan_remains_inert_when_provider_or_allocation_is_unavailable(
@@ -288,7 +312,7 @@ class ApplicationStateVolumeTests(_ApplicationStateVolumeFixture):
         self.store.write_dokploy_target_record(
             target.model_copy(update={"domains": ("testing.example.invalid",)})
         )
-        self.live["domains"] = [{"host": "testing.example.invalid"}]
+        self.live["domains"] = [self.private_domain()]
         provider_calls = self.provider.call_count
         plan = await self._testing_hold()
         self.assertEqual(plan.status_code, 202, plan.text)
@@ -311,6 +335,106 @@ class ApplicationStateVolumeTests(_ApplicationStateVolumeFixture):
         self.assertEqual(replay.json()["result"], applied.json()["result"])
         self.assertEqual(self.provider.call_count, provider_calls)
         self.assertEqual(self.storage_inspector.call_count, 1)
+        self.assert_production_unchanged()
+
+    async def test_application_continuation_refuses_live_domain_drift(self) -> None:
+        await self.prepare_application_hold()
+        target = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        self.store.write_dokploy_target_record(
+            target.model_copy(update={"domains": ("testing.example.invalid",)})
+        )
+        domain = self.private_domain()
+        plan = await self._testing_hold()
+        variations: tuple[object, ...] = (
+            None,
+            {},
+            [{"host": domain["host"]}],
+            [domain, {**domain, "domainId": "second-domain", "host": "second.example.invalid"}],
+            *(
+                [{**domain, **changes}]
+                for changes in (
+                    {"host": "production.example.invalid"},
+                    {"host": "*.example.invalid"},
+                    {"path": "/production-path"},
+                    {"internalPath": "/another-path"},
+                    {"https": True},
+                    {"certificateType": "letsencrypt"},
+                    {"customCertResolver": "foreign-resolver"},
+                    {"applicationId": "another-application"},
+                    {"port": self.profile.runtime_port + 1},
+                    {"serviceName": "another-service"},
+                    {"composeId": "another-compose"},
+                    {"previewDeploymentId": "another-preview"},
+                    {"stripPath": True},
+                    {"domainType": "compose"},
+                    {"middlewares": ["unreviewed-middleware"]},
+                    {"customEntrypoint": "websecure"},
+                    {"forwardAuthEnabled": True},
+                    {"enabled": False},
+                )
+            ),
+        )
+        for domains in variations:
+            with self.subTest(domains=domains):
+                self.live["domains"] = domains
+                result = await self._testing_hold(
+                    mode="apply", reviewed_plan_sha256=plan.json()["result"]["plan_sha256"]
+                )
+                self.assertEqual(result.status_code, 409, result.text)
+                self.assertIsNotNone(
+                    self.store.read_dokploy_target_record(
+                        context_name=self.context, instance_name="testing"
+                    ).policies.staff_testing_hold
+                )
+        self.storage_inspector.assert_not_called()
+        self.assertEqual(self.store.list_product_reconcile_requests(), ())
+        self.assert_production_unchanged()
+
+    async def test_application_continuation_refuses_another_lanes_hostname_claim(self) -> None:
+        from control_plane.contracts.dokploy_target_record import PublicHostEffect
+
+        await self.prepare_application_hold()
+        target = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        hostname = "testing.example.invalid"
+        self.store.write_dokploy_target_record(target.model_copy(update={"domains": (hostname,)}))
+        self.live["domains"] = [self.private_domain()]
+        plan = await self._testing_hold()
+        targets = self.store.list_dokploy_target_records()
+        for changes in (
+            {"domains": (hostname,)},
+            {"domains": ("TESTING.EXAMPLE.INVALID.",)},
+            {"domains": ("*.example.invalid",)},
+            {"public_hosts": (hostname,)},
+            {
+                "pending_public_host_effects": (
+                    PublicHostEffect(
+                        host=hostname,
+                        provider_host="https://provider.example.invalid",
+                        target_id=self.production_id.target_id,
+                        runtime_port=self.profile.runtime_port,
+                    ),
+                )
+            },
+        ):
+            with self.subTest(changes=changes):
+                other = self.production.model_copy(update=changes)
+                with patch.object(
+                    self.store, "list_dokploy_target_records", return_value=(*targets, other)
+                ):
+                    result = await self._testing_hold(
+                        mode="apply", reviewed_plan_sha256=plan.json()["result"]["plan_sha256"]
+                    )
+                self.assertEqual(result.status_code, 409, result.text)
+                self.assertIsNotNone(
+                    self.store.read_dokploy_target_record(
+                        context_name=self.context, instance_name="testing"
+                    ).policies.staff_testing_hold
+                )
+        self.storage_inspector.assert_not_called()
         self.assert_production_unchanged()
 
     async def test_application_continuation_refuses_live_source_mount_placement_and_execution_drift(
@@ -712,6 +836,7 @@ class ApplicationStateVolumeTests(_ApplicationStateVolumeFixture):
         hold = target.policies.staff_testing_hold
         assert hold is not None
         protected = hold.model_copy(update={"purpose": "staff_testing", "recorded_by": "staff"})
+        original_lock = self.store.serialize_disposable_testing_resources
 
         @contextmanager
         def changed_before_commit() -> Any:
@@ -724,7 +849,8 @@ class ApplicationStateVolumeTests(_ApplicationStateVolumeFixture):
                     }
                 )
             )
-            yield
+            with original_lock():
+                yield
 
         with patch.object(
             self.store, "serialize_disposable_testing_resources", side_effect=changed_before_commit

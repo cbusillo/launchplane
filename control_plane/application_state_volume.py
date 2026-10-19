@@ -238,11 +238,24 @@ class ApplicationStateVolumeAdapter:
             raise ValueError("Original application allocation progress is incomplete.")
         self._verify_adopted(phase, configuration_verified=False)
         if inspect_provider:
+            from control_plane.dokploy.application_domains import (
+                require_private_application_domains,
+            )
             from control_plane.dokploy.fresh_application import require_fresh_application_runtime
 
             live = self._live(data["application"], data["environment"], data["app_name"])
             require_fresh_application_runtime(
                 live, environment_id=data["environment"], project_id=data["project"]
+            )
+            target = self.store.read_dokploy_target_record(
+                context_name=self.request.context, instance_name="testing"
+            )
+            profile = self.store.read_product_profile_record(self.product)
+            require_private_application_domains(
+                live.get("domains"),
+                hostname=target.domains[0] if len(target.domains) == 1 else None,
+                runtime_port=profile.runtime_port,
+                application_id=data["application"],
             )
             if not self._mount_matches(live):
                 raise ValueError("Application source, execution, storage or placement changed.")

@@ -66,11 +66,16 @@ must also match the empty allocation. The application must retain its vanilla
 single-replica runtime: no custom Swarm options, networks, published ports,
 execution, registry bindings, security or redirects. Nullable Swarm options must
 stay null, since even empty objects override provider defaults. Supported testing
-domain setup remains available; Dockerfile/build-path settings skipped by
+domain setup remains available: either no provider domain or the lane's one exact
+private HTTP application origin at the runtime port, with root paths and no TLS,
+middleware, authentication or entrypoint override. The hostname must remain
+exclusive of other lanes' domains, public hosts and pending hostname effects.
+Dockerfile/build-path settings skipped by
 Docker-source deployment do not block continuation.
 This boundary follows Dokploy's
 [application defaults](https://github.com/Dokploy/dokploy/blob/e0c8d80cdea15a4ac3fe495a6ad38e043b4b80b5/packages/server/src/db/schema/application.ts)
-and [runtime construction](https://github.com/Dokploy/dokploy/blob/e0c8d80cdea15a4ac3fe495a6ad38e043b4b80b5/packages/server/src/utils/builders/index.ts).
+and [runtime construction](https://github.com/Dokploy/dokploy/blob/e0c8d80cdea15a4ac3fe495a6ad38e043b4b80b5/packages/server/src/utils/builders/index.ts),
+including the [domain defaults and API fields](https://github.com/Dokploy/dokploy/blob/e0c8d80cdea15a4ac3fe495a6ad38e043b4b80b5/packages/server/src/db/schema/domain.ts).
 Staff, foreign, legacy and Compose interlocks keep their existing protections.
 
 Dry-run remains an inert hold plan and does not qualify provider readiness.
