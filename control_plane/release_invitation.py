@@ -139,7 +139,9 @@ def _change_link(change: InvitationChange) -> str:
     # Keep Client instructions; name constituents instead of their batch PR.
     item = change.item
     name = change.feature_name.replace("@", "@\u200b")
-    notes = " ".join(item.owner_test_notes.splitlines()).replace("@", "@\u200b")
+    notes = " ".join((change.release_test_notes or item.owner_test_notes).splitlines()).replace(
+        "@", "@\u200b"
+    )
     return f"- [#{item.pull_request_number}]({item.url}): " + (
         f"{name} — {notes}" if name else notes
     )
@@ -746,6 +748,9 @@ def publish_release_invitation(
             return False
         assert review.checklist is not None
         client_changes = client_invitation_changes(store, profile, review.checklist)
+        notification_changes = {
+            key: change for key, change in client_changes.items() if change.client_review_requested
+        }
         marker = release_invitation_marker(profile.product, review.checklist.candidate)
         issue_marker = release_request_issue_marker(profile.product)
         lane = next(lane for lane in profile.lanes if lane.instance == "testing")
@@ -769,7 +774,7 @@ def publish_release_invitation(
             if len(issues) > 1:
                 raise ValueError("Release invitation destination is ambiguous.")
             if not issues:
-                if not client_changes and not urgent_reason:
+                if not notification_changes and not urgent_reason:
                     return False
                 created = github_api_request(
                     path=path,
@@ -795,7 +800,7 @@ def publish_release_invitation(
             request = _open_request(comments, request_marker, last_decision)
             # Engineering-only changes never open a release review on their own;
             # they ride with the next Client-facing release or an urgent opening.
-            if request is None and not client_changes and not urgent_reason:
+            if request is None and not notification_changes and not urgent_reason:
                 return False
             reminder_marker = request_marker.replace("release-request:", "release-reminder:")
             reminded = any(reminder_marker in _comment_lines(comment) for comment in comments)
@@ -839,8 +844,10 @@ def publish_release_invitation(
                 if request
                 else _now() + timedelta(days=3)
             )
-            announced = _announced_changes(request, client_changes, marker)
-            added = {key: item for key, item in client_changes.items() if key not in announced}
+            announced = _announced_changes(request, notification_changes, marker)
+            added = {
+                key: item for key, item in notification_changes.items() if key not in announced
+            }
             # A matching candidate receipt still needs the one-time migration
             # to plain wording and cleanup of older duplicate invitations.
             formatted = (
@@ -848,7 +855,21 @@ def publish_release_invitation(
                 and any(line.startswith("Updated at: ") for line in _comment_lines(request))
                 and any(line.startswith("**Release review**") for line in _comment_lines(request))
             )
-            if request and marker in _comment_lines(request) and formatted and not added:
+            # An unchanged candidate can still have a request from before release
+            # steps were displayed, or corrected notes on its source PR. Refresh
+            # that content silently before trusting or reminding from the receipt.
+            release_steps_changed = request is not None and any(
+                _change_link(change) not in _comment_lines(request)
+                for change in client_changes.values()
+                if change.release_test_notes
+            )
+            if (
+                request
+                and marker in _comment_lines(request)
+                and formatted
+                and not added
+                and not release_steps_changed
+            ):
                 _replace_older_invitations(
                     comments=comments,
                     current=request,
@@ -899,7 +920,7 @@ def publish_release_invitation(
             )
             receipts = "\n".join(
                 f"<!-- launchplane:release-client-change:{key} -->"
-                for key in sorted(announced | client_changes.keys())
+                for key in sorted(announced | notification_changes.keys())
             )
             if reminded:
                 receipts += f"\n{reminder_marker}"
@@ -1079,7 +1100,8 @@ def adopt_release_invitation(
                     ADOPTED_ORIGINAL_PREFIX + str(comment_id) + " -->",
                     *(
                         f"<!-- launchplane:release-client-change:{key} -->"
-                        for key in sorted(changes)
+                        for key, change in sorted(changes.items())
+                        if change.client_review_requested
                     ),
                     "",
                     "Existing release request adopted; no new Client action or decision.",
