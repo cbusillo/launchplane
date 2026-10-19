@@ -1024,7 +1024,7 @@ class GenericWebDeployTests(unittest.TestCase):
             "control-plane.fake-cloud",
         )
 
-    def test_execute_generic_web_deploy_records_integration_key_readback(self) -> None:
+    def test_non_production_deploy_refuses_unreasoned_shared_key_before_provider(self) -> None:
         store = _IntegrationKeyGenericWebDeployStore(
             _profile(),
             secret_bindings=(
@@ -1036,23 +1036,146 @@ class GenericWebDeployTests(unittest.TestCase):
                 ).model_copy(update={"declared_secret_class": "shared_safe"}),
             ),
         )
+        deploy_provider = _FakeGenericWebDeployProvider()
 
         result = execute_generic_web_deploy(
             control_plane_root=Path("."),
             record_store=store,
             request=_request(),
-            deploy_provider=_FakeGenericWebDeployProvider(),
+            deploy_provider=deploy_provider,
         )
 
-        # Recorded on the deployment after the deploy; the read-back does not refuse it.
+        self.assertEqual(result.deploy_status, "fail")
+        self.assertFalse(result.provider_effect_attempted)
+        self.assertEqual(deploy_provider.runtime_identities, [])
+        self.assertIn("REPAIRSHOPR_API_TOKEN", result.error_message)
+
+    def test_non_production_deploy_refuses_failing_integration_key_before_provider(
+        self,
+    ) -> None:
+        # A context-wide production key with no classification reaches the testing lane.
+        store = _IntegrationKeyGenericWebDeployStore(
+            _profile(),
+            secret_bindings=(
+                _runtime_secret_binding(
+                    secret_id="secret-stripe",
+                    binding_key="STRIPE_SECRET_KEY",
+                    context="sellyouroutboard-testing",
+                ),
+            ),
+        )
+        deploy_provider = _FakeGenericWebDeployProvider()
+
+        result = execute_generic_web_deploy(
+            control_plane_root=Path("."),
+            record_store=store,
+            request=_request(),
+            deploy_provider=deploy_provider,
+        )
+
+        self.assertEqual(result.deploy_status, "fail")
+        self.assertFalse(result.provider_effect_attempted)
+        self.assertEqual(deploy_provider.runtime_identities, [])
+        self.assertIn("STRIPE_SECRET_KEY", result.error_message)
+        self.assertEqual(store.deployments[-1].deploy.status, "fail")
+        self.assertEqual(store.inventories, [])
+
+    def test_non_production_deploy_refuses_managed_keys_without_active_policy(self) -> None:
+        class _NoPolicyStore(_IntegrationKeyGenericWebDeployStore):
+            def list_runtime_key_safety_policy_records(
+                self, *, status: str = "", limit: int | None = None
+            ) -> tuple[RuntimeKeySafetyPolicyRecord, ...]:
+                return ()
+
+        store = _NoPolicyStore(
+            _profile(),
+            secret_bindings=(
+                _runtime_secret_binding(
+                    secret_id="secret-webhook",
+                    binding_key="CONTACT_ALERT_DISCORD_WEBHOOK_URL",
+                    context="sellyouroutboard-testing",
+                    instance="testing",
+                ),
+            ),
+        )
+        deploy_provider = _FakeGenericWebDeployProvider()
+
+        result = execute_generic_web_deploy(
+            control_plane_root=Path("."),
+            record_store=store,
+            request=_request(),
+            deploy_provider=deploy_provider,
+        )
+
+        self.assertEqual(result.deploy_status, "fail")
+        self.assertEqual(deploy_provider.runtime_identities, [])
+
+    def test_non_production_deploy_with_safe_integration_keys_deploys(self) -> None:
+        store = _IntegrationKeyGenericWebDeployStore(
+            _profile(),
+            secret_bindings=(
+                _runtime_secret_binding(
+                    secret_id="secret-stripe",
+                    binding_key="STRIPE_SECRET_KEY",
+                    context="sellyouroutboard-testing",
+                    instance="testing",
+                ).model_copy(update={"declared_secret_class": "testing"}),
+            ),
+        )
+        deploy_provider = _FakeGenericWebDeployProvider()
+
+        result = execute_generic_web_deploy(
+            control_plane_root=Path("."),
+            record_store=store,
+            request=_request(),
+            deploy_provider=deploy_provider,
+        )
+
         self.assertEqual(result.deploy_status, "pass")
-        readback = store.deployments[0].integration_key_readback
+        self.assertEqual(len(deploy_provider.runtime_identities), 1)
+        readback = store.deployments[-1].integration_key_readback
+        assert readback is not None
+        self.assertEqual(readback.status, "pass")
+
+    def test_production_deploy_records_failing_integration_key_without_refusing(self) -> None:
+        profile = _profile()
+        profile = profile.model_copy(
+            update={
+                "lanes": (
+                    *profile.lanes,
+                    ProductLaneProfile(
+                        instance="prod",
+                        context="sellyouroutboard",
+                        base_url="https://sellyouroutboard.com",
+                        health_url="https://sellyouroutboard.com/api/health",
+                    ),
+                )
+            }
+        )
+        store = _IntegrationKeyGenericWebDeployStore(
+            profile,
+            secret_bindings=(
+                _runtime_secret_binding(
+                    secret_id="secret-stripe",
+                    binding_key="STRIPE_SECRET_KEY",
+                    context="sellyouroutboard",
+                ),
+            ),
+        )
+        deploy_provider = _FakeGenericWebDeployProvider()
+
+        result = execute_generic_web_deploy(
+            control_plane_root=Path("."),
+            record_store=store,
+            request=_request("prod"),
+            deploy_provider=deploy_provider,
+        )
+
+        self.assertEqual(result.deploy_status, "pass")
+        self.assertEqual(len(deploy_provider.runtime_identities), 1)
+        readback = store.deployments[-1].integration_key_readback
         assert readback is not None
         self.assertEqual(readback.status, "fail")
-        self.assertEqual(
-            [(finding.binding_key, finding.code) for finding in readback.findings],
-            [("REPAIRSHOPR_API_TOKEN", "sharing_reason_missing")],
-        )
 
     def test_execute_generic_web_deploy_uses_deploy_reference_for_runtime_image(self) -> None:
         artifact_id = (

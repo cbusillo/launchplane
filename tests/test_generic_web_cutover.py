@@ -28,6 +28,11 @@ from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
 )
 from control_plane.contracts.runtime_identity import RuntimeIdentity
+from control_plane.contracts.runtime_key_safety_policy import (
+    RuntimeKeySafetyPolicyRecord,
+    RuntimeSecretSafetyRule,
+)
+from control_plane.contracts.secret_record import SecretBinding
 from control_plane.generic_web_cutover import WebDeploymentCutoverStore
 from control_plane.release_compatibility import classify_release_database_compatibility
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -487,6 +492,68 @@ class WebCutoverDeploymentTests(unittest.TestCase):
                         deployment_record_id="release",
                     )
                 inplace.assert_not_called()
+
+    def test_non_production_cutover_refuses_failing_integration_key_before_provider(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as folder:
+            store, intent, provider = self.seed(Path(folder), "compose")
+            profile = store.read_product_profile_record("fixture")
+            store.write_product_profile_record(
+                profile.model_copy(
+                    update={"lanes": (profile.lanes[0].model_copy(update={"instance": "testing"}),)}
+                )
+            )
+            store.write_runtime_key_safety_policy_record(
+                RuntimeKeySafetyPolicyRecord(
+                    record_id="policy",
+                    source="test",
+                    updated_at=datetime.now(UTC).isoformat(),
+                    rules=(
+                        RuntimeSecretSafetyRule(binding_key="UNRELATED", secret_class="testing"),
+                    ),
+                )
+            )
+            # A context-wide production key with no classification reaches the testing lane.
+            store.write_secret_binding(
+                SecretBinding(
+                    binding_id="binding-stripe",
+                    secret_id="secret-stripe",
+                    integration="runtime_environment",
+                    binding_key="STRIPE_SECRET_KEY",
+                    context="fixture",
+                    created_at=datetime.now(UTC).isoformat(),
+                    updated_at=datetime.now(UTC).isoformat(),
+                )
+            )
+            factory_calls: list[object] = []
+
+            def factory(admitted: Any) -> Any:
+                factory_calls.append(admitted)
+                return provider
+
+            with (
+                patch.object(DokployGenericWebDeployProvider, "execute_artifact_deploy") as inplace,
+                self.assertRaises(ValueError) as refused,
+            ):
+                execute_generic_web_deploy(
+                    control_plane_root=Path(folder),
+                    record_store=store,
+                    request=GenericWebDeployRequest(
+                        product="fixture",
+                        instance="testing",
+                        artifact_id=intent.candidate.artifact_id,
+                        source_git_ref=intent.candidate.source_commit,
+                        deploy_reference=intent.new.deploy_reference,
+                    ),
+                    deploy_provider=DokployGenericWebDeployProvider(
+                        cutover_provider_factory=factory
+                    ),
+                    deployment_record_id="release",
+                )
+            self.assertIn("STRIPE_SECRET_KEY", str(refused.exception))
+            self.assertEqual(factory_calls, [])
+            inplace.assert_not_called()
 
 
 class WebCutoverAuthorityTests(unittest.TestCase):
