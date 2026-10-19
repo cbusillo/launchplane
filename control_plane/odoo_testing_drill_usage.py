@@ -48,6 +48,7 @@ def read_drill_recent_signins(
     history_generation: FreshOdooTestingGeneration | None = None,
     history_database: str = "",
     usage_required: bool = True,
+    since: datetime | None = None,
 ) -> bool | None:
     profile = store.read_product_profile_record(generation.product)
     selection = select_stable_runtime(store, profile, "testing")
@@ -77,10 +78,13 @@ def read_drill_recent_signins(
     # people can sign in after web opens but before final health is recorded.
     prepared = datetime.fromisoformat(history.prepared_at.replace("Z", "+00:00"))
     completed = datetime.fromisoformat(history.completed_at.replace("Z", "+00:00"))
+    moment = datetime.fromtimestamp(now, timezone.utc)
     if (
         prepared.utcoffset() is None
         or completed.utcoffset() is None
-        or not prepared <= completed <= datetime.fromtimestamp(now, timezone.utc)
+        or not prepared <= completed <= moment
+        or since is not None
+        and (since.utcoffset() is None or since > moment)
     ):
         raise ValueError("Testing copy timestamps are unreadable.")
     frames: list[dict[str, object]] = []
@@ -104,8 +108,8 @@ def read_drill_recent_signins(
             "web_gate_path": INTEGRATION_READBACK_PASSED_PATH,
             "usage_since": max(
                 prepared,
-                datetime.fromtimestamp(now, timezone.utc)
-                - timedelta(seconds=DRILL_RECENT_USE_SECONDS),
+                moment - timedelta(seconds=DRILL_RECENT_USE_SECONDS),
+                since or prepared,
             ).isoformat(),
         },
         receive=frames.append,

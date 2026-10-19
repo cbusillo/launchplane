@@ -1,13 +1,17 @@
 """Daily restore admission, durable evidence and notification behavior in isolated stores."""
 
 from datetime import datetime, timezone, timedelta
+from functools import partial
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 import unittest
 from unittest.mock import Mock, patch
 
-from control_plane.contracts.disposable_lane import DisposableTestingResourcePreparation
+from control_plane.contracts.disposable_lane import (
+    DisposableTestingResourcePreparation,
+    DisposableLaneSafety,
+)
 from control_plane.contracts.dokploy_target_record import (
     DokployTargetRecord,
     DokployTargetStaffTestingHold,
@@ -42,6 +46,9 @@ from control_plane.odoo_testing_drill import (
     require_drill_checkpoint,
     testing_drill_evidence,
     DrillSkipped,
+    prepare_drill,
+    timestamp,
+    require_native_drill_forward_use,
 )
 from control_plane.odoo_testing_resources import OdooTestingResources
 from control_plane.odoo_testing_restore import generation_binding
@@ -60,7 +67,16 @@ from tests.test_odoo_testing_restore import generation
 
 
 class TestingDrillScenario(unittest.TestCase):
-    def seed(self, database_url: str) -> None:
+    def seed(self, database_url: str, *, legacy_operations: bool = True) -> None:
+        if legacy_operations:
+            # These scenarios preserve already-queued recreate-in-place work.
+            # New schedule admission is exercised separately below.
+            self.enterContext(
+                patch(
+                    "control_plane.odoo_testing_drill.prepare_drill",
+                    partial(prepare_drill, legacy_recovery=True),
+                )
+            )
         self.store = PostgresRecordStore(database_url=database_url)
         self.store.ensure_schema()
         self.addCleanup(self.store.close)
@@ -305,6 +321,308 @@ class TestingDrillScenario(unittest.TestCase):
         )
         self.store.activate_odoo_testing_drill(operation, self.now)
         return operation
+
+
+class NativeTestingDrillTests(TestingDrillScenario):
+    def setUp(self) -> None:
+        root = Path(self.enterContext(TemporaryDirectory()))
+        self.seed(f"sqlite+pysqlite:///{root / 'state.db'}", legacy_operations=False)
+
+    def claim_native(self) -> Any:
+        worker = self.store.claim_next_odoo_stable_target_replacement_operation_record(
+            lease_owner="native-drill-worker",
+            claimed_at=timestamp(self.now),
+            lease_expires_at=timestamp(self.now + 1800),
+        )
+        assert worker is not None
+        return worker
+
+    def test_schedule_selects_native_copy_without_selecting_a_database(self) -> None:
+        self.scheduler.run_once()
+        operation = self.operation()
+        self.assertTrue(operation.is_native_testing_rebuild)
+        self.assertEqual(operation.request.data_source_mode, "production_restore")
+        self.assertEqual(
+            self.store.read_fresh_odoo_testing_generation(self.profile.product, self.context),
+            self.gen,
+        )
+        self.assertEqual(
+            self.store.list_runtime_environment_records(
+                scope="instance", context_name=self.context, instance_name="testing"
+            )[0],
+            self.runtime,
+        )
+
+    def test_missing_target_prerequisite_evidence_remains_visible_without_native_slots(
+        self,
+    ) -> None:
+        target = self.store.read_dokploy_target_id_record(
+            context_name=self.context, instance_name="testing"
+        )
+        self.store.delete_dokploy_target_id_record(expected_record=target)
+        self.scheduler.run_once()
+        evidence = self.evidence()
+        self.assertEqual(evidence.status, "fail")
+        self.assertEqual(evidence.operation_id, "")
+        self.assertEqual(evidence.disposal_attention, 0)
+
+    def test_continuously_leased_native_attempt_reuses_its_scoped_admission(self) -> None:
+        self.scheduler.run_once()
+        worker = self.claim_native()
+        require_drill_checkpoint(self.store, worker, now=self.now)
+        reads = self.signins.call_count
+        self.signins.side_effect = RuntimeError("historical monitor/source no longer current")
+        require_drill_checkpoint(self.store, worker, now=self.now + 600)
+        self.assertEqual(self.signins.call_count, reads)
+
+    def reject_native_admission_race(self, *, lease_changed: bool) -> None:
+        from control_plane.odoo_testing_drill import collect_drill_admission, DrillPrerequisite
+
+        self.scheduler.run_once()
+        worker = self.claim_native()
+
+        def changed_after_read(*args: Any, **kwargs: Any) -> DisposableLaneSafety:
+            observation = collect_drill_admission(*args, **kwargs)
+            if lease_changed:
+                self.store.write_odoo_stable_target_replacement_operation_record(
+                    worker.model_copy(update={"lease_owner": "different-worker"})
+                )
+            else:
+                self.store.write_fresh_odoo_testing_generation(
+                    self.gen.model_copy(update={"non_use_invalidated": True})
+                )
+            return observation
+
+        with patch(
+            "control_plane.odoo_testing_drill.collect_drill_admission",
+            side_effect=changed_after_read,
+        ):
+            with self.assertRaises(DrillPrerequisite if lease_changed else DrillSkipped):
+                require_drill_checkpoint(self.store, worker, now=self.now)
+        receipt = self.store.read_idempotency_record(
+            scope=DRILL_SCOPE, route_path=DRILL_ROUTE, idempotency_key=worker.idempotency_key
+        )
+        assert receipt is not None
+        self.assertNotIn("activation_attempt", receipt.response_payload)
+        self.assertEqual(
+            self.store.list_runtime_environment_records(
+                scope="instance", context_name=self.context, instance_name="testing"
+            )[0],
+            self.runtime,
+        )
+
+    def test_native_admission_rejects_a_generation_changed_during_full_collection(self) -> None:
+        self.reject_native_admission_race(lease_changed=False)
+
+    def test_native_admission_rejects_a_worker_lease_changed_during_full_collection(self) -> None:
+        self.reject_native_admission_race(lease_changed=True)
+
+    def test_down_qualified_native_attempt_keeps_history_when_monitor_expires_but_new_use_wins(
+        self,
+    ) -> None:
+        from tests.support.down_lanes import record_lane_health
+        from control_plane.lane_usage import VERIFIED_DOWN_USAGE_EVIDENCE_PREFIX
+
+        record_lane_health(
+            self.store,
+            self.profile.product,
+            self.context,
+            datetime.fromtimestamp(self.now, timezone.utc),
+        )
+        record_safety(self.store, self.profile.product, self.context, "testing", usage="in_use")
+        self.signins.return_value = True
+        self.scheduler.run_once()
+        worker = self.claim_native()
+        require_drill_checkpoint(self.store, worker, now=self.now)
+        receipt = self.store.read_idempotency_record(
+            scope=DRILL_SCOPE, route_path=DRILL_ROUTE, idempotency_key=worker.idempotency_key
+        )
+        assert receipt is not None
+        safety = DisposableLaneSafety.model_validate(receipt.response_payload["activation_safety"])
+        self.assertTrue(safety.usage_evidence.startswith(VERIFIED_DOWN_USAGE_EVIDENCE_PREFIX))
+        before = self.store.read_disposable_lane_safety(
+            self.profile.product, self.context, "testing"
+        )
+        with patch.object(self.store, "list_public_ingress_observation_records", return_value=()):
+            require_drill_checkpoint(self.store, worker, now=self.now + 600)
+            self.signins.return_value = None
+            require_native_drill_forward_use(self.store, worker, now=self.now + 600)
+            self.assertEqual(self.signins.call_args.kwargs["since"], safety.observed_at)
+            self.assertEqual(
+                self.store.read_disposable_lane_safety(
+                    self.profile.product, self.context, "testing"
+                ),
+                before,
+            )
+            self.signins.return_value = True
+            with self.assertRaises(DrillSkipped):
+                require_native_drill_forward_use(self.store, worker, now=self.now + 600)
+            record_safety(
+                self.store,
+                self.profile.product,
+                self.context,
+                "testing",
+                usage="in_use",
+                usage_evidence="fixture:new-user-after-admission",
+            )
+            with self.assertRaises(DrillSkipped):
+                require_drill_checkpoint(self.store, worker, now=self.now + 600)
+
+    def test_native_attempt_retakes_full_history_on_reclaim_and_keeps_holds_live(self) -> None:
+        self.scheduler.run_once()
+        worker = self.claim_native()
+        require_drill_checkpoint(self.store, worker, now=self.now)
+        self.store.write_odoo_stable_target_replacement_operation_record(
+            worker.model_copy(
+                update={
+                    "status": "pending",
+                    "lease_owner": "",
+                    "lease_expires_at": "",
+                    "heartbeat_at": "",
+                }
+            )
+        )
+        reclaimed = self.claim_native()
+        self.assertGreater(reclaimed.attempt, worker.attempt)
+        self.signins.reset_mock()
+        require_drill_checkpoint(self.store, reclaimed, now=self.now)
+        self.signins.assert_called_once()
+        self.assertNotIn("since", self.signins.call_args.kwargs)
+        target = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        self.store.write_dokploy_target_record(
+            target.model_copy(
+                update={
+                    "policies": target.policies.model_copy(
+                        update={
+                            "staff_testing_hold": DokployTargetStaffTestingHold(
+                                reason="staff arrived",
+                                recorded_by="fixture",
+                                recorded_at=timestamp(self.now),
+                            )
+                        }
+                    )
+                }
+            )
+        )
+        with self.assertRaises(DrillSkipped):
+            require_drill_checkpoint(self.store, reclaimed, now=self.now)
+
+    def test_final_native_read_keeps_qualified_unknown_but_refuses_malformed_and_denied_reads(
+        self,
+    ) -> None:
+        from control_plane.odoo_testing_drill_usage import DrillUsageUnreadable
+        from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
+
+        self.scheduler.run_once()
+        worker = self.claim_native()
+        require_drill_checkpoint(self.store, worker, now=self.now)
+        self.signins.return_value = None
+        require_native_drill_forward_use(self.store, worker, now=self.now + 600)
+        self.signins.side_effect = DrillUsageUnreadable("unreadable")
+        with self.assertRaises(DrillSkipped):
+            require_native_drill_forward_use(self.store, worker, now=self.now + 600)
+        self.signins.side_effect = NativeSourceAuthorizationDenied("denied")
+        with self.assertRaises(NativeSourceAuthorizationDenied):
+            require_native_drill_forward_use(self.store, worker, now=self.now + 600)
+
+    def test_native_schedule_identity_cannot_be_rebound_to_another_action_or_destination(
+        self,
+    ) -> None:
+        from control_plane.odoo_target_replacement_apply_http import (
+            build_odoo_target_replacement_apply_operation_record,
+        )
+        from control_plane.durable_operation_authorization import (
+            DurableOperationAuthorizationDeniedError,
+        )
+
+        self.scheduler.run_once()
+        operation = self.operation()
+        authorization = operation.authorization
+        assert authorization is not None
+        for field, value in (
+            ("action", "other.execute"),
+            ("product", "other-product"),
+            ("context", "other-context"),
+            ("instances", ("prod",)),
+        ):
+            with (
+                self.subTest(field=field),
+                self.assertRaises(DurableOperationAuthorizationDeniedError),
+            ):
+                build_odoo_target_replacement_apply_operation_record(
+                    replacement_request=operation.request,
+                    context=operation.context,
+                    idempotency_key="invalid",
+                    idempotency_scope=DRILL_SCOPE,
+                    request_fingerprint="invalid",
+                    created_at=operation.created_at,
+                    authorization=authorization.model_copy(update={field: value}),
+                )
+        for update in (
+            {"instance": "prod"},
+            {"data_source_mode": "empty"},
+            {"strategy": "recreate-in-place"},
+        ):
+            with (
+                self.subTest(update=update),
+                self.assertRaises((ValueError, DurableOperationAuthorizationDeniedError)),
+            ):
+                build_odoo_target_replacement_apply_operation_record(
+                    replacement_request=operation.request.model_copy(update=update),
+                    context=operation.context,
+                    idempotency_key="invalid",
+                    idempotency_scope=DRILL_SCOPE,
+                    request_fingerprint="invalid",
+                    created_at=operation.created_at,
+                    authorization=authorization,
+                )
+        with self.assertRaises(DurableOperationAuthorizationDeniedError):
+            build_odoo_target_replacement_apply_operation_record(
+                replacement_request=operation.request,
+                context=operation.context,
+                idempotency_key="external",
+                idempotency_scope="client-selected-scope",
+                request_fingerprint="external",
+                created_at=operation.created_at,
+                authorization=authorization,
+            )
+
+    def test_locked_native_admission_refuses_a_generation_changed_after_collection(self) -> None:
+        original = prepare_drill
+
+        def raced(*args: Any, **kwargs: Any) -> Any:
+            candidate = original(*args, **kwargs)
+            self.store.write_fresh_odoo_testing_generation(
+                self.gen.model_copy(update={"non_use_invalidated": True})
+            )
+            return candidate
+
+        with patch("control_plane.odoo_testing_drill.prepare_drill", side_effect=raced):
+            self.scheduler.run_once()
+        self.assertEqual(self.evidence().status, "skipped")
+        self.assertEqual(self.evidence().step, "drill_admission_snapshot_changed")
+        self.assertEqual(self.evidence().operation_id, "")
+
+    def test_delayed_native_checkpoint_reads_original_signins_and_refuses_unreadable_use(
+        self,
+    ) -> None:
+        self.scheduler.run_once()
+        operation = self.operation()
+        before = self.store.read_disposable_lane_safety(
+            self.profile.product, self.context, "testing"
+        )
+        self.signins.return_value = True
+        with self.assertRaises(DrillSkipped):
+            require_drill_checkpoint(self.store, operation, now=self.now + 600)
+        self.signins.side_effect = RuntimeError("private read failure")
+        with self.assertRaises(DrillSkipped):
+            require_drill_checkpoint(self.store, operation, now=self.now + 600)
+        self.assertEqual(
+            self.store.read_disposable_lane_safety(self.profile.product, self.context, "testing"),
+            before,
+        )
 
 
 class TestingDrillTests(TestingDrillScenario):

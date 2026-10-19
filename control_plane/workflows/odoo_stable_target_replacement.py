@@ -1508,7 +1508,9 @@ def build_odoo_stable_target_replacement_plan(
             "fresh_testing_authority_unverified",
             "The fresh testing generation's resource or credential authority is unverified.",
         )
-    refusal = fresh_testing_mode_refusal(generation, request.data_source_mode)
+    refusal = fresh_testing_mode_refusal(
+        generation, request.data_source_mode, publication=published_copy
+    )
     if refusal is not None:
         block(*refusal)
     fresh_bootstrap = bool(
@@ -2021,7 +2023,9 @@ def execute_odoo_stable_target_replacement_apply(
     generation = read_current_testing_generation(
         record_store, product=profile.product, context=plan.context, instance=plan.instance
     )
-    refusal = fresh_testing_mode_refusal(generation, request.data_source_mode)
+    refusal = fresh_testing_mode_refusal(
+        generation, request.data_source_mode, publication=published_copy
+    )
     if refusal is not None:
         raise OdooTargetReplacementStageError(*refusal)
     if target_record.target_type != "compose":

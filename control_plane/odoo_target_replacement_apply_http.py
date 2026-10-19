@@ -338,8 +338,30 @@ def build_odoo_target_replacement_apply_operation_record(
     created_at: str,
     authorization: DurableOperationAuthorization,
 ) -> OdooStableTargetReplacementOperationRecord:
+    replacement_request = OdooStableTargetReplacementApplyRequest.model_validate(
+        replacement_request.model_dump()
+    )
     if replacement_request.strategy == "replace-and-cutover":
-        caller_binding(authorization.caller)
+        from control_plane.odoo_testing_drill import DRILL_SCOPE
+        from control_plane.launchplane_reconcile_authorization import (
+            build_launchplane_reconcile_authorization,
+        )
+
+        # The internal scheduler already owns this testing-only reconcile
+        # authority. HTTP callers still require their own resumable identity;
+        # the worker independently rechecks the service grant and destination.
+        if not (
+            idempotency_scope == DRILL_SCOPE
+            and replacement_request.instance == "testing"
+            and authorization
+            == build_launchplane_reconcile_authorization(
+                product=replacement_request.product,
+                context=context,
+                authorized_at=authorization.authorized_at,
+            )
+            and replacement_request.data_source_mode == "production_restore"
+        ):
+            caller_binding(authorization.caller)
     return OdooStableTargetReplacementOperationRecord(
         schema_version=2,
         operation_id=build_odoo_stable_target_replacement_operation_id(

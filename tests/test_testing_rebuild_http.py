@@ -106,6 +106,16 @@ class TestingRebuildHttpFixture(unittest.TestCase):
 
 
 class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_external_request_cannot_choose_internal_scope_or_service_identity(self) -> None:
+        before = self.store.list_odoo_stable_target_replacement_operation_records()
+        for extra in (
+            {"idempotency_scope": "launchplane:odoo-testing-drill:v1"},
+            {"authorization": {"grant": "launchplane_reconcile"}},
+        ):
+            response = await self.call("POST", {**self.payload, **extra})
+            self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), before)
+
     async def test_native_preflight_exposes_fixed_checkpoint_without_private_exception(
         self,
     ) -> None:

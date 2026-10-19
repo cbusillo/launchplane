@@ -41,4 +41,6 @@ class OdooTestingDrillEvidence(BaseModel):
     disposal_pending: int = Field(default=0, ge=0)
     disposal_attention: int = Field(default=0, ge=0)
     disposal_pending_bindings: tuple[str, ...] = ()
+    retained_copy_bindings: tuple[str, ...] = ()
+    retained_candidate_namespaces: tuple[str, ...] = ()
     storage_status: Literal["unknown", "pass", "insufficient", "unconfigured"] = "unknown"

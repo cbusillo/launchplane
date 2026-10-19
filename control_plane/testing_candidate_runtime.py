@@ -17,6 +17,7 @@ from control_plane.contracts.odoo_stable_target_replacement import (
     missing_required_odoo_modules_from_artifact,
 )
 from control_plane.contracts.odoo_testing_source import NativeOdooTestingSource
+from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
 from control_plane.contracts.odoo_runtime_environment import merge_required_odoo_addons_path
 from control_plane.contracts.runtime_identity import RuntimeIdentity, runtime_identity_env
 from control_plane.contracts.testing_candidate import TestingCandidateAllocation
@@ -204,6 +205,7 @@ def candidate_runtime_inputs(
     artifact_id: str,
     source: CandidateSource,
     admitted_profile: LaunchplaneProductProfileRecord | None = None,
+    drill_storage_budget: OdooTestingDrillStorageBudget | None = None,
 ) -> TestingCandidateRuntimeInputs:
     """Read managed inputs only; no secret write, target adoption or live mutation."""
     if allocation.intent_sha256 != candidate_application_intent(
@@ -313,8 +315,12 @@ def candidate_runtime_inputs(
             request_sha256=allocation.intent_sha256,
             omitted_runtime_keys=tuple(sorted(omitted)),
             prepared_at=allocation.created_at.isoformat(),
+            reconcile_requested_at=previous.generation.reconcile_requested_at
+            if previous is not None and previous.generation is not None
+            else allocation.created_at.isoformat(),
             source_mode="container-export" if source == "production" else "ssh",
             source_binding_sha256=source_binding,
+            drill_storage_budget=drill_storage_budget,
         )
     )
     runtime_selection = RuntimeEnvironmentSetExpectation(

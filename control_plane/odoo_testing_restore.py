@@ -6,7 +6,7 @@ import json
 from control_plane._odoo_testing_storage_program import STORAGE_MAINTENANCE_LIBRARY
 from control_plane._odoo_copy_runtime_guard import COPY_RUNTIME_INSPECTION_LIBRARY
 from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
-from typing import Literal, TypeVar, TypedDict
+from typing import TYPE_CHECKING, Literal, TypeVar, TypedDict
 from control_plane._odoo_website_settings_program import WEBSITE_SETTINGS_PROGRAM
 from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_COPY_CHUNK_BYTES
 from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_COPY_ARTIFACT_BYTES
@@ -28,6 +28,9 @@ from control_plane.odoo_connection_isolation import connection_isolation_library
 from control_plane.contracts.odoo_stable_target_replacement import (
     OdooTargetReplacementPlanBlockerCode,
 )
+
+if TYPE_CHECKING:
+    from control_plane.contracts.testing_publication import TestingPublicationRecord
 
 
 Requirement = TypeVar(
@@ -113,11 +116,21 @@ def fresh_testing_override_record(
 
 
 def fresh_testing_mode_refusal(
-    generation: FreshOdooTestingGeneration | None, mode: str
+    generation: FreshOdooTestingGeneration | None,
+    mode: str,
+    *,
+    publication: "TestingPublicationRecord | None" = None,
 ) -> tuple[OdooTargetReplacementPlanBlockerCode, str] | None:
     if generation is None:
         return None
-    if not generation.reconcile_requested_at:
+    published_completion = (
+        publication is not None
+        and publication.state == "applied"
+        and bool(generation.completed_at)
+        and publication.plan.after.generation is not None
+        and generation_snapshot_matches(generation, publication.plan.after.generation)
+    )
+    if not generation.reconcile_requested_at and not published_completion:
         return (
             "fresh_testing_bootstrap_incomplete",
             "Finish the original bootstrap route and queue preparation before executing this generation.",

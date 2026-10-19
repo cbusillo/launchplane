@@ -5,19 +5,156 @@ from contextlib import redirect_stdout
 from copy import deepcopy
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
 from typing import Any
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 from control_plane.dokploy.testing_retained_copy import (
+    native_storage_capacity,
     qualify_retained_copy,
     retained_copy_host_program,
 )
 from control_plane.odoo_testing_restore import FRESH_TESTING_LOCAL_CREDENTIAL_KEYS
+from control_plane._odoo_testing_storage_program import FILESYSTEM_CAPACITY_LIBRARY
+
+
+class NativeAllocationCapacityTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.root = Path(self.enterContext(TemporaryDirectory())).resolve()
+        for name in ("volumes", "overlay2", "candidate-db", "candidate-data"):
+            (self.root / name).mkdir()
+        self.spec = {
+            "candidate_namespace": "lp-testing-" + "a" * 32,
+            "candidate_allocated": False,
+            "candidate_resources_binding": "b" * 64,
+            "budget": {
+                "database_bytes": 40,
+                "filestore_bytes": 40,
+                "staging_bytes": 40,
+                "reserve_bytes": 1,
+            },
+        }
+        self.mounts = ""
+        original = Path.read_text
+        self.enterContext(
+            patch.object(
+                Path,
+                "read_text",
+                lambda path, *args, **kwargs: (
+                    self.mounts
+                    if str(path) == "/proc/self/mountinfo"
+                    else original(path, *args, **kwargs)
+                ),
+            )
+        )
+
+    def docker(self, *arguments: str) -> bytes:
+        if arguments[0] == "info":
+            return json.dumps({"DockerRootDir": str(self.root), "Driver": "overlay2"}).encode()
+        name = arguments[-1]
+        return json.dumps(
+            [
+                {
+                    "Name": name,
+                    "Driver": "local",
+                    "Options": {},
+                    "Labels": {
+                        "io.launchplane.testing-resources": self.spec["candidate_resources_binding"]
+                    },
+                    "Mountpoint": str(
+                        self.root / ("candidate-db" if name.endswith("-db") else "candidate-data")
+                    ),
+                }
+            ]
+        ).encode()
+
+    def test_initial_allocation_uses_new_volume_and_layer_backings_without_borrowing_old_runner(
+        self,
+    ) -> None:
+        observed: list[tuple[Path, int]] = []
+
+        def reject(demands: list[tuple[Path, int]], _reserve: int) -> bool:
+            observed.extend(demands)
+            return False
+
+        self.assertFalse(
+            native_storage_capacity(
+                self.spec,
+                self.docker,
+                reject,
+            )
+        )
+        self.assertEqual(
+            observed,
+            [
+                (self.root / "volumes", 40),
+                (self.root / "volumes", 40),
+                (self.root / "overlay2", 40),
+            ],
+        )
+
+    def test_resume_uses_exact_candidate_mountpoints_and_refuses_nested_staging_mounts(
+        self,
+    ) -> None:
+        self.spec["candidate_allocated"] = True
+        observed: list[tuple[Path, int]] = []
+
+        def accept(demands: list[tuple[Path, int]], _reserve: int) -> bool:
+            observed.extend(demands)
+            return True
+
+        self.assertTrue(
+            native_storage_capacity(
+                self.spec,
+                self.docker,
+                accept,
+            )
+        )
+        self.assertEqual(observed[0][0], self.root / "candidate-db")
+        self.assertEqual(observed[1][0], self.root / "candidate-data")
+        self.mounts = f"1 0 1:1 / {self.root}/overlay2/foreign/diff rw - ext4 /dev/other rw\n"
+        with self.assertRaises(ValueError):
+            native_storage_capacity(
+                self.spec, self.docker, lambda *_: self.fail("Unproved backing admitted")
+            )
+
+    def test_allocated_low_space_volume_cannot_borrow_free_bytes_from_docker_root(self) -> None:
+        self.spec["candidate_allocated"] = True
+        namespace: dict[str, Any] = {"Path": Path, "os": os}
+        exec(FILESYSTEM_CAPACITY_LIBRARY, namespace)
+
+        def check(demands: list[tuple[Path, int]], reserve: int) -> bool:
+            with (
+                patch.object(
+                    Path,
+                    "stat",
+                    side_effect=lambda path: SimpleNamespace(
+                        st_dev={
+                            "candidate-db": 1,
+                            "candidate-data": 2,
+                            "overlay2": 3,
+                        }[path.name]
+                    ),
+                    autospec=True,
+                ),
+                patch.object(
+                    os,
+                    "statvfs",
+                    side_effect=lambda path: SimpleNamespace(
+                        f_bavail=20 if path.name == "candidate-db" else 10000,
+                        f_frsize=1,
+                    ),
+                ),
+            ):
+                return bool(namespace["filesystem_capacity"](demands, reserve))
+
+        self.assertFalse(native_storage_capacity(self.spec, self.docker, check))
 
 
 class RetainedTestingCopyTests(unittest.TestCase):

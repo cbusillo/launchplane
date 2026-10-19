@@ -1,7 +1,10 @@
 """Read testing copy custody and private health without a provider mutation."""
 
 import inspect
+from collections.abc import Callable
+from pathlib import Path
 from control_plane._odoo_copy_runtime_guard import VOLUME_BACKING_INSPECTION_LIBRARY
+from control_plane._odoo_testing_storage_program import FILESYSTEM_CAPACITY_LIBRARY
 from typing import Any
 
 from control_plane.dokploy.native_copy_stream import _read_remote
@@ -126,10 +129,74 @@ assert isinstance(payload,dict) and payload.get('runtime_identity')==spec['ident
 """
 
 
+def native_storage_capacity(
+    spec: dict[str, Any],
+    docker: Callable[..., bytes],
+    capacity: Callable[[list[tuple[Path, int]], int], bool],
+) -> bool:
+    """Prove fresh default-local allocation and overlay2 staging backing."""
+    import json
+    import re
+
+    budget = spec["budget"]
+    if set(budget) != {
+        "database_bytes",
+        "filestore_bytes",
+        "staging_bytes",
+        "reserve_bytes",
+    } or any(type(value) is not int or value <= 0 for value in budget.values()):
+        raise ValueError("Testing storage requirements are unavailable")
+    namespace = spec["candidate_namespace"]
+    if not re.fullmatch(r"lp-testing-[a-f0-9]{32}", namespace):
+        raise ValueError("Testing allocation namespace is invalid")
+    info = json.loads(docker("info", "--format", "{{json .}}"))
+    if info.get("Driver") != "overlay2":
+        raise ValueError("Testing staging allocation driver is unverified")
+    root = Path(info["DockerRootDir"]).resolve(strict=True)
+    volume_root, overlay_root = root / "volumes", root / "overlay2"
+    for path in (volume_root, overlay_root):
+        if path.resolve(strict=True) != path:
+            raise ValueError("Testing allocation backing is redirected")
+    # New overlay2 upper directories are made under this backing. A nested
+    # mount on a diff/work directory would invalidate that topology; mounted
+    # container merged views do not back writable-layer allocation.
+    for line in Path("/proc/self/mountinfo").read_text().splitlines():
+        fields = line.split()
+        mount = Path(re.sub(r"\\([0-7]{3})", lambda item: chr(int(item[1], 8)), fields[4]))
+        if mount != overlay_root and mount.is_relative_to(overlay_root):
+            if mount.name != "merged" or fields[fields.index("-") + 1] != "overlay":
+                raise ValueError("Testing staging allocation has an unsupported nested mount")
+    demands = []
+    for suffix, size in (("-db", budget["database_bytes"]), ("-data", budget["filestore_bytes"])):
+        name = namespace + suffix
+        if spec["candidate_allocated"]:
+            volume = json.loads(docker("volume", "inspect", name))[0]
+            if (
+                volume.get("Name") != name
+                or volume.get("Driver") != "local"
+                or volume.get("Options") not in (None, {})
+                or (volume.get("Labels") or {}).get("io.launchplane.testing-resources")
+                != spec["candidate_resources_binding"]
+            ):
+                raise ValueError("Original testing allocation backing is unverified")
+            backing = Path(volume["Mountpoint"]).resolve(strict=True)
+        else:
+            # Default local volumes allocate at these new names. A preexisting
+            # path belongs to custody reconciliation, never a capacity guess.
+            if (volume_root / name).exists():
+                raise ValueError("Testing allocation path already exists")
+            backing = volume_root
+        demands.append((backing, size))
+    demands.append((overlay_root, budget["staging_bytes"]))
+    return capacity(demands, budget["reserve_bytes"])
+
+
 def retained_copy_host_program() -> str:
     return (
-        "import base64,hashlib,json,subprocess,sys\nfrom typing import Any\nfrom pathlib import Path\n"
+        "import base64,hashlib,json,os,subprocess,sys\nfrom typing import Any\nfrom collections.abc import Callable\nfrom pathlib import Path\n"
         + VOLUME_BACKING_INSPECTION_LIBRARY
+        + FILESYSTEM_CAPACITY_LIBRARY
+        + inspect.getsource(native_storage_capacity)
         + inspect.getsource(qualify_retained_copy)
         + "\nHEALTH_PROGRAM="
         + repr(RETAINED_PRIVATE_HEALTH_PROGRAM)
@@ -157,7 +224,9 @@ try:
     result['physical_binding']=hashlib.sha256(json.dumps({'logical':result['resource_binding'],'backings':backings},sort_keys=True,separators=(',',':')).encode()).hexdigest()
     if spec.get('physical_binding') and result['physical_binding']!=spec['physical_binding']:
         raise ValueError('Retained testing backing storage changed')
-    if spec['mode']=='readiness':
+    if spec['mode']=='capacity':
+        result['capacity']=native_storage_capacity(spec,docker,filesystem_capacity)
+    elif spec['mode']=='readiness':
         if result['web_stopped'] or not spec.get('identity') or not spec.get('health_path','').startswith('/'):
             raise ValueError('Retained private health requires the original running process')
         web=next(item for item in inventory() if item['Id']==result['web_id'])

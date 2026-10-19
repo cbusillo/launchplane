@@ -2,7 +2,23 @@
 
 MAX_DISPOSALS_PER_PASS = 4
 
-STORAGE_MAINTENANCE_LIBRARY = r"""
+FILESYSTEM_CAPACITY_LIBRARY = r"""
+def filesystem_capacity(demands, reserve_bytes):
+    required, available = {}, {}
+    for path, size in demands:
+        path = Path(path).resolve(strict=True)
+        device = path.stat().st_dev
+        stat = os.statvfs(path)
+        free = stat.f_bavail * stat.f_frsize
+        if size:
+            required[device] = required.get(device, 0) + size
+        available[device] = min(available.get(device, free), free)
+    return all(available[device] >= size + reserve_bytes for device, size in required.items())
+"""
+
+STORAGE_MAINTENANCE_LIBRARY = (
+    FILESYSTEM_CAPACITY_LIBRARY
+    + r"""
 def storage_maintenance(spec, containers):
     from datetime import datetime, timezone
     gen = spec['generation']
@@ -25,7 +41,7 @@ def storage_maintenance(spec, containers):
             results.append(status or 'disposed')
         except Exception:
             results.append('deferred')
-    capacity = storage_capacity(spec, containers, maintenance['budget'])
+    capacity = storage_capacity(spec, containers, maintenance['budget']) if maintenance.get('check_capacity', True) else True
     print(sys.argv[2] + json.dumps({'type':'complete', 'disposals':results, 'capacity':capacity}), flush=True)
 
 
@@ -34,16 +50,9 @@ def storage_capacity(spec, containers, budget, staged_bytes=0, assembly_bytes=0,
     gen = spec['generation']
     # Group demands on the same actual backing filesystem. Comparing each
     # volume independently would admit two allocations against the same free bytes.
-    required = {}
-    available = {}
+    demands = []
     def demand(path, size):
-        path = Path(path).resolve(strict=True)
-        device = path.stat().st_dev
-        stat = os.statvfs(path)
-        free = stat.f_bavail * stat.f_frsize
-        if size:
-            required[device] = required.get(device, 0) + size
-        available[device] = min(available.get(device, free), free)
+        demands.append((path, size))
     for suffix, size in (('-db', budget['database_bytes']), ('-data', budget['filestore_bytes'])):
         volume = json.loads(docker('volume', 'inspect', gen['namespace'] + suffix))[0]
         demand(volume['Mountpoint'], size)
@@ -64,6 +73,6 @@ def storage_capacity(spec, containers, budget, staged_bytes=0, assembly_bytes=0,
         if not upper:
             raise RuntimeError('Database staging backing is unavailable')
         demand(upper, database_staging_bytes)
-    capacity = all(available[device] >= size + budget['reserve_bytes'] for device, size in required.items())
-    return capacity
+    return filesystem_capacity(demands, budget['reserve_bytes'])
 """.replace("__MAX_DISPOSALS__", str(MAX_DISPOSALS_PER_PASS))
+)

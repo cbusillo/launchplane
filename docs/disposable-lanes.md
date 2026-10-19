@@ -2054,12 +2054,16 @@ production change enables the rule.
 
 ## Scheduled Odoo testing rebuild drill
 
-The API service owns a daily drill for each enabled active Odoo testing lane. It queues
-an ordinary durable target-replacement operation; the Odoo worker performs the
-existing upstream restore, module work, integration sanitization, website
-exclusions and health checks. There is no GitHub workflow or product-repository
-call. The drill uses the lane's recorded artifact and same-product production
-source. Platform-input updates remain the separate devkit#131 grouped-update
+The API service owns a daily drill for each enabled active Odoo testing lane. New
+slots queue the existing native `replace-and-cutover` target-replacement action
+with `production_restore`. The Odoo worker prepares an independent private copy,
+restores the same-product production source, sanitizes integrations, applies
+module work and website exclusions, verifies health, and switches the existing
+testing address. The predecessor keeps serving during preparation. Queueing
+preserves the current database, runtime and generation; native publication owns
+their eventual atomic adoption. There is no GitHub workflow or product-repository
+call. The drill uses the lane's recorded artifact and existing same-product
+production restore policy. Platform-input updates remain the separate devkit#131 grouped-update
 workstream; a drill does not rebuild or change the product artifact's inputs.
 
 The invariant is repeatable rebuildability, independently of a currently healthy
@@ -2114,7 +2118,23 @@ lanes cannot enable the flag. An unchanged failed prerequisite produces no
 repeated admission; corrected facts/configuration can retry the same daily slot
 before an operation has been queued.
 
-Queueing archives the prior generation and planned copy in the private slot
+Native worker admission records the existing scoped safety, worker attempt and
+accepted usage revision without selecting a legacy database or changing the
+serving runtime. That admission survives within the same continuously leased
+attempt. Holds, newer use reports, needed-copy and resource protections are
+rechecked; reclaim collects full original-copy admission again. Immediately
+before an actual new forward route write, including after route preparation,
+the worker reads sign-ins on the original witnessed testing database since its
+admission read began, bounded by copy preparation and the existing daily window.
+New positive evidence is evaluated by the current shared usage rule and cannot
+borrow the accepted historical revision. A fixed receiver's resources-qualified
+UNKNOWN remains UNKNOWN; malformed resource evidence or an unreadable hold
+refuses. Already-dispatched route observation and inverse recovery preserve
+their original fences without a new forward admission.
+
+Historical `recreate-in-place` operations retain their original continuation;
+new slots do not enter that orchestration. For those historical receipts,
+queueing archives the prior generation and planned copy in the private slot
 receipt without changing the running lane's settings. After its hold check,
 the worker atomically selects a new service-named testing database and matching
 filestore path and activates that exact generation under its current lease.
@@ -2159,11 +2179,21 @@ or a staff hold therefore protects the lane even after queueing. Protect a
 lane through the existing staff-testing hold before starting a session. Unknown
 or expired observations cannot substitute for that hold.
 
-A drill can stop the testing web service, replace its disposable contents, load
-the production source with the existing bounded read-only export, and consume
-testing storage. It never changes production data, ports, storage, routes,
+The native drill stops the predecessor runtime only after verified cutover and
+publication. It retains that copy's physical storage and original custody;
+whole-copy deletion is outside the native rebuild. Failed or abandoned private
+candidates also retain their original allocation and any credentials they may
+have received. Environment evidence exposes original retained-copy bindings and
+candidate namespaces, including custody awaiting retirement or left by failure.
+Custody evidence alone does not claim a stopped runtime or completed restore.
+These copies require no new per-copy manual acknowledgement. Fresh headroom
+gates each new allocation, and exhaustion refuses another copy; source tests do
+not prove indefinite daily operation.
+
+A drill consumes testing storage and loads production through the existing
+bounded read-only export. It never changes production data, ports, storage, routes,
 credentials or permissions. Its copy has live keys and outbound connections
-removed before the first registry process. The immediate completed predecessor,
+removed before the first registry process. For historical in-place copies, the immediate completed predecessor,
 initial bootstrap database and current selection are retained. Disposal runs
 before a later drill selects its new database, independently of that new copy's
 health. Up to four outstanding slot receipts are reconciled per worker pass,
@@ -2173,6 +2203,10 @@ inspection. The same host lock excludes restore and cleanup processes. A copy
 must have its exact committed database witness; DROP uses neither FORCE nor
 connection termination. A connected database or failed filestore removal stays
 deferred. No receipt or failed raw-copy evidence is erased.
+This bounded database disposal reconciles only original in-project legacy
+receipts. Native predecessor targets and their volumes are never interpreted as
+legacy databases. With no eligible legacy backlog, native preparation does not
+run a legacy receiver or borrow its old-pool capacity verdict.
 Copies from different resource generations, protected current/predecessor copies,
 and legacy absent databases with a remaining filestore but no host write-ahead
 receipt become retained attention. They are never deleted, remain queryable and
@@ -2208,7 +2242,8 @@ capture's assembly remains required. Set these
 working-headroom requirements through the existing authenticated product-profile
 write path, preserving the rest of the current profile. There are no invented
 real sizes, default budgets, new grants or assumed observation lifetimes.
-Unconfigured requirements refuse a drill before database selection. Choose the
+Unconfigured requirements refuse a native drill before allocation, or a historical
+in-place drill before database selection. Choose the
 requirements from qualified source size and restore/staging overhead; they are
 an explicit capacity requirement, **not a quota or a claim about future source
 growth**. A budget is not established by a healthy deployment or yesterday's
@@ -2222,7 +2257,19 @@ does not authorize disposal: any old-copy deletion still requires fresh general
 custody facts for its original receipt; drill-scoped successful-login evidence
 is not silently generalized to other copies.
 
-On every new worker attempt, the shared resource guard reads current filesystem
+Before native allocation, fixed host inspection checks the daemon's actual
+default-local volume allocation backing and supported `overlay2` staging
+topology. Redirected or unsupported layouts remain unverified. A resumed empty
+allocation uses its exact volume mountpoints, driver/options and original
+resource labels. An uncertain original storage dispatch is read back before
+capacity qualification; existing paths never authorize another preparation.
+Demands sharing a backing device are summed with its reserve. The original slot
+records the native capacity result and its operation, attempt, intent, placement
+and budget. The existing restore guard repeats actual backing and staging checks
+before capture. A populated candidate resumes under its original custody rather
+than demanding another whole-copy allocation.
+
+For historical in-place operations, the shared resource guard reads current filesystem
 capacity, using non-root available bytes and the actual backing device. Demands
 for DB, filestore and capture staging on the same filesystem are summed before
 adding its reserve. SSH capture accounts for both host staging and the runner's
@@ -2248,9 +2295,12 @@ still gates a passing operation and generation completion.
 `testing_rebuild_drill` evidence: queued/pass/fail/skipped, observation time,
 operation/deployment IDs, failing step, trace, alert delivery status, pending
 disposal count, up to four original pending discard-copy bindings,
-retained-attention count and capacity status. A pass
-requires the worker's health result and this exact generation's committed copy
-completion. It does not replace monitor freshness or prove platform updates.
+retained-attention count and capacity status. Native evidence also includes up
+to four original `retained_copy_bindings` and `retained_candidate_namespaces`.
+A pass requires the worker's health result and the original operation's committed
+copy completion and deployment. Native publication supplies that immutable
+evidence even if another rebuild moved the lane before the scheduler observed
+completion. It does not replace current monitor freshness or prove platform updates.
 Failures use the lane's existing enabled Discord notification destinations and
 managed sender. No destination or unreadable sender leaves `alert_delivered=false`;
 retry occurs at five-minute intervals and remains visible without blocking later
@@ -2279,7 +2329,8 @@ facts, delete the initial copy or change the source transport to obtain a pass.
 Once a drill generation exists, older images cannot interpret its additional
 identity fields. Retain this image or a compatible successor and forward-fix;
 do not erase generation history or restore an old DB snapshot to clear a failure.
-Staff holds provide the supported per-lane maintenance pause. A held queued
+Staff holds provide the supported per-lane maintenance pause. The following
+database-selection rollback applies only to historical in-place operations. A held queued
 operation has not selected its new database. A refusal after selection but before
 any provider dispatch can restore the exact previous generation and runtime
 atomically with the terminal operation or its no-effect source-read retry back
@@ -2300,7 +2351,14 @@ compatible successor for recovery. Older images cannot interpret those fields;
 forward-fix rather than removing custody evidence to roll back. Disabling the
 existing drill flag prevents new scheduled captures and changes no retained copy.
 
-For a deliberately retained copy, the existing authenticated profile path accepts
+Existing native candidates retain their exact immutable generation and plan,
+including an older absent bootstrap-request timestamp. For an already published,
+completed native generation, ordinary maintenance can use its exact fully
+qualified applied publication instead of a legacy bootstrap receipt. This
+supplies no fabricated witness or receipt and does not qualify an unfinished or
+unproved generation.
+
+For a deliberately retained legacy in-project copy, the existing authenticated profile path accepts
 `odoo_testing_drill_storage.retained_copy_bindings`, a list of exact original
 committed discard-copy bindings exposed as `disposal_pending_bindings` in that
 existing environment evidence. The bounded service

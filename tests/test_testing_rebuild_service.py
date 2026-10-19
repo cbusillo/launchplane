@@ -160,7 +160,7 @@ def exercise_published_copy_maintenance(
     case.assertEqual(current.target_id, before.target_id)
     case.assertEqual(current.binding, before.binding)
     case.assertEqual(fixture.store.list_secret_records(), credentials)
-    case.assertIsNone(current.generation)
+    case.assertEqual(current.generation, before.generation)
     case.assertEqual(
         published_testing_copy(fixture.store, product=candidate.product, context=candidate.context),
         publication,
@@ -219,6 +219,47 @@ class NativeTestingRequestTests(unittest.TestCase):
                         **changes,
                     }
                 )
+
+
+class HistoricalPublishedTestingCopyTests(unittest.TestCase):
+    def test_original_published_blank_receipt_supports_maintenance_only_with_exact_proof(
+        self,
+    ) -> None:
+        from control_plane import testing_candidate_runtime as compiler
+        from control_plane.odoo_testing_restore import (
+            FreshOdooTestingGeneration,
+            fresh_testing_mode_refusal,
+        )
+
+        fixture = publication_tests.TestingPublicationTests()
+        fixture.source_mode = "upstream"
+
+        def original_generation(**kwargs: Any) -> FreshOdooTestingGeneration:
+            return FreshOdooTestingGeneration(**{**kwargs, "reconcile_requested_at": ""})
+
+        with patch.object(compiler, "FreshOdooTestingGeneration", side_effect=original_generation):
+            fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.prepare()
+        publication = fixture.publish()
+        generation = publication.plan.after.generation
+        assert generation is not None
+        self.assertFalse(generation.reconcile_requested_at)
+        self.assertIsNotNone(fresh_testing_mode_refusal(generation, "existing"))
+        self.assertIsNone(
+            fresh_testing_mode_refusal(generation, "existing", publication=publication)
+        )
+        self.assertIsNotNone(
+            fresh_testing_mode_refusal(generation, "upstream_restore", publication=publication)
+        )
+        for unproved in (
+            generation.model_copy(update={"completed_at": ""}),
+            generation.model_copy(update={"target_id": "another-target"}),
+        ):
+            self.assertIsNotNone(
+                fresh_testing_mode_refusal(unproved, "existing", publication=publication)
+            )
+        exercise_published_copy_maintenance(self, fixture)
 
 
 class PublishedTestingCopyTests(unittest.TestCase):

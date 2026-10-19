@@ -24843,6 +24843,22 @@
             "title": "Operation Id",
             "type": "string"
           },
+          "retained_candidate_namespaces": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Retained Candidate Namespaces",
+            "type": "array"
+          },
+          "retained_copy_bindings": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Retained Copy Bindings",
+            "type": "array"
+          },
           "status": {
             "enum": [
               "queued",

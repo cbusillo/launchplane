@@ -88,6 +88,7 @@ from control_plane.provider_operations import (
 )
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_candidate_allocation import (
+    candidate_resources,
     observe_candidate_creation,
     observe_candidate_storage,
     prepare_candidate_storage,
@@ -661,6 +662,39 @@ class NativeTestingRebuildExecution:
         self.check_lock()
         self.lease.assert_current()
         self.adapter.authorize("testing_rebuild_checkpoint")
+        if not recovery and not self.cutover_started():
+            from control_plane.odoo_testing_drill import require_drill_checkpoint
+
+            require_drill_checkpoint(self.store, self.operation)
+            from control_plane.odoo_testing_drill import DRILL_SCOPE
+
+            if self.operation.idempotency_scope == DRILL_SCOPE:
+                current_lane = next(
+                    (
+                        lane
+                        for lane in self.store.read_product_profile_record(
+                            self.operation.product
+                        ).lanes
+                        if (lane.context, lane.instance) == (self.operation.context, "testing")
+                    ),
+                    None,
+                )
+                admitted_lane = next(
+                    lane
+                    for lane in self.intent.profile.lanes
+                    if (lane.context, lane.instance) == (self.operation.context, "testing")
+                )
+                if (
+                    current_lane is None
+                    or not current_lane.odoo_testing_drill_enabled
+                    or any(
+                        getattr(current_lane, field) != getattr(admitted_lane, field)
+                        for field in ("odoo_testing_drill_storage", "odoo_data_policy")
+                    )
+                ):
+                    raise NativeTestingRebuildAdmissionChanged(
+                        "The scheduled testing restore policy changed."
+                    )
         if not recovery and not is_exclusive_product_context(
             context=self.operation.context,
             product=self.operation.product,
@@ -742,7 +776,13 @@ class NativeTestingRebuildExecution:
             raise NativeTestingRebuildAdmissionChanged(
                 "The lane has a recorded protected copy or shared production resource."
             )
-        if not recovery and not self.cutover_started():
+        from control_plane.odoo_testing_drill import DRILL_SCOPE
+
+        if (
+            not recovery
+            and not self.cutover_started()
+            and self.operation.idempotency_scope != DRILL_SCOPE
+        ):
             usage = read_odoo_testing_usage(
                 target=self.intent.before.target,
                 target_id=self.intent.before.target_id,
@@ -893,6 +933,8 @@ class NativeTestingRebuildExecution:
         self, allocation: TestingCandidateAllocation
     ) -> TestingCandidateRuntimeInputs:
         try:
+            from control_plane.odoo_testing_drill import DRILL_SCOPE
+
             return candidate_runtime_inputs(
                 root=self.root,
                 store=self.store,
@@ -900,6 +942,13 @@ class NativeTestingRebuildExecution:
                 artifact_id=self.operation.request.artifact_id,
                 source=rebuild_source(self.operation),
                 admitted_profile=self.intent.profile,
+                drill_storage_budget=next(
+                    lane.odoo_testing_drill_storage
+                    for lane in self.intent.profile.lanes
+                    if (lane.context, lane.instance) == (self.operation.context, "testing")
+                )
+                if self.operation.idempotency_scope == DRILL_SCOPE
+                else None,
             )
         except CandidateRuntimeInputsChanged as error:
             raise NativeTestingRebuildAdmissionChanged(
@@ -1032,7 +1081,77 @@ class NativeTestingRebuildExecution:
                         "The original candidate allocation is still unknown."
                     )
                 allocation = observed
+            if allocation.effect == "storage" and not allocation.resources_binding_sha256:
+                # Read the original dispatch before asking for another copy's
+                # headroom. Existing paths may be that dispatch's successful
+                # output; their presence is never permission to prepare again.
+                allocation = observe_candidate_storage(
+                    root=self.root,
+                    store=self.store,
+                    allocation=allocation,
+                    lease=self.lease,
+                    guard=self.guard,
+                )
             if allocation.application is None:
+                from control_plane.odoo_testing_storage import prepare_drill_storage
+                from control_plane.odoo_testing_drill import DRILL_SCOPE, DrillPrerequisite
+
+                if self.operation.idempotency_scope == DRILL_SCOPE:
+                    # Keep the original bounded legacy cleanup ledger. Native
+                    # predecessors remain in publication custody, never passed
+                    # to the in-project database deletion program.
+                    prepare_drill_storage(
+                        self.store,
+                        self.operation,
+                        self.root,
+                        checkpoint=lambda: self.adapter.authorize("testing_drill_storage"),
+                    )
+                    lane = next(
+                        lane
+                        for lane in self.intent.profile.lanes
+                        if (lane.context, lane.instance) == (self.operation.context, "testing")
+                    )
+                    budget = lane.odoo_testing_drill_storage
+                    if budget is None:
+                        raise DrillPrerequisite("testing_storage_budget_required")
+                    try:
+                        capacity_readback = retained_copy_operation(
+                            host=self.host,
+                            token=self.token,
+                            server_id=self.intent.server_id,
+                            payload={
+                                **self.retained_payload("capacity"),
+                                "budget": budget.model_dump(exclude={"retained_copy_bindings"}),
+                                "candidate_namespace": allocation.namespace,
+                                "candidate_allocated": bool(allocation.resources_binding_sha256),
+                                "candidate_resources_binding": candidate_resources(
+                                    allocation
+                                ).binding_sha256,
+                            },
+                        )
+                    except ValueError as error:
+                        raise DrillPrerequisite("testing_storage_capacity_unverified") from error
+                    self.guard()
+                    self.store.update_odoo_testing_drill_receipt(
+                        self.operation.idempotency_key,
+                        datetime.now(UTC).timestamp(),
+                        {
+                            "storage_status": "pass"
+                            if capacity_readback.get("capacity") is True
+                            else "insufficient",
+                            "native_capacity": {
+                                "operation_id": self.operation.operation_id,
+                                "attempt": self.operation.attempt,
+                                "intent": self.intent.digest,
+                                "server_id": self.intent.server_id,
+                                "namespace": allocation.namespace,
+                                "old_physical_binding": self.intent.old.resource_binding,
+                                "budget": budget.model_dump(mode="json"),
+                            },
+                        },
+                    )
+                    if capacity_readback.get("capacity") is not True:
+                        raise DrillPrerequisite("testing_storage_capacity_insufficient")
                 allocation = prepare_candidate_storage(
                     root=self.root,
                     store=self.store,
@@ -1541,6 +1660,14 @@ class NativeTestingRebuildExecution:
         inverse_route = phase == "route:" + self.plan.old.copy_id
         assert isinstance(self.lease, ProviderEvidenceLease)
         evidence_lease = self.lease
+
+        def route_checkpoint(checkpoint_phase: str) -> None:
+            if forward_route and checkpoint_phase == phase:
+                from control_plane.odoo_testing_drill import require_native_drill_forward_use
+
+                require_native_drill_forward_use(self.store, self.operation)
+            self.lease.checkpoint_effect(checkpoint_phase)
+
         route_effect = (
             TestingRouteEffects(
                 controller=TestingRouteFenceController(
@@ -1548,7 +1675,7 @@ class NativeTestingRebuildExecution:
                     transport=self.transport,
                     execution=route_execution,
                     guard=lambda: self.guard(recovery=recovery),
-                    checkpoint=self.lease.checkpoint_effect,
+                    checkpoint=route_checkpoint,
                     lease_owner=lambda: evidence_lease.evidence_reservation().lease_owner,
                 ),
                 phase=phase,

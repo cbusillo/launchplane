@@ -536,10 +536,22 @@ class CandidateApplicationTests(unittest.TestCase):
         )
         self.fixture.assert_serving_unchanged()
         # Input changes cannot silently rebind a persisted candidate application.
+        original = inputs.plan.model_copy(
+            update={
+                "generation": inputs.plan.generation.model_copy(
+                    update={"reconcile_requested_at": ""}
+                )
+            }
+        )
         persisted = allocation.model_copy(
-            update={"application": TestingCandidateApplication(plan=inputs.plan)}
+            update={"application": TestingCandidateApplication(plan=original)}
         )
         self.store.compare_and_write_testing_candidate(allocation, persisted)
+        with (
+            patch.object(compiler, "native_testing_source_authority", return_value=authority),
+            patch.object(compiler, "resolve_native_testing_source", return_value=descriptor),
+        ):
+            self.assertEqual(self.inputs(persisted, "production").plan, original)
         changed = self.artifact.model_copy(update={"source_commit": "changed-commit"})
         self.store.write_artifact_manifest(changed)
         with (
@@ -548,6 +560,26 @@ class CandidateApplicationTests(unittest.TestCase):
             self.assertRaises(ValueError),
         ):
             self.inputs(persisted, "production")
+        self.fixture.assert_serving_unchanged()
+
+    def test_original_upstream_plan_keeps_its_blank_receipt_and_witness_on_readback(self) -> None:
+        from control_plane.odoo_testing_restore import generation_binding
+
+        allocation = self.allocate("upstream")
+        inputs = self.inputs(allocation, "upstream")
+        assert inputs.plan.generation is not None
+        generation = inputs.plan.generation.model_copy(update={"reconcile_requested_at": ""})
+        original = inputs.plan.model_copy(update={"generation": generation})
+        persisted = allocation.model_copy(
+            update={"application": TestingCandidateApplication(plan=original)}
+        )
+        self.store.compare_and_write_testing_candidate(allocation, persisted)
+        resumed = self.inputs(persisted, "upstream")
+        self.assertEqual(resumed.plan, original)
+        assert resumed.plan.generation is not None
+        self.assertEqual(
+            generation_binding(resumed.plan.generation), generation_binding(generation)
+        )
         self.fixture.assert_serving_unchanged()
 
     def test_undelivered_global_change_does_not_rebind_or_block_candidate(self) -> None:

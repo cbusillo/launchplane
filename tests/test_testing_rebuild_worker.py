@@ -36,6 +36,9 @@ from control_plane.dokploy import post_deploy, api, source
 from control_plane import testing_candidate_application as candidate_application
 from control_plane.testing_candidate_allocation import candidate_resources
 from control_plane.testing_candidate_runtime import candidate_runtime_inputs
+from control_plane.testing_candidate_runtime import candidate_application_intent
+from control_plane.testing_candidate_runtime import CandidateSource
+from control_plane.odoo_testing_restore import generation_binding
 from control_plane.testing_local_credentials import generation_bundle
 from control_plane.testing_serving_copy import (
     published_testing_copy,
@@ -50,10 +53,12 @@ from tests.test_testing_rebuild_service import exercise_published_copy_maintenan
 
 class NativeTestingWorkerTests(unittest.TestCase):
     database_url = ""
+    source_mode: CandidateSource = "empty"
 
     def setUp(self) -> None:
         self.fixture = publication_tests.TestingPublicationTests()
         self.fixture.database_url = self.database_url
+        self.fixture.source_mode = self.source_mode
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
         self.store, self.root = self.fixture.store, self.fixture.fixture.root
@@ -84,6 +89,13 @@ class NativeTestingWorkerTests(unittest.TestCase):
             artifact_id="old-build",
             source_git_ref="old-source",
         )
+        data_mode: Literal["empty", "production_restore", "upstream_restore"] = (
+            "production_restore"
+            if self.source_mode == "production"
+            else "upstream_restore"
+            if self.source_mode == "upstream"
+            else "empty"
+        )
         self.operation = OdooStableTargetReplacementOperationRecord(
             operation_id=candidate.operation_id,
             product=candidate.product,
@@ -96,7 +108,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
                 product=candidate.product,
                 instance="testing",
                 strategy="replace-and-cutover",
-                data_source_mode="empty",
+                data_source_mode=data_mode,
                 allow_empty_data=True,
                 artifact_id=self.fixture.fixture.artifact.artifact_id,
                 source_git_ref=self.fixture.fixture.artifact.source_commit,
@@ -138,6 +150,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.owned: dict[str, Any] | None = None
         self.effects: list[str] = []
         self.fail_public = False
+        self.capacity = True
         self.fail_after_stop = False
         self.old_private_healthy = True
         self.authorize = Mock()
@@ -266,6 +279,8 @@ class NativeTestingWorkerTests(unittest.TestCase):
 
     def physical(self, **kwargs: Any) -> dict[str, Any]:
         result = dict(self.retained)
+        if kwargs["payload"]["mode"] == "capacity":
+            result["capacity"] = getattr(self, "capacity", True)
         if kwargs["payload"]["mode"] == "readiness":
             result["healthy"] = self.old_private_healthy
         return result
@@ -1789,10 +1804,20 @@ class NativeTestingWorkerTests(unittest.TestCase):
     def test_next_rebuild_moves_to_desired_port_without_reverting_the_profile(self) -> None:
         self.complete_second_rebuild(change_port=True)
 
-    def complete_second_rebuild(self, *, change_port: bool = False) -> None:
+    def complete_second_rebuild(
+        self,
+        *,
+        change_port: bool = False,
+        scheduled: bool = False,
+        operation_id: str = "second-native-rebuild",
+        scheduled_at: float = 0,
+        interrupted_storage: bool = False,
+        expected_status: str = "pass",
+    ) -> None:
         import yaml
 
         self.assertEqual(self.execute().deploy_status, "pass")
+        previous_effects = list(self.effects)
         first = self.fixture.candidate
         previous = published_testing_copy(self.store, product=first.product, context=first.context)
         assert previous is not None
@@ -1805,30 +1830,63 @@ class NativeTestingWorkerTests(unittest.TestCase):
                 published_testing_copy(self.store, product=first.product, context=first.context)
         before = self.current()
         secrets = self.store.list_secret_records()
-        operation_id = "second-native-rebuild"
+        queued = None
+        if scheduled:
+            from control_plane.odoo_testing_drill import OdooTestingDrillScheduler
+
+            OdooTestingDrillScheduler(
+                self.store, clock=lambda: scheduled_at or datetime.now(UTC).timestamp()
+            ).run_once()
+            queued = self.store.claim_next_odoo_stable_target_replacement_operation_record(
+                lease_owner="scheduled-native-fixture",
+                claimed_at=datetime.now(UTC).isoformat(),
+                lease_expires_at=(datetime.now(UTC) + timedelta(minutes=5)).isoformat(),
+            )
+            self.assertIsNotNone(queued)
+            assert queued is not None
+            operation_id = queued.operation_id
+            self.operation = queued
         namespace = testing_candidate_namespace(first.product, first.context, operation_id)
         candidate = first.model_copy(
             update={
                 "operation_id": operation_id,
                 "namespace": namespace,
                 "serving_target_id": first.compose_id,
-                "project_id": "second-project",
-                "environment_id": "second-environment",
-                "compose_id": "second-compose",
+                "project_id": namespace + "-project",
+                "environment_id": namespace + "-environment",
+                "compose_id": namespace + "-compose",
                 "application": None,
                 "resources_binding_sha256": "",
+                "intent_sha256": candidate_application_intent(
+                    product=first.product,
+                    context=first.context,
+                    artifact_id=self.operation.request.artifact_id,
+                    source=self.source_mode,
+                ),
             }
         )
         candidate = candidate.model_copy(
             update={"resources_binding_sha256": candidate_resources(candidate).binding_sha256}
         )
-        self.store.compare_and_write_testing_candidate(None, candidate)
+        self.store.compare_and_write_testing_candidate(
+            None,
+            candidate.model_copy(update={"resources_binding_sha256": ""})
+            if interrupted_storage
+            else candidate,
+        )
         inputs = candidate_runtime_inputs(
             root=self.root,
             store=self.store,
             allocation=candidate,
             artifact_id=self.operation.request.artifact_id,
-            source="empty",
+            source=self.source_mode,
+            drill_storage_budget=next(
+                lane.odoo_testing_drill_storage
+                for lane in self.store.read_product_profile_record(first.product).lanes
+                if (lane.context, lane.instance) == (first.context, "testing")
+            )
+            if scheduled
+            else None,
         )
         app_fixture = self.fixture.fixture
         app_fixture.allocation, app_fixture.compiled = candidate, inputs
@@ -1871,9 +1929,17 @@ class NativeTestingWorkerTests(unittest.TestCase):
             }
         )
         self.capture.side_effect = self.capture_function
-        self.operation = self.operation.model_copy(
-            update={"operation_id": operation_id, "idempotency_key": operation_id}
-        )
+        if scheduled:
+            assert queued is not None
+            self.operation = queued
+        else:
+            self.operation = self.operation.model_copy(
+                update={
+                    "operation_id": operation_id,
+                    "idempotency_key": operation_id,
+                    "idempotency_scope": "fixture",
+                }
+            )
         self.fixture.before, self.fixture.candidate = before, candidate
         self.fixture.route = compile_testing_route(
             product=first.product,
@@ -1898,7 +1964,9 @@ class NativeTestingWorkerTests(unittest.TestCase):
                 runtime_identity=inputs.plan.runtime_identity,
                 private_endpoint=self.fixture.route.new_backend,
                 deployment_id="candidate-deployment",
-                source_witness="empty:" + inputs.plan.digest,
+                source_witness=generation_binding(inputs.plan.generation)
+                if inputs.plan.generation
+                else "empty:" + inputs.plan.digest,
                 integration_isolation_verified=True,
                 credentials_verified=True,
                 observed_at=datetime.now(UTC),
@@ -1917,9 +1985,27 @@ class NativeTestingWorkerTests(unittest.TestCase):
             patch.object(candidate_application, "candidate_private_readiness", side_effect=ready),
             patch.object(service, "candidate_private_readiness", side_effect=ready),
         ):
-            self.assertEqual(self.execute().deploy_status, "pass")
+            result = self.execute()
+            self.assertEqual(result.deploy_status, expected_status)
+        if scheduled:
+            from control_plane.workflows.odoo_stable_operation_worker import (
+                _target_replacement_terminal_operation,
+            )
+
+            self.assertTrue(
+                self.store.complete_odoo_stable_target_replacement_operation_record(
+                    record=_target_replacement_terminal_operation(
+                        operation=self.operation,
+                        result=result,
+                        lease_owner=self.operation.lease_owner,
+                    ),
+                    lease_owner=self.operation.lease_owner,
+                )
+            )
+        if expected_status != "pass":
+            return
         self.assertEqual(app_fixture.effects, ["configure", "deploy", "restore"])
-        self.assertEqual(self.effects, ["switch-new", "stop-old"] * 2)
+        self.assertEqual(self.effects, previous_effects + ["switch-new", "stop-old"])
         current = self.current()
         self.assertEqual(current.binding.domains, before.binding.domains)
         self.assertEqual(self.store.list_secret_records(), secrets)

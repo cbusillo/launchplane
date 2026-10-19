@@ -153,6 +153,38 @@ class DrillUsageReadTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             read_drill_recent_signins(self.store, self.gen, datetime.now(timezone.utc).timestamp())
         self.inspect.assert_not_called()
+
+    def test_internal_since_is_clamped_to_copy_preparation_and_recent_window(self) -> None:
+        now = datetime.now(timezone.utc)
+        self.inspect.side_effect = lambda **kwargs: kwargs["receive"](
+            {"type": "complete", "recent_signins": False}
+        )
+        for since in (now - timedelta(hours=1), now - timedelta(days=3)):
+            read_drill_recent_signins(self.store, self.gen, now.timestamp(), since=since)
+            self.assertEqual(
+                datetime.fromisoformat(self.inspect.call_args.kwargs["spec"]["usage_since"]),
+                max(
+                    datetime.fromisoformat(self.gen.prepared_at),
+                    now - timedelta(seconds=DRILL_RECENT_USE_SECONDS),
+                    since,
+                ),
+            )
+        recent = self.gen.model_copy(
+            update={
+                "prepared_at": (now - timedelta(minutes=5)).isoformat(),
+                "completed_at": (now - timedelta(minutes=1)).isoformat(),
+            }
+        )
+        read_drill_recent_signins(
+            self.store, recent, now.timestamp(), since=now - timedelta(hours=1)
+        )
+        self.assertEqual(
+            datetime.fromisoformat(self.inspect.call_args.kwargs["spec"]["usage_since"]),
+            datetime.fromisoformat(recent.prepared_at),
+        )
+        for invalid in (now + timedelta(seconds=1), now.replace(tzinfo=None)):
+            with self.assertRaises(ValueError):
+                read_drill_recent_signins(self.store, self.gen, now.timestamp(), since=invalid)
         self.store.read_dokploy_target_id_record.return_value.target_id = self.gen.target_id
         self.inspect.side_effect = lambda **kw: kw["receive"](
             {"type": "complete", "recent_signins": False}

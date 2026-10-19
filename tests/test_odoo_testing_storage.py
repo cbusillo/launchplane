@@ -515,12 +515,13 @@ class HostCapacityTests(unittest.TestCase):
     def test_shared_backing_demands_are_summed_and_unknown_overlay_is_refused(self) -> None:
         namespace: dict[str, Any] = {"Path": Path, "os": os, "json": json}
         tree = ast.parse(STORAGE_MAINTENANCE_LIBRARY)
-        function = next(
+        functions: list[ast.stmt] = [
             node
             for node in tree.body
-            if isinstance(node, ast.FunctionDef) and node.name == "storage_capacity"
-        )
-        exec(compile(ast.Module(body=[function], type_ignores=[]), "<capacity>", "exec"), namespace)
+            if isinstance(node, ast.FunctionDef)
+            and node.name in {"filesystem_capacity", "storage_capacity"}
+        ]
+        exec(compile(ast.Module(body=functions, type_ignores=[]), "<capacity>", "exec"), namespace)
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
             for suffix in ("-data", "-db", "-staging"):

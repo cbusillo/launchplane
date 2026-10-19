@@ -55,6 +55,8 @@ def maintenance_spec(
     copies: list[dict[str, str]],
     budget: dict[str, int],
     expires_at: float,
+    *,
+    check_capacity: bool = True,
 ) -> dict[str, object]:
     """Only stored recipient authority; host code independently inspects every consumer."""
     from control_plane.dokploy.compose import ODOO_DATABASE_DATA_DIRECTORY
@@ -86,7 +88,12 @@ def maintenance_spec(
         "copy_binding_sha256": generation_binding(generation),
         "copy_witness_parameter": TESTING_COPY_COMPLETION_PARAMETER,
         # Maintenance never restores or executes modules; no module intent is invented.
-        "storage_maintenance": {"copies": copies, "budget": budget, "expires_at": expires_at},
+        "storage_maintenance": {
+            "copies": copies,
+            "budget": budget,
+            "expires_at": expires_at,
+            "check_capacity": check_capacity,
+        },
     }
 
 
@@ -143,7 +150,9 @@ def prepare_drill_storage(
     )
     if slot is None:
         raise DrillPrerequisite("drill_receipt_missing")
-    if generation_binding(generation) == slot.response_payload.get("generation_binding"):
+    if not operation.is_native_testing_rebuild and generation_binding(
+        generation
+    ) == slot.response_payload.get("generation_binding"):
         # Original activation already consumed the admission. Recovery keeps its
         # same generation; it must not collect or delete against a different copy.
         return
@@ -159,7 +168,6 @@ def prepare_drill_storage(
         )
         raise DrillPrerequisite("testing_storage_budget_required")
     budget = lane.odoo_testing_drill_storage.model_dump(exclude={"retained_copy_bindings"})
-    binding = fresh_testing_authority_sha256(store, generation)
     pending = store.list_odoo_testing_disposal_receipts(operation.product, operation.context)
     copies = []
     selected = []
@@ -194,6 +202,18 @@ def prepare_drill_storage(
         if len(copies) == MAX_DISPOSALS_PER_PASS:
             break
     intent = storage_receipt(store, operation.operation_id)
+    if (
+        operation.is_native_testing_rebuild
+        and not copies
+        and not (intent is not None and intent.response_payload.get("phase") == "dispatching")
+    ):
+        # Different-project legacy copies retain their original custody. With
+        # no eligible legacy backlog, no legacy receiver or old-pool capacity
+        # requirement belongs to the independent native allocation.
+        for key in retained:
+            store.update_odoo_testing_drill_receipt(key, clock(), {"disposal_status": "retained"})
+        return
+    binding = fresh_testing_authority_sha256(store, generation)
     payload = {
         "binding": binding,
         "copies": copies,
@@ -223,6 +243,7 @@ def prepare_drill_storage(
             copies,
             budget,
             safety.expires_at.timestamp() if safety is not None else 0,
+            check_capacity=not operation.is_native_testing_rebuild,
         )
         return (execute or execute_maintenance)(root, generation.target_id, spec, dispatch_guard)
 

@@ -22871,6 +22871,22 @@
             "title": "Operation Id",
             "type": "string"
           },
+          "retained_candidate_namespaces": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Retained Candidate Namespaces",
+            "type": "array"
+          },
+          "retained_copy_bindings": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Retained Copy Bindings",
+            "type": "array"
+          },
           "status": {
             "enum": [
               "queued",
@@ -22911,6 +22927,8 @@
           "disposal_pending_bindings",
           "observed_at",
           "operation_id",
+          "retained_candidate_namespaces",
+          "retained_copy_bindings",
           "status",
           "step",
           "storage_status",
