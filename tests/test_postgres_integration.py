@@ -25,6 +25,7 @@ from tests import test_testing_activation as testing_activation
 from tests import test_testing_hold_rehearsal as testing_hold_rehearsal
 from tests import test_application_state_volume as application_volume_tests
 from tests import test_testing_rebuild as testing_rebuild_tests
+from tests import test_testing_retry as testing_retry_tests
 from control_plane.contracts.testing_rebuild import TestingRebuildRecord
 from tests import test_merge_train_historical_completion_storage as historical_storage_tests
 from unittest.mock import Mock, patch
@@ -11976,6 +11977,55 @@ class RealPostgresPreviewReservationRecoveryTests(
 
     def database_url(self) -> str:
         return self.enterContext(_head_postgres_database())
+
+
+class RealPostgresTestingRetryTests(testing_retry_tests.TestingRetryTests):
+    def setUp(self) -> None:
+        self.database_url = self.enterContext(_head_postgres_database())
+        super().setUp()
+
+    def test_concurrent_same_key_commits_one_rearm_and_one_wakeup(self) -> None:
+        from control_plane.contracts.testing_retry import TestingRetryRearm
+        from control_plane.testing_retry import TestingRetryRequest, build_testing_retry_plan
+
+        body = self.reviewed()
+        plan = build_testing_retry_plan(
+            self.store, "site", TestingRetryRequest.model_validate(body)
+        )
+        rearm = TestingRetryRearm(
+            artifact_id=str(body["artifact_id"]),
+            context=plan.context,
+            after_operation_id=plan.after_operation_id,
+            lane_binding_sha256=plan.lane_binding_sha256,
+            recorded_at=plan.request.updated_at,
+            recorded_by="test-operator",
+            reason="Recover testing",
+        )
+        mutation = DbOnlyMutationRequest(
+            scope="test-operator",
+            route_path=testing_retry_tests.ROUTE,
+            idempotency_key="same-key",
+            request_fingerprint=plan.plan_sha256,
+            lease_owner="retry-commit",
+            response_status_code=202,
+            response_trace_id="retry-commit",
+            response_payload={"result": {"reconcile_requested": True}},
+        )
+        barrier = threading.Barrier(2)
+
+        def simultaneous(_: int) -> Any:
+            barrier.wait(timeout=10)
+            return self.store.commit_testing_retry_rearm(
+                expected=plan.request, rearm=rearm, mutation=mutation
+            )
+
+        before = self.store.read_product_reconcile_request("site:testing")
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            responses = tuple(executor.map(simultaneous, range(2)))
+        self.assertCountEqual([response[0] for response in responses], ["written", "replayed"])
+        self.assertEqual(responses[0][1], responses[1][1])
+        after = self.store.read_product_reconcile_request("site:testing")
+        self.assertEqual(after.request_count, before.request_count + 1)
 
 
 class RealPostgresTestingPublicIngressTests(public_ingress_tests.TestingPublicIngressTests):

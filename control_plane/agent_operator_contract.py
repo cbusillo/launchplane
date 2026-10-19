@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from control_plane.contracts.lane_service_restart import SERVICE_RESTART_ROUTE
+from control_plane.testing_retry import TESTING_RETRY_ROUTE
 from control_plane.private_testing_transport import ROUTE as PRIVATE_TESTING_TRANSPORT_ROUTE
 from control_plane.private_testing_activation import ROUTE as PRIVATE_TESTING_ACTIVATION_ROUTE
 from control_plane.contracts.odoo_walkthrough import WALKTHROUGH_ROUTE
@@ -97,6 +98,24 @@ class OperationSpec:
 
 
 OPERATION_SPECS = (
+    OperationSpec(
+        "GET",
+        TESTING_RETRY_ROUTE,
+        "Review recovery of an exhausted Odoo testing artifact using read authority; queue no work.",
+        ("service_api",),
+        ("read",),
+        "none",
+        (),
+    ),
+    OperationSpec(
+        "POST",
+        TESTING_RETRY_ROUTE,
+        "Review and re-arm the exhausted attempt budget for the exact verified Odoo testing artifact, retaining existing data and all operation history; the reconciler performs deployment.",
+        ("service_api",),
+        ("dry-run", "apply"),
+        "apply",
+        ("reviewed_plan_sha256",),
+    ),
     OperationSpec(
         "POST",
         TESTING_PRIVATE_INGRESS_ROUTE,

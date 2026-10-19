@@ -447,6 +447,11 @@ from control_plane.contracts.product_retirement import (
     product_retirement_secret_authority,
 )
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
+from control_plane.contracts.testing_retry import (
+    TestingRetryRearm,
+    TESTING_RETRY_REARM_SCOPE,
+    TESTING_RETRY_REARM_ROUTE,
+)
 from control_plane.contracts.product_reconcile import (
     PRODUCT_RECONCILE_REQUEST_STATES,
     GitHubAppWebhookDeliveryRecord,
@@ -5770,6 +5775,7 @@ class PostgresRecordStore(HumanSessionStore):
                 | LaunchplaneDisposableTestingResourceAllocationRow
                 | LaunchplaneFreshOdooTestingGenerationRow
                 | LaunchplaneInventoryRow
+                | LaunchplaneReleaseTupleRow
                 | LaunchplanePrivateHealthEndpointRow
                 | LaunchplaneReleaseReviewDecisionRow,
             )
@@ -24155,6 +24161,127 @@ class PostgresRecordStore(HumanSessionStore):
             return self._read_payload(
                 model_type=GitHubAppWebhookDeliveryRecord, payload=row.payload
             )
+
+    def _testing_retry_binding_in_session(self, session: Any, *, product: str, context: str) -> str:
+        rows = {
+            "profile": session.get(LaunchplaneProductProfileRow, product),
+            "target_id": session.get(LaunchplaneDokployTargetIdRow, (context, "testing")),
+            "inventory": session.get(LaunchplaneInventoryRow, (context, "testing")),
+            "release_tuple": session.get(LaunchplaneReleaseTupleRow, (context, "testing")),
+        }
+        return canonical_json_sha256(
+            {name: row.payload if row is not None else None for name, row in rows.items()}
+        )
+
+    def read_testing_retry_binding(self, *, product: str, context: str) -> str:
+        with self._session_factory() as session:
+            return self._testing_retry_binding_in_session(session, product=product, context=context)
+
+    def read_testing_retry_rearm(self, product: str) -> TestingRetryRearm | None:
+        record = self.read_idempotency_record(
+            scope=TESTING_RETRY_REARM_SCOPE,
+            route_path=TESTING_RETRY_REARM_ROUTE,
+            idempotency_key=product,
+        )
+        return TestingRetryRearm.model_validate(record.response_payload) if record else None
+
+    def commit_testing_retry_rearm(
+        self,
+        *,
+        expected: ProductReconcileRequestRecord,
+        rearm: TestingRetryRearm,
+        mutation: DbOnlyMutationRequest,
+    ) -> tuple[str, LaunchplaneIdempotencyRecord]:
+        """Commit a recovery boundary, wakeup and replay receipt in one transaction."""
+        from control_plane.testing_retry import TestingRetryRefused
+
+        if expected.target_kind != "testing" or expected.state == "running":
+            raise TestingRetryRefused("testing_retry_busy")
+        with self._session_factory() as session:
+            self._lock_odoo_stable_lane(
+                session, product=expected.product, context=rearm.context, instance="testing"
+            )
+            status, reservation_row, reservation = self._reserve_db_only_mutation_in_session(
+                session=session, mutation=mutation
+            )
+            if status != "acquired":
+                return status, reservation
+            assert reservation_row is not None
+            self._lock_product_authority_bundle_write(session)
+            self._lock_landing_authority(
+                session, f"launchplane:product-reconcile:{expected.target_key}"
+            )
+            require_bundle_context_owner(
+                ProductAuthorityBundle(
+                    required_context_owner=(expected.product, rearm.context),
+                    required_product_config_target=(expected.product, rearm.context, "testing"),
+                ),
+                (
+                    self._read_product_profile_payload(row.payload)
+                    for row in session.scalars(select(LaunchplaneProductProfileRow)).all()
+                ),
+            )
+            if (
+                self._testing_retry_binding_in_session(
+                    session, product=expected.product, context=rearm.context
+                )
+                != rearm.lane_binding_sha256
+            ):
+                raise TestingRetryRefused("testing_retry_stale")
+            target_row = session.get(LaunchplaneDokployTargetRow, (rearm.context, "testing"))
+            if (
+                target_row is not None
+                and DokployTargetRecord.model_validate(
+                    target_row.payload
+                ).policies.staff_testing_hold
+                is not None
+            ):
+                raise TestingRetryRefused("testing_retry_held")
+            row = session.get(LaunchplaneProductReconcileRequestRow, expected.target_key)
+            if row is None or ProductReconcileRequestRecord.model_validate(row.payload) != expected:
+                raise TestingRetryRefused("testing_retry_stale")
+            if (
+                self._active_odoo_stable_lane_operation_owner(
+                    session, product=expected.product, context=rearm.context, instance="testing"
+                )
+                is not None
+            ):
+                raise TestingRetryRefused("testing_retry_busy")
+            # An isolated metadata record is invisible to older workers. Never add
+            # fields to their strict queue payload: emergency image rollback must
+            # still be able to claim and list every product's requests.
+            marker = LaunchplaneIdempotencyRecord(
+                record_id=build_launchplane_mutation_reservation_id(
+                    scope=TESTING_RETRY_REARM_SCOPE,
+                    route_path=TESTING_RETRY_REARM_ROUTE,
+                    idempotency_key=expected.product,
+                ),
+                scope=TESTING_RETRY_REARM_SCOPE,
+                route_path=TESTING_RETRY_REARM_ROUTE,
+                idempotency_key=expected.product,
+                request_fingerprint=canonical_json_sha256(rearm.model_dump(mode="json")),
+                response_status_code=202,
+                response_trace_id=mutation.response_trace_id,
+                recorded_at=self._database_mutation_timestamp(session),
+                response_payload=rearm.model_dump(mode="json"),
+            )
+            session.merge(self._idempotency_row(marker))
+            self._fold_product_reconcile_request(
+                session,
+                target=ProductReconcileTarget(product=expected.product, target_kind="testing"),
+                requested_at=self._database_mutation_timestamp(session),
+                delivery_id="",
+            )
+            completion = complete_launchplane_mutation_reservation(
+                reservation,
+                response_status_code=mutation.response_status_code,
+                response_trace_id=mutation.response_trace_id,
+                completed_at=self._database_mutation_timestamp(session),
+                response_payload=mutation.response_payload,
+            )
+            self._sync_idempotency_row(reservation_row, completion)
+            session.commit()
+            return "written", completion
 
     def request_product_reconcile(
         self, target: ProductReconcileTarget, requested_at: str

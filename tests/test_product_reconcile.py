@@ -488,7 +488,8 @@ class ProductReconcileTestCase(unittest.TestCase):
         temporary_directory = TemporaryDirectory()
         self.addCleanup(temporary_directory.cleanup)
         self.store = PostgresRecordStore(
-            database_url=sqlite_database_url(Path(temporary_directory.name) / "lp.sqlite3")
+            database_url=getattr(self, "database_url", "")
+            or sqlite_database_url(Path(temporary_directory.name) / "lp.sqlite3")
         )
         self.addCleanup(self.store.close)
         self.store.ensure_schema()
@@ -596,6 +597,47 @@ class ProductReconcileTestCase(unittest.TestCase):
         completed = self.run_once()
         self.assertEqual(completed.state, "done", completed.last_error)
         return dict(completed.last_plan)
+
+    def _running_release(self, run_id: int, commit: str) -> None:
+        self.github.add_run(run_id, commit)
+        verified = verify_build_artifact(
+            transport=self.github,
+            repository=REPOSITORY,
+            repository_id=REPOSITORY_ID,
+            commit=commit,
+            purpose="release",
+            context="cm",
+            image_repository=IMAGE_REPOSITORY,
+        )
+        self.store.write_artifact_manifest(verified.manifest)
+        self.store.write_release_tuple_record(
+            ReleaseTupleRecord(
+                tuple_id="running-testing",
+                context="cm",
+                channel="testing",
+                artifact_id=verified.manifest.artifact_id,
+                repo_shas={"site": commit},
+                image_repository=IMAGE_REPOSITORY,
+                image_digest=_digest(commit),
+                provenance="ship",
+                minted_at="2026-09-30T12:00:00Z",
+            )
+        )
+
+    def finish(self, operation_id: str, status: str) -> None:
+        operation = self.store.read_odoo_stable_target_replacement_operation_record(operation_id)
+        changes: dict[str, object] = {"status": status, "phase": "failed"}
+        if status == "pass":
+            changes.update(phase="completed", finished_at="2026-09-30T12:00:00Z")
+        elif status == "fail":
+            changes.update(finished_at="2026-09-30T12:00:00Z", error_message="deploy failed")
+        else:
+            changes.update(error_code="provider_outcome_unknown", error_message="unknown")
+        self.store.write_odoo_stable_target_replacement_operation_record(
+            OdooStableTargetReplacementOperationRecord.model_validate(
+                {**operation.model_dump(mode="json"), **changes}
+            )
+        )
 
     def write_preview(self, *, number: int = 5, state: PreviewState = "active") -> None:
         preview_id = f"preview-cm-site-pr-{number}"
@@ -963,32 +1005,6 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
                 self.assertFalse(self.store.list_odoo_stable_target_replacement_operation_records())
                 self.assertNotIn("private credential", json.dumps(outcome))
 
-    def _running_release(self, run_id: int, commit: str) -> None:
-        self.github.add_run(run_id, commit)
-        verified = verify_build_artifact(
-            transport=self.github,
-            repository=REPOSITORY,
-            repository_id=REPOSITORY_ID,
-            commit=commit,
-            purpose="release",
-            context="cm",
-            image_repository=IMAGE_REPOSITORY,
-        )
-        self.store.write_artifact_manifest(verified.manifest)
-        self.store.write_release_tuple_record(
-            ReleaseTupleRecord(
-                tuple_id="running-testing",
-                context="cm",
-                channel="testing",
-                artifact_id=verified.manifest.artifact_id,
-                repo_shas={"site": commit},
-                image_repository=IMAGE_REPOSITORY,
-                image_digest=_digest(commit),
-                provenance="ship",
-                minted_at="2026-09-30T12:00:00Z",
-            )
-        )
-
     def test_incomplete_run_listing_cannot_downgrade_testing(self) -> None:
         self._running_release(20, DEPLOYABLE)
         self.github.add_run(10, OLDER)
@@ -1222,21 +1238,6 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
         self.assertEqual(completed.last_plan["active_operation_id"], busy.operation_id)
         self.assertEqual(
             self.store.list_odoo_stable_target_replacement_operation_records(), (busy,)
-        )
-
-    def finish(self, operation_id: str, status: str) -> None:
-        operation = self.store.read_odoo_stable_target_replacement_operation_record(operation_id)
-        changes: dict[str, object] = {"status": status, "phase": "failed"}
-        if status == "pass":
-            changes.update(phase="completed", finished_at="2026-09-30T12:00:00Z")
-        elif status == "fail":
-            changes.update(finished_at="2026-09-30T12:00:00Z", error_message="deploy failed")
-        else:
-            changes.update(error_code="provider_outcome_unknown", error_message="unknown")
-        self.store.write_odoo_stable_target_replacement_operation_record(
-            OdooStableTargetReplacementOperationRecord.model_validate(
-                {**operation.model_dump(mode="json"), **changes}
-            )
         )
 
     def test_failed_testing_deploy_is_retried_once_per_reconcile(self) -> None:
