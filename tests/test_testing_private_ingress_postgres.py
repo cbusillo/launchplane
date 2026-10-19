@@ -33,6 +33,24 @@ class RealPostgresTestingPrivateIngressRecoveryTests(private_ingress_tests.Priva
         self.client.enable_proxy_host(host_id)
         digest = self.adapter(operation="disable").plan()["plan_sha256"]
         adapter = self.adapter(operation="disable", reviewed_plan_sha256=digest)
+        snapshot = adapter._snapshot
+        snapshots = 0
+
+        def fail_before_effects(*args: Any, **kwargs: Any) -> Any:
+            nonlocal snapshots
+            snapshots += 1
+            if snapshots == 2:
+                raise RuntimeError("provider read failed before effects")
+            return snapshot(*args, **kwargs)
+
+        with (
+            patch.object(adapter, "_snapshot", side_effect=fail_before_effects),
+            self.assertRaises(ValueError),
+        ):
+            self.run_ingress(adapter, "cleanup")
+        self.assertEqual(self.store.list_held_provider_target_reservations(), ())
+        with self.assertRaises(ValueError):
+            self.adapter().plan()
         with patch.object(self.client, "disable_proxy_host", side_effect=ValueError("rejected")):
             self.assertEqual(self.run_ingress(adapter, "cleanup").status, "reconcile_required")
         self.assertEqual(self.run_ingress(adapter, "different-key").status, "target_busy")

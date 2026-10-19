@@ -500,9 +500,31 @@ class TestingPrivateIngressAdapter:
         authority: dict[str, object],
     ) -> None:
         payload = actual or desired
+        record_id = _PREFIX + self.request.reviewed_plan_sha256
+        try:
+            previous = self.store.read_ingress_route_audit_record(record_id)
+        except FileNotFoundError:
+            previous = None
+        if previous is not None and previous.status == "applied":
+            # A repeated plan can reuse this slot. Preserve successful authority
+            # before pending or applied replacement, with its original chronology.
+            history = previous.model_copy(
+                update={
+                    "record_id": _PREFIX
+                    + "history-"
+                    + canonical_json_sha256(previous.model_dump(mode="json"))
+                }
+            )
+            try:
+                saved = self.store.read_ingress_route_audit_record(history.record_id)
+            except FileNotFoundError:
+                self.store.write_ingress_route_audit_record(history)
+            else:
+                if saved != history:
+                    raise ValueError("Private hostname receipt history changed.")
         self.store.write_ingress_route_audit_record(
             IngressRouteAuditRecord(
-                record_id=_PREFIX + self.request.reviewed_plan_sha256,
+                record_id=record_id,
                 product=self.product,
                 context=self.request.context,
                 provider="npmplus",

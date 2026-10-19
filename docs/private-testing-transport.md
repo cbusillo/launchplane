@@ -59,7 +59,12 @@ held private-route provider operations. Historical pending receipts from a
 completed replan do not hold a new route's probe. Only the latest applied receipt
 for the current provider host supplies authority, so a later disable cannot be
 overridden by replaying an older enabled receipt. Receipt timestamps preserve
-subsecond ordering for rapid toggles. Deleted historical hosts are not queried
+subsecond ordering. Repeated plans preserve their prior applied receipt under a
+content-addressed history ID before replacing the plan's pending/readback record;
+the history retains its original timestamp. A failed pre-effect retry cannot
+erase a later disable and resurrect older serving authority. If preserving that
+history fails, the replacement and provider effects do not proceed.
+Deleted historical hosts are not queried
 as current candidates. Missing or changed current evidence fails the probe.
 
 The health request connects to the configured NPMplus API origin's machine on

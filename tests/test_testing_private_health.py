@@ -10,8 +10,12 @@ from control_plane.contracts.private_health_endpoint_record import (
     private_health_endpoint_record_sha256,
 )
 from control_plane.outbound_http import PublicHttpDestinationError, PublicHttpResponse
+from control_plane.provider_operations import ProviderMutationRejectedError
 from control_plane.testing_private_health import fetch_testing_private_health
-from control_plane.contracts.ingress_route_audit_record import TESTING_PRIVATE_INGRESS_AUDIT_PREFIX
+from control_plane.contracts.ingress_route_audit_record import (
+    IngressRouteAuditRecord,
+    TESTING_PRIVATE_INGRESS_AUDIT_PREFIX,
+)
 from control_plane.workflows.ingress_provider import NPMPLUS_BASE_URL_ENV_KEY
 import click
 from tests.test_testing_private_ingress import PrivateIngressFixture
@@ -114,6 +118,46 @@ class TestingPrivateHealthTests(PrivateIngressFixture):
             self.adapter().plan()
         digest = self.adapter(operation="disable").plan()["plan_sha256"]
         adapter = self.adapter(operation="disable", reviewed_plan_sha256=digest)
+        previous = self.store.read_ingress_route_audit_record(
+            TESTING_PRIVATE_INGRESS_AUDIT_PREFIX + str(digest)
+        )
+        write = self.store.write_ingress_route_audit_record
+        for fail_history in (True, False):
+
+            def failed_write(audit: IngressRouteAuditRecord) -> None:
+                if (audit.record_id != previous.record_id) == fail_history:
+                    raise RuntimeError("receipt persistence failed")
+                write(audit)
+
+            with (
+                self.subTest(fail_history=fail_history),
+                patch.object(
+                    self.store, "write_ingress_route_audit_record", side_effect=failed_write
+                ),
+                patch.object(self.client, "disable_proxy_host") as toggle,
+                self.assertRaises(ProviderMutationRejectedError),
+            ):
+                adapter.apply("cleanup-key", self.lease)
+            self.assertEqual(
+                self.store.read_ingress_route_audit_record(previous.record_id), previous
+            )
+            toggle.assert_not_called()
+            self.assert_refused()
+        with (
+            patch.object(self.lease, "assert_current", side_effect=RuntimeError("lease lost")),
+            self.assertRaises(ProviderMutationRejectedError),
+        ):
+            adapter.apply("cleanup-key", self.lease)
+        self.assert_refused()
+        self.assertTrue(
+            any(
+                audit.record_id != previous.record_id
+                and audit.model_copy(update={"record_id": previous.record_id}) == previous
+                for audit in self.store.list_ingress_route_audit_records()
+            )
+        )
+        with self.assertRaises(ValueError):
+            self.adapter().plan()
         adapter.apply("cleanup-key", self.lease)
         self.assertTrue(adapter.readback()["applied"])
         self.assertFalse(self.client.proxy_hosts[0].enabled)
