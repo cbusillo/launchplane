@@ -2,7 +2,6 @@ from json import JSONDecodeError
 import json
 import os
 from pathlib import Path
-from datetime import datetime, timezone
 from urllib.parse import urlencode
 from urllib.parse import urlsplit
 from urllib.request import Request
@@ -99,8 +98,7 @@ from control_plane.workflows.runner_host_hygiene_audit_spool import (
     RunnerHostHygieneAuditSpool,
 )
 from control_plane.workflows.runner_host_hygiene_qualification import (
-    HygieneQualificationEvidence,
-    qualify_runner_host_hygiene,
+    runner_host_hygiene_qualify,
 )
 from control_plane.workflows.ship import utc_now_timestamp
 
@@ -130,29 +128,6 @@ def register_runner_lane_commands(work_graph: click.Group) -> None:
         runner_host_hygiene_executor,
         name="runner-host-hygiene-executor",
     )
-
-
-@click.command("runner-host-hygiene-qualify")
-@click.option("--requests-file", type=click.Path(exists=True, path_type=Path), required=True)
-@click.option("--evidence-file", type=click.Path(exists=True, path_type=Path), required=True)
-def runner_host_hygiene_qualify(requests_file: Path, evidence_file: Path) -> None:
-    """Qualify saved existing hygiene inputs without contacting or changing a host."""
-    try:
-        raw_requests = json.loads(requests_file.read_text())
-        if not isinstance(raw_requests, list):
-            raise ValueError("requests file must contain an array of executor requests")
-        result = qualify_runner_host_hygiene(
-            requests=tuple(
-                RunnerHostHygieneExecutorRequest.model_validate(item) for item in raw_requests
-            ),
-            evidence=HygieneQualificationEvidence.model_validate_json(evidence_file.read_text()),
-            now=datetime.now(timezone.utc),
-        )
-    except (OSError, ValueError) as error:
-        raise click.ClickException(str(error)) from error
-    click.echo(result.model_dump_json(indent=2))
-    if not result.configuration_qualified or not result.retention_accounted_for:
-        raise click.ClickException("runner host hygiene qualification needs attention")
 
 
 @click.command("runner-inventory")
@@ -1669,6 +1644,12 @@ def runner_host_hygiene_adapter_boundary_plan(
     help="Buildx builder policy allows cache pruning for. Repeat as needed.",
 )
 @click.option(
+    "--buildkit-cache-budget",
+    "buildkit_cache_budgets",
+    multiple=True,
+    help="Existing report-only cache budget as builder=bytes, or default=bytes. Grants no prune permission.",
+)
+@click.option(
     "--max-used-space-bytes",
     default=0,
     show_default=True,
@@ -1801,6 +1782,7 @@ def runner_host_hygiene_executor(
     target_buildkit_builder: str,
     allowed_buildkit_builders: tuple[str, ...],
     max_used_space_bytes: int,
+    buildkit_cache_budgets: tuple[str, ...],
     mutate: bool,
     minimum_free_disk_bytes: int,
     prune_until: str,
@@ -1840,6 +1822,12 @@ def runner_host_hygiene_executor(
                 "runner host hygiene GitHub idle evidence requires a populated token in "
                 f"{github_token_env_name}."
             )
+        report_budgets: dict[str, int] = {}
+        for value in buildkit_cache_budgets:
+            key, separator, raw_bytes = value.partition("=")
+            if not separator or key in report_budgets:
+                raise ValueError("report cache budgets require unique builder=bytes entries")
+            report_budgets[key] = int(raw_bytes)
         request = RunnerHostHygieneExecutorRequest(
             action=apply_action,
             host_name=host_name,
@@ -1853,6 +1841,7 @@ def runner_host_hygiene_executor(
             target_buildkit_builder=target_buildkit_builder,
             allowed_buildkit_builders=allowed_buildkit_builders,
             max_used_space_bytes=max_used_space_bytes,
+            buildkit_cache_budgets=report_budgets,
             target_buildkit_state_volumes=target_buildkit_state_volumes,
             allowed_buildkit_state_volumes=allowed_buildkit_state_volumes,
             mutate=mutate,

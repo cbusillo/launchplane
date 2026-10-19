@@ -21,8 +21,9 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 import click
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneBuilderCacheUsage
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAction
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAuditStatus
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAuditRecord
@@ -249,6 +250,7 @@ class RunnerHostHygieneExecutorRequest(BaseModel):
     target_buildkit_builder: str = ""
     allowed_buildkit_builders: tuple[str, ...] = ()
     max_used_space_bytes: int = Field(default=0, ge=0)
+    buildkit_cache_budgets: dict[str, int] = Field(default_factory=dict)
     target_buildkit_state_volumes: tuple[str, ...] = ()
     allowed_buildkit_state_volumes: tuple[str, ...] = ()
 
@@ -499,6 +501,20 @@ class RunnerHostHygieneExecutorRequest(BaseModel):
             raise ValueError("default Docker cache budget must retain at least 8 GiB")
         if not self.target_buildkit_builder and self.allowed_buildkit_builders:
             raise ValueError("allowed BuildKit builders require a target BuildKit builder")
+        if any(
+            not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", key)
+            or type(value) is not int
+            or value <= 0
+            for key, value in self.buildkit_cache_budgets.items()
+        ):
+            raise ValueError("report cache budgets require safe keys and positive integer bytes")
+        budget_key = self.target_buildkit_builder or "default"
+        if (
+            self.max_used_space_bytes
+            and budget_key in self.buildkit_cache_budgets
+            and self.max_used_space_bytes != self.buildkit_cache_budgets[budget_key]
+        ):
+            raise ValueError("target cache budget must agree with existing report budget")
         if not self.host_name:
             raise ValueError("runner host hygiene executor requires host_name")
         if not self.execution_lane:
@@ -557,17 +573,16 @@ class RunnerHostHygieneExecutorResult(BaseModel):
     audit_delivery_pending: bool = False
     reconciled: bool = False
     message: str
-    maintenance_completed: bool = False
 
-    @model_validator(mode="after")
-    def _classify_maintenance(self) -> "RunnerHostHygieneExecutorResult":
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def maintenance_completed(self) -> bool:
         terminal = self.terminal_response or {}
-        self.maintenance_completed = (
+        return (
             self.status == "completed"
             and not self.audit_delivery_pending
             and (terminal.get("status") == "accepted" or self.reconciled)
         )
-        return self
 
 
 def _strip_text_fields(*values: str) -> tuple[str, ...]:
@@ -576,6 +591,8 @@ def _strip_text_fields(*values: str) -> tuple[str, ...]:
 
 def _executor_intent_sha256(request: RunnerHostHygieneExecutorRequest) -> str:
     payload = request.model_dump(mode="json")
+    if not request.buildkit_cache_budgets:
+        payload.pop("buildkit_cache_budgets")
     payload["resolve_action_started"] = False
     payload["target_generated_cache_run_ids"] = []
     serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
@@ -1434,6 +1451,14 @@ def collect_runner_host_hygiene_report(
             docker_cache_class_measurements,
             observed_at=observed_at,
         ),
+        builder_cache_usage=_collect_builder_cache_usage(
+            request=request,
+            remote_runner=remote_runner,
+            containers=container_inventory,
+            containers_available=container_inventory_available,
+            disk_usage=docker_disk_usage,
+        ),
+        require_builder_cache_evidence=bool(request.buildkit_cache_budgets),
         docker_toolchain=_collect_docker_toolchain(
             request=request,
             remote_runner=remote_runner,
@@ -1468,6 +1493,143 @@ def collect_runner_host_hygiene_report(
         ),
         observation=observation,
     )
+
+
+def _collect_builder_cache_usage(
+    *,
+    request: RunnerHostHygieneExecutorRequest,
+    remote_runner: RemoteCommandRunner,
+    containers: tuple[dict[str, object], ...],
+    containers_available: bool,
+    disk_usage: _DockerDiskUsageSnapshot,
+) -> tuple[RunnerHostHygieneBuilderCacheUsage, ...]:
+    budgets = request.buildkit_cache_budgets
+    if not budgets:
+        return ()
+    rows: list[RunnerHostHygieneBuilderCacheUsage] = []
+    default = next(
+        (
+            item
+            for item in disk_usage.cache_class_measurements
+            if item.cache_class == "docker_build_cache"
+        ),
+        None,
+    )
+    if "default" in budgets:
+        rows.append(
+            RunnerHostHygieneBuilderCacheUsage(
+                cache_key="default",
+                target_bytes=budgets["default"],
+                availability=default.availability if default else "unavailable",
+                logical_bytes=default.logical_bytes if default else None,
+                reason_code=default.reason_code
+                if default and default.availability != "available"
+                else ("" if default else "source_missing"),
+            )
+        )
+    names = {
+        _docker_json_text(item, "Names")
+        for item in containers
+        if _docker_json_text(item, "Names").startswith("buildx_buildkit_")
+    }
+    configured = {f"buildx_buildkit_{key}0": key for key in budgets if key != "default"}
+    if not containers_available or len(names) > MAX_DOCKER_VOLUME_INVENTORY_ITEMS:
+        return (
+            *rows,
+            RunnerHostHygieneBuilderCacheUsage(
+                cache_key="named-builders",
+                availability="unavailable",
+                reason_code="builder_inventory_incomplete",
+            ),
+        )
+    for container in sorted(names | configured.keys()):
+        key = configured.get(container, container)
+        target = budgets.get(key)
+        if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", container) or container not in names:
+            rows.append(
+                RunnerHostHygieneBuilderCacheUsage(
+                    cache_key=key,
+                    target_bytes=target,
+                    availability="unavailable",
+                    reason_code="builder_container_missing",
+                )
+            )
+            continue
+        try:
+            result = remote_runner(
+                ("docker", "exec", container, "buildctl", "du", "--format", "{{json .}}"),
+                min(request.timeout_seconds, 30),
+            )
+            if result.returncode != 0:
+                raise ValueError("probe failed")
+            measured = _parse_builder_cache_usage(
+                result.stdout,
+                observed_at=utc_now_timestamp(),
+                minimum_age_hours=MINIMUM_PRUNE_UNTIL_HOURS,
+            )
+            rows.append(
+                RunnerHostHygieneBuilderCacheUsage.model_validate(
+                    {
+                        "cache_key": key,
+                        "target_bytes": target,
+                        "availability": "available",
+                        **measured,
+                    }
+                )
+            )
+        except (ValueError, OSError, click.ClickException):
+            rows.append(
+                RunnerHostHygieneBuilderCacheUsage(
+                    cache_key=key,
+                    target_bytes=target,
+                    availability="unavailable",
+                    reason_code="builder_measurement_incomplete",
+                )
+            )
+    return tuple(rows)
+
+
+def _parse_builder_cache_usage(
+    output: str, *, observed_at: str, minimum_age_hours: int
+) -> dict[str, int]:
+    payload = json.loads(output)
+    if payload is None:
+        payload = []
+    if not isinstance(payload, list) or len(payload) > 100_000:
+        raise ValueError("builder usage is incomplete")
+    totals = dict.fromkeys(
+        ("logical_bytes", "protected_bytes", "in_use_bytes", "recent_bytes", "shared_bytes"), 0
+    )
+    seen: set[str] = set()
+    observed = datetime.fromisoformat(observed_at)
+    for item in payload:
+        if (
+            not isinstance(item, dict)
+            or not isinstance(item.get("id"), str)
+            or not item["id"]
+            or item["id"] in seen
+        ):
+            raise ValueError("builder records are incomplete or duplicated")
+        seen.add(item["id"])
+        size = item.get("size")
+        if (
+            type(size) is not int
+            or size < 0
+            or type(item.get("inUse")) is not bool
+            or type(item.get("shared")) is not bool
+        ):
+            raise ValueError("builder counters are incomplete")
+        timestamp = item.get("lastUsedAt") or item.get("createdAt")
+        used = datetime.fromisoformat(timestamp) if isinstance(timestamp, str) else None
+        if used is None or used.tzinfo is None or used > observed:
+            raise ValueError("builder age evidence is incomplete")
+        recent = (observed - used).total_seconds() < minimum_age_hours * 3600
+        totals["logical_bytes"] += size
+        totals["in_use_bytes"] += size if item["inUse"] else 0
+        totals["shared_bytes"] += size if item["shared"] else 0
+        totals["recent_bytes"] += size if recent else 0
+        totals["protected_bytes"] += size if item["inUse"] or item["shared"] or recent else 0
+    return totals
 
 
 def _collect_full_host_idle_convergence(

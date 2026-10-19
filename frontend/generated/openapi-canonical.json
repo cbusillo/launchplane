@@ -45932,6 +45932,114 @@
         "title": "RunnerHostHygieneAuditSummary",
         "type": "object"
       },
+      "RunnerHostHygieneBuilderCacheUsage": {
+        "additionalProperties": false,
+        "description": "One existing daemon or named-container cache, with no cleanup authority.",
+        "properties": {
+          "availability": {
+            "enum": [
+              "available",
+              "partial",
+              "unavailable",
+              "stale"
+            ],
+            "title": "Availability",
+            "type": "string"
+          },
+          "cache_key": {
+            "title": "Cache Key",
+            "type": "string"
+          },
+          "in_use_bytes": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "In Use Bytes"
+          },
+          "logical_bytes": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Logical Bytes"
+          },
+          "protected_bytes": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Protected Bytes"
+          },
+          "reason_code": {
+            "default": "",
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "recent_bytes": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recent Bytes"
+          },
+          "recovery_owner": {
+            "default": "admin",
+            "title": "Recovery Owner",
+            "type": "string"
+          },
+          "shared_bytes": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Shared Bytes"
+          },
+          "target_bytes": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Bytes"
+          }
+        },
+        "required": [
+          "cache_key",
+          "availability"
+        ],
+        "title": "RunnerHostHygieneBuilderCacheUsage",
+        "type": "object"
+      },
       "RunnerHostHygieneCacheClassTelemetry": {
         "additionalProperties": false,
         "properties": {
@@ -46145,6 +46253,7 @@
           "code": {
             "enum": [
               "docker_reclaimable_above_limit",
+              "builder_cache_unqualified",
               "free_disk_below_minimum",
               "generated_cache_above_limit",
               "generated_cache_measurement_partial",
@@ -46825,6 +46934,14 @@
       "RunnerHostHygieneReport": {
         "additionalProperties": false,
         "properties": {
+          "builder_cache_usage": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/RunnerHostHygieneBuilderCacheUsage"
+            },
+            "title": "Builder Cache Usage",
+            "type": "array"
+          },
           "cache_class_telemetry": {
             "default": [],
             "items": {
@@ -46941,6 +47058,11 @@
             "minimum": 0.0,
             "title": "Orphan Buildkit Volumes",
             "type": "integer"
+          },
+          "require_builder_cache_evidence": {
+            "default": false,
+            "title": "Require Builder Cache Evidence",
+            "type": "boolean"
           },
           "runner_workdir_allocated_bytes": {
             "default": 0,

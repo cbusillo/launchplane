@@ -1,208 +1,132 @@
-"""Offline acceptance of existing hygiene configuration and retention evidence.
-
-Inputs are review artifacts, never runtime configuration authority. The future
-record-backed projection can call this same evaluator without another store.
-"""
+"""Acceptance and summaries of the existing hygiene report/audit artifacts."""
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Literal
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import TypedDict
 
-from pydantic import BaseModel, ConfigDict, Field
+import click
 
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneAuditDeliveryEnvelope
-from control_plane.workflows.runner_host_hygiene_executor import (
-    RunnerHostGitHubBinding,
-    RunnerHostHygieneExecutorRequest,
-)
 
 
-class BuilderMeasurement(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    builder: str
-    availability: Literal["complete", "partial", "unavailable"]
-    logical_bytes: int | None = Field(default=None, ge=0)
-    # Explicit evidence explains an excess; it does not authorize removal or
-    # pretend the target is a physical-volume quota.
-    constraint: Literal["", "protected", "in_use", "recent_cache", "maintenance_blocked"] = ""
-    evidence: str = ""
-    recovery_owner: str = ""
-
-
-class HygieneQualificationEvidence(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    host_name: str
-    observed_at: datetime
-    services_complete: bool = False
-    registrations_complete: bool = False
-    images_complete: bool = False
-    builders_complete: bool = False
-    service_units: tuple[str, ...] = ()
-    registrations: tuple[RunnerHostGitHubBinding, ...] = ()
-    image_references: tuple[str, ...] = ()
-    builders: tuple[BuilderMeasurement, ...] = ()
-    audits: tuple[RunnerHostHygieneAuditDeliveryEnvelope, ...] = ()
-
-
-class BuilderQualification(BaseModel):
-    builder: str
-    target_bytes: int
-    logical_bytes: int | None
-    status: Literal["within_target", "explained", "blocked", "unknown"]
-    reason: str
-    recovery_owner: str
-    accepted_terminal_completion: bool = False
-
-
-class HygieneQualification(BaseModel):
-    mode: Literal["report-only"] = "report-only"
-    configuration_qualified: bool
+class HygieneQualification(TypedDict):
+    audit_record_key: str
+    observed_at: str
+    as_of: str
+    fresh: bool
+    report_delivery: str
+    report_status: str
+    maintenance_completed: bool
     retention_accounted_for: bool
+    qualified: bool
     blockers: tuple[str, ...]
-    builders: tuple[BuilderQualification, ...]
+    findings: tuple[str, ...]
+    builder_cache_usage: tuple[dict[str, object], ...]
 
 
 def qualify_runner_host_hygiene(
+    audit: RunnerHostHygieneAuditDeliveryEnvelope,
     *,
-    requests: tuple[RunnerHostHygieneExecutorRequest, ...],
-    evidence: HygieneQualificationEvidence,
-    now: datetime,
+    as_of: datetime,
+    maximum_age_seconds: int,
 ) -> HygieneQualification:
-    """Check a proposed projection using complete independent host observations.
-
-    Each request is an existing configured named-builder schedule entry. No
-    extra builder receives a budget, grant or cleanup permission here.
-    """
-    blockers: list[str] = []
-    if not requests:
-        blockers.append("configured_named_builder_requests_missing")
-    for request in requests:
-        if request.host_name != evidence.host_name:
-            blockers.append("host_mismatch")
-        if (
-            now.tzinfo is None
-            or evidence.observed_at.tzinfo is None
-            or not 0 <= (now - evidence.observed_at).total_seconds() <= request.idle_max_age_seconds
-        ):
-            blockers.append("source_stale_or_future")
-        if not evidence.services_complete or not evidence.registrations_complete:
-            blockers.append("fleet_source_incomplete")
-        configured = set(request.github_idle_bindings)
-        registered = set(evidence.registrations)
-        units = [binding.service_unit for binding in evidence.registrations]
-        if (
-            not configured
-            or configured != registered
-            or len(units) != len(set(units))
-            or len(evidence.service_units) != len(set(evidence.service_units))
-            or set(units) != set(evidence.service_units)
-        ):
-            blockers.append("fleet_binding_mismatch")
-        if not evidence.images_complete:
-            blockers.append("retained_image_source_incomplete")
-        if not set(request.retained_warm_builders).issubset(evidence.image_references):
-            blockers.append("retained_image_missing")
-        if (
-            request.action != "prune_docker_cache"
-            or not request.target_buildkit_builder
-            or request.target_buildkit_builder not in request.allowed_buildkit_builders
-            or request.max_used_space_bytes <= 0
-        ):
-            blockers.append("named_builder_request_invalid")
-    targets = [request.target_buildkit_builder for request in requests]
-    if len(targets) != len(set(targets)):
-        blockers.append("duplicate_builder_target")
-    measurements = [item.builder for item in evidence.builders]
-    if not evidence.builders_complete or len(measurements) != len(set(measurements)):
-        blockers.append("builder_source_incomplete_or_ambiguous")
-    if set(measurements) != set(targets):
-        # Includes live builders without a configured budget. Never borrow
-        # another builder's budget or silently leave their ownership unqualified.
-        blockers.append("builder_ownership_unqualified")
-    rows: list[BuilderQualification] = []
-    for request in requests:
-        matching = [
-            item for item in evidence.builders if item.builder == request.target_buildkit_builder
-        ]
-        measurement = matching[0] if len(matching) == 1 else None
-        status: Literal["within_target", "explained", "blocked", "unknown"] = "unknown"
-        reason = "named_builder_measurement_incomplete"
-        if (
-            measurement
-            and measurement.availability == "complete"
-            and measurement.logical_bytes is not None
-        ):
-            if measurement.logical_bytes <= request.max_used_space_bytes:
-                status, reason = "within_target", "measured_within_target"
-            elif (
-                measurement.constraint
-                and measurement.evidence.strip()
-                and measurement.recovery_owner.strip()
-            ):
-                status = (
-                    "blocked" if measurement.constraint == "maintenance_blocked" else "explained"
-                )
-                reason = measurement.constraint
-            else:
-                status, reason = "blocked", "above_target_without_owned_explanation"
-        rows.append(
-            BuilderQualification(
-                builder=request.target_buildkit_builder,
-                target_bytes=request.max_used_space_bytes,
-                logical_bytes=measurement.logical_bytes if measurement else None,
-                status=status,
-                reason=reason,
-                recovery_owner=measurement.recovery_owner if measurement else "",
-                accepted_terminal_completion=any(
-                    _accepted_completion(request, audit, now) for audit in evidence.audits
-                ),
-            )
-        )
-    return HygieneQualification(
-        configuration_qualified=not blockers,
-        retention_accounted_for=not blockers
-        and bool(rows)
-        and all(row.status in {"within_target", "explained"} for row in rows),
-        blockers=tuple(sorted(set(blockers))),
-        builders=tuple(rows),
-    )
-
-
-def _accepted_completion(
-    request: RunnerHostHygieneExecutorRequest,
-    envelope: RunnerHostHygieneAuditDeliveryEnvelope,
-    now: datetime,
-) -> bool:
-    terminal = envelope.terminal_audit
-    if terminal is None or terminal.post_apply_report is None:
-        return False
+    report = audit.terminal_audit.post_apply_report if audit.terminal_audit else None
+    report = report or audit.planned_audit.pre_apply_report
     try:
-        observed_at = datetime.fromisoformat(terminal.post_apply_report.observed_at)
-        if (
-            observed_at.tzinfo is None
-            or not 0 <= (now - observed_at).total_seconds() <= request.idle_max_age_seconds
-        ):
-            return False
+        observed = datetime.fromisoformat(report.observed_at)
+        fresh = (
+            observed.tzinfo is not None
+            and 0 <= (as_of - observed).total_seconds() <= maximum_age_seconds
+        )
     except (ValueError, TypeError):
-        return False
-    planned_targets = envelope.planned_audit.request.model_dump()
-    terminal_targets = terminal.request.model_dump()
-    planned_targets.pop("idle_decision_at")
-    terminal_targets.pop("idle_decision_at")
-    return (
-        envelope.host_name == request.host_name
-        and envelope.audit_record_key == request.audit_record_key
-        and planned_targets == terminal_targets
-        and envelope.planned_delivery_state == "delivered"
-        and envelope.terminal_delivery_state == "delivered"
-        and terminal.status == "completed"
-        and terminal.request.mutate
-        and terminal.request.action == request.action
-        and terminal.request.host_name == request.host_name
-        and terminal.request.target_buildkit_builder == request.target_buildkit_builder
-        and terminal.request.max_used_space_bytes == request.max_used_space_bytes
-        and terminal.request.retained_warm_builders == request.retained_warm_builders
+        fresh = False
+    blockers = tuple(
+        item.code
+        for item in audit.planned_audit.plan.blockers
+        if item.code != "mutate_not_requested"
     )
+    retained = (
+        report.require_builder_cache_evidence
+        and bool(report.builder_cache_usage)
+        and all(
+            item.qualification in {"within_target", "protected_cache", "unbudgeted_report_only"}
+            for item in report.builder_cache_usage
+        )
+    )
+    return {
+        "audit_record_key": audit.audit_record_key,
+        "observed_at": report.observed_at,
+        "as_of": as_of.isoformat(),
+        "fresh": fresh,
+        "report_delivery": audit.planned_delivery_state,
+        "report_status": report.status,
+        "maintenance_completed": (
+            audit.terminal_audit is not None
+            and audit.terminal_audit.status == "completed"
+            and audit.terminal_audit.request.mutate
+            and audit.planned_delivery_state == "delivered"
+            and audit.terminal_delivery_state == "delivered"
+        ),
+        "retention_accounted_for": retained,
+        "qualified": fresh
+        and retained
+        and report.status == "healthy"
+        and not blockers
+        and audit.planned_delivery_state == "delivered",
+        "blockers": blockers,
+        "findings": tuple(item.code for item in report.findings),
+        "builder_cache_usage": tuple(
+            {**item.model_dump(mode="json"), "qualification": item.qualification}
+            for item in report.builder_cache_usage
+        ),
+    }
+
+
+@click.command("runner-host-hygiene-qualify")
+@click.option("--audit-file", type=click.Path(exists=True, path_type=Path), required=True)
+@click.option("--as-of", type=click.DateTime(formats=["%Y-%m-%dT%H:%M:%S%z"]))
+@click.option("--maximum-age-seconds", type=click.IntRange(min=1), default=3600, show_default=True)
+@click.option("--require-qualified/--report-only", default=False)
+@click.option("--summary-file", type=click.Path(path_type=Path))
+def runner_host_hygiene_qualify(
+    audit_file: Path,
+    as_of: datetime | None,
+    maximum_age_seconds: int,
+    require_qualified: bool,
+    summary_file: Path | None,
+) -> None:
+    """Read one existing audit artifact; never contact or change a host."""
+    import json
+
+    try:
+        audit = RunnerHostHygieneAuditDeliveryEnvelope.model_validate_json(audit_file.read_text())
+        result = qualify_runner_host_hygiene(
+            audit,
+            as_of=as_of or datetime.now(timezone.utc),
+            maximum_age_seconds=maximum_age_seconds,
+        )
+        if summary_file is not None:
+            # Render only bounded contract codes and booleans, never host names,
+            # paths, raw Docker output or free-text evidence in Actions summaries.
+            with summary_file.open("a") as output:
+                output.write("\n### Runner host hygiene qualification\n\n")
+                for key, value in result.items():
+                    if key not in (
+                        "report_delivery",
+                        "report_status",
+                        "maintenance_completed",
+                        "retention_accounted_for",
+                        "fresh",
+                        "qualified",
+                        "blockers",
+                        "findings",
+                    ):
+                        continue
+                    output.write(f"- {key}: `{value}`\n")
+        click.echo(json.dumps(result, indent=2))
+    except (OSError, ValueError) as error:
+        raise click.ClickException(str(error)) from error
+    if require_qualified and not result["qualified"]:
+        raise click.ClickException("runner host hygiene qualification needs attention")
