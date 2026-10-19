@@ -37,7 +37,12 @@ from control_plane.contracts.promotion_record import HealthcheckEvidence, PostDe
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.drivers.registry import read_driver_descriptor
-from control_plane.integration_key_readback import integration_key_readback
+from control_plane.integration_key_readback import (
+    evaluate_delivered_integration_keys,
+    integration_key_readback,
+    lane_receives_managed_runtime_bindings,
+)
+from control_plane.runtime_key_safety import runtime_key_safety_environment_class
 from control_plane.workflows.generic_web_deploy_provider import GenericWebDeployProvider
 from control_plane.workflows.generic_web_deploy_provider import (
     GenericWebDeployRuntimeArtifactProvider,
@@ -534,6 +539,13 @@ def execute_generic_web_deploy(
                 raise ValueError(
                     "two-slot releases cannot run an unqualified post-deploy extension"
                 )
+            integration_key_refusal = _non_production_integration_key_refusal(
+                record_store=record_store,
+                context_name=current_lane.context,
+                instance_name=current_lane.instance,
+            )
+            if integration_key_refusal:
+                raise ValueError(integration_key_refusal)
             if not rollback:
                 require_forward_lane_build(
                     record_store=record_store,
@@ -832,6 +844,13 @@ def _execute_generic_web_deploy_unserialized(
             raise click.ClickException(
                 "Declared product verification has no supported post-deploy executor."
             )
+        integration_key_refusal = _non_production_integration_key_refusal(
+            record_store=record_store,
+            context_name=resolved_lane.context,
+            instance_name=resolved_lane.instance,
+        )
+        if integration_key_refusal:
+            raise click.ClickException(integration_key_refusal)
         verified_build_evidence = lane_build_proof(desired_build)
         snapshot = application_snapshot_for_deploy(
             store=record_store,
@@ -1268,6 +1287,40 @@ def record_observed_generic_web_deploy(
         ),
     )
     return {"deployment_record_id": deployment_record_id}, result.model_dump(mode="json")
+
+
+def _non_production_integration_key_refusal(
+    *, record_store: object, context_name: str, instance_name: str
+) -> str:
+    """Why a non-production deploy must stop before the provider, or "" to proceed.
+
+    Each deploy path raises the refusal in its own pre-execution style.
+
+    Production keeps only the recorded read-back: refusing there would block a
+    release. Without a readable policy, a lane that receives managed bindings is
+    refused rather than deployed unchecked.
+    """
+    if runtime_key_safety_environment_class(instance_name) == "prod":
+        return ""
+    evidence = evaluate_delivered_integration_keys(
+        record_store=record_store, context_name=context_name, instance_name=instance_name
+    )
+    if evidence.status == "unavailable" and lane_receives_managed_runtime_bindings(
+        record_store=record_store, context_name=context_name, instance_name=instance_name
+    ):
+        return (
+            "Generic web deploy refused before the provider deploy: the lane receives "
+            "managed runtime keys but no active runtime key-safety policy is readable."
+        )
+    if evidence.status != "fail":
+        return ""
+    findings = ", ".join(
+        f"{finding.binding_key or '-'}: {finding.code}" for finding in evidence.findings
+    )
+    return (
+        "Generic web deploy refused before the provider deploy: integration key safety "
+        f"failed for {context_name}/{instance_name} ({findings})."
+    )
 
 
 def _prove_untitled_deployment_effect(

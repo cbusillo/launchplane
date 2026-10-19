@@ -644,6 +644,17 @@ decryption key state denies the reveal or resolution.
   happened and a refused promotion would roll a live site back. Odoo lanes
   read their integration settings back from the database instead
   (`control_plane/integration_readback.py`).
+- A non-production generic-web deploy (testing, or any lane whose instance is
+  not `prod`) runs the same evaluation before the provider deploy and refuses
+  on `fail`, naming the binding keys and finding codes. It also refuses when
+  the lane receives managed runtime keys but no active key-safety policy is
+  readable. An in-place refusal is recorded as a failed deployment with no
+  provider effect; a cutover refusal raises before creating a deployment record.
+  Testing rollbacks also run this check, so unsafe keys must be corrected before
+  retrying a held testing cutover. Production deploys, promotions and production
+  rollbacks keep only the recorded read-back. Previews deploy through their own
+  path, which checks the keys a preview copies from its template lane before
+  creating the preview.
 - `prod_only` bindings are allowed only for `prod` runtime targets. `testing`
   targets may use `testing`, `non_prod`, or `shared_safe` bindings. `preview`
   targets may use `preview`, `non_prod`, or `shared_safe` bindings.
