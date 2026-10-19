@@ -22956,6 +22956,14 @@
             "title": "Reserve Bytes",
             "type": "integer"
           },
+          "retained_candidate_namespaces": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Retained Candidate Namespaces",
+            "type": "array"
+          },
           "retained_copy_bindings": {
             "default": [],
             "items": {
@@ -22974,6 +22982,7 @@
           "database_bytes",
           "filestore_bytes",
           "reserve_bytes",
+          "retained_candidate_namespaces",
           "retained_copy_bindings",
           "staging_bytes"
         ],

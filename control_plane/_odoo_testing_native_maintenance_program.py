@@ -1,6 +1,6 @@
 """Fixed, original-copy-only native drill retirement and storage removal."""
 
-NATIVE_MAINTENANCE_LIBRARY = r'''
+NATIVE_MAINTENANCE_LIBRARY = r"""
 def native_host_clock():
     return {'host_boot_id':Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
         'host_monotonic':time.clock_gettime(time.CLOCK_BOOTTIME),'host_observed_at':time.time()}
@@ -358,4 +358,4 @@ def native_maintenance_main(spec, command, *, receipt_root=None, lock_root=None,
         raise ValueError('Unsupported native maintenance mode')
     finally:
         executor.close()
-'''
+"""

@@ -17,7 +17,9 @@ from control_plane.contracts.artifact_identity import ArtifactSourceBuild
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.http_routes import testing_rebuild as routes
 from control_plane.odoo_testing_drill import DRILL_SCOPE
-from control_plane.launchplane_reconcile_authorization import build_launchplane_reconcile_authorization
+from control_plane.launchplane_reconcile_authorization import (
+    build_launchplane_reconcile_authorization,
+)
 from control_plane import testing_rebuild_preflight as preflight
 from control_plane import odoo_target_replacement_apply_http as admission
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
