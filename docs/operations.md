@@ -4954,6 +4954,13 @@ ordered versions. Do not substitute Alembic `head` for the release migration
 target: `head` includes the held drop and is reserved for disposable rehearsals
 or the separately approved application procedure.
 
+An image rollback across the Q533 preview drop cannot start an older image
+that still requires the enablement table or rejects the new revision. Recovery
+across that boundary requires the pre-deploy database backup or host snapshot
+and its matching image; restoring that recovery point also discards later writes.
+The preview migration does not create a backup, and its downgrade cannot recover
+the retired rows.
+
 Before application, obtain the Director's explicit shared-data/release approval
 on #2437. From the approved Launchplane host and exact reviewed image, verify
 that every HTTP replica and worker is on consumer-free source including #3930,

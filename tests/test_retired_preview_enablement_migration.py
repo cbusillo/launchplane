@@ -46,7 +46,7 @@ def assert_preview_enablement_drop(test: unittest.TestCase, database_url: str) -
             sorted(before_tables - {migration.RETIRED_TABLE, "alembic_version"})
         )
         before = history_snapshot(engine, preserved_tables)
-        command.upgrade(config, SCHEMA_MIGRATION_TARGET_REVISION)
+        command.upgrade(config, migration.revision)
         test.assertEqual(
             set(inspect(engine).get_table_names()), before_tables - {migration.RETIRED_TABLE}
         )
@@ -61,7 +61,7 @@ def assert_preview_enablement_drop(test: unittest.TestCase, database_url: str) -
         with engine.connect() as connection:
             test.assertEqual(
                 connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one(),
-                SCHEMA_MIGRATION_TARGET_REVISION,
+                migration.revision,
             )
         test.assertEqual(history_snapshot(engine, preserved_tables), before)
     finally:
