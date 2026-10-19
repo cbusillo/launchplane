@@ -329,6 +329,11 @@ The destroy path remains limited to the preview's own target and storage;
 production-shared targets, volumes or databases are not disposable. Runtime
 sync, rebuild and refresh retain their existing isolation rules. Credential
 separation is independent work, not a prerequisite for deleting a preview.
+Driver-managed preview database destruction checks the database and role against
+that preview's generated identifiers and the template server before any effect.
+A foreign database, role or server is held without deleting the application or
+issuing database commands. The shared resolver also protects refresh from
+altering a foreign role.
 For testing lanes, caller-supplied facts and references remain assertions: while an authoritative collector is unavailable, the service
 stores usage, custody and isolation as `unknown`, even if the request asserts
 `unused`, `reproducible` or `isolated`. Those assertions never permit an apply.
