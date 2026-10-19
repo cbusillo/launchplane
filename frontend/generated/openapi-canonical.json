@@ -5910,6 +5910,10 @@
             "title": "Current Domains",
             "type": "array"
           },
+          "expected_confirmation": {
+            "title": "Expected Confirmation",
+            "type": "string"
+          },
           "instance": {
             "title": "Instance",
             "type": "string"
@@ -5984,6 +5988,7 @@
           "instance",
           "status",
           "plan_sha256",
+          "expected_confirmation",
           "target_type",
           "target_id",
           "target_name",
@@ -45110,6 +45115,10 @@
             "title": "Current Record Sha256",
             "type": "string"
           },
+          "expected_confirmation": {
+            "title": "Expected Confirmation",
+            "type": "string"
+          },
           "expected_current": {
             "$ref": "#/components/schemas/RouteBindingExpectedCurrent"
           },
@@ -45181,6 +45190,7 @@
           "status",
           "binding_operation",
           "plan_sha256",
+          "expected_confirmation",
           "expected_current",
           "current_record_sha256",
           "current_domains",

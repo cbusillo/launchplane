@@ -1975,10 +1975,6 @@ class FastApiDokployTargetSetupTests(unittest.IsolatedAsyncioTestCase):
             setup_route["requestBody"]["content"]["application/json"]["schema"]["$ref"],
             "#/components/schemas/DokployTargetSetupEnvelope",
         )
-        self.assertEqual(
-            setup_route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
-            "#/components/schemas/AcceptedEvidenceResponse",
-        )
         self.assertIn("LaunchplaneErrorResponse", json.dumps(setup_route))
         self.assertEqual(
             openapi["components"]["schemas"]["DokployTargetSetupEnvelope"]["additionalProperties"],

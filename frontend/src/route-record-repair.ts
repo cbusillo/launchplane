@@ -22,14 +22,11 @@ export function repairOperationScope(scope: RepairScope, kind: RepairKind): stri
   return JSON.stringify([scope.product, scope.context, scope.instance, "route-record-repair", kind]);
 }
 export function repairStorageKey(scope: string): string { return `launchplane:route-repair-request:${scope}`; }
-export function repairConfirmation(kind: RepairKind): string {
-  return kind === "domain" ? "APPLY DOKPLOY TARGET SETUP" : "APPLY LAUNCHPLANE ROUTE BINDING RECONCILE";
-}
 export function repairRequest(scope: RepairScope, kind: RepairKind, reason: string, review?: RepairReview): RepairRequest {
   const common = {
     context: scope.context, instance: scope.instance, reason: reason.trim(),
     mode: review ? "apply" as const : "dry-run" as const,
-    confirmation: review ? repairConfirmation(kind) : "",
+    confirmation: review?.expected_confirmation ?? "",
     browser_review: { product: scope.product, reviewed_plan_sha256: review?.plan_sha256 ?? "" },
   };
   return kind === "domain" ? { ...common, product: "launchplane", operation: "repair-domain-authority" }
@@ -61,7 +58,7 @@ export function parseStoredRepairRequest(value: string | null, scope: RepairScop
       kind === "domain" ? "operation" : "expected_current"]) || request.mode !== "apply" ||
       request.context !== scope.context || request.instance !== scope.instance ||
       typeof request.reason !== "string" || !request.reason.trim() || request.reason !== request.reason.trim() ||
-      request.confirmation !== repairConfirmation(kind) || !object(request.browser_review) ||
+      typeof request.confirmation !== "string" || !request.confirmation.trim() || !object(request.browser_review) ||
       !exactKeys(request.browser_review, ["product", "reviewed_plan_sha256"]) ||
       request.browser_review.product !== scope.product || !digest(request.browser_review.reviewed_plan_sha256)) return null;
     if (kind === "domain") {
@@ -87,6 +84,7 @@ export function checkedRepairReview(response: RepairResponse, scope: RepairScope
   const value: unknown = response.review;
   if (response.status !== "accepted" || typeof response.trace_id !== "string" || !response.trace_id || !object(value) ||
       !matchesScope(value, scope) || !digest(value.plan_sha256) || typeof value.applied !== "boolean" ||
+      typeof value.expected_confirmation !== "string" || !value.expected_confirmation.trim() ||
       !strings(value.current_domains) || !strings(value.proposed_domains) || !Array.isArray(value.source_records) ||
       !value.source_records.every(source => object(source) && typeof source.identity === "string" && typeof source.version === "string")) {
     throw new Error("The service response does not verify this lane's route-record review.");

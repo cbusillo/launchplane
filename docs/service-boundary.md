@@ -2740,13 +2740,29 @@ It is omitted for existing machine requests, whose result shape and authority
 remain unchanged.
 
 Browser apply rechecks the semantic review and current source rows through the
-existing atomic CAS/receipt boundary. A historical same-key replay is recovered
-before fresh-plan drift checks. The browser then performs a separate inert
-dry-run for current-record readback, using a distinct request identity. Failure
-or denial of that readback retains the original apply request/key and reports
-accepted but unverified; it does not turn a later record into proof of the
-historical operation or prove current site health. No other setup operation is
-admitted by this browser path.
+existing atomic CAS/receipt boundary. A deterministic prewrite `stale` result
+is returned only after its completed 409 refusal wins the same unique caller,
+route and idempotency-key row as a successful atomic write. A concurrent 202
+winner is recovered instead of a false refusal; a 409 winner prevents later
+same-key route-record writes, even after evidence becomes eligible again.
+Existing immutable once-only idempotency insertion decides this result without
+a second request-lock or lease lifecycle. Changed payloads conflict, while
+in-progress, infrastructure, storage and commit uncertainty retain the original
+request/key. Browser replay preserves the exact stored 409 error and trace before
+any Accepted response conversion. Machine replay behavior remains unchanged.
+
+A historical same-key replay is recovered before fresh-plan drift checks. A
+verified accepted or replayed receipt completes that apply independently of
+current-record readback. The browser then performs a separate inert dry-run,
+using a distinct request identity. Failure, denial or later drift of readback is
+shown as current evidence only and does not retain the completed operation in
+recovery or block either decision. The original payload/key remains required
+while the apply receipt itself is unproved. Neither a later record nor readback
+proves current site health. Browser receipts retain the administrator's reason;
+the typed review's required `expected_confirmation` comes from the same
+server-side envelope property that validates apply. Existing machine response
+shapes and confirmations remain unchanged. No other setup operation is admitted
+by this browser path.
 
 Besides `dokploy_target.setup` (or `dokploy_target.plan` for dry-run), checked on
 product and context `launchplane`, the route accepts the lane-scoped

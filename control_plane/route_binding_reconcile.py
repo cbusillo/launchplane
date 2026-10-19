@@ -132,6 +132,10 @@ class RouteBindingReconcileRequest(BaseModel):
         return self
 
 
+class RouteBindingSourceChanged(ValueError):
+    """An exact reviewed source row was removed or changed before its atomic write."""
+
+
 class RouteBindingReviewSources(BaseModel):
     """Private exact source snapshots for the browser's commit guard."""
 

@@ -26,7 +26,6 @@ from control_plane.workflows.dokploy_target_adoption import (
     DokployTargetAdoptionRecordStore,
     DokployTargetDomainRepairPlan,
     FetchDokployTargetPayload,
-    normalize_dokploy_domain_hosts,
     normalize_dokploy_domain_host,
     plan_dokploy_target_domain_authority,
 )
@@ -73,6 +72,7 @@ class DokployDomainRepairReview(BaseModel):
     instance: str
     status: Literal["ready", "unchanged"]
     plan_sha256: str
+    expected_confirmation: str
     target_type: Literal["application", "compose"]
     target_id: str
     target_name: str
@@ -94,6 +94,7 @@ class RouteBindingRepairReview(BaseModel):
     status: Literal["ready", "unchanged", "blocked", "conflict"]
     binding_operation: Literal["create", "refresh", "none"]
     plan_sha256: str
+    expected_confirmation: str
     expected_current: RouteBindingExpectedCurrent
     current_record_sha256: str
     current_record: EnvironmentRouteBindingReadModel | None = Field(
@@ -129,6 +130,7 @@ def plan_browser_domain_repair(
     instance: str,
     host: str,
     token: str,
+    expected_confirmation: str,
     fetch_target_payload: FetchDokployTargetPayload,
     fetch_target_domains: Callable[
         [str, str, Literal["application", "compose"], str], tuple[JsonObject, ...]
@@ -145,18 +147,22 @@ def plan_browser_domain_repair(
     domains = tuple(
         sorted({normalize_dokploy_domain_host(str(row.get("host") or "")) for row in observed})
     )
-    # An already-canonical stored host order remains authoritative (including its primary host).
-    try:
-        stored_hosts = normalize_dokploy_domain_hosts(
-            tuple(
-                (urlsplit(domain if "://" in domain else f"//{domain}").hostname or "")
-                for domain in target.domains
+    # Preserve the intended primary/alias order of observed stored hosts, then
+    # append newly observed hosts. Removed hosts never gain repair authority.
+    stored_hosts: list[str] = []
+    for domain in target.domains:
+        try:
+            host_name = normalize_dokploy_domain_host(
+                urlsplit(domain if "://" in domain else f"//{domain}").hostname or ""
             )
-        )
-    except ValueError:
-        stored_hosts = ()
-    if set(stored_hosts) == set(domains) and len(stored_hosts) == len(domains):
-        domains = stored_hosts
+        except ValueError:
+            continue
+        if host_name in domains and host_name not in stored_hosts:
+            stored_hosts.append(host_name)
+    domains = (
+        *stored_hosts,
+        *(host_name for host_name in domains if host_name not in stored_hosts),
+    )
     repair = plan_dokploy_target_domain_authority(
         record_store=record_store,
         host=host,
@@ -215,6 +221,7 @@ def plan_browser_domain_repair(
             instance=instance,
             status="unchanged" if current.domains == repair.result.requested_domains else "ready",
             plan_sha256=_digest(evidence),
+            expected_confirmation=expected_confirmation,
             target_type=current.target_type,
             target_id=repair.target_id.target_id,
             target_name=current.target_name,
@@ -234,6 +241,7 @@ def binding_repair_review(
     instance: str,
     plan: RouteBindingReconcilePlan,
     expected_current: RouteBindingExpectedCurrent,
+    expected_confirmation: str,
     applied: bool = False,
 ) -> RouteBindingRepairReview:
     current = redacted_route_binding_record(plan.current_record) if plan.current_record else None
@@ -269,6 +277,7 @@ def binding_repair_review(
         status=plan.status,
         binding_operation=plan.operation,
         plan_sha256=_digest(evidence),
+        expected_confirmation=expected_confirmation,
         expected_current=expected_current,
         current_record_sha256=plan.current_record_sha256,
         current_record=current,

@@ -1898,6 +1898,32 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
             finally:
                 fixture.doCleanups()
 
+    def test_browser_same_key_concurrent_retries_preserve_original_receipts(self) -> None:
+        from tests.test_browser_route_repair import BrowserRouteRepairTests
+
+        for kind in ("domain", "binding"):
+            with self.subTest(kind=kind), _store_for_fresh_head_database() as store:
+                fixture = BrowserRouteRepairTests()
+                try:
+                    with patch(
+                        "tests.test_browser_route_repair.PostgresRecordStore", return_value=store
+                    ):
+                        fixture.setUp()
+                    store.seed_authz_policy_if_absent(
+                        LaunchplaneAuthzPolicyRecord(
+                            record_id=build_authz_policy_record_id(
+                                revision=1, policy_sha256=authz_policy_sha256(fixture.policy)
+                            ),
+                            source="test:browser-route-repair",
+                            updated_at=fixture.target.updated_at,
+                            policy=fixture.policy,
+                        )
+                    )
+                    for winner in ("stale", "success"):
+                        asyncio.run(fixture.assert_atomic_terminal_winner(kind, winner))
+                finally:
+                    fixture.doCleanups()
+
     def test_browser_binding_and_authority_publisher_do_not_invert_locks(self) -> None:
         from control_plane.route_binding_reconcile import (
             RouteBindingExpectedCurrent,

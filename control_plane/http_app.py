@@ -2707,6 +2707,10 @@ class RouteBindingReconcileEnvelope(BaseModel):
     reason: str = ""
     confirmation: str = ""
 
+    @property
+    def expected_confirmation(self) -> str:
+        return "APPLY LAUNCHPLANE ROUTE BINDING RECONCILE"
+
     @model_validator(mode="after")
     def _validate_envelope(self) -> "RouteBindingReconcileEnvelope":
         if self.schema_version != 1:
@@ -2728,7 +2732,7 @@ class RouteBindingReconcileEnvelope(BaseModel):
         if self.mode == "apply":
             if not self.reason:
                 raise ValueError("Route binding reconcile apply requires a reason")
-            if self.confirmation != "APPLY LAUNCHPLANE ROUTE BINDING RECONCILE":
+            if self.confirmation != self.expected_confirmation:
                 raise ValueError("Route binding reconcile apply requires exact confirmation text")
         return self
 
@@ -22721,7 +22725,7 @@ def create_launchplane_fastapi_app(
         identity: Annotated[LaunchplaneIdentity, Depends(read_binding_repair_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
-    ) -> AcceptedEvidenceResponse:
+    ) -> AcceptedEvidenceResponse | JSONResponse:
         trace_id = next_trace_id()
         authorization_action = (
             "route_binding.apply" if binding_request.mode == "apply" else "route_binding.read"
@@ -22861,6 +22865,7 @@ def create_launchplane_fastapi_app(
                 instance=binding_request.instance,
                 plan=reconcile_plan,
                 expected_current=expected_current,
+                expected_confirmation=binding_request.expected_confirmation,
                 applied=binding_request.mode == "apply"
                 and reconcile_plan.status in {"ready", "unchanged"},
             )
@@ -22868,15 +22873,21 @@ def create_launchplane_fastapi_app(
                 binding_request.mode == "apply"
                 and binding_request.browser_review.reviewed_plan_sha256 != review.plan_sha256
             ):
-                raise _launchplane_http_error(
-                    status_code=409,
+                assert isinstance(record_store, PostgresRecordStore)
+                return settle_browser_route_repair_stale(
+                    database_store=record_store,
+                    identity=identity,
+                    route_path=_ROUTE_BINDING_RECONCILE_ROUTE,
+                    idempotency_key=normalized_key,
+                    fingerprint=payload_fingerprint,
                     trace_id=trace_id,
-                    code="stale",
                     message="Reviewed route binding plan changed. Review fresh lane evidence before applying.",
                 )
 
         def reconcile_response(*, route_binding_status: str) -> AcceptedEvidenceResponse:
             result_payload = reconcile_plan.model_dump(mode="json", exclude_none=True)
+            if binding_request.browser_review is not None:
+                result_payload["reason"] = binding_request.reason
             result_payload["mode"] = binding_request.mode
             result_payload["route_binding_status"] = route_binding_status
             if reconcile_plan.record is not None:
@@ -22945,13 +22956,19 @@ def create_launchplane_fastapi_app(
                     reviewed_sources=reconcile_plan.review_sources,
                     reviewed_product=binding_request.product,
                 )
-            except (ValueError, ProductContextOwnershipError) as error:
-                raise _launchplane_http_error(
-                    status_code=409,
+            except (
+                control_plane_route_binding_reconcile.RouteBindingSourceChanged,
+                ProductContextOwnershipError,
+            ):
+                return settle_browser_route_repair_stale(
+                    database_store=record_store,
+                    identity=identity,
+                    route_path=_ROUTE_BINDING_RECONCILE_ROUTE,
+                    idempotency_key=normalized_key,
+                    fingerprint=payload_fingerprint,
                     trace_id=trace_id,
-                    code="stale",
                     message="Reviewed route source or lane ownership changed before commit. Review the lane again.",
-                ) from error
+                )
         else:
             mutation_result = mutation_store.reconcile_route_binding_record(
                 expected_record=reconcile_plan.current_record,
@@ -22988,6 +23005,17 @@ def create_launchplane_fastapi_app(
                 message="The route binding mutation requires reconciliation before retry.",
             )
         if mutation_result.status in {"changed", "missing"}:
+            if binding_request.browser_review is not None:
+                assert isinstance(record_store, PostgresRecordStore)
+                return settle_browser_route_repair_stale(
+                    database_store=record_store,
+                    identity=identity,
+                    route_path=_ROUTE_BINDING_RECONCILE_ROUTE,
+                    idempotency_key=normalized_key,
+                    fingerprint=payload_fingerprint,
+                    trace_id=trace_id,
+                    message="The route binding changed before the reviewed write. Review current evidence again.",
+                )
             raise _launchplane_http_error(
                 status_code=409,
                 trace_id=trace_id,
@@ -26173,12 +26201,84 @@ def create_launchplane_fastapi_app(
                 message="Route repair requires the product's exact, exclusively owned recorded lane.",
             )
 
+    def browser_route_repair_refusal(
+        stored_record: LaunchplaneIdempotencyRecord,
+    ) -> JSONResponse | None:
+        if stored_record.response_status_code == 202:
+            return None
+        if stored_record.response_status_code != 409:
+            raise RuntimeError("Browser route repair receipt has an unsupported terminal status.")
+        failure = LaunchplaneErrorResponse.model_validate(stored_record.response_payload)
+        if failure.error.code != "stale":
+            raise RuntimeError(
+                "Browser route repair refusal requires its exact stored stale evidence."
+            )
+        return JSONResponse(
+            status_code=409, content=failure.model_dump(mode="json", exclude_none=True)
+        )
+
+    def settle_browser_route_repair_stale(
+        *,
+        database_store: PostgresRecordStore,
+        identity: LaunchplaneIdentity,
+        route_path: str,
+        idempotency_key: str,
+        fingerprint: str,
+        trace_id: str,
+        message: str,
+    ) -> AcceptedEvidenceResponse | JSONResponse:
+        failure = LaunchplaneErrorResponse(
+            trace_id=trace_id,
+            error=LaunchplaneErrorDetail(code="stale", message=message),
+        )
+        refusal = build_apply_idempotency_record(
+            identity=identity,
+            route_path=route_path,
+            idempotency_key=idempotency_key,
+            request_fingerprint_value=fingerprint,
+            trace_id=trace_id,
+            response=failure,
+        ).model_copy(update={"response_status_code": 409})
+        if database_store.write_idempotency_record_once(refusal):
+            response = browser_route_repair_refusal(refusal)
+            assert response is not None
+            return response
+        # A concurrent success or refusal owns this key. Never overwrite it or
+        # report a settled refusal while another reservation can still write.
+        preflight = database_store.prepare_db_only_mutation(
+            scope=idempotency_scope(identity),
+            route_path=route_path,
+            idempotency_key=idempotency_key,
+            request_fingerprint=fingerprint,
+        )
+        if preflight.status == "replayed":
+            if preflight.record is None:
+                raise RuntimeError("Terminal route repair winner requires its stored receipt.")
+            if route_path == _DOKPLOY_TARGET_SETUP_ROUTE:
+                return domain_repair_replay(trace_id=trace_id, stored_record=preflight.record)
+            return binding_repair_replay(
+                trace_id=trace_id, stored_record=preflight.record, route_path=route_path
+            )
+        raise _launchplane_http_error(
+            status_code=409,
+            trace_id=trace_id,
+            code="idempotency_key_reused"
+            if preflight.status == "conflict"
+            else "mutation_reconciliation_required"
+            if preflight.status == "reconcile_required"
+            else "mutation_in_progress",
+            message="The original route repair result is unproven. Preserve its exact request and key.",
+        )
+
     def binding_repair_replay(
         *,
         trace_id: str,
         stored_record: LaunchplaneIdempotencyRecord,
         route_path: str,
-    ) -> RouteBindingReconcileResponse:
+    ) -> RouteBindingReconcileResponse | JSONResponse:
+        refusal = browser_route_repair_refusal(stored_record)
+        if refusal is not None:
+            return refusal
         base = replay_idempotent_response(
             trace_id=trace_id, stored_record=stored_record, route_path=route_path
         )
@@ -26194,7 +26294,10 @@ def create_launchplane_fastapi_app(
         *,
         trace_id: str,
         stored_record: LaunchplaneIdempotencyRecord,
-    ) -> DokployTargetSetupResponse:
+    ) -> DokployTargetSetupResponse | JSONResponse:
+        refusal = browser_route_repair_refusal(stored_record)
+        if refusal is not None:
+            return refusal
         base = replay_idempotent_response(
             trace_id=trace_id, stored_record=stored_record, route_path=_DOKPLOY_TARGET_SETUP_ROUTE
         )
@@ -26213,7 +26316,7 @@ def create_launchplane_fastapi_app(
         database_store: PostgresRecordStore,
         idempotency_key: str,
         trace_id: str,
-    ) -> DokployTargetSetupResponse:
+    ) -> AcceptedEvidenceResponse | JSONResponse:
         from control_plane.dokploy import source as dokploy_source
         from control_plane.dokploy_target_setup_http import (
             fetch_dokploy_target_payload_for_setup,
@@ -26284,7 +26387,7 @@ def create_launchplane_fastapi_app(
                     message="Preserve the original domain repair payload and key; its existing receipt controls recovery.",
                 )
 
-        def execute_reviewed_repair() -> DokployTargetSetupResponse:
+        def execute_reviewed_repair() -> AcceptedEvidenceResponse | JSONResponse:
             require_browser_repair_lane(
                 record_store=database_store,
                 product=browser_request.product,
@@ -26306,6 +26409,7 @@ def create_launchplane_fastapi_app(
                     instance=setup_request.instance,
                     host=host,
                     token=token,
+                    expected_confirmation=setup_request.expected_confirmation,
                     fetch_target_payload=fetch_dokploy_target_payload_for_setup,
                     fetch_target_domains=fetch_dokploy_target_domains_for_setup,
                 )
@@ -26329,10 +26433,13 @@ def create_launchplane_fastapi_app(
                 setup_request.mode == "apply"
                 and browser_request.reviewed_plan_sha256 != plan.review.plan_sha256
             ):
-                raise _launchplane_http_error(
-                    status_code=409,
+                return settle_browser_route_repair_stale(
+                    database_store=database_store,
+                    identity=identity,
+                    route_path=_DOKPLOY_TARGET_SETUP_ROUTE,
+                    idempotency_key=normalized_key,
+                    fingerprint=fingerprint,
                     trace_id=trace_id,
-                    code="stale",
                     message="Reviewed domain repair changed. Review fresh lane evidence before applying.",
                 )
             response = DokployTargetSetupResponse(
@@ -26346,6 +26453,7 @@ def create_launchplane_fastapi_app(
                     "mode": setup_request.mode,
                     "operation": setup_request.operation,
                     "applied": setup_request.mode == "apply",
+                    "reason": setup_request.reason,
                 },
                 review=plan.review.model_copy(update={"applied": setup_request.mode == "apply"}),
             )
@@ -26371,13 +26479,16 @@ def create_launchplane_fastapi_app(
                         response_payload=response.model_dump(mode="json", exclude_none=True),
                     ),
                 )
-            except (ValueError, FileNotFoundError, ProductContextOwnershipError) as error:
-                raise _launchplane_http_error(
-                    status_code=409,
+            except (DokployTargetRecordChanged, FileNotFoundError, ProductContextOwnershipError):
+                return settle_browser_route_repair_stale(
+                    database_store=database_store,
+                    identity=identity,
+                    route_path=_DOKPLOY_TARGET_SETUP_ROUTE,
+                    idempotency_key=normalized_key,
+                    fingerprint=fingerprint,
                     trace_id=trace_id,
-                    code="stale",
                     message="Domain authority changed before the repair committed. Review the lane again.",
-                ) from error
+                )
             if status == "written":
                 return response
             if status == "replayed":
@@ -26432,7 +26543,7 @@ def create_launchplane_fastapi_app(
         identity: Annotated[LaunchplaneIdentity, Depends(read_domain_repair_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
-    ) -> AcceptedEvidenceResponse:
+    ) -> AcceptedEvidenceResponse | JSONResponse:
         trace_id = next_trace_id()
         database_store = require_dokploy_target_setup_database_store(
             record_store=record_store,

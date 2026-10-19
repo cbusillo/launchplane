@@ -2482,16 +2482,29 @@ Dokploy, DNS or TLS, or establish website health. Existing no-op ingress audit
 automation remains separate.
 
 The browser preserves the exact reviewed request and idempotency key before
-dispatch. After an accepted apply, a separate inert review reads the current
-record. If acknowledgement or readback is uncertain, **Resume original** retries
-that same request and key before another readback. A denied readback or later
-authority change does not undo the historical apply or authorize a new one.
-Missing or invalid recovery storage locks a fresh apply; keep the original
-receipt trace for diagnosis. The controls require the existing strict-admin
-service admission and add no grant or machine authority.
-An exact precommit `stale` refusal settles that original request without a write;
-the panel discards the stale review and lets the administrator review current
-records with a new key. Other conflicts and unknown readbacks retain recovery.
+dispatch. An unknown apply acknowledgement keeps **Resume original** available
+under that same request and key. An accepted response or verified original-key
+replay completes the operation. A separate inert review reads the current
+record afterward. Denied, unavailable or differing current readback is reported
+separately; it does not undo the completed receipt, lock either decision, or
+prevent a fresh review. Current readback does not establish website health.
+Missing or invalid recovery storage still blocks replacing an unproved apply;
+keep the original receipt trace for diagnosis. The controls require the existing
+strict-admin service admission and add no grant or machine authority.
+
+Each browser apply settles under its caller scope, route and idempotency key.
+A proven prewrite `stale` refusal must first record its completed immutable 409
+receipt using the same unique idempotency row as the atomic successful write.
+If success already won, the stale caller recovers the original 202 instead. If
+the refusal won, another in-flight request with that same key recovers 409 and
+cannot write route records. The refusal remains terminal even if current
+evidence later becomes eligible again; review current records with a new key.
+A changed payload under a completed key conflicts. Storage, commit and unknown
+outcomes do not become settled refusals and retain original-key recovery.
+No separate long-lived request lock or client-side inference decides the result.
+The typed review supplies its `expected_confirmation` from the same server
+contract used to validate apply, and the durable browser receipt records the
+administrator's reason. These fields do not confer authorization.
 
 For an invalid tracked Dokploy target domain authority, use the `Dokploy Target
 Setup` workflow with `operation=repair-domain-authority`. Supply the exact

@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from urllib.parse import urlsplit
 
-from control_plane.route_binding_reconcile import RouteBindingReviewSources
+from control_plane.route_binding_reconcile import (
+    RouteBindingReviewSources,
+    RouteBindingSourceChanged,
+)
 from control_plane.contracts.merge_train_stall import MergeTrainStallRecord
 from control_plane.contracts.odoo_upgrade_rehearsal import OdooUpgradeRehearsalRecord
 from control_plane.contracts.testing_rebuild import TestingRebuildRecord
@@ -28097,7 +28100,9 @@ class PostgresRecordStore(HumanSessionStore):
                 or self._read_payload(model_type=record_type, payload=_payload_from_row(row))
                 != expected
             ):
-                raise ValueError("Reviewed route binding source changed before commit.")
+                raise RouteBindingSourceChanged(
+                    "Reviewed route binding source changed before commit."
+                )
 
     def _sync_route_binding_row(
         self,
@@ -29315,7 +29320,9 @@ class PostgresRecordStore(HumanSessionStore):
             payload=_payload_from_row(row),
         )
         if current_record != expected_record:
-            raise ValueError("Dokploy target record changed during domain authority repair.")
+            raise DokployTargetRecordChanged(
+                "Dokploy target record changed during domain authority repair."
+            )
         target_id_statement = (
             select(LaunchplaneDokployTargetIdRow)
             .where(
@@ -29336,7 +29343,9 @@ class PostgresRecordStore(HumanSessionStore):
             payload=_payload_from_row(target_id_row),
         )
         if current_target_id_record != expected_target_id_record:
-            raise ValueError("Dokploy target-id record changed during domain authority repair.")
+            raise DokployTargetRecordChanged(
+                "Dokploy target-id record changed during domain authority repair."
+            )
         provider_statement = (
             select(LaunchplaneProviderTargetRow)
             .where(
@@ -29355,7 +29364,9 @@ class PostgresRecordStore(HumanSessionStore):
             payload=_payload_from_row(provider_row),
         )
         if current_provider_target_record != expected_provider_target_record:
-            raise ValueError("Provider-target record changed during domain authority repair.")
+            raise DokployTargetRecordChanged(
+                "Provider-target record changed during domain authority repair."
+            )
         self._protect_testing_hold_non_use(session, replacement_record)
         row.updated_at = replacement_record.updated_at
         row.payload = self._payload_dict(replacement_record)

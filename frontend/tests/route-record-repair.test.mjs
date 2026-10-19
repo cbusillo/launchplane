@@ -5,13 +5,13 @@ import { parseStoredRepairRequest, repairRequest, repairOperationScope } from ".
 const scope = { product: "example-site", context: "example-testing", instance: "testing" };
 for (const kind of ["domain", "binding"]) {
   const review = { operation: kind === "domain" ? "repair-domain-authority" : "reconcile-route-binding",
-    plan_sha256: "a".repeat(64), expected_current: { state: "present", record_sha256: "b".repeat(64) } };
+    expected_confirmation: "fixture-reviewed-confirmation", plan_sha256: "a".repeat(64), expected_current: { state: "present", record_sha256: "b".repeat(64) } };
   test(`${kind} retained request validates its complete minimal shape`, () => {
     const request = repairRequest(scope, kind, "Approved route record repair", review);
     assert.deepEqual(parseStoredRepairRequest(JSON.stringify(request), scope, kind), request);
     const invalid = [
       { ...request, extra: "unexpected" }, { ...request, reason: "" }, { ...request, mode: "dry-run" },
-      { ...request, confirmation: "WRONG" }, { ...request, instance: "prod" },
+      { ...request, confirmation: "" }, { ...request, instance: "prod" },
       { ...request, browser_review: { ...request.browser_review, extra: true } },
       { ...request, browser_review: { product: "other-product", reviewed_plan_sha256: review.plan_sha256 } },
       { ...request, browser_review: { product: scope.product, reviewed_plan_sha256: "invalid" } },

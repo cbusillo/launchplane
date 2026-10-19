@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { Route } from "lucide-react";
 import { LaunchplaneApiError, readAuthSession, repairDomainAuthority, repairRouteBinding } from "./api";
-import { browserOperationIdentity, recoverBrowserOperationState, type BrowserOperationOptions, type BrowserOperationFailureCertainty } from "./browser-operation";
+import { recoverBrowserOperationState, type BrowserOperationOptions, type BrowserOperationFailureCertainty } from "./browser-operation";
 import { productConfigFailureCertainty, productConfigOperationFailure } from "./product-config-operation";
 import { useBrowserOperationController } from "./use-browser-operation";
 import type { ProductEnvironmentDetail } from "./generated/openapi.ts";
@@ -16,7 +16,7 @@ function executeRepair(request: RepairRequest, options: BrowserOperationOptions)
 }
 
 function repairFailureCertainty(error: unknown, dispatched: boolean): BrowserOperationFailureCertainty {
-  // Both routes replay successful original keys before their atomic prewrite stale refusal.
+  // Both routes persist terminal stale refusals against the same key as the atomic write.
   if (dispatched && error instanceof LaunchplaneApiError && error.statusCode === 409 && error.code === "stale") return "settled";
   return productConfigFailureCertainty(error, dispatched);
 }
@@ -78,6 +78,7 @@ function RepairDecision({ kind, scope, admin, otherActive, setActive, refreshTok
   const [confirmed, setConfirmed] = useState(false);
   const [message, setMessage] = useState("");
   const [accepted, setAccepted] = useState<RepairResponse | null>(null);
+  const [readback, setReadback] = useState<"idle" | "pending" | "verified" | "unavailable" | "different">("idle");
   const revision = useRef(0);
   const plan = useBrowserOperationController<RepairRequest, RepairResponse>({
     scope: `${operationScope}:plan`, readOnly: true, execute: executeRepair,
@@ -93,29 +94,13 @@ function RepairDecision({ kind, scope, admin, otherActive, setActive, refreshTok
           throw new Error("The original operation key could not be preserved. No apply was sent; keep its recovery request.");
         }
       } });
-      const receipt = verifyRepairReceipt(response, scope, kind, request);
+      verifyRepairReceipt(response, scope, kind, request);
       setAccepted(response);
-      setMessage("Apply accepted; current record readback pending. This is not a website health check.");
-      try {
-        const readRequest = repairRequest(scope, kind, request.reason);
-        const readIdentity = await browserOperationIdentity(`${operationScope}:readback`, readRequest);
-        const readback = await executeRepair(readRequest, { signal: options.signal, idempotencyKey: readIdentity.idempotencyKey });
-        const current = checkedRepairReview(readback, scope, kind);
-        if (current.applied) throw new Error("The readback was not an inert review.");
-        if (!repairReadbackMatches(receipt, current)) {
-          throw new Error("Original apply accepted; current authority differs. Keep the original request and key; a new apply is unavailable here.");
-        }
-      } catch (error) {
-        // A readback403 cannot settle an already accepted write as a definitive apply refusal.
-        const detail = error instanceof Error ? error.message : "Record readback unavailable.";
-        setMessage(`Apply accepted but current readback is unverified. ${detail}`);
-        throw new Error(`Accepted apply needs original-key recovery. ${detail}`);
-      }
       return response;
     },
   });
   const recovering = apply.state.requiresIdempotencyContinuity;
-  const busy = [plan.state.phase, apply.state.phase].some(phase => phase === "queued" || phase === "submitting");
+  const busy = readback === "pending" || [plan.state.phase, apply.state.phase].some(phase => phase === "queued" || phase === "submitting");
   const locked = !admin || busy || recovering || otherActive;
   useEffect(() => { setActive(busy || recovering); }, [busy, recovering]);
   useEffect(() => {
@@ -135,7 +120,7 @@ function RepairDecision({ kind, scope, admin, otherActive, setActive, refreshTok
   }
   async function inspect() {
     if (locked || !reason.trim() || !apply.reset()) return;
-    setReview(null); setConfirmed(false); setMessage(""); setAccepted(null);
+    setReview(null); setConfirmed(false); setMessage(""); setAccepted(null); setReadback("idle");
     const generation = ++revision.current;
     const response = await plan.run(repairRequest(scope, kind, reason));
     if (!response || generation !== revision.current) return;
@@ -158,11 +143,37 @@ function RepairDecision({ kind, scope, admin, otherActive, setActive, refreshTok
     if (!response) return;
     setReview(null); setPending(null); setConfirmed(false);
     try { sessionStorage.removeItem(storageKey); } catch { /* Settled state never recovers a leftover request. */ }
-    setMessage("Route record saved and current record readback verified. Website health has not been checked.");
+    // The verified receipt settles this apply. Later readback cannot make it uncertain again.
+    setReadback("pending");
+    const readbackGeneration = revision.current;
+    setMessage("Apply accepted; current record readback pending. This is not a website health check.");
+    try {
+      const readRequest = repairRequest(scope, kind, request.reason);
+      const readResponse = await plan.run(readRequest);
+      if (readbackGeneration !== revision.current) {
+        setReadback("unavailable");
+        setMessage("Original apply completed; a newer evidence refresh superseded this readback. Review current evidence before another decision.");
+        return;
+      }
+      if (!readResponse) throw new Error("Record readback unavailable. The original receipt still proves completion.");
+      const current = checkedRepairReview(readResponse, scope, kind);
+      if (current.applied) throw new Error("The readback was not an inert review.");
+      if (repairReadbackMatches(verifyRepairReceipt(response, scope, kind, request), current)) {
+        setReadback("verified");
+        setMessage("Route record saved and current record readback verified. Website health has not been checked.");
+      } else {
+        setReadback("different");
+        setMessage("Original apply completed; current records now differ. Review the current evidence before another decision.");
+      }
+    } catch (error) {
+      setReadback("unavailable");
+      setMessage(`Original apply completed; current readback is unverified. ${error instanceof Error ? error.message : "Record readback unavailable."}`);
+    }
     onSaved();
   }
   const failure = apply.state.failure ?? plan.state.failure;
-  return <section className="route-repair-decision" aria-labelledby={`${id}-title`} aria-busy={busy}>
+  return <section className="route-repair-decision" aria-labelledby={`${id}-title`} aria-busy={busy}
+    data-operation-phase={apply.state.phase} data-readback={readback} data-recovery={recovering}>
     <h3 id={`${id}-title`}>{title}</h3>
     <p>{kind === "domain" ? "Compare stored domains with the verified provider hosts before recognizing them." : "Join recorded destination, ingress and TLS ownership without inventing missing evidence."}</p>
     <label className="product-config-field">Reason<input aria-label={`${title} reason`} value={reason} disabled={locked} onChange={event => edited(event.target.value)} /></label>
