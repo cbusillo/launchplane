@@ -12507,6 +12507,7 @@ class RealPostgresRecipientRecoveryTests(unittest.TestCase):
         from tests import test_production_recipient_qualification as qualification
 
         self.fixture = qualification.RecipientRecoveryTests()
+        self.fixture.scenario_database = _head_postgres_database
         database = _head_postgres_database()
         self.fixture.database_url = database.__enter__()
         self.addCleanup(database.__exit__, None, None, None)
@@ -12530,6 +12531,100 @@ class RealPostgresRecipientRecoveryTests(unittest.TestCase):
 
     def test_terminal_host_failure_retries_only_original_key_on_postgres(self) -> None:
         self.fixture.test_terminal_clean_failure_retries_original_key_with_host_witness()
+
+    def test_terminal_cold_authority_drift_completes_historically(self) -> None:
+        self.fixture.test_terminal_cold_witness_under_changed_authority_completes_without_qualification()
+
+    def test_cold_proof_io_failure_retries_without_recapture(self) -> None:
+        self.fixture.test_passed_cold_witness_retries_proof_after_io_failure()
+
+    def test_cold_proof_cas_collision_retries_without_recapture(self) -> None:
+        self.fixture.test_passed_cold_witness_retries_proof_after_cas_collision()
+
+    def test_cold_current_validation_refusal_remains_unknown(self) -> None:
+        self.fixture.test_passed_cold_witness_keeps_unclassified_current_refusal_unknown()
+
+    def test_terminal_provider_drift_completes_historically(self) -> None:
+        self.fixture.test_terminal_provider_drift_completes_historically()
+
+    def test_terminal_authority_facts_complete_historically(self) -> None:
+        self.fixture.test_terminal_authority_facts_complete_historically()
+
+    def test_unreadable_observations_retry_the_original_proof(self) -> None:
+        self.fixture.test_unreadable_observations_retry_the_original_proof()
+
+    def test_equivalent_yaml_provider_source_qualifies(self) -> None:
+        self.fixture.test_equivalent_yaml_provider_source_qualifies()
+
+    def test_json_number_provider_source_qualifies(self) -> None:
+        self.fixture.test_json_number_provider_source_qualifies()
+
+    def test_committed_receipt_survives_later_provider_drift(self) -> None:
+        self.fixture.test_committed_receipt_survives_later_provider_drift()
+
+
+class RealPostgresPublishedRecipientRecoveryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from tests import test_production_recipient_published_recovery as recovery
+
+        self.fixture = recovery.PublishedRecoveryTests()
+        self.fixture.scenario_database = _head_postgres_database
+        database = _head_postgres_database()
+        self.fixture.database_url = database.__enter__()
+        self.addCleanup(database.__exit__, None, None, None)
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+
+    def test_completed_proof_and_original_key_replay(self) -> None:
+        self.fixture.test_published_capture_is_fresh_separate_and_replays_only_its_original_key()
+
+    def test_terminal_protocol_drift_completes_original_binding_historically(self) -> None:
+        self.fixture.test_terminal_passed_witness_with_new_current_plan_completes_historically()
+
+    def test_two_reservations_exclude_competing_generations(self) -> None:
+        self.fixture.test_second_generation_cannot_dispatch_while_first_target_is_held()
+
+    def test_authority_race_cannot_commit_a_proof(self) -> None:
+        self.fixture.test_authority_changes_between_last_read_and_atomic_write_are_refused()
+
+    def test_unknown_capture_adopts_only_original_host_witness(self) -> None:
+        self.fixture.test_lost_reply_adopts_only_terminal_host_witness_without_recapture()
+
+    def test_failed_proof_persistence_keeps_original_owner_and_refuses_alternate_key(self) -> None:
+        self.fixture.test_failed_proof_persistence_preserves_owner_and_excludes_other_key()
+
+    def test_custody_append_collision_merges_original_proof(self) -> None:
+        self.fixture.test_custody_append_collision_merges_without_discarding_current_proof()
+
+    def test_future_terminal_capture_completes_without_qualification(self) -> None:
+        self.fixture.test_future_terminal_capture_completes_without_qualification()
+
+    def test_prepublication_terminal_capture_completes_without_qualification(self) -> None:
+        self.fixture.test_prepublication_terminal_capture_completes_without_qualification()
+
+    def test_terminal_provider_drift_completes_historically(self) -> None:
+        self.fixture.test_terminal_provider_drift_completes_historically()
+
+    def test_terminal_authority_facts_complete_historically(self) -> None:
+        self.fixture.test_terminal_authority_facts_complete_historically()
+
+    def test_unreadable_observations_retry_the_original_proof(self) -> None:
+        self.fixture.test_unreadable_observations_retry_the_original_proof()
+
+    def test_owned_authority_race_completes_the_original_witness(self) -> None:
+        self.fixture.test_owned_authority_race_completes_the_original_witness()
+
+    def test_equivalent_yaml_provider_source_qualifies(self) -> None:
+        self.fixture.test_equivalent_yaml_provider_source_qualifies()
+
+    def test_json_number_provider_source_qualifies(self) -> None:
+        self.fixture.test_json_number_provider_source_qualifies()
+
+    def test_committed_receipt_survives_later_provider_drift(self) -> None:
+        self.fixture.test_committed_receipt_survives_later_provider_drift()
+
+    def test_stale_committed_receipt_remains_nonqualifying_after_drift(self) -> None:
+        self.fixture.test_stale_committed_receipt_remains_nonqualifying_after_drift()
 
 
 class RealPostgresProductionRecipientTests(unittest.TestCase):

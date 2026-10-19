@@ -2,7 +2,14 @@
 
 from typing import Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    model_validator,
+    model_serializer,
+    SerializerFunctionWrapHandler,
+)
 
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
@@ -136,6 +143,14 @@ class ProductionRecipientRecord(BaseModel):
     def volumes(self) -> dict[str, str]:
         return {"database": self.namespace + "-db", "config": self.namespace + "-config"}
 
+    @property
+    def published_recovery_proofs(self) -> dict[str, dict[str, Any]]:
+        return {
+            key.removeprefix("published_recovery:"): value
+            for key, value in self.execution.items()
+            if key.startswith("published_recovery:") and isinstance(value, dict)
+        }
+
 
 class RecipientWriterReference(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -183,9 +198,17 @@ class RecipientRecoveryRequest(BaseModel):
 
     context: str = Field(min_length=1)
     preparation_plan_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    purpose: Literal["bootstrap", "published"] = "bootstrap"
+    generation: str = Field(default="", max_length=128, pattern=r"^[A-Za-z0-9_-]*$")
     mode: Literal["dry-run", "apply", "readback", "receipt"] = "dry-run"
     reason: str = Field(min_length=1)
     reviewed_plan_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
+
+    @model_validator(mode="after")
+    def validate_generation(self) -> Self:
+        if (self.purpose == "published") != bool(self.generation):
+            raise ValueError("Only published recovery requires an explicit capture generation.")
+        return self
 
 
 class RecipientRecoveryPlan(BaseModel):
@@ -199,4 +222,33 @@ class RecipientRecoveryPlan(BaseModel):
     capture_sha256: str = ""
     recovered_at: str = ""
     captured_database_empty: bool | None = None
+    purpose: Literal["bootstrap", "published"] = "bootstrap"
+    publication_sha256: str = ""
+    generation: str = ""
+    authority_sha256: str = ""
+    capture_protocol: str = ""
+    capture_started_at: str = ""
+    capture_duration_ms: int | None = None
+    recovery_fresh_until: str = ""
+    retained_scratch: dict[str, str] = Field(default_factory=dict)
     bootstrap_eligible: Literal[False] = False
+
+    @model_serializer(mode="wrap")
+    def serialize_compatible_bootstrap(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> dict[str, Any]:
+        result: dict[str, Any] = handler(self)
+        if self.purpose == "bootstrap":
+            for key in (
+                "purpose",
+                "generation",
+                "publication_sha256",
+                "authority_sha256",
+                "capture_protocol",
+                "capture_started_at",
+                "capture_duration_ms",
+                "recovery_fresh_until",
+                "retained_scratch",
+            ):
+                result.pop(key, None)
+        return result

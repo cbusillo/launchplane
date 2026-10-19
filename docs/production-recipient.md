@@ -172,6 +172,150 @@ After the move's recovery obligations end, the maintaining session reviews that 
 archive directory for retirement. This scoped capture does not replace Gate C's
 independent destination backup qualification on shiny-infra-ops#528.
 
+### Recovery after publication
+
+The same recovery route and `--recovery` terminal consumer support
+`"purpose": "published"` with an explicit `"generation": "post-window-1"` in the
+planning request. The default purpose remains `bootstrap`. Use a new generation
+for a genuinely new observation; changing the generation does not establish
+freshness. Dry-run, reviewed apply, readback and original-key receipt retain the
+existing original preparer identity and setup authority. This capability does
+not approve a live capture or grant an agent production setup access.
+
+Published recovery requires the exact currently owned publication and its
+authority, recipient, artifact and storage. It leaves the cold bootstrap proof
+unchanged. Before any provider schedule is written, the current execution lease
+and an atomic authority comparison admit exactly one original operation for the
+reviewed plan. Its immutable operation binding uses the existing execution metadata.
+Another key cannot capture or adopt its witness, even if proof storage failed.
+A new reviewed generation is the supported way to request another observation.
+
+Active proof commits require the current provider lease. Original-key terminal
+adoption compares the existing reservation's identity and writes only under the
+atomic current-authority check; it does not claim a renewed execution lease or
+start another capture. A custody collision merges unrelated append-only entries
+or accepts the identical original proof. Infrastructure errors preserve
+uncertainty. Positively changed authority or publication, a successfully resolved
+different current plan, or authenticated terminal capture-time ineligibility can
+complete the original terminal witness without qualification. Unclassified
+validation, read and persistence errors remain unknown.
+
+Confirmed drift requires readable observations. Incomplete required provider
+identity or malformed source, environment, converted services or labels cannot
+establish changed authority. Optional fields retain the provider's existing
+omitted/null semantics. A changed retained-target digest also needs a readable
+source description; an identity-only response is not enough. These minimum
+readability checks do not claim to validate a complete provider schema.
+Unreadable observations retain the original operation so a later valid read can
+adopt its existing proof without another capture.
+Provider source comparisons accept equivalent JSON or YAML documents. After
+proof persistence returns successfully, the operation receipt projects that
+committed evidence and its freshness without another provider read. A lost
+commit acknowledgement retains uncertainty. Later observations may settle
+historically while preserving already committed evidence. A later authority
+change affects current eligibility; it cannot rewrite a completed receipt.
+
+The proof records publication and authority digests, capture and logical-data
+digests, exact host container/storage identity, capture start, completion and
+measured duration. The immutable `recovery_fresh_until` timestamp is 15 minutes
+after actual completion. Current dry-run/readback eligibility requires a fresh
+proof. An original completed receipt remains historical and is never refreshed
+by replay. The later #3711 consumer must also require proof after its observation
+window. This producer performs no retirement and clears no backup, health,
+ownership or uncertain-effect gate. Host/service clock skew fails closed; a
+failed timestamp check does not grant qualification. An authenticated terminal
+witness with ineligible capture times completes without proof and releases its
+target. Malformed identity, unproved source settlement and persistence failures
+remain uncertain.
+
+The verifier inventories every running and stopped container. Only the exact
+pinned, running application and database containers may reference the allocated
+MariaDB/config volumes. A service-owned session acquires `FLUSH TABLES WITH READ
+LOCK` and remains idle while a second connection runs `mariadb-dump
+--skip-lock-tables`. This preserves mixed transactional and nontransactional
+tables. Writes wait during the global read lock, potentially for the native
+attempt deadline. Reads remain allowed after acquisition; acquisition and
+engine-specific queues can affect latency. See the
+[MariaDB FLUSH contract](https://mariadb.com/docs/server/reference/sql-statements/administrative-sql-statements/flush-commands/flush).
+Native client and server statement deadlines constrain attempts on a best-effort
+basis; a killed client alone proves neither server completion nor a strict lock
+duration. Only a positively completed capture of at most 120 seconds qualifies.
+Any live capture must account for this write pause; source availability alone is
+not evidence of acceptable live impact.
+
+The protocol conservatively requires exclusive use of the existing root utility
+credential. Preexisting root sessions refuse before capture; later sessions may
+keep quiescence unproved. No unrelated session is killed and no credential or
+grant is added. Credentials remain inside the database container. Native source
+launches are fenced as one original attempt, and source closure requires
+positive cancellation and server quiescence rather than elapsed-time inference.
+If native inspection fails, only a successful complete Docker inventory proving
+the recorded full container ID was removed can establish cancelled closure.
+A stopped or listed source, malformed inventory or unavailable Docker service
+remains unknown. Removal never provides successful capture evidence.
+The native coordinator acquires its nonce lock and announces exact `READY`
+before any SQL. Only its live host parent, still holding the attempt lock, can
+send the matching `GO` over a private pipe after receiving that announcement.
+No permission is prebuffered. EOF, malformed input or a five-second input timeout
+refuses before SQL. A late queued exec after restart cannot receive permission
+from a dead parent, even when `/tmp` cancellation state was lost. Docker exec
+processes end with the container's PID1 and are not restarted with it; see the
+[Docker exec lifecycle contract](https://docs.docker.com/reference/cli/docker/container/exec/).
+
+The provider host bootstrap must keep the worker's intended local Docker endpoint
+stable throughout capture and original-key inspection. The fixed program reads
+local volume backing directories and uses that same daemon for immutable-ID
+execution, cleanup and absence checks. Switching the host's Docker context or
+endpoint during an attempt is outside this provider contract; host administrators
+remain inside its custody boundary.
+This uses no database-volume metadata, image configuration or ownership repair.
+
+One monotonic host journal and lock own that attempt. A missing journal can be
+permanently tombstoned under the same lock, fencing a queued original worker.
+After native source closure and verification of the stable SQL/config artifact,
+the host durably records `source_closed` before any scratch-create dispatch.
+All subsequent commands affect only its independent scratch. Create intent,
+private name/path and exact isolation specification precede create; exact
+observed container identity/isolation is durable before start or import.
+Generation-specific provider schedule identities prevent delayed old triggers
+from receiving a newer script.
+
+Scratch has no application, network, published port, source mount, replication,
+event execution, binary logging or inherited service credential. Restore uses
+explicit autocommit control. Integrity checks, useful nonempty business data and
+an exact same-image canonical SQL roundtrip are required. Config content,
+permissions and ownership remain stable across capture. System/auth databases
+are independently initialized. Unsupported or nondeterministic roundtrips
+refuse. The 2 GiB source/dump ceiling is a safety bound, not a promise of recovery
+throughput; time and free-space bounds may refuse a smaller database.
+
+After source closure, a lost restore or cleanup reply may terminalize with
+`recovered=false` and an explicit `retained_scratch` disposition. It identifies
+the originally observed isolated container ID, private name and path as
+`retained_or_cleanup_unconfirmed`; it claims neither presence nor absence.
+This releases the shared production target without resuming, reusing or cleaning
+that uncertain attempt. A new generation uses disjoint names/paths and repeats
+space checks. A lost create reply can also settle as `stopped_create_unconfirmed`, with an
+unknown ID, when the exact source-closed create-only journal is intact. Docker
+create produces a stopped object with restart disabled. Every start is a
+separate ID-only call after isolation is durably observed. Thus any late create
+cannot run code, and the terminal tombstone prevents a later start. This makes
+no claim that an object exists or is absent. Corrupt create intent, unproved
+source closure, or a start phase without durable isolation keeps the target held.
+
+After verified scratch cleanup, success durably records a value-only receipt
+before removing its own SQL/archive copies. It does not create a second backup
+service. Known pre-scratch failures remove only their own partial files. While
+the original host worker is still running, a later failure also attempts to
+remove only the exact container ID its successful create returned. Private
+files are removed only after successful removal and a complete inventory
+positively confirms that ID is absent. A lost removal reply is never retried
+by that worker or by inspection. Unknown/retained attempts keep their private
+data and explicit custody; no automatic cleanup
+endpoint, retention service or maintenance promise is introduced. Original-key
+inspection never starts a new capture. Cold bootstrap keeps its existing archive
+and safe same-key retry contract.
+
 After changing either verifier, the implementing agent runs the focused host and
 adapter tests plus the real storage gates before handoff. PostgreSQL uses the
 repository's normal integration gate. The explicit disposable MariaDB proof is:
@@ -181,6 +325,10 @@ LAUNCHPLANE_TEST_MARIADB_IMAGE=<reviewed-immutable-mariadb-image> \
 LAUNCHPLANE_TEST_MARIADB_DIRECTORY=<task-local-docker-accessible-directory> \
 uv run --extra dev python -m unittest tests.test_production_recipient_mariadb
 ```
+
+Run `tests.test_production_recipient_published_host.RealPublishedMariaDBTests`
+with the same explicit local-image variables to prove populated InnoDB and
+nontransactional Aria recovery while their original databases remain running.
 
 This gate proves empty restoration, populated restoration with a recovered-row
 query, rejection of a real corrupt Aria table, and partial-initialization refusal.
