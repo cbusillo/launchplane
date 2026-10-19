@@ -238,3 +238,32 @@ class AccessPolicyReviewTests(unittest.TestCase):
             )
             self.assertIsNone(read.call_args.args[0].get_header("Authorization"))
         _public_github_login_account.cache_clear()
+
+    def test_legacy_selector_removal_never_evaluates_an_unresolved_pattern_as_a_person(
+        self,
+    ) -> None:
+        payload = _policy().model_dump(mode="json")
+        payload["github_humans"].extend(
+            [
+                {
+                    "managed_set_id": "review.legacy",
+                    "managed_rule_id": "remove",
+                    "logins": ["a*"],
+                    "roles": ["read_only"],
+                    "actions": ["operations.read"],
+                },
+                {"logins": ["a?"], "roles": ["admin"], "actions": ["operations.read"]},
+            ]
+        )
+        policy = LaunchplaneAuthzPolicy.model_validate(payload)
+        request = ManagedAuthzPolicySetProposalInput(
+            managed_set_id="review.legacy",
+            desired_policy=LaunchplaneAuthzPolicy(schema_version=policy.schema_version),
+            reason="Remove a legacy selector",
+        )
+        store = Mock()
+        store.list_authz_policy_records.return_value = (_policy_record(policy),)
+        evidence = plan_managed_authz_policy_set(store, request)
+        review = build_access_policy_review(record_store=store, request=request, evidence=evidence)
+        self.assertEqual(review.rules[0].role_effects[0].state, "unknown")
+        self.assertIsNone(review.rules[0].role_effects[0].before)

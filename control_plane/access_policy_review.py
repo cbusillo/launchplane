@@ -183,7 +183,19 @@ def _role_bounds(
     login: str,
 ) -> tuple[Literal["admin", "read_only"] | None, Literal["admin", "read_only"] | None]:
     """Use the existing resolver for known facts and an upper bound on missing facts."""
-    known = policy.human_role_for(
+    known_policy = policy.model_copy(
+        update={
+            "github_humans": tuple(
+                rule
+                for rule in policy.github_humans
+                if (github_id or not rule.github_ids)
+                and (login or not rule.logins)
+                and not rule.organizations
+                and not rule.teams
+            )
+        }
+    )
+    known = known_policy.human_role_for(
         github_id=github_id, login=login, organizations=frozenset(), teams=frozenset()
     )
     # This display-only copy removes unobserved selectors. It is never persisted
@@ -215,12 +227,22 @@ def _role_effects(
 ) -> tuple[AccessPolicyRoleEffect, ...]:
     # Selectors describe who a rule could match. They are never evidence that
     # an account ID belongs to a login. Only an ID-bound lookup establishes that.
-    principals = (
-        tuple((github_id, login_for_id(github_id)) for github_id in rule.github_ids)
-        if rule.github_ids
-        else tuple(account_for_login(login) or (0, login) for login in rule.logins)
-    )
-    effects = []
+    principals: list[Account] = []
+    effects: list[AccessPolicyRoleEffect] = []
+    if rule.github_ids:
+        principals.extend((github_id, login_for_id(github_id)) for github_id in rule.github_ids)
+    else:
+        for selector in rule.logins:
+            account = account_for_login(selector)
+            if account is None:
+                effects.append(
+                    AccessPolicyRoleEffect(
+                        principal=f"GitHub login selector {selector} (account unavailable)",
+                        state="unknown",
+                    )
+                )
+            else:
+                principals.append(account)
     for github_id, login in principals:
         principal = (
             f"GitHub login {login} (account ID {github_id})"
