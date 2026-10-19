@@ -1201,6 +1201,10 @@ def _post_audit_with_retry(
     )
 
 
+def _buildctl_keep_storage_mb(max_used_space_bytes: int) -> int:
+    return (max_used_space_bytes + _BUILDCTL_STORAGE_MB_BYTES - 1) // _BUILDCTL_STORAGE_MB_BYTES
+
+
 def _execute_apply_action(
     *, request: RunnerHostHygieneExecutorRequest, remote_runner: RemoteCommandRunner
 ) -> RemoteCommandResult:
@@ -1280,9 +1284,7 @@ def _execute_apply_action(
                 returncode=1,
                 stderr="BuildKit does not support bounded duration and storage pruning",
             )
-        keep_storage_mb = (
-            request.max_used_space_bytes + _BUILDCTL_STORAGE_MB_BYTES - 1
-        ) // _BUILDCTL_STORAGE_MB_BYTES
+        keep_storage_mb = _buildctl_keep_storage_mb(request.max_used_space_bytes)
         return remote_runner(
             (
                 "flock",
@@ -1559,14 +1561,17 @@ def _collect_builder_cache_usage(
     }
     configured = {f"buildx_buildkit_{key}0": key for key in budgets if key != "default"}
     if not containers_available or len(inventory) > MAX_DOCKER_VOLUME_INVENTORY_ITEMS:
-        return (
-            *rows,
+        missing = tuple(
             RunnerHostHygieneBuilderCacheUsage(
-                cache_key="named-builders",
+                cache_key=_builder_cache_key(key),
+                target_bytes=budgets[key],
                 availability="unavailable",
                 reason_code="builder_inventory_incomplete",
-            ),
+            )
+            for key in budgets
+            if key != "default"
         )
+        return (*rows, *missing)
     for container in sorted(inventory.keys() | configured.keys()):
         builder = configured.get(container)
         key = (
@@ -1625,6 +1630,10 @@ def _collect_builder_cache_usage(
                     {
                         "cache_key": key,
                         "target_bytes": target,
+                        "effective_target_bytes": _buildctl_keep_storage_mb(target)
+                        * _BUILDCTL_STORAGE_MB_BYTES
+                        if target is not None
+                        else None,
                         "availability": "available",
                         **measured,
                     }
@@ -1651,7 +1660,15 @@ def _parse_builder_cache_usage(
     if not isinstance(payload, list) or len(payload) > 100_000:
         raise ValueError("builder usage is incomplete")
     totals = dict.fromkeys(
-        ("logical_bytes", "protected_bytes", "in_use_bytes", "recent_bytes", "shared_bytes"), 0
+        (
+            "logical_bytes",
+            "budgeted_bytes",
+            "protected_bytes",
+            "in_use_bytes",
+            "recent_bytes",
+            "shared_bytes",
+        ),
+        0,
     )
     seen: set[str] = set()
     observed = datetime.fromisoformat(observed_at)
@@ -1672,18 +1689,24 @@ def _parse_builder_cache_usage(
             or type(item.get("shared")) is not bool
         ):
             raise ValueError("builder counters are incomplete")
+        if item.get("mutable") is True and item["inUse"]:
+            raise ValueError("mutable active record size is unknown")
         recent = False
         if minimum_age_hours:
-            timestamp = item.get("lastUsedAt") or item.get("createdAt")
-            used = datetime.fromisoformat(timestamp) if isinstance(timestamp, str) else None
-            if used is None or used.tzinfo is None or used > observed:
+            if "lastUsedAt" not in item:
                 raise ValueError("builder age evidence is incomplete")
-            recent = (observed - used).total_seconds() < minimum_age_hours * 3600
+            timestamp = item["lastUsedAt"]
+            if timestamp is not None:
+                used = datetime.fromisoformat(timestamp) if isinstance(timestamp, str) else None
+                if used is None or used.tzinfo is None or used > observed:
+                    raise ValueError("builder age evidence is incomplete")
+                recent = (observed - used).total_seconds() < minimum_age_hours * 3600
         totals["logical_bytes"] += size
+        totals["budgeted_bytes"] += size if not item["shared"] else 0
         totals["in_use_bytes"] += size if item["inUse"] else 0
         totals["shared_bytes"] += size if item["shared"] else 0
         totals["recent_bytes"] += size if recent else 0
-        totals["protected_bytes"] += size if item["inUse"] or recent else 0
+        totals["protected_bytes"] += size if not item["shared"] and (item["inUse"] or recent) else 0
     return totals
 
 

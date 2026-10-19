@@ -668,46 +668,58 @@ dry-run planning only.
 
 Weekday green means a report's planned audit was delivered. It does not mean
 retention is working. The workflow summary now separates report delivery,
-report status, retention qualification and accepted terminal maintenance.
-The qualifier uses the audit envelope's single `maintenance_completed` rule.
-Accepted planned delivery, `blocked`, `not_needed` and pending terminal delivery
-never establish completed maintenance. A completed action can still leave cache
-above target or have unknown measurements; completion and retention are separate.
+report status, retention qualification and accepted terminal maintenance. The
+qualifier uses the audit envelope's single `maintenance_completed` rule.
+Accepted planned delivery, `blocked`, `not_needed` and pending terminal
+delivery never establish completed maintenance. A completed action can still
+leave cache above target or have unknown measurements; completion and retention
+are separate.
 
 Each scheduled report receives the existing default-daemon and named-builder
 budgets through `--buildkit-cache-budget key=bytes`. These are read-only report
-inputs, not prune permissions. Target actions still require their existing exact
-allowlist, target, budget, idle evidence, host lock and durable audit/replay path.
-The configuration projection uses the existing executor request contract; the
-record-backed migration can supply that same input without a new store.
+inputs. The workflow's existing runtime budget setting also selects named
+Sunday maintenance targets; adding an entry there remains a maintenance-scope
+change, not a way to suppress a report finding. The report-only CLI flag itself
+grants no prune permission. Target actions still require their existing exact
+allowlist, target, budget, idle evidence, host lock and durable audit/replay
+path. The configuration projection uses the existing executor request contract;
+the record-backed migration can supply that same input without a new store.
 
 Reports measure each configured builder using its own container's read-only
 `buildctl du --format '{{json .}}'`. They retain only aggregate counters, never
 raw cache descriptions. The existing complete Docker container inventory also
 identifies unbudgeted named caches: these remain measured report-only rows with
 an admin recovery assignment, no target and no cleanup permission. Stopped
-unbudgeted containers have an explicit unmeasured report-only state and are never probed or counted as zero. A configured
-stopped or missing builder remains unknown. Existing orphan findings still apply. Their actual producer/retention responsibility must be reviewed independently before any
-budget or maintenance is proposed. The daemon-default cache remains a distinct
-row from the named builders.
+unbudgeted containers have an explicit unmeasured report-only state and are
+never probed or counted as zero. Running unbudgeted probe failures are likewise
+explicit unmeasured report-only rows with recovery assignment, never measured
+zero. A configured stopped or missing builder remains unknown. Existing orphan
+findings still apply. Their actual producer/retention responsibility must be
+reviewed independently before any budget or maintenance is proposed. The
+daemon-default cache remains a distinct row from the named builders.
 
 The report's invariant is that every configured builder has measured logical
-usage within target, or measured in-use/recent-cache evidence
+budgeted usage within target, or measured in-use/recent-cache evidence
 explaining the excess; otherwise it records a maintenance or measurement
 finding with a recovery assignment. Named-builder age accounting uses the
-selected action's configured
-retention duration, with the existing seven-day minimum for other named rows.
-Shared bytes remain information only; sharing does not protect a record from GC.
-The daemon and named rows use the same logical record sum, including shared
-records; the pre-existing Docker reclaimable aggregate remains unchanged and is
-a different basis. The default-daemon action has no age filter. Report-only
-budgets never enter interrupted-action recovery identity. Missing, failed,
-malformed, duplicate or truncated measurements are
-unknown, never zero. Logical targets are not physical-volume quotas, and excess
-is not an expected-reclaim estimate. Overlapping protection categories are
-counted once. [BuildKit's accounting implementation](https://github.com/moby/buildkit/blob/master/cmd/buildctl/diskusage.go)
-and [client record format](https://github.com/moby/buildkit/blob/master/client/diskusage.go)
-own the probe format and logical accounting semantics.
+selected action's configured retention duration, with the existing seven-day
+minimum for other named rows. Shared bytes remain information only; sharing
+does not protect a record from GC. The daemon and named rows preserve full
+`logical_bytes` and informational `shared_bytes`, but compare the target
+against non-shared `budgeted_bytes`, matching BuildKit GC. Named rows also
+record the effective target after the existing adapter's megabyte rounding. The
+pre-existing Docker reclaimable aggregate remains unchanged and is a separate
+measurement. The default-daemon action has no age filter. Report-only budgets
+never enter interrupted-action recovery identity. Missing, failed, malformed,
+duplicate or truncated measurements are unknown, never zero. Logical targets
+are not physical-volume quotas, and excess is not an expected-reclaim estimate.
+Overlapping protection categories are counted once. [BuildKit's accounting impl
+ementation](https://github.com/moby/buildkit/blob/master/cmd/buildctl/diskusage
+.go) and [client record
+format](https://github.com/moby/buildkit/blob/master/client/diskusage.go) own
+the probe format. [BuildKit GC
+accounting](https://github.com/moby/buildkit/blob/master/cache/manager.go) owns
+the non-shared target basis and last-used retention semantics.
 
 Evaluate the existing private audit artifact without contacting a host:
 
@@ -722,7 +734,8 @@ or absent artifacts produce fixed unqualified diagnostics. With `--summary-file`
 only bounded action/audit identifiers, snapshot time and contract codes are
 rendered. Detailed JSON stays out of that job log. Summary snapshots do not claim
 current-time freshness after a long Sunday batch. The explicit qualification mode exits nonzero for stale/missing evidence, report
-findings, pending planned delivery or action blockers other than the expected
+findings, unresolved execution/recovery, pending delivery or action blockers other
+than recognized existing not-needed outcomes and the expected
 `mutate_not_requested` dry-run blocker. Legacy artifacts without builder evidence
 remain unqualified. `--maximum-age-seconds` bounds review-artifact age separately
 from the executor's unchanged idle freshness gate. To reproduce historical

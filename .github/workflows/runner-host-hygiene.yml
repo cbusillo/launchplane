@@ -517,8 +517,9 @@ jobs:
           set -euo pipefail
           shopt -s nullglob
           artifact_args=()
-          for artifact in "$RUNNER_TEMP"/runner-host-hygiene-audit-evidence-*.json; do
-            artifact_args+=(--audit-file "$artifact")
+          for result in runner-host-hygiene-result-*.json; do
+            suffix="${result#runner-host-hygiene-result-}"
+            artifact_args+=(--audit-file "$RUNNER_TEMP/runner-host-hygiene-audit-evidence-$suffix")
           done
           uv run launchplane work-graph runner-host-hygiene-qualify \
             "${artifact_args[@]}" --report-only \

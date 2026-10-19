@@ -392,8 +392,10 @@ class RunnerHostHygieneBuilderCacheUsage(BaseModel):
     cache_key: str
     source: Literal["docker_engine", "buildctl"] = "buildctl"
     target_bytes: int | None = Field(default=None, ge=1)
+    effective_target_bytes: int | None = Field(default=None, ge=1)
     availability: RunnerHostHygieneEvidenceAvailability
     logical_bytes: int | None = Field(default=None, ge=0)
+    budgeted_bytes: int | None = Field(default=None, ge=0)
     protected_bytes: int | None = Field(default=None, ge=0)
     in_use_bytes: int | None = Field(default=None, ge=0)
     recent_bytes: int | None = Field(default=None, ge=0)
@@ -407,7 +409,9 @@ class RunnerHostHygieneBuilderCacheUsage(BaseModel):
         self.recovery_owner = _required_public_token(
             self.recovery_owner, "builder cache requires recovery assignment"
         )
-        if self.availability == "available" and (self.logical_bytes is None or self.reason_code):
+        if self.availability == "available" and (
+            self.logical_bytes is None or self.budgeted_bytes is None or self.reason_code
+        ):
             raise ValueError(
                 "available builder cache requires measured bytes and no failure reason"
             )
@@ -416,6 +420,7 @@ class RunnerHostHygieneBuilderCacheUsage(BaseModel):
         if self.logical_bytes is not None and any(
             value is not None and value > self.logical_bytes
             for value in (
+                self.budgeted_bytes,
                 self.protected_bytes,
                 self.in_use_bytes,
                 self.recent_bytes,
@@ -423,21 +428,32 @@ class RunnerHostHygieneBuilderCacheUsage(BaseModel):
             )
         ):
             raise ValueError("builder cache subsets cannot exceed total logical bytes")
+        if self.effective_target_bytes is not None and (
+            self.target_bytes is None or self.effective_target_bytes < self.target_bytes
+        ):
+            raise ValueError("effective cache target must include the configured target")
+        if (
+            self.protected_bytes is not None
+            and self.budgeted_bytes is not None
+            and self.protected_bytes > self.budgeted_bytes
+        ):
+            raise ValueError("protected cache cannot exceed budgeted usage")
         return self
 
     @property
     def qualification(self) -> str:
         if self.target_bytes is None and self.reason_code == "builder_not_running":
             return "stopped_unmeasured_report_only"
-        if self.availability != "available" or self.logical_bytes is None:
-            return "unknown"
+        if self.availability != "available" or self.budgeted_bytes is None:
+            return "unbudgeted_unmeasured_report_only" if self.target_bytes is None else "unknown"
         if self.target_bytes is None:
             return "unbudgeted_report_only"
-        if self.logical_bytes <= self.target_bytes:
+        target = self.effective_target_bytes or self.target_bytes
+        if self.budgeted_bytes <= target:
             return "within_target"
         if (
             self.protected_bytes is not None
-            and self.logical_bytes - self.protected_bytes <= self.target_bytes
+            and self.budgeted_bytes - self.protected_bytes <= target
         ):
             return "protected_cache"
         return "maintenance_required"
@@ -449,6 +465,7 @@ class RunnerHostHygieneBuilderCacheUsage(BaseModel):
             "protected_cache",
             "unbudgeted_report_only",
             "stopped_unmeasured_report_only",
+            "unbudgeted_unmeasured_report_only",
         }
 
 

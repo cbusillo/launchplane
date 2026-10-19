@@ -45946,9 +45946,33 @@
             "title": "Availability",
             "type": "string"
           },
+          "budgeted_bytes": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Budgeted Bytes"
+          },
           "cache_key": {
             "title": "Cache Key",
             "type": "string"
+          },
+          "effective_target_bytes": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effective Target Bytes"
           },
           "in_use_bytes": {
             "anyOf": [

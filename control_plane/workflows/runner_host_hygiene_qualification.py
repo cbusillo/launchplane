@@ -6,11 +6,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 import hashlib
 import json
+import re
 from typing import TypedDict
 
 import click
 
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneAuditDeliveryEnvelope
+from control_plane.workflows.runner_host_hygiene_audit_spool import RunnerHostHygieneAuditSpool
+from control_plane.workflows.runner_host_hygiene_executor import _generated_cache_apply_not_needed
 
 
 class HygieneQualification(TypedDict):
@@ -20,6 +23,9 @@ class HygieneQualification(TypedDict):
     fresh: bool
     report_delivery: str
     report_status: str
+    execution_state: str
+    recovery_required: bool
+    action_not_needed: bool
     maintenance_completed: bool
     retention_accounted_for: bool
     qualified: bool
@@ -44,6 +50,8 @@ def qualify_runner_host_hygiene(
         )
     except (ValueError, TypeError):
         fresh = False
+    not_needed = _generated_cache_apply_not_needed(audit.planned_audit.plan)
+    unresolved = RunnerHostHygieneAuditSpool.is_unresolved(audit)
     blockers = tuple(
         item.code
         for item in audit.planned_audit.plan.blockers
@@ -61,12 +69,17 @@ def qualify_runner_host_hygiene(
         "fresh": fresh,
         "report_delivery": audit.planned_delivery_state,
         "report_status": report.status,
+        "execution_state": audit.execution_state,
+        "recovery_required": unresolved,
+        "action_not_needed": not_needed,
         "maintenance_completed": audit.maintenance_completed,
         "retention_accounted_for": retained,
         "qualified": fresh
         and retained
         and report.status == "healthy"
-        and not blockers
+        and (not blockers or not_needed)
+        and not unresolved
+        and (audit.terminal_audit is None or audit.terminal_audit.status == "completed")
         and audit.planned_delivery_state == "delivered",
         "blockers": blockers,
         "findings": tuple(item.code for item in report.findings),
@@ -77,14 +90,16 @@ def qualify_runner_host_hygiene(
     }
 
 
-def _summary(audit: RunnerHostHygieneAuditDeliveryEnvelope, result: HygieneQualification) -> str:
+def _summary(
+    audit: RunnerHostHygieneAuditDeliveryEnvelope, result: HygieneQualification, label: str
+) -> str:
     reference = hashlib.sha256(audit.audit_record_key.encode()).hexdigest()[:12]
     try:
         observed = datetime.fromisoformat(str(result["observed_at"])).isoformat()
     except ValueError:
         observed = "unavailable"
     lines = [
-        f"\n### Hygiene snapshot: {audit.action} ({reference})\n",
+        f"\n### Hygiene snapshot: {audit.action} ({label or reference})\n",
         f"- observed_at: `{observed}`",
     ]
     # Historical snapshots may be hours apart on Sunday. Do not imply the
@@ -96,6 +111,9 @@ def _summary(audit: RunnerHostHygieneAuditDeliveryEnvelope, result: HygieneQuali
         in {
             "report_delivery",
             "report_status",
+            "execution_state",
+            "recovery_required",
+            "action_not_needed",
             "maintenance_completed",
             "retention_accounted_for",
             "blockers",
@@ -104,6 +122,16 @@ def _summary(audit: RunnerHostHygieneAuditDeliveryEnvelope, result: HygieneQuali
     }
     lines.extend(f"- {key}: `{value}`" for key, value in fields.items())
     return "\n".join(lines) + "\n"
+
+
+def _artifact_label(path: Path) -> str:
+    prefix = "runner-host-hygiene-audit-evidence-"
+    name = path.name
+    if name.startswith(prefix) and name.endswith(".json"):
+        suffix = name[len(prefix) : -5]
+        if re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,159}", suffix):
+            return suffix
+    return ""
 
 
 @click.command("runner-host-hygiene-qualify")
@@ -133,11 +161,11 @@ def runner_host_hygiene_qualify(
                 maximum_age_seconds=maximum_age_seconds,
             )
             outputs.append(dict(result))
-            summaries.append(_summary(audit, result))
+            summaries.append(_summary(audit, result, _artifact_label(audit_file)))
         except (OSError, ValueError):
             outputs.append({"qualified": False, "reason_code": "audit_artifact_invalid"})
             summaries.append(
-                "\n### Hygiene snapshot unavailable\n\nUnqualified: invalid audit artifact.\n"
+                f"\n### Hygiene snapshot unavailable ({_artifact_label(audit_file) or 'unattributed'})\n\nUnqualified: invalid or missing audit artifact.\n"
             )
     if not outputs:
         outputs.append({"qualified": False, "reason_code": "audit_artifact_missing"})
