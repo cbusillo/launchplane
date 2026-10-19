@@ -4028,7 +4028,7 @@ def _parse_docker_disk_usage(output: str) -> _DockerDiskUsageSnapshot:
     for row in build_cache_rows:
         in_use = row.get("InUse")
         shared = row.get("Shared")
-        raw_size = _engine_build_cache_size(row)
+        raw_size = _optional_non_negative_int(row.get("Size"))
         if not isinstance(in_use, bool) or not isinstance(shared, bool) or raw_size is None:
             build_cache_partial = True
             build_cache_measurements_known = False

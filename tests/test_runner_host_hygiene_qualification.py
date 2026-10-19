@@ -680,8 +680,10 @@ class HygieneQualificationTests(unittest.TestCase):
                     self.assertEqual(aggregate.logical_bytes, 0)
                 else:
                     self.assertIsNone(row.logical_bytes)
-                    self.assertIsNone(aggregate.logical_bytes)
-                    self.assertNotEqual(aggregate.availability, "available")
+                    # Legacy Engine telemetry is a reported-size lower bound.
+                    # Qualification must not add a new maintenance admission gate.
+                    self.assertEqual(aggregate.logical_bytes, 0)
+                    self.assertEqual(aggregate.availability, "available")
                     self.assertIn(
                         "builder_cache_unqualified", {item.code for item in report.findings}
                     )
@@ -704,6 +706,63 @@ class HygieneQualificationTests(unittest.TestCase):
                 minimum_age_hours=168,
             )
             self.assertEqual(measured["logical_bytes"], 0)
+
+    def test_active_zero_daemon_retains_reclaimable_bytes_and_audited_maintenance_admission(
+        self,
+    ) -> None:
+        for target in ("", "builder-a"):
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as root:
+                original = request_with_budgets(mutate=True)
+                request = RunnerHostHygieneExecutorRequest.model_validate(
+                    {
+                        **original.model_dump(),
+                        "target_buildkit_builder": target,
+                        "max_used_space_bytes": original.buildkit_cache_budgets[
+                            target or "default"
+                        ],
+                        "allowed_buildkit_builders": (target,) if target else (),
+                    }
+                )
+                runner = ReportRunner(
+                    daemon_records=[
+                        {"ID": "active", "Size": 0, "InUse": True, "Shared": False},
+                        {"ID": "reclaimable", "Size": 100, "InUse": False, "Shared": False},
+                    ]
+                )
+
+                def busy(command: Sequence[str], timeout: int) -> RemoteCommandResult:
+                    if tuple(command)[:2] == ("bash", "-lc") and "pgrep -af" in command[2]:
+                        return RemoteCommandResult(
+                            0, "789 /opt/actions-runner/bin/Runner.Worker spawnclient 456\n"
+                        )
+                    return runner(command, timeout)
+
+                spool = RunnerHostHygieneAuditSpool(root=Path(root))
+                result = execute_runner_host_hygiene_executor(
+                    request=request,
+                    remote_runner=busy,
+                    audit_poster=_AuditPoster(),
+                    audit_spool=spool,
+                    github_idle_evidence_reader=_github_idle_evidence_reader,
+                    audit_delivery_sleeper=lambda _: None,
+                )
+                self.assertEqual(result.status, "blocked")
+                self.assertFalse(any(command[0] == "flock" for command in runner.commands))
+                envelope = spool.read(
+                    host_name=request.host_name,
+                    action=request.action,
+                    audit_record_key=request.audit_record_key,
+                )
+                assert envelope is not None
+                self.assertEqual(envelope.planned_delivery_state, "delivered")
+                self.assertIsNone(envelope.terminal_audit)
+                report = envelope.planned_audit.pre_apply_report
+                self.assertEqual(report.docker_reclaimable_breakdown.build_cache_bytes, 100)
+                default = next(
+                    item for item in report.builder_cache_usage if item.cache_key == "default"
+                )
+                self.assertFalse(default.accounted_for)
+                self.assertIsNone(default.logical_bytes)
 
     def test_failed_terminal_uses_latest_evidence_and_reports_action_failure(self) -> None:
         for cause in ("idle", "collection", "command"):

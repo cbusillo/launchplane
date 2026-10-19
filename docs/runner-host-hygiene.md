@@ -715,7 +715,17 @@ record the effective target after the existing adapter's megabyte rounding. The
 pre-existing Docker reclaimable aggregate remains unchanged and is a separate
 measurement. The default-daemon action has no age filter. Report-only budgets
 never enter interrupted-action recovery identity. Missing, failed, malformed,
-duplicate or truncated measurements are unknown, never zero. Logical targets
+duplicate or truncated measurements are unknown, never zero. Active mutable BuildKit records have unknown size despite
+reporting zero. Qualification deliberately requires complete logical sizes, more
+strictly than GC. Engine omits mutability, so active zero-sized Engine records
+are conservatively unknown in the new daemon qualification row. Empty caches and
+inactive zero records remain measured zero. The legacy aggregate retains its
+Engine-reported size basis and admission behavior; during an active mutable
+record it is a lower bound, with known reclaimable bytes preserved. Thus weekday
+qualification can need attention during a build without changing Sunday prune
+admission or replacing its existing audited idle block.
+[Engine cache records](https://github.com/moby/moby/blob/master/api/types/build/cache.go)
+explain the API limit. Logical targets
 are not physical-volume quotas, and excess is not an expected-reclaim estimate.
 Overlapping protection categories are counted once.
 [BuildKit's accounting implementation](https://github.com/moby/buildkit/blob/master/cmd/buildctl/diskusage.go)
