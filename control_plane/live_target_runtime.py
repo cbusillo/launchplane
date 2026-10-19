@@ -308,7 +308,7 @@ def validate_provider_key_retirement(
         for key in retired_keys - (unused - application_keys)
     ):
         raise LiveTargetRuntimeError(
-            "Provider key retirement conflicts with declared application or driver settings.",
+            "Provider key retirement conflicts with application, driver, or stored instance override settings.",
             code="runtime_retirement_conflict",
         )
 

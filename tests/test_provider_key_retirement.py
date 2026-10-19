@@ -579,6 +579,8 @@ class ProviderKeyRetirementLiveSyncTests(unittest.TestCase):
             self.assertEqual(records[0].env["APP_MODE"], "updated")
 
     def test_changed_authority_or_failed_removal_prevents_deployment(self) -> None:
+        from control_plane.odoo_instance_overrides import addon_setting_secret_env_key
+
         for failure in (
             "retirement_changed",
             "application_changed",
@@ -594,7 +596,7 @@ class ProviderKeyRetirementLiveSyncTests(unittest.TestCase):
                 self.addCleanup(store.close)
                 store.write_product_profile_record(_profile())
                 retired_key = (
-                    "ODOO_OVERRIDE_SECRET__ADDON__FIXTURE__TOKEN"
+                    addon_setting_secret_env_key(addon_name="fixture", setting_name="token")
                     if failure == "override_changed"
                     else "LEGACY_PASSWORD"
                 )
