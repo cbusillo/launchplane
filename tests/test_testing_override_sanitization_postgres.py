@@ -76,3 +76,86 @@ class RealPostgresTestingOverrideSanitizationHttpTests(
                 self.assertNotIn(
                     item.value.secret_binding_id, applied.text + replay.text + readback.text
                 )
+
+    async def test_preflight_drift_returning_to_review_cannot_commit_another_receipt(self) -> None:
+        from unittest.mock import patch
+
+        from control_plane.contracts.odoo_instance_override_record import (
+            OdooConfigParameterOverride,
+            OdooOverrideValue,
+        )
+        from control_plane.storage.postgres import PostgresRecordStore
+        from control_plane.testing_override_sanitization import (
+            TestingOverrideSanitizationRequest,
+            TestingOverrideSanitizationSnapshot,
+            read_sanitization_audit,
+            sanitization_snapshot,
+        )
+
+        path = ROUTE.format(product=self.profile.product)
+        headers = {"Authorization": "Bearer local-operator-token"}
+        review = await request(
+            self.fixture.app, "POST", path, headers=headers, payload=self.sanitize_payload
+        )
+        self.assertEqual(review.status_code, 202, review.text)
+        body = TestingOverrideSanitizationRequest.model_validate(
+            {
+                **self.sanitize_payload,
+                "mode": "apply",
+                "reviewed_plan_sha256": review.json()["result"]["plan_sha256"],
+            }
+        )
+        self.store.write_odoo_instance_override_record(
+            self.original_overrides.model_copy(
+                update={
+                    "config_parameters": (
+                        *self.original_overrides.config_parameters,
+                        OdooConfigParameterOverride(
+                            key="fixture.changed",
+                            value=OdooOverrideValue(source="literal", value=True),
+                        ),
+                    )
+                }
+            )
+        )
+
+        def snapshot_then_restore(
+            store: PostgresRecordStore,
+            product: str,
+            request: TestingOverrideSanitizationRequest,
+        ) -> TestingOverrideSanitizationSnapshot:
+            observed = sanitization_snapshot(store, product, request)
+            self.store.write_odoo_instance_override_record(self.original_overrides)
+            return observed
+
+        key = "review-aba-sanitization-key"
+        with (
+            patch(
+                "control_plane.http_routes.testing_override_sanitization.sanitization_snapshot",
+                side_effect=snapshot_then_restore,
+            ),
+            patch.object(
+                self.store,
+                "sanitize_testing_overrides",
+                wraps=self.store.sanitize_testing_overrides,
+            ) as mutation,
+        ):
+            response = await request(
+                self.fixture.app,
+                "POST",
+                path,
+                headers={**headers, "Idempotency-Key": key},
+                payload=body.model_dump(mode="json"),
+            )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(
+            response.json()["error"]["code"], "testing_override_sanitization_unverified"
+        )
+        mutation.assert_not_called()
+        self.assertEqual(
+            self.store.read_odoo_instance_override_record(
+                context_name=self.fixture.context, instance_name="testing"
+            ),
+            self.original_overrides,
+        )
+        self.assertIsNone(read_sanitization_audit(self.store, self.profile.product, body))

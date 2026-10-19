@@ -407,7 +407,17 @@ class TestingOverrideSanitizationTests(TestingOverrideSanitizationScenario):
                     product=self.profile.product, request=body, mutation=self.mutation(body, plan)
                 )
         self.store.write_odoo_instance_override_record(
-            self.original_overrides.model_copy(update={"source_label": "changed"})
+            self.original_overrides.model_copy(
+                update={
+                    "config_parameters": (
+                        *self.original_overrides.config_parameters,
+                        OdooConfigParameterOverride(
+                            key="fixture.changed",
+                            value=OdooOverrideValue(source="literal", value=True),
+                        ),
+                    )
+                }
+            )
         )
         with self.assertRaises(ValueError):
             self.store.sanitize_testing_overrides(

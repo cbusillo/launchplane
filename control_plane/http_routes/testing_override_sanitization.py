@@ -75,6 +75,8 @@ def register_testing_override_sanitization_routes(
                     if audit is not None
                     else sanitization_snapshot(record_store, product, body).plan
                 )
+            if body.mode == "apply" and plan.plan_sha256 != body.reviewed_plan_sha256:
+                raise ValueError("The reviewed sanitization changed.")
             response = accepted_evidence_response(
                 trace_id=trace,
                 records={"operation": body.operation_id},
