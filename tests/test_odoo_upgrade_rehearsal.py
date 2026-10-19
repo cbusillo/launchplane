@@ -1607,7 +1607,7 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         compare = self.host["compare_retained_attachment"]
         limit = spec["capture_comparison_timeout_seconds"]
         budget = self.host["capture_comparison_budget"]
-        self.assertGreater(budget(100 * 1024**3, limit), budget(1024, limit))
+        self.assertGreater(budget(100 * 1024**3, 10**9), budget(1024, 10**9))
         self.assertLessEqual(budget(100 * 1024**3, limit), limit)
         for data, expected in (
             (content, "capture_attachment_matches_reference_copy_differs"),
@@ -1658,7 +1658,9 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         (raw / "filestore.tar").write_bytes(tampered_archive)
         self.assertEqual(compare(spec, root, reference), "capture_comparison_unavailable")
         archive([(name, content)])
-        with patch.object(self.host["time"], "monotonic", side_effect=[0, 601]):
+        expired = budget((raw / "filestore.tar").stat().st_size, limit) + 1
+        ticks = iter([0])
+        with patch.object(self.host["time"], "monotonic", side_effect=lambda: next(ticks, expired)):
             self.assertEqual(compare(spec, root, reference), "capture_comparison_incomplete")
         receipt = root / "capture.json"
         receipt.rename(root / "saved-capture.json")
