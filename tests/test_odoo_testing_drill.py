@@ -375,6 +375,104 @@ class NativeTestingDrillTests(TestingDrillScenario):
         require_drill_checkpoint(self.store, worker, now=self.now + 600)
         self.assertEqual(self.signins.call_count, reads)
 
+    def test_original_retirement_custody_is_rechecked_for_fresh_and_cached_admission(self) -> None:
+        from control_plane.odoo_testing_drill import collect_drill_admission, DrillPrerequisite
+        from control_plane.contracts.testing_rebuild import REBUILD_SCOPE, REBUILD_ROUTE
+        from control_plane.contracts.canonical_json import canonical_json_sha256
+
+        self.scheduler.run_once()
+        worker = self.claim_native()
+        namespace = "lp-testing-" + "a" * 32
+        witness = generation_binding(self.gen)
+        original = None
+
+        def outstanding_after_read(*args: Any, **kwargs: Any) -> DisposableLaneSafety:
+            nonlocal original
+            observation = collect_drill_admission(*args, **kwargs)
+            identity = {
+                "namespace": namespace,
+                "product": worker.product,
+                "context": worker.context,
+                "copy_binding": witness,
+            }
+            original = self.store.reserve_mutation(
+                scope=REBUILD_SCOPE,
+                route_path=REBUILD_ROUTE + ":effect",
+                idempotency_key="original-retirer:retire-old",
+                request_fingerprint=canonical_json_sha256(identity),
+                reconciliation_key=canonical_json_sha256(identity),
+                provider_target_key="original-native-copy",
+                lease_owner="original-retirer",
+                lease_seconds=300,
+                original_intent={"native_retirement": {"identity": identity}},
+            ).record
+            assert original is not None
+            original = self.store.checkpoint_mutation_provider_effect(
+                reservation=original, effect_phase="retire-old"
+            ).record
+            assert original is not None
+            original = self.store.mark_mutation_reconcile_required(
+                reservation=original, reconciliation_key=original.reconciliation_key
+            ).record
+            return observation
+
+        with patch(
+            "control_plane.odoo_testing_drill.collect_drill_admission",
+            side_effect=outstanding_after_read,
+        ):
+            with self.assertRaises(DrillPrerequisite) as refused:
+                require_drill_checkpoint(self.store, worker, now=self.now)
+        self.assertEqual(
+            refused.exception.code, "native_testing_copy_recovery_or_retention_required"
+        )
+        assert original is not None
+        profile = self.store.read_product_profile_record(worker.product)
+
+        def retain(*, names: tuple[str, ...] = (), bindings: tuple[str, ...] = ()) -> None:
+            self.store.write_product_profile_record(
+                profile.model_copy(
+                    update={
+                        "lanes": tuple(
+                            lane.model_copy(
+                                update={
+                                    "odoo_testing_drill_storage": lane.odoo_testing_drill_storage.model_copy(
+                                        update={
+                                            "retained_candidate_namespaces": names,
+                                            "retained_copy_bindings": bindings,
+                                        }
+                                    )
+                                }
+                            )
+                            if lane.instance == "testing"
+                            and lane.odoo_testing_drill_storage is not None
+                            else lane
+                            for lane in profile.lanes
+                        )
+                    }
+                )
+            )
+
+        retain(names=(namespace,))
+        require_drill_checkpoint(self.store, worker, now=self.now)
+        reads = self.signins.call_count
+        retain()
+        with self.assertRaises(DrillPrerequisite) as refused:
+            require_drill_checkpoint(self.store, worker, now=self.now)
+        self.assertEqual(
+            refused.exception.code, "native_testing_copy_recovery_or_retention_required"
+        )
+        retain(bindings=(witness,))
+        require_drill_checkpoint(self.store, worker, now=self.now)
+        self.assertEqual(self.signins.call_count, reads)
+        self.assertEqual(
+            self.store.read_idempotency_record(
+                scope=original.scope,
+                route_path=original.route_path,
+                idempotency_key=original.idempotency_key,
+            ),
+            original,
+        )
+
     def reject_native_admission_race(self, *, lease_changed: bool) -> None:
         from control_plane.odoo_testing_drill import collect_drill_admission, DrillPrerequisite
 

@@ -94,7 +94,9 @@ class TestingProvider:
     def exclusive(self, plan: TestingRebuildPlan) -> nullcontext[None]:
         return nullcontext()
 
-    def guard(self, plan: TestingRebuildPlan, *, recovery: bool = False) -> None:
+    def guard(
+        self, plan: TestingRebuildPlan, *, recovery: bool = False, serving_only: bool = False
+    ) -> None:
         if self.deny_retirement and self.published == plan.new:
             raise PermissionError("fixture authorization_denied")
 

@@ -990,6 +990,77 @@ class NativeTestingWorkerTests(unittest.TestCase):
                 self.assertEqual(self.effects, [])
                 self.assertEqual(self.current().target_id, self.fixture.before.target_id)
 
+    def test_final_forward_checkpoint_rechecks_custody_after_health_read(
+        self, *, protection: str = "safety"
+    ) -> None:
+        from tests.support.disposable_lanes import record_safety
+        from control_plane.testing_rebuild_storage import RecordTestingRebuildStore
+
+        read = service.NativeTestingRebuildExecution.current_route
+        changed = False
+
+        def observed(executor: Any, plan: Any) -> Any:
+            nonlocal changed
+            result = read(executor, plan)
+            if changed or not self.effects or self.effects[-1] != "stop-old":
+                return result
+            changed = True
+            if protection == "safety":
+                record_safety(
+                    self.store,
+                    self.operation.product,
+                    self.operation.context,
+                    "testing",
+                    data="only_copy",
+                )
+            else:
+                phase = "route:" + plan.old.copy_id
+                execution = executor.transport.execution_intent(
+                    executor.route, plan.old.private_url, operation_id=self.operation.operation_id
+                )
+                fingerprint = canonical_json_sha256(
+                    {"intent": executor.intent.digest, "phase": phase}
+                )
+                self.store.reserve_mutation(
+                    scope=REBUILD_SCOPE,
+                    route_path=REBUILD_ROUTE + ":effect",
+                    idempotency_key=self.operation.operation_id + ":" + phase,
+                    request_fingerprint=fingerprint,
+                    reconciliation_key=fingerprint,
+                    provider_target_key=executor.adapter.target_key() + ":" + phase,
+                    lease_owner=executor.lease.evidence_reservation().lease_owner,
+                    original_intent={"route_execution": execution.model_dump(mode="json")},
+                )
+            return result
+
+        with (
+            patch.object(service.NativeTestingRebuildExecution, "current_route", observed),
+            self.assertRaises(service.NativeTestingRebuildPending),
+        ):
+            self.execute()
+        self.assertTrue(changed)
+        checkpoint = RecordTestingRebuildStore(self.store).load_operation(
+            product=self.operation.product,
+            context=self.operation.context,
+            operation_id=self.operation.operation_id,
+        )
+        self.assertEqual(checkpoint.step, "retiring")
+        self.assertFalse(checkpoint.rollback_started)
+        self.assertIsNone(checkpoint.retirement)
+        self.assertEqual(self.effects, ["switch-new", "stop-old"])
+        if protection == "safety":
+            record_safety(self.store, self.operation.product, self.operation.context, "testing")
+            self.assertEqual(self.execute().deploy_status, "pass")
+        else:
+            with self.assertRaises(service.NativeTestingRebuildPending):
+                self.execute()
+        self.assertEqual(self.effects, ["switch-new", "stop-old"])
+
+    def test_admitted_original_inverse_blocks_forward_even_without_outer_rollback_flag(
+        self,
+    ) -> None:
+        self.test_final_forward_checkpoint_rechecks_custody_after_health_read(protection="inverse")
+
     def test_recovery_names_unverified_candidate_custody_without_releasing_it(self) -> None:
         candidate = self.fixture.candidate
         provider = self.store.read_provider_target_record(
@@ -2999,8 +3070,31 @@ class NativeTestingWorkerTests(unittest.TestCase):
             self.assertRaises(TimeoutError),
         ):
             self.execute()
+        from control_plane.odoo_testing_drill import DrillPrerequisite
+
+        for method, code in (
+            ("retirement_exclusion", "native_testing_copy_admission_changed"),
+            ("unstarted_retirement", "native_testing_copy_retirement_exclusion_unproven"),
+        ):
+            self.fail_public = method == "unstarted_retirement"
+            with (
+                patch.object(
+                    service.NativeTestingRebuildExecution,
+                    method,
+                    side_effect=DrillPrerequisite(code),
+                ),
+                self.assertRaises(service.NativeTestingRebuildPending) as pending,
+            ):
+                self.execute()
+            self.assertEqual(pending.exception.code, code)
+            self.assertEqual(self.effects, ["switch-new"])
         self.fail_public = True
-        self.assertEqual(self.execute().deploy_status, "fail")
+        with patch(
+            "control_plane.odoo_testing_native_maintenance.qualifying_retirement",
+            side_effect=service.NativeTestingRebuildPending("fixture lineage refused"),
+        ) as qualification:
+            self.assertEqual(self.execute().deploy_status, "fail")
+        qualification.assert_not_called()
         self.assertEqual(self.effects, ["switch-new", "switch-old"])
         self.assertFalse(self.retained["stopped"])
         self.assertEqual(self.current(), self.fixture.before)

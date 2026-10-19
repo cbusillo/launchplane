@@ -7729,6 +7729,8 @@ class PostgresRecordStore(HumanSessionStore):
         self,
         expected: TestingRebuildRecord | None,
         replacement: LaunchplaneIdempotencyRecord,
+        *,
+        parent: LaunchplaneIdempotencyRecord | None = None,
     ) -> None:
         from control_plane.testing_rebuild_storage import (
             REBUILD_CHECKPOINT_ROUTE,
@@ -7757,6 +7759,135 @@ class PostgresRecordStore(HumanSessionStore):
             raise ValueError("Rebuild checkpoint fingerprint or scope differs from its plan.")
         with self._session_factory() as session:
             self._begin_serialized_write(session)
+            if parent is not None:
+                from control_plane.storage.testing_native_disposal import _native_child
+                from control_plane.contracts.testing_rebuild import REBUILD_SCOPE, REBUILD_ROUTE
+                from control_plane.contracts.testing_publication import TestingPublicationRecord
+                from control_plane.testing_publication_storage import (
+                    PUBLICATION_SCOPE,
+                    PUBLICATION_ROUTE,
+                    _snapshot,
+                    effective_after,
+                    serving_snapshot_matches,
+                )
+
+                if self.database_dialect_name == "postgresql":
+                    self._lock_odoo_stable_lane(
+                        session,
+                        product=record.plan.product,
+                        context=record.plan.context,
+                        instance="testing",
+                    )
+                self._lock_product_authority_bundle_write(session)
+                from control_plane.contracts.product_profile_record import (
+                    product_context_owner_map,
+                    is_exclusive_product_context,
+                )
+
+                profiles = tuple(
+                    LaunchplaneProductProfileRecord.model_validate(row.payload)
+                    for row in session.scalars(select(LaunchplaneProductProfileRow))
+                )
+                profile = next(
+                    (item for item in profiles if item.product == record.plan.product), None
+                )
+                safety_row = session.get(
+                    LaunchplaneDisposableLaneSafetyRow,
+                    (record.plan.product, record.plan.context, "testing"),
+                )
+                safety = (
+                    DisposableLaneSafety.model_validate(safety_row.payload) if safety_row else None
+                )
+                aliases = session.scalar(
+                    select(LaunchplaneDokployTargetIdRow)
+                    .where(
+                        LaunchplaneDokployTargetIdRow.target_id.in_(
+                            (record.plan.old.target_id, record.plan.new.target_id)
+                        ),
+                        or_(
+                            LaunchplaneDokployTargetIdRow.context != record.plan.context,
+                            LaunchplaneDokployTargetIdRow.instance != "testing",
+                        ),
+                    )
+                    .limit(1)
+                )
+                if (
+                    profile is None
+                    or not profile.is_active
+                    or profile.driver_id != "odoo"
+                    or not is_exclusive_product_context(
+                        context=record.plan.context,
+                        product=record.plan.product,
+                        owners=product_context_owner_map(profiles),
+                    )
+                    or aliases is not None
+                    or safety is not None
+                    and (
+                        safety.data == "only_copy"
+                        or safety.production_resources in {"shared", "separation_ready"}
+                    )
+                ):
+                    raise ValueError("Forward completion custody protections changed.")
+                if (parent.scope, parent.route_path, parent.idempotency_key) != (
+                    REBUILD_SCOPE,
+                    REBUILD_ROUTE,
+                    record.plan.operation_id,
+                ):
+                    raise ValueError("Forward completion belongs to another original parent.")
+                _native_child(self, session, parent, running=True)
+                if (
+                    canonical_json_sha256(self._original_mutation_intent(session, parent))
+                    != record.plan.authority_digest
+                ):
+                    raise ValueError("Forward completion changed its original intent.")
+                inverse = session.scalar(
+                    self._idempotency_statement(
+                        scope=REBUILD_SCOPE,
+                        route_path=REBUILD_ROUTE + ":effect",
+                        idempotency_key=record.plan.operation_id
+                        + ":route:"
+                        + record.plan.old.copy_id,
+                        for_update=True,
+                    )
+                )
+                if inverse is not None:
+                    value = LaunchplaneIdempotencyRecord.model_validate(inverse.payload)
+                    if not (
+                        value.state == "completed"
+                        and (
+                            value.response_payload.get("not_dispatched") is True
+                            or value.response_payload.get("route_write_not_started") is True
+                        )
+                    ):
+                        raise ValueError(
+                            "An admitted original inverse prevents forward completion."
+                        )
+                publication = session.scalar(
+                    self._idempotency_statement(
+                        scope=PUBLICATION_SCOPE,
+                        route_path=PUBLICATION_ROUTE,
+                        idempotency_key=key,
+                        for_update=True,
+                    )
+                )
+                applied_publication = (
+                    TestingPublicationRecord.model_validate(publication.payload["response_payload"])
+                    if publication
+                    else None
+                )
+                if (
+                    applied_publication is None
+                    or applied_publication.state != "applied"
+                    or applied_publication.plan.key != key
+                    or applied_publication.plan.candidate.operation_id != record.plan.operation_id
+                    or applied_publication.plan.after.target_id.target_id
+                    != record.plan.new.target_id
+                    or not serving_snapshot_matches(
+                        _snapshot(self, session, record.plan.product, record.plan.context),
+                        effective_after(applied_publication),
+                    )
+                ):
+                    raise ValueError("Forward completion requires its exact current publication.")
             self._lock_landing_authority(session, "testing-rebuild:" + replacement.idempotency_key)
             row = session.scalar(
                 self._idempotency_statement(
@@ -12695,6 +12826,39 @@ class PostgresRecordStore(HumanSessionStore):
                     now=now,
                     accepted_usage_revision=accepted_revision,
                 )
+                from control_plane.storage.testing_drill_custody import (
+                    outstanding_native_retirements,
+                )
+
+                profile_row = session.get(LaunchplaneProductProfileRow, operation.product)
+                profile = (
+                    LaunchplaneProductProfileRecord.model_validate(profile_row.payload)
+                    if profile_row
+                    else None
+                )
+                lane = (
+                    next(
+                        (
+                            item
+                            for item in profile.lanes
+                            if (item.context, item.instance) == (operation.context, "testing")
+                        ),
+                        None,
+                    )
+                    if profile
+                    else None
+                )
+                budget = lane.odoo_testing_drill_storage if lane else None
+                if budget is None or outstanding_native_retirements(
+                    self,
+                    operation.product,
+                    operation.context,
+                    retained_bindings=budget.retained_copy_bindings,
+                    retained_namespaces=budget.retained_candidate_namespaces,
+                    limit=1,
+                    session=session,
+                ):
+                    raise DrillPrerequisite("native_testing_copy_recovery_or_retention_required")
             finally:
                 self._disposable_authority_context.session = outer
             self._sync_idempotency_row(slot, current_receipt)

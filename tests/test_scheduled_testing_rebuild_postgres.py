@@ -14,6 +14,7 @@ from control_plane.dokploy.api import dokploy_request
 from tests import test_scheduled_testing_rebuild as scheduled
 from tests import test_odoo_testing_drill as drills
 from tests import test_testing_native_maintenance as maintenance_tests
+from tests import test_testing_rebuild_worker as workers
 from tests.test_postgres_integration import _head_postgres_database
 
 
@@ -67,8 +68,25 @@ class ScheduledNativePostgresTests(unittest.TestCase):
     def test_native_rollback_closure_remains_sticky_after_health_recovers(self) -> None:
         self.fixture().test_native_rollback_exclusion_survives_lost_reply_and_recovered_new_health()
 
+    def test_old_unhealthy_no_stop_preference_can_finish_healthy_new_before_inverse(self) -> None:
+        self.fixture().test_recovered_new_health_can_complete_before_inverse_when_old_health_is_unavailable()
+
     def test_late_shared_receipt_exposure_remains_untrusted_after_mount_removal(self) -> None:
         self.fixture().test_receipt_exposure_remains_untrusted_after_the_mount_is_removed()
+
+    def test_final_completion_rechecks_new_protected_safety_under_authority(self) -> None:
+        fixture = workers.NativeTestingWorkerTests()
+        fixture.database_url = self.enterContext(_head_postgres_database())
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.test_final_forward_checkpoint_rechecks_custody_after_health_read()
+
+    def test_final_completion_cannot_race_an_admitted_original_inverse(self) -> None:
+        fixture = workers.NativeTestingWorkerTests()
+        fixture.database_url = self.enterContext(_head_postgres_database())
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.test_admitted_original_inverse_blocks_forward_even_without_outer_rollback_flag()
 
     def test_unknown_failed_original_allocation_blocks_new_capture(self) -> None:
         self.fixture().test_unknown_failed_allocation_blocks_another_physical_capture()
@@ -224,7 +242,7 @@ class ScheduledNativePostgresTests(unittest.TestCase):
             concurrent.join(5)
             self.assertFalse(concurrent.is_alive())
             self.assertEqual(len(failures), 1)
-            self.assertEqual(getattr(getattr(failures[0], "orig", None), "sqlstate", None), "57014")
+            self.assertEqual(writer.read_product_profile_record(operation.product), profile)
 
         dispatch_native_disposal(fixture.store, operation, identity, publication, effect, send)
         writer.write_product_profile_record(retained)
@@ -296,9 +314,7 @@ class ScheduledNativePostgresTests(unittest.TestCase):
             thread.start()
             thread.join(5)
             self.assertFalse(thread.is_alive())
-            self.assertEqual(
-                getattr(getattr(failures[-1], "orig", None), "sqlstate", None), "57014"
-            )
+            self.assertTrue(failures, "Contender committed while original policy/family was locked")
             return evidence(*args, **kwargs)
 
         # A benign heartbeat is allowed; true supersession waits on the same
@@ -368,15 +384,24 @@ class ScheduledNativePostgresTests(unittest.TestCase):
             thread.start()
             thread.join(5)
             self.assertFalse(thread.is_alive())
-            self.assertEqual(
-                getattr(getattr(failures[-1], "orig", None), "sqlstate", None), "57014"
-            )
+            self.assertTrue(failures, "Contender committed while original policy/family was locked")
             return evidence(*args, **kwargs)
 
         with patch.object(native, "_native_evidence", side_effect=closure_barrier):
             native.close_native_admissions(store, current, route, family2, proof)
         initial = native.native_closure(store, current)
         assert initial is not None
+        with patch.object(
+            store,
+            "_database_mutation_timestamp",
+            return_value=(datetime.now(UTC) + timedelta(days=1)).isoformat(),
+        ):
+            with self.assertRaises(DrillPrerequisite):
+                native.close_native_admissions(store, current, route, family2, proof, rollback=True)
+            self.assertEqual(native.native_closure(store, current), initial)
+            self.assertEqual(
+                native.close_native_admissions(store, current, route, family2, proof), initial
+            )
         native.close_native_admissions(
             store, current, route, family2, {**proof, "host_monotonic": 500.0}, rollback=True
         )
@@ -488,9 +513,7 @@ class ScheduledNativePostgresTests(unittest.TestCase):
             thread.start()
             thread.join(5)
             self.assertFalse(thread.is_alive())
-            self.assertEqual(
-                getattr(getattr(failures[-1], "orig", None), "sqlstate", None), "57014"
-            )
+            self.assertTrue(failures, "Contender committed while original policy/family was locked")
 
         dispatch_native_retirement(fixture.store, operation, child, route, send)
         from control_plane.dokploy import api
@@ -615,6 +638,12 @@ class ScheduledNativePostgresTests(unittest.TestCase):
         self.addCleanup(fixture.doCleanups)
         fixture.seed(self.enterContext(_head_postgres_database()), legacy_operations=False)
         fixture.test_locked_native_admission_refuses_a_generation_changed_after_collection()
+
+    def test_unknown_original_retirement_blocks_fresh_and_cached_locked_admission(self) -> None:
+        fixture = drills.NativeTestingDrillTests()
+        self.addCleanup(fixture.doCleanups)
+        fixture.seed(self.enterContext(_head_postgres_database()), legacy_operations=False)
+        fixture.test_original_retirement_custody_is_rechecked_for_fresh_and_cached_admission()
 
     def test_attempt_scoped_down_admission_survives_expiry_but_new_positive_use_refuses(
         self,

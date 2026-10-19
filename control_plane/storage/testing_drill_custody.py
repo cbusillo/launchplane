@@ -19,7 +19,81 @@ from control_plane.storage.postgres import (
     PostgresRecordStore,
 )
 from control_plane.testing_publication_storage import PUBLICATION_ROUTE, PUBLICATION_SCOPE
-from control_plane.contracts.odoo_testing_drill import NATIVE_DRILL_MAINTENANCE_ROUTE
+from control_plane.contracts.odoo_testing_drill import (
+    NATIVE_DRILL_MAINTENANCE_ROUTE,
+    NATIVE_DRILL_QUALIFICATION_ROUTE,
+)
+from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+from control_plane.contracts.testing_rebuild import REBUILD_ROUTE, REBUILD_SCOPE
+from control_plane.storage.postgres import ORIGINAL_MUTATION_INTENT_ROUTE
+
+
+def outstanding_native_retirements(
+    store: PostgresRecordStore,
+    product: str,
+    context: str,
+    *,
+    retained_bindings: tuple[str, ...],
+    retained_namespaces: tuple[str, ...],
+    limit: int,
+    session: Any = None,
+) -> tuple[tuple[LaunchplaneIdempotencyRecord, dict[str, Any]], ...]:
+    """Original retirement custody, before any immediate-predecessor exemption."""
+    child = aliased(LaunchplaneIdempotencyRow)
+    intent = aliased(LaunchplaneIdempotencyRow)
+    spec = intent.payload["response_payload"]["original_intent"]["native_retirement"]
+    identity = spec["identity"]
+    qualification = aliased(LaunchplaneIdempotencyRow)
+    qualified = exists(
+        select(qualification.record_id).where(
+            qualification.scope == DRILL_SCOPE,
+            qualification.route_path == NATIVE_DRILL_QUALIFICATION_ROUTE,
+            qualification.idempotency_key == identity["namespace"].as_string(),
+            qualification.state == "completed",
+            qualification.payload["response_trace_id"].as_string()
+            == identity["retiring_operation_id"].as_string(),
+            qualification.payload["response_payload"]["identity_sha256"].as_string()
+            == spec["identity_sha256"].as_string(),
+        )
+    )
+    statement = (
+        select(child.payload, spec)
+        .join(
+            intent,
+            and_(
+                intent.scope == REBUILD_SCOPE,
+                intent.route_path == ORIGINAL_MUTATION_INTENT_ROUTE,
+                intent.idempotency_key == child.record_id,
+            ),
+        )
+        .where(
+            child.scope == REBUILD_SCOPE,
+            child.route_path == REBUILD_ROUTE + ":effect",
+            identity["product"].as_string() == product,
+            identity["context"].as_string() == context,
+            identity["namespace"].as_string().not_in(retained_namespaces),
+            identity["copy_binding"].as_string().not_in(retained_bindings),
+            ~and_(
+                child.state == "completed",
+                func.coalesce(child.payload["response_payload"]["retirement"].as_string(), "")
+                == "stopped",
+                qualified,
+            ),
+        )
+        .order_by(child.created_at, child.record_id)
+        .limit(limit)
+    )
+
+    def read(held: Any) -> tuple[tuple[LaunchplaneIdempotencyRecord, dict[str, Any]], ...]:
+        return tuple(
+            (LaunchplaneIdempotencyRecord.model_validate(row[0]), row[1])
+            for row in held.execute(statement)
+        )
+
+    if session is not None:
+        return read(session)
+    with store._session_factory() as held:
+        return read(held)
 
 
 def _disposed(resource: Any, namespace: Any = None, resources_binding: Any = None) -> Any:

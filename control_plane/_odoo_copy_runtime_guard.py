@@ -41,7 +41,7 @@ def inspect_volume_backings(volumes, all_containers, own, *, expected_binding=No
 COPY_RUNTIME_INSPECTION_LIBRARY = (
     VOLUME_BACKING_INSPECTION_LIBRARY
     + r"""
-def inspect_copy_runtime(spec, *, expected_instance):
+def inspect_copy_runtime(spec, *, expected_instance, receipt_namespace=None):
     gen = spec["generation"]
     namespace, project, database = gen["namespace"], spec["compose_project"], spec["database_name"]
     if expected_instance not in {"testing", "rehearsal"} or gen["instance"] != expected_instance:
@@ -113,6 +113,8 @@ def inspect_copy_runtime(spec, *, expected_instance):
             raise CopyRuntimeDrift("Testing storage is shared by another container")
     inspect_volume_backings(volumes, all_containers, {item[1]["Id"] for item in containers.values()}, expected_binding=gen["resources_binding_sha256"])
     private_state = Path.home().resolve(strict=True) / ('.local/state/launchplane-testing-disposal' if expected_instance == 'testing' else '.local/state/launchplane-rehearsals')
+    if receipt_namespace is not None:
+        private_state = Path(receipt_namespace).resolve(strict=False)
     for container in all_containers:
         for mount in container.get('Mounts', []):
             if (expected_instance == 'rehearsal' or mount.get('RW', True)) and mount.get('Source'):

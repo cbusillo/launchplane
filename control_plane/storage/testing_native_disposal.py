@@ -267,6 +267,7 @@ def close_native_admissions(
     proof: dict[str, Any],
     *,
     rollback: bool = False,
+    parent: LaunchplaneIdempotencyRecord | None = None,
 ) -> dict[str, Any]:
     """Commit a host-sealed no-stop disposition only against the complete original family."""
     if proof.get("status") != "preserved" or proof.get("no_stop_dispatched") is not True:
@@ -274,6 +275,24 @@ def close_native_admissions(
     with store._session_factory() as session:
         store._begin_serialized_write(session)
         _native_child(store, session, child, running=False)
+        # Observing immutable proof needs no new authority. Creating a closure
+        # or making rollback preferred does: either this child or its original
+        # parent must still own a live reservation.
+        prior = _native_closure(store, session, child)
+        changing = (
+            prior is None or rollback and not prior.response_payload.get("rollback_requested")
+        )
+        if changing:
+            if parent is None:
+                _native_child(store, session, child, running=True)
+            else:
+                if (
+                    parent.scope != child.scope
+                    or parent.route_path + ":effect" != child.route_path
+                    or child.idempotency_key != parent.idempotency_key + ":retire-old"
+                ):
+                    raise DrillPrerequisite("native_testing_copy_admission_changed")
+                _native_child(store, session, parent, running=True)
         if (
             _native_custody_loss(store, session, child)
             or _native_family(session, child, route) != family
@@ -286,11 +305,13 @@ def close_native_admissions(
             or any(item.get("namespace_sha256") != proof.get("namespace_sha256") for item in family)
         ):
             raise DrillPrerequisite("native_testing_copy_retirement_exclusion_unproven")
-        prior = _native_closure(store, session, child)
         if prior is not None and prior.response_payload["proof"].get(
             "namespace_sha256"
         ) != proof.get("namespace_sha256"):
             raise DrillPrerequisite("native_testing_copy_retirement_exclusion_unproven")
+        if not changing:
+            assert prior is not None
+            return prior.response_payload
         payload = {
             "family_sha256": canonical_json_sha256(
                 [{key: str(value) for key, value in item.items()} for item in family]

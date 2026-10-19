@@ -39,7 +39,10 @@ from control_plane.storage.postgres import (
     LaunchplaneIdempotencyRow,
     PostgresRecordStore,
 )
-from control_plane.storage.testing_drill_custody import native_drill_maintenance_candidates
+from control_plane.storage.testing_drill_custody import (
+    native_drill_maintenance_candidates,
+    outstanding_native_retirements,
+)
 from control_plane.storage.testing_native_disposal import (
     native_admission_family,
     register_native_admission,
@@ -268,18 +271,59 @@ def retire_qualified_copy(
         return family, remote("inspect-original", {"receipt_namespaces": anchors})
 
     def preserve(
-        current: LaunchplaneIdempotencyRecord, family: list[dict[str, Any]]
+        lease: ProviderOperationLease, family: list[dict[str, Any]], clock: dict[str, Any]
     ) -> dict[str, Any]:
+        assert isinstance(lease, ProviderEvidenceLease)
+        executor.lease.assert_current()
+        lease.assert_current()
+        current = lease.evidence_reservation()
+        existing = next((item for item in family if item["attempt"] == current.attempt), None)
+        if existing is None and not _family_excluded(family, clock):
+            raise pending(clock)
+        if not clock.get("namespace_sha256"):
+            raise pending(clock)
+        admission = register_native_admission(
+            store,
+            current,
+            attempt_route,
+            family,
+            {
+                "expires_at": datetime.now(UTC).timestamp() + 120,
+                "host_boot_id": str(clock["host_boot_id"]),
+                "host_expires_at": float(clock["host_monotonic"]) + 120,
+                "namespace_sha256": clock["namespace_sha256"],
+            },
+        )
+        family = native_admission_family(store, current, attempt_route)
         anchors = _receipt_namespaces(family)
         closure = native_closure(store, current)
         if closure is not None:
             anchors.append(str(closure["proof"]["namespace_sha256"]))
-        proof = remote("seal-retirement", {"receipt_namespaces": anchors})
+
+        def dispatch(send: Callable[[], None]) -> None:
+            executor.lease.assert_current()
+            lease.assert_current()
+            executor.lease.checkpoint_effect(phase)
+            if not lease.evidence_reservation().provider_effect_started_at:
+                lease.checkpoint_effect(phase)
+            dispatch_native_retirement(
+                store, operation, lease.evidence_reservation(), attempt_route, send
+            )
+
+        proof = remote("seal-retirement", {**admission, "receipt_namespaces": anchors}, dispatch)
         if (
             proof.get("status") == "preserved"
             and proof.get("identity_sha256") == spec["identity_sha256"]
         ):
-            close_native_admissions(store, current, attempt_route, family, proof, rollback=exclude)
+            close_native_admissions(
+                store,
+                lease.evidence_reservation(),
+                attempt_route,
+                family,
+                proof,
+                rollback=exclude,
+                parent=executor.lease.evidence_reservation(),
+            )
         return proof
 
     class Retirement:
@@ -296,12 +340,19 @@ def retire_qualified_copy(
             assert current is not None
             family, result = inspect_family(current)
             closure = native_closure(store, current)
-            if closure is not None:
+            if closure is not None or result.get("status") == "preserved":
                 if result.get("status") != "preserved":
                     return ProviderObservation("unknown")
-                if exclude:
+                if closure is None or exclude:
+                    executor.lease.assert_current()
                     close_native_admissions(
-                        store, current, attempt_route, family, result, rollback=True
+                        store,
+                        current,
+                        attempt_route,
+                        family,
+                        result,
+                        rollback=exclude,
+                        parent=executor.lease.evidence_reservation(),
                     )
                 return ProviderObservation(
                     "present",
@@ -313,18 +364,12 @@ def retire_qualified_copy(
                 )
             if stopped(result):
                 return ProviderObservation("present", 200, {"retirement": "stopped"})
-            if exclude or result.get("status") in {"protected", "preserved"}:
-                proof = preserve(current, family)
-                if proof.get("status") == "preserved":
-                    return ProviderObservation(
-                        "present",
-                        200,
-                        {
-                            "retirement": "preserved",
-                            "reason": "native_testing_copy_recovery_or_retention_required",
-                        },
-                    )
-                return ProviderObservation("unknown")
+            if (exclude or result.get("status") == "protected") and _family_excluded(
+                family, result
+            ):
+                return ProviderObservation(
+                    "absent", retry_safe=True, preserve_effect_checkpoint=True
+                )
             if (
                 spec.get("retirement_protocol") == 2
                 and _family_excluded(family, result)
@@ -346,7 +391,7 @@ def retire_qualified_copy(
                     200, {"retirement": "stopped"}, provider_effect_performed=False
                 )
             if exclude or clock.get("status") in {"protected", "preserved"}:
-                proof = preserve(reservation, family)
+                proof = preserve(lease, family, clock)
                 if proof.get("status") == "preserved":
                     return ProviderMutationOutcome(
                         200,
@@ -375,6 +420,25 @@ def retire_qualified_copy(
 
             def dispatch(send: Callable[[], None]) -> None:
                 executor.guard(recovery=True)
+                disabled = store.read_idempotency_record(
+                    scope=REBUILD_SCOPE,
+                    route_path=REBUILD_ROUTE + ":effect",
+                    idempotency_key=operation.operation_id + ":disable-old-auto-deploy",
+                )
+                provider = executor.old_provider()
+                if (
+                    disabled is None
+                    or disabled.state != "completed"
+                    or disabled.response_payload.get("not_dispatched") is True
+                    or disabled.request_fingerprint
+                    != canonical_json_sha256(
+                        {"intent": executor.intent.digest, "phase": "disable-old-auto-deploy"}
+                    )
+                    or provider.get("autoDeploy") is not False
+                    or candidate_configuration_sha256(provider)
+                    != spec["identity"]["configuration_sha256"]
+                ):
+                    raise pending({"reason": "native_copy_custody_changed"})
                 target = store.read_dokploy_target_record(
                     context_name=operation.context, instance_name="testing"
                 )
@@ -401,7 +465,7 @@ def retire_qualified_copy(
                 if result.get("status") == "protected":
                     current = lease.evidence_reservation()
                     family = native_admission_family(store, current, attempt_route)
-                    proof = preserve(current, family)
+                    proof = preserve(lease, family, result)
                     if proof.get("status") == "preserved":
                         return ProviderMutationOutcome(
                             200,
@@ -416,7 +480,16 @@ def retire_qualified_copy(
     prior = child()
     if prior is not None and native_closure(store, prior) is not None and exclude:
         family, proof = inspect_family(prior)
-        close_native_admissions(store, prior, attempt_route, family, proof, rollback=True)
+        executor.lease.assert_current()
+        close_native_admissions(
+            store,
+            prior,
+            attempt_route,
+            family,
+            proof,
+            rollback=True,
+            parent=executor.lease.evidence_reservation(),
+        )
     result = run_durable_provider_operation(
         store=store,
         scope=REBUILD_SCOPE,
@@ -448,10 +521,7 @@ def native_retirement_excluded(executor: Any, stop: LaunchplaneIdempotencyRecord
     from control_plane.testing_rebuild_service import NativeTestingRebuildPending
 
     if native_custody_lost(executor.store, stop):
-        raise NativeTestingRebuildPending(
-            "native_testing_copy_retirement_native_copy_receipt_untrusted",
-            code="native_testing_copy_retirement_native_copy_receipt_untrusted",
-        )
+        return False
     spec = executor.store.read_original_mutation_intent(stop).get("native_retirement")
     if not isinstance(spec, dict):
         return False
@@ -651,6 +721,7 @@ def reconcile_native_drill_storage(executor: Any) -> None:
     budget = lane.odoo_testing_drill_storage
     if budget is None:
         raise DrillPrerequisite("testing_storage_budget_required")
+    observe_outstanding_native_retirements(executor)
     protected = (current.plan.after.target_id.target_id, current.plan.before.target_id.target_id)
     candidates = native_drill_maintenance_candidates(
         store,
@@ -684,6 +755,112 @@ def reconcile_native_drill_storage(executor: Any) -> None:
         limit=1,
     ):
         raise DrillPrerequisite("native_testing_copy_cleanup_pending")
+
+
+def observe_outstanding_native_retirements(executor: Any) -> None:
+    """Reach original children before a passed producer's successor allocates."""
+    store, operation = executor.store, executor.operation
+    profile = store.read_product_profile_record(operation.product)
+    lane = next(
+        item
+        for item in profile.lanes
+        if (item.context, item.instance) == (operation.context, "testing")
+    )
+    budget = lane.odoo_testing_drill_storage
+    if budget is None:
+        raise DrillPrerequisite("testing_storage_budget_required")
+    outstanding = outstanding_native_retirements(
+        store,
+        operation.product,
+        operation.context,
+        retained_bindings=budget.retained_copy_bindings,
+        retained_namespaces=budget.retained_candidate_namespaces,
+        limit=MAX_DISPOSALS_PER_PASS,
+    )
+    unresolved = False
+    for child, spec in outstanding:
+        if not observe_native_retirement_custody(executor, child, spec):
+            unresolved = True
+    if unresolved or len(outstanding) == MAX_DISPOSALS_PER_PASS:
+        raise DrillPrerequisite("native_testing_copy_recovery_or_retention_required")
+
+
+def observe_native_retirement_custody(
+    executor: Any, child: LaunchplaneIdempotencyRecord, spec: dict[str, Any]
+) -> bool:
+    """Observe/adopt only the original stop; a passed producer is not a resume route."""
+    store = executor.store
+    if store.read_original_mutation_intent(child).get("native_retirement") != spec:
+        raise DrillPrerequisite("native_testing_copy_retirement_unsettled")
+    if native_custody_lost(store, child):
+        return False
+
+    class OriginalObservation:
+        def target_key(self) -> str:
+            return str(child.provider_target_key)
+
+        def reconciliation_key(self) -> str:
+            return str(child.reconciliation_key)
+
+        def observe(self, *_args: Any) -> ProviderObservation:
+            current = store.read_idempotency_record(
+                scope=child.scope,
+                route_path=child.route_path,
+                idempotency_key=child.idempotency_key,
+            )
+            if current is None or native_custody_lost(store, current):
+                return ProviderObservation("unknown")
+            anchors = _receipt_namespaces(
+                native_admission_family(
+                    store,
+                    current,
+                    REBUILD_ROUTE + ":retirement-admission",
+                )
+            )
+            closure = native_closure(store, current)
+            if closure is not None:
+                anchors.append(str(closure["proof"]["namespace_sha256"]))
+            result = native_maintenance_operation(
+                host=executor.host,
+                token=executor.token,
+                server_id=spec["identity"]["server_id"],
+                payload={**spec, "mode": "inspect-original", "receipt_namespaces": anchors},
+            )
+            if result.get("reason") == "native_copy_receipt_untrusted":
+                note_native_custody_loss(store, current, result)
+            if result.get("status") in {"eligible", "recent_use", "unqualified", "disposed"}:
+                return ProviderObservation("present", 200, {"retirement": "stopped"})
+            return ProviderObservation("unknown")
+
+        def apply(self, *_args: Any) -> ProviderMutationOutcome:
+            raise AssertionError("Original custody observation cannot dispatch")
+
+    result = run_durable_provider_operation(
+        store=store,
+        scope=child.scope,
+        route_path=child.route_path,
+        idempotency_key=child.idempotency_key,
+        request_fingerprint=child.request_fingerprint,
+        lease_owner=executor.operation.lease_owner or "native-custody-observer",
+        response_trace_id=spec["identity"]["retiring_operation_id"],
+        adapter=OriginalObservation(),
+        original_intent={"native_retirement": spec},
+        allow_mutation=False,
+    )
+    if (
+        result.status not in {"completed", "adopted", "replayed"}
+        or result.response_payload.get("retirement") != "stopped"
+    ):
+        return False
+    candidate = store.read_testing_candidate(spec["identity"]["namespace"])
+    if candidate is None:
+        return False
+    # Original stopped proof plus the exact successful native producer/retirer
+    # invariants permits the same qualification as immediate completion. No
+    # new intent, provider effect or passed-parent resume route is invented.
+    _require_completed_copy(store, candidate, spec)
+    _publish_qualification(store, spec)
+    return True
 
 
 def _reconcile_copy(
@@ -808,6 +985,18 @@ def _reconcile_copy(
             route_path=REBUILD_ROUTE + ":effect",
             idempotency_key=identity["retiring_operation_id"] + ":retire-old",
         )
+        if (
+            original is None
+            or store.read_original_mutation_intent(original).get("native_retirement") != spec
+        ):
+            raise DrillPrerequisite("native_testing_copy_retirement_unsettled")
+        anchors = _receipt_namespaces(
+            native_admission_family(store, original, REBUILD_ROUTE + ":retirement-admission")
+        )
+        closure = native_closure(store, original)
+        if closure is not None:
+            anchors.append(str(closure["proof"]["namespace_sha256"]))
+        anchors.extend(receipt_namespaces or [])
         if any(
             native_custody_lost(store, record)
             for record in (current, original)
@@ -824,7 +1013,7 @@ def _reconcile_copy(
                 "expires_at": expires_at,
                 "host_boot_id": host_boot_id,
                 "host_expires_at": host_expires_at,
-                "receipt_namespaces": receipt_namespaces or [],
+                "receipt_namespaces": anchors,
             },
             dispatch_guard=dispatch_guard,
         )

@@ -807,6 +807,8 @@ class OdooTestingDrillScheduler:
                     and "disposal_status" not in payload
                 ):
                     payload.update(disposal_status="deferred", disposal_pending=1)
+                    if evidence.get("native_retirement_reason"):
+                        payload["step"] = evidence["native_retirement_reason"]
                     if (
                         payload["status"] != "fail"
                         and payload.get("failure_step") != "testing_disposal_deferred"

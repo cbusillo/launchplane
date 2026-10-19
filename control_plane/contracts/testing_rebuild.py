@@ -125,8 +125,8 @@ TestingRebuildStep = Literal[
 
 
 class TestingRetirementDisposition(FrozenRecord):
-    status: Literal["stopped", "preserved"]
-    reason: Literal["", "native_testing_copy_recovery_or_retention_required"] = ""
+    status: Literal["stopped", "preserved", "outstanding"]
+    reason: str = Field(default="", max_length=160, pattern=r"^[a-z0-9_]*$")
 
 
 class TestingRebuildRecord(FrozenRecord):
@@ -162,7 +162,7 @@ class TestingRebuildRecord(FrozenRecord):
     @model_validator(mode="after")
     def validate_checkpoint(self) -> Self:
         if self.retirement is not None and (self.step != "complete" or not self.retirement_started):
-            raise ValueError("A retirement disposition requires completed original retirement.")
+            raise ValueError("A retirement disposition requires completed forward replacement.")
         if (
             self.step in {"rolling_back", "failed"}
             and self.retirement_started

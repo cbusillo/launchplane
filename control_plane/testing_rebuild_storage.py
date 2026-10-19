@@ -1,6 +1,7 @@
 """Rebuild checkpoints in existing record storage, separate from provider fences."""
 
 from typing import Protocol
+from collections.abc import Callable
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.idempotency_record import (
@@ -21,6 +22,8 @@ class RebuildRecordStore(Protocol):
         self,
         expected: TestingRebuildRecord | None,
         replacement: LaunchplaneIdempotencyRecord,
+        *,
+        parent: LaunchplaneIdempotencyRecord | None = None,
     ) -> None: ...
 
 
@@ -34,6 +37,7 @@ class RecordTestingRebuildStore:
 
     def __init__(self, store: RebuildRecordStore) -> None:
         self.store = store
+        self.completion_parent: Callable[[], LaunchplaneIdempotencyRecord] | None = None
 
     def load(self, plan: TestingRebuildPlan) -> TestingRebuildRecord:
         return self.load_operation(
@@ -94,6 +98,11 @@ class RecordTestingRebuildStore:
                 response_trace_id="testing-rebuild:" + record.plan.operation_id,
                 recorded_at=record.updated_at.isoformat(),
                 response_payload=record.model_dump(mode="json"),
+            ),
+            **(
+                {"parent": self.completion_parent()}
+                if record.step == "complete" and self.completion_parent
+                else {}
             ),
         )
 

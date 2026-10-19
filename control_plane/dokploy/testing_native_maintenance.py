@@ -80,8 +80,9 @@ def docker(*arguments,stdin=None):
     return command(*arguments,stdin=stdin)
 def one_inspection(identifier):
     values=json.loads(docker('inspect',identifier))
-    if len(values)!=1:
-        raise ValueError('Native inventory is incomplete')
+    if not isinstance(values,list) or len(values)!=1 or not isinstance(values[0],dict):
+        raise RuntimeError('Native inventory is unavailable')
+    native_container_observation(values[0],spec)
     return values[0]
 try:
     spec=json.loads(base64.b64decode(sys.argv[1],validate=True))

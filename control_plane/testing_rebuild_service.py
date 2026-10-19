@@ -145,6 +145,10 @@ class NativeTestingRebuildPending(ValueError):
         super().__init__(message)
 
 
+class NativeRetainedCopyChanged(ValueError):
+    """A positive provider observation changed the original predecessor placement."""
+
+
 class NativeTestingRebuildAdmissionChanged(ValueError):
     """A source-defined admission refusal with a safe, useful operator cause."""
 
@@ -455,6 +459,9 @@ class NativeTestingRebuildAdapter:
                         DrillPrerequisite,
                     )
 
+                    if isinstance(error, DrillPrerequisite) and executor.cutover_started():
+                        raise NativeTestingRebuildPending(str(error), code=error.code) from error
+
                     if self.operation.idempotency_scope != DRILL_SCOPE or not isinstance(
                         error, (DrillSkipped, DrillPrerequisite)
                     ):
@@ -499,6 +506,8 @@ class NativeTestingRebuildExecution:
         check_lock: Callable[[], None],
     ) -> None:
         self.adapter, self.lease, self.check_lock = adapter, lease, check_lock
+        if isinstance(lease, ProviderEvidenceLease):
+            self.adapter.checkpoints.completion_parent = lease.evidence_reservation
         self.root, self.store, self.operation, self.intent = (
             adapter.root,
             adapter.store,
@@ -812,16 +821,27 @@ class NativeTestingRebuildExecution:
             return False
         raise NativeTestingRebuildPending("The original forward route requires observation.")
 
-    def guard(self, plan: TestingRebuildPlan | None = None, *, recovery: bool = False) -> None:
+    def guard(
+        self,
+        plan: TestingRebuildPlan | None = None,
+        *,
+        recovery: bool = False,
+        serving_only: bool = False,
+    ) -> None:
         self.check_lock()
         self.lease.assert_current()
         self.adapter.authorize("testing_rebuild_checkpoint")
         if not recovery and not self.cutover_started():
             from control_plane.odoo_testing_drill import require_drill_checkpoint
-
-            require_drill_checkpoint(self.store, self.operation)
             from control_plane.odoo_testing_drill import DRILL_SCOPE
 
+            if self.operation.idempotency_scope == DRILL_SCOPE:
+                from control_plane.odoo_testing_native_maintenance import (
+                    observe_outstanding_native_retirements,
+                )
+
+                observe_outstanding_native_retirements(self)
+            require_drill_checkpoint(self.store, self.operation)
             if self.operation.idempotency_scope == DRILL_SCOPE:
                 current_lane = next(
                     (
@@ -891,7 +911,8 @@ class NativeTestingRebuildExecution:
             if self.operation.idempotency_scope == DRILL_SCOPE:
                 raise DrillSkipped("staff_testing_hold")
             raise NativeTestingRebuildPending("Staff testing holds this lane.")
-        self.old_provider()
+        if not serving_only:
+            self.old_provider()
         current_target = self.store.read_dokploy_target_id_record(
             context_name=self.operation.context, instance_name="testing"
         ).target_id
@@ -943,6 +964,28 @@ class NativeTestingRebuildExecution:
             raise NativeTestingRebuildAdmissionChanged(
                 "The lane has a recorded protected copy or shared production resource."
             )
+        if serving_only:
+            publication = published_testing_copy(
+                self.store,
+                product=self.operation.product,
+                context=self.operation.context,
+                recovery_operation_id=self.operation.operation_id,
+            )
+            inverse = self.store.read_idempotency_record(
+                scope=REBUILD_SCOPE,
+                route_path=REBUILD_ROUTE + ":effect",
+                idempotency_key=self.operation.operation_id + ":route:" + self.plan.old.copy_id,
+            )
+            if (
+                publication is None
+                or publication.plan.key != self.publication_key
+                or publication.state != "applied"
+                or self.inverse_admitted(inverse)
+            ):
+                raise NativeTestingRebuildPending(
+                    "The original forward publication is not exclusive."
+                )
+            return
         from control_plane.odoo_testing_drill import DRILL_SCOPE
 
         if (
@@ -1031,6 +1074,16 @@ class NativeTestingRebuildExecution:
             }
         )
 
+    @staticmethod
+    def inverse_admitted(inverse: Any) -> bool:
+        return inverse is not None and not (
+            inverse.state == "completed"
+            and (
+                inverse.response_payload.get("not_dispatched") is True
+                or inverse.response_payload.get("route_write_not_started") is True
+            )
+        )
+
     def old_provider(self) -> dict[str, Any]:
         provider = api.fetch_dokploy_target_payload(
             host=self.host,
@@ -1039,7 +1092,9 @@ class NativeTestingRebuildExecution:
             target_id=self.intent.old.target_id,
         )
         if provider.get("composeType") != "docker-compose":
-            raise ValueError("Native retirement requires a Docker Compose testing target.")
+            raise NativeRetainedCopyChanged(
+                "Native retirement requires a Docker Compose testing target."
+            )
         if (
             provider.get("composeId"),
             provider.get("name"),
@@ -1051,7 +1106,7 @@ class NativeTestingRebuildExecution:
             self.intent.project,
             self.intent.server_id,
         ):
-            raise ValueError("The retained testing provider placement changed.")
+            raise NativeRetainedCopyChanged("The retained testing provider placement changed.")
         return provider
 
     def retained_payload(self, mode: str) -> dict[str, Any]:
@@ -1718,6 +1773,49 @@ class NativeTestingRebuildExecution:
         )
 
     def retire_old(self, plan: TestingRebuildPlan) -> TestingRetirementDisposition:
+        original = self.store.read_idempotency_record(
+            scope=REBUILD_SCOPE,
+            route_path=REBUILD_ROUTE + ":effect",
+            idempotency_key=self.operation.operation_id + ":retire-old",
+        )
+        native_spec = (
+            self.store.read_original_mutation_intent(original).get("native_retirement")
+            if original is not None
+            else None
+        )
+        if isinstance(native_spec, dict):
+            from control_plane.odoo_testing_native_maintenance import retire_qualified_copy
+            from control_plane.odoo_testing_drill import DrillPrerequisite
+
+            try:
+                status = retire_qualified_copy(self, native_spec)
+            except NativeRetainedCopyChanged:
+                return TestingRetirementDisposition(
+                    status="outstanding",
+                    reason="native_testing_copy_retirement_native_copy_custody_changed",
+                )
+            except DrillPrerequisite as error:
+                raise NativeTestingRebuildPending(str(error), code=error.code) from error
+            except NativeTestingRebuildPending as error:
+                if error.code not in {
+                    "native_testing_copy_retirement_native_copy_receipt_untrusted",
+                    "native_testing_copy_retirement_native_copy_custody_changed",
+                    "native_testing_copy_retirement_original_mutation_outcome_unknown",
+                    "native_testing_copy_retirement_original_stop_outcome_unknown",
+                    "native_testing_copy_retirement_recovery_required",
+                    "native_testing_copy_retirement_protected",
+                }:
+                    raise
+                # Serving completion is separately fenced by the workflow. The
+                # original uncertain child remains intact, never fake-completed.
+                return TestingRetirementDisposition(status="outstanding", reason=error.code)
+            return TestingRetirementDisposition(
+                status=status,
+                reason="native_testing_copy_recovery_or_retention_required"
+                if status == "preserved"
+                else "",
+            )
+
         def disable_auto_deploy(dispatch: Callable[[Callable[[], None]], None]) -> None:
             def send() -> None:
                 api.dokploy_request(
@@ -1803,16 +1901,28 @@ class NativeTestingRebuildExecution:
             != canonical_json_sha256({"intent": self.intent.digest, "phase": "retire-old"})
         ):
             raise ValueError("The original stop exclusion has different physical custody.")
-        proof = retained_copy_operation(
-            host=self.host,
-            token=self.token,
-            server_id=self.intent.server_id,
-            payload={
-                **self.retained_payload("readiness"),
-                "health_path": self.intent.profile.health_path,
-            },
+        inverse = self.store.read_idempotency_record(
+            scope=REBUILD_SCOPE,
+            route_path=REBUILD_ROUTE + ":effect",
+            idempotency_key=self.operation.operation_id + ":route:" + plan.old.copy_id,
         )
+        try:
+            proof = retained_copy_operation(
+                host=self.host,
+                token=self.token,
+                server_id=self.intent.server_id,
+                payload={
+                    **self.retained_payload("readiness"),
+                    "health_path": self.intent.profile.health_path,
+                },
+            )
+        except ValueError:
+            if self.inverse_admitted(inverse):
+                raise
+            return None
         if proof.get("healthy") is not True:
+            if not self.inverse_admitted(inverse):
+                return None
             raise NativeTestingRebuildPending(
                 "The excluded retirement needs fresh retained-copy health."
             )
@@ -1827,11 +1937,9 @@ class NativeTestingRebuildExecution:
 
     def unstarted_retirement(self, plan: TestingRebuildPlan) -> TestingCopyReadiness | None:
         from control_plane.odoo_testing_native_maintenance import (
-            qualifying_retirement,
             retire_qualified_copy,
         )
 
-        qualification = qualifying_retirement(self)
         # Exclude all outstanding retirement writes before releasing the lane's
         # original fence. Unknown dispatched effects are observed, never retried.
         for phase in ("disable-old-auto-deploy", "retire-old"):
@@ -1840,7 +1948,12 @@ class NativeTestingRebuildExecution:
                 route_path=REBUILD_ROUTE + ":effect",
                 idempotency_key=self.operation.operation_id + ":" + phase,
             )
-            if phase == "retire-old" and qualification is not None:
+            qualification = (
+                self.store.read_original_mutation_intent(prior).get("native_retirement")
+                if prior is not None
+                else None
+            )
+            if phase == "retire-old" and isinstance(qualification, dict):
                 if retire_qualified_copy(self, qualification, exclude=True) != "preserved":
                     return None
                 continue
@@ -2037,6 +2150,7 @@ def rebuild_result(
 ) -> OdooStableTargetReplacementApplyResult:
     app = allocation.application
     complete = record.step == "complete"
+    attention = complete and record.retirement is not None and record.retirement.status != "stopped"
     return OdooStableTargetReplacementApplyResult(
         product=record.plan.product,
         context=record.plan.context,
@@ -2059,6 +2173,13 @@ def rebuild_result(
             "testing_candidate": allocation.namespace,
             "copy_source": app.plan.source if app else record.plan.source,
         },
+        post_deploy_override_evidence={
+            "post_deploy_readback_testing_drill_disposal_deferred": "true",
+            "native_retirement_status": record.retirement.status,
+            "native_retirement_reason": record.retirement.reason,
+        }
+        if attention and record.retirement is not None
+        else {},
         error_code=record.error,
         error_message=record.admission_refusal
         or "The candidate failed; the original testing copy remains selected."

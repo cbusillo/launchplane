@@ -2246,18 +2246,46 @@ Continuation checks every admitted payload, including prior attempts when the
 latest attempt never registered. CP wall time cannot exclude a host payload.
 Positive no-stop proof requires an intact private receipt namespace and a terminal
 host seal under both original locks; delayed payloads read that seal before any
-stop. A dispatched stop, even one later observed stopped, cannot produce no-stop
+stop. A new seal uses the same immutable boot/deadline admission family as the
+stop, under current original authority; an expired admission cannot create a
+seal or a new rollback preference. Reading/adopting an intact existing seal
+does not require a new mutation admission. A dispatched stop, even one later observed stopped, cannot produce no-stop
 proof. Observed writable container access to the receipt namespace remains
-untrusted after the mount is removed. A healthy successor may complete with a
-truthful preserved retirement; only an explicit original rollback request plus
-fresh private old-copy health permits the inverse. Both generic retirement API
+untrusted after the mount is removed. Namespace identity is a private, atomically
+created and fsynced random marker; a missing marker in an already anchored
+namespace fails closed. Every disposal inspection and admission inherits the
+original retirement family/closure anchors as well as its own disposal anchors.
+Physical volume device/inode checks remain independent and conservative.
+
+A healthy, exactly current successor may complete forward with a truthful
+`preserved` no-stop disposition or `outstanding` unqualified predecessor custody.
+Outstanding does not complete the original uncertain child, manufacture stopped
+or no-stop proof, qualify deletion, cancel daemon work or permit an inverse.
+The final checkpoint rechecks the original parent lease, exact current
+publication and custody protections under lane/authority locks, after fresh
+route and public-health observation. The original execution lock and parent CAS
+exclude a competing supported inverse; any admitted original inverse still
+requires its original recovery even if the outer rollback flag was lost.
+An explicit rollback preference plus fresh private old-copy health permits the
+inverse. If old health is unavailable but new health recovers before an inverse
+is admitted, forward completion can win. Both generic retirement API
 calls and native host sends serialize supported hold writes through their bounded
 send. A preexisting hold refuses the generic call before its effect checkpoints.
 
 Normally qualified, stopped drill copies are collected automatically. Exceptional
 preserved copies, unavailable history and unresolved physical effects keep their
 original custody and attention. Recovery or explicit retention uses the existing
-supported original operation and policy; it does not silently qualify a copy,
+original effect and policy; a passed serving parent is not resumable through the
+held-operation endpoint. Instead the bounded preallocation custody pass observes
+the exact original child/spec before the immediate-predecessor exemption. Later
+fully proved stopped work can be adopted and qualified under that same original
+key after its successful producer/retirer invariants pass. Unresolved work blocks
+another automatic capture; the locked admission checkpoint repeats that check
+against current exact retention. Existing `retained_candidate_namespaces` or
+`retained_copy_bindings` can deliberately permit continuation while keeping the
+original uncertainty and attention. No retention is inserted automatically.
+Serving success retains the existing deferred-disposal evidence/alert and the
+environment's original custody total/examples. This does not silently qualify a copy,
 cancel dispatched work, authorize re-adoption or copy credentials.
 
 The collector keeps the serving copy and its immediate predecessor from the

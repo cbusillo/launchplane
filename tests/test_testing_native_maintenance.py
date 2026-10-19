@@ -271,11 +271,15 @@ class NativeMaintenanceHostTests(unittest.TestCase):
             )
             return json.dumps({"witness": self.witness, "max_login_at": self.login}).encode()
         if arguments[0] == "stop":
-            options = dict(zip(arguments[1:-1:2], arguments[2:-1:2]))
+            values = iter(arguments[1:-1])
+            options = {}
+            for argument in values:
+                name, separator, value = argument.partition("=")
+                options[name] = value if separator else next(values)
             self.assertEqual(int(options.get("--timeout", options.get("-t", "0"))), -1)
             for descriptor in kwargs["pass_fds"]:
                 os.fstat(descriptor)
-            self.containers[arguments[3]]["State"].update(
+            self.containers[arguments[-1]]["State"].update(
                 Status="exited", FinishedAt="retirement-finished"
             )
             return b""
@@ -345,6 +349,36 @@ class NativeMaintenanceHostTests(unittest.TestCase):
         self.network_members.add("foreign-consumer")
         self.assertEqual(self.run_mode("qualify-retirement")["status"], "protected")
         self.assertFalse(any(call[0] == "stop" for call in self.calls))
+        for mismatch in ("empty_networks", "multiple_networks", "wrong_networks", "empty_mounts"):
+            with self.subTest(mismatch=mismatch):
+                fixture = NativeMaintenanceHostTests()
+                fixture.setUp()
+                try:
+                    database = fixture.containers["database"]
+                    if mismatch == "empty_mounts":
+                        database["Mounts"] = []
+                    else:
+                        networks = database["NetworkSettings"]["Networks"]
+                        if mismatch == "empty_networks":
+                            networks.clear()
+                        elif mismatch == "multiple_networks":
+                            networks["foreign-network"] = {}
+                        else:
+                            networks["dokploy-network"] = networks.pop(fixture.network_name)
+                            fixture.networks["dokploy-network"] = {
+                                **fixture.networks["original-private-network"],
+                                "Id": "dokploy-network",
+                                "Name": "dokploy-network",
+                            }
+                    self.assertEqual(
+                        fixture.framed_mode({**fixture.spec, "mode": "qualify-retirement"})[
+                            "status"
+                        ],
+                        "protected",
+                    )
+                    self.assertFalse(any(call[0] == "stop" for call in fixture.calls))
+                finally:
+                    fixture.doCleanups()
 
     def test_restart_or_replacement_after_retirement_never_qualifies_for_removal(self) -> None:
         self.run_mode("qualify-retirement")
@@ -456,7 +490,9 @@ class NativeMaintenanceHostTests(unittest.TestCase):
         target = self.root / "foreign.json"
         target.write_text("{}")
         (self.state / ("native-" + self.spec["identity_sha256"] + ".json")).symlink_to(target)
-        self.assertEqual(self.run_mode("qualify-retirement")["status"], "recovery_required")
+        self.assertEqual(
+            self.run_mode("qualify-retirement")["reason"], "native_copy_receipt_untrusted"
+        )
         self.assertFalse(any(call[0] == "stop" for call in self.calls))
 
     def test_host_wall_clock_rollback_cannot_extend_an_original_boot_deadline(self) -> None:
@@ -630,6 +666,37 @@ class NativeMaintenanceHostTests(unittest.TestCase):
         self.assertNotEqual(self.run_mode("seal-retirement")["status"], "preserved")
         self.assertEqual(sum(call[0] == "stop" for call in self.calls), 1)
 
+    def test_partial_stop_with_changed_or_missing_original_keeps_uncertain_custody(self) -> None:
+        for change in ("restart", "prune", "labels"):
+            with self.subTest(change=change):
+                fixture = NativeMaintenanceHostTests()
+                fixture.setUp()
+                self.addCleanup(fixture.doCleanups)
+                command = fixture.docker
+
+                def lost(*arguments: str, **kwargs: Any) -> bytes:
+                    result = command(*arguments, **kwargs)
+                    if arguments[0] == "stop":
+                        raise TimeoutError("fixture daemon stop reply lost")
+                    return result
+
+                with patch.object(fixture, "docker", side_effect=lost):
+                    fixture.run_mode("qualify-retirement")
+                fixture.next_admission()
+                if change == "restart":
+                    fixture.containers["database"]["State"]["StartedAt"] = "new-lifetime"
+                    fixture.containers["database"]["RestartCount"] += 1
+                elif change == "prune":
+                    del fixture.containers["web"]
+                else:
+                    fixture.containers["database"]["Config"]["Labels"]["replacement"] = "true"
+                self.assertEqual(
+                    fixture.run_mode("inspect-original")["status"], "recovery_required"
+                )
+                self.assertNotEqual(fixture.run_mode("seal-retirement")["status"], "preserved")
+                self.assertEqual(sum(call[0] == "stop" for call in fixture.calls), 1)
+                self.assertTrue(fixture.volumes)
+
     def test_expiry_after_stop_wal_before_command_has_positive_no_send_proof(self) -> None:
         host = self.host["NativeMaintenanceHost"]
         save = host.save
@@ -647,6 +714,8 @@ class NativeMaintenanceHostTests(unittest.TestCase):
                 self.run_mode("qualify-retirement")["status"], "observation_unavailable"
             )
         self.assertFalse(any(call[0] == "stop" for call in self.calls))
+        self.assertEqual(self.run_mode("seal-retirement")["status"], "observation_unavailable")
+        self.next_admission()
         self.assertEqual(self.run_mode("seal-retirement")["status"], "preserved")
 
     def test_expiry_after_removal_wal_before_command_can_continue_without_resend(self) -> None:
@@ -670,6 +739,25 @@ class NativeMaintenanceHostTests(unittest.TestCase):
         self.assertEqual(len(removals), len(set(removals)))
 
     def test_state_mount_exposure_refuses_both_stop_and_seal(self) -> None:
+        originals = deepcopy(self.containers)
+        for missing in ("status", "networks", "mounts"):
+            self.containers = deepcopy(originals)
+            if missing == "status":
+                self.containers["database"]["State"]["Status"] = None
+            elif missing == "networks":
+                self.containers["database"]["NetworkSettings"]["Networks"] = None
+            else:
+                self.containers["database"]["Mounts"] = None
+            self.containers["foreign"] = {
+                "Id": "foreign",
+                "Mounts": [{"Source": str(self.state), "RW": True}],
+            }
+            with self.subTest(unavailable=missing):
+                self.assertEqual(
+                    self.framed_mode({**self.spec, "mode": "inspect-original"})["reason"],
+                    "native_copy_receipt_untrusted",
+                )
+        self.containers = originals
         self.containers["foreign"] = {
             "Id": "foreign",
             "Mounts": [{"Source": str(self.root), "RW": True}],
@@ -695,21 +783,61 @@ class NativeMaintenanceHostTests(unittest.TestCase):
                 result = fixture.framed_mode(
                     {**fixture.spec, "mode": "qualify-retirement"}, default_layout=True
                 )
-                self.assertEqual(result["status"], "protected")
-                self.assertEqual(
-                    result["reason"],
-                    "native_copy_receipt_untrusted" if own else "native_copy_custody_changed",
-                )
+                self.assertEqual(result["status"], "protected" if own else "eligible")
+                if own:
+                    self.assertEqual(result["reason"], "native_copy_receipt_untrusted")
                 self.assertNotIn(str(source), json.dumps(result))
-                self.assertFalse(any(call[0] == "stop" for call in fixture.calls))
+                self.assertEqual(sum(call[0] == "stop" for call in fixture.calls), 0 if own else 3)
 
     def test_namespace_replacement_cannot_supply_missing_receipt_exclusion(self) -> None:
-        original = self.run_mode("inspect-original")
+        original = self.run_mode("qualify-retirement")
+        self.assertEqual(original["status"], "eligible")
         self.spec["receipt_namespaces"] = [original["namespace_sha256"]]
         previous = self.state.with_name("previous-state")
         self.state.rename(previous)
         self.state.mkdir(mode=0o700)
+        receipt = next(previous.glob("native-*.json"))
+        (self.state / receipt.name).write_bytes(receipt.read_bytes())
+        (self.state / receipt.name).chmod(0o600)
+        calls = list(self.calls)
+        self.assertEqual(
+            self.run_mode("dispose-original")["reason"], "native_copy_receipt_untrusted"
+        )
         self.assertEqual(self.run_mode("seal-retirement")["status"], "protected")
+        self.assertFalse(
+            any(len(call) > 1 and call[1] == "rm" for call in self.calls[len(calls) :])
+        )
+
+    def test_namespace_nonce_survives_directory_metadata_change_and_detects_reused_metadata(
+        self,
+    ) -> None:
+        original = self.run_mode("inspect-original")
+        self.spec["receipt_namespaces"] = [original["namespace_sha256"]]
+        fstat = os.fstat
+
+        def changed(descriptor: int) -> os.stat_result:
+            metadata = fstat(descriptor)
+            if stat.S_ISDIR(metadata.st_mode):
+                values = list(metadata)
+                values[2] += 1
+                return os.stat_result(values)
+            return metadata
+
+        with patch.object(os, "fstat", side_effect=changed):
+            self.assertEqual(
+                self.run_mode("inspect-original")["namespace_sha256"], original["namespace_sha256"]
+            )
+        # Same directory/inode and copied success-looking WAL do not authenticate
+        # a different marker. Physical volume identity is deliberately untouched.
+        (self.state / "namespace-id").write_text(os.urandom(32).hex())
+        self.assertEqual(
+            self.run_mode("inspect-original")["reason"], "native_copy_receipt_untrusted"
+        )
+        (self.state / "namespace-id").write_bytes(b"\xff")
+        self.assertEqual(
+            self.framed_mode({**self.spec, "mode": "inspect-original"})["reason"],
+            "native_copy_receipt_untrusted",
+        )
         self.assertFalse(any(call[0] == "stop" for call in self.calls))
 
     def test_transient_history_read_retries_only_before_the_running_database_stops(self) -> None:
@@ -754,7 +882,169 @@ class NativeMaintenanceHostTests(unittest.TestCase):
         receipt = self.state / ("native-" + self.spec["identity_sha256"] + ".json")
         with os.fdopen(os.open(receipt, os.O_CREAT | os.O_WRONLY, 0o600), "w") as handle:
             json.dump([], handle)
-        self.assertEqual(self.run_mode("seal-retirement")["status"], "recovery_required")
+        self.assertEqual(
+            self.run_mode("seal-retirement")["reason"], "native_copy_receipt_untrusted"
+        )
+        self.assertFalse(any(call[0] == "stop" for call in self.calls))
+
+    def test_unavailable_inventory_retries_and_read_time_exposure_taints_the_original(self) -> None:
+        command = self.docker
+
+        def incomplete(*arguments: str, **kwargs: Any) -> bytes:
+            if (
+                len(arguments) == 2
+                and arguments[0] == "inspect"
+                and arguments[1] in self.containers
+            ):
+                return b"[]"
+            return command(*arguments, **kwargs)
+
+        with patch.object(self, "docker", side_effect=incomplete):
+            self.assertEqual(
+                self.framed_mode({**self.spec, "mode": "qualify-retirement"})["status"],
+                "observation_unavailable",
+            )
+        self.assertFalse(any(call[0] == "stop" for call in self.calls))
+        self.next_admission()
+
+        def malformed(*arguments: str, **kwargs: Any) -> bytes:
+            return b"[" if arguments[0] == "inspect" else command(*arguments, **kwargs)
+
+        with patch.object(self, "docker", side_effect=malformed):
+            self.assertEqual(
+                self.run_mode("qualify-retirement")["status"], "observation_unavailable"
+            )
+        for missing in (
+            "volume_created_at",
+            "process_lifetime",
+            "process_status_missing",
+            "process_status_null",
+            "process_status_unknown",
+            "network_members",
+            "container_networks",
+            "container_mounts",
+            "volume_inventory",
+        ):
+            self.next_admission()
+
+            def unavailable(*arguments: str, **kwargs: Any) -> bytes:
+                output = command(*arguments, **kwargs)
+                if arguments[:2] == ("volume", "inspect"):
+                    if missing == "volume_inventory":
+                        return b"[]"
+                    if missing == "volume_created_at":
+                        values = json.loads(output)
+                        values[0].pop("CreatedAt")
+                        return json.dumps(values).encode()
+                if arguments[0] == "inspect":
+                    if (
+                        missing
+                        in {
+                            "process_lifetime",
+                            "process_status_missing",
+                            "process_status_null",
+                            "process_status_unknown",
+                            "container_networks",
+                            "container_mounts",
+                        }
+                        and len(arguments) != 2
+                    ):
+                        return output
+                    values = json.loads(output)
+                    for value in values:
+                        if missing == "process_lifetime" and value.get("Id") in self.containers:
+                            value.pop("RestartCount", None)
+                        if value.get("Id") in self.containers:
+                            if missing == "container_networks":
+                                value["NetworkSettings"]["Networks"] = None
+                            elif missing == "container_mounts":
+                                value["Mounts"] = None
+                            if missing == "process_status_missing":
+                                value["State"].pop("Status", None)
+                            elif missing == "process_status_null":
+                                value["State"]["Status"] = None
+                            elif missing == "process_status_unknown":
+                                value["State"]["Status"] = "unavailable"
+                        if missing == "network_members" and value.get("Id") in self.networks:
+                            value.pop("Containers", None)
+                    return json.dumps(values).encode()
+                return output
+
+            with (
+                self.subTest(missing=missing),
+                patch.object(self, "docker", side_effect=unavailable),
+            ):
+                self.assertEqual(
+                    self.framed_mode({**self.spec, "mode": "qualify-retirement"})["status"],
+                    "observation_unavailable",
+                )
+            self.assertFalse(any(call[0] == "stop" for call in self.calls))
+            for receipt in self.state.glob("native-*.json"):
+                self.assertNotEqual(json.loads(receipt.read_text())["state"], "preserved")
+        for missing in ("absent", "null", "unsupported"):
+            self.next_admission()
+            observed_owned = set()
+
+            def late_unavailable(*arguments: str, **kwargs: Any) -> bytes:
+                output = command(*arguments, **kwargs)
+                if arguments[0] != "inspect":
+                    return output
+                if len(arguments) == 2 and arguments[1] in self.containers:
+                    observed_owned.add(arguments[1])
+                    return output
+                if len(arguments) > 2 and observed_owned == set(self.containers):
+                    values = json.loads(output)
+                    for value in values:
+                        if missing == "absent":
+                            value["State"].pop("Status", None)
+                        else:
+                            value["State"]["Status"] = None if missing == "null" else "unavailable"
+                    return json.dumps(values).encode()
+                return output
+
+            with (
+                self.subTest(late_status=missing),
+                patch.object(self, "docker", side_effect=late_unavailable),
+            ):
+                self.assertEqual(
+                    self.framed_mode({**self.spec, "mode": "qualify-retirement"})["status"],
+                    "observation_unavailable",
+                )
+            self.assertEqual(observed_owned, set(self.containers))
+        self.assertFalse(any(call[0] == "stop" for call in self.calls))
+        self.next_admission()
+        self.assertEqual(self.run_mode("qualify-retirement")["status"], "eligible")
+        host = self.host["NativeMaintenanceHost"]
+        read = host.read
+
+        def exposed(executor: Any) -> Any:
+            receipt = read(executor)
+            self.containers["foreign"] = {
+                "Id": "foreign",
+                "Mounts": [{"Source": str(self.state), "RW": True}],
+            }
+            return receipt
+
+        with patch.object(host, "read", exposed):
+            self.assertEqual(
+                self.run_mode("dispose-original")["reason"], "native_copy_receipt_untrusted"
+            )
+        self.assertFalse(any(len(call) > 1 and call[1] == "rm" for call in self.calls))
+
+    def test_new_seal_needs_live_admission_but_existing_seal_is_immutable_observation(self) -> None:
+        self.network_members.add("foreign")
+        self.assertEqual(self.run_mode("qualify-retirement")["status"], "protected")
+        self.monotonic = float(self.spec["host_expires_at"]) + 1
+        self.assertEqual(self.run_mode("seal-retirement")["status"], "observation_unavailable")
+        receipt = next(self.state.glob("native-*.json"))
+        self.assertNotEqual(json.loads(receipt.read_text())["state"], "preserved")
+        self.next_admission()
+        sealed = self.run_mode("seal-retirement")
+        self.assertEqual(sealed["status"], "preserved")
+        original = receipt.read_bytes()
+        self.monotonic = float(self.spec["host_expires_at"]) + 1
+        self.assertEqual(self.run_mode("seal-retirement")["status"], "preserved")
+        self.assertEqual(receipt.read_bytes(), original)
         self.assertFalse(any(call[0] == "stop" for call in self.calls))
 
     def test_legacy_incomplete_receipt_stays_protected(self) -> None:

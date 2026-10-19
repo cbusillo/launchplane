@@ -36,7 +36,9 @@ class TestingRebuildProvider(Protocol):
     """
 
     def exclusive(self, plan: TestingRebuildPlan) -> AbstractContextManager[None]: ...
-    def guard(self, plan: TestingRebuildPlan, *, recovery: bool = False) -> None:
+    def guard(
+        self, plan: TestingRebuildPlan, *, recovery: bool = False, serving_only: bool = False
+    ) -> None:
         """Recheck authority/custody; recovery can observe or undo an existing effect.
 
         New forward effects still need the ordinary holds/use admission check.
@@ -209,7 +211,9 @@ def execute_testing_rebuild(
             return prior
     with provider.exclusive(plan):
         provider.guard(
-            plan, recovery=prior is not None and prior.step not in {"preparing", "prepared"}
+            plan,
+            recovery=prior is not None and prior.step not in {"preparing", "prepared"},
+            serving_only=prior is not None and prior.step == "retiring",
         )
         try:
             record = store.load(plan)
@@ -350,7 +354,7 @@ def execute_testing_rebuild(
                 save(step="retiring", route=observation)
 
         if record.step == "retiring":
-            provider.guard(plan, recovery=True)
+            provider.guard(plan, recovery=True, serving_only=True)
             observation = provider.current_route(plan)
             _route(observation, plan, plan.new)
             # The provider's original terminal exclusion is durable even if
@@ -401,8 +405,11 @@ def execute_testing_rebuild(
             return record
 
         if record.step == "retiring":
-            provider.guard(plan, recovery=True)
+            provider.guard(plan, recovery=True, serving_only=True)
             save(retirement_started=True)
             retirement = provider.retire_old(plan)
+            provider.guard(plan, recovery=True, serving_only=True)
+            observation = provider.current_route(plan)
+            _serving(observation, plan, plan.new, clock())
             save(step="complete", route=observation, ended_at=clock(), retirement=retirement)
         return record

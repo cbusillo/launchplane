@@ -18,6 +18,14 @@ def native_host_clock():
         'host_monotonic':time.clock_gettime(time.CLOCK_BOOTTIME),'host_observed_at':time.time()}
 
 
+def native_container_observation(container,spec):
+    if (container.get('Config',{}).get('Labels') or {}).get('com.docker.compose.project')!=spec['compose_project']:
+        return
+    if not isinstance(container.get('Mounts'),list) or not isinstance(container.get('NetworkSettings',{}).get('Networks'),dict):
+        raise RuntimeError('Native container observation is unavailable')
+    NativeMaintenanceHost.fingerprint(container)
+
+
 class NativeMaintenanceHost:
     def __init__(self, spec, command, *, receipt_root=None, lock_root=None, clock=None, monotonic=None):
         self.spec, self.command = spec, command
@@ -80,20 +88,59 @@ class NativeMaintenanceHost:
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid!=os.geteuid() or metadata.st_mode&0o077:
             raise ValueError('Native receipt lock is unsafe')
         fcntl.flock(descriptor,fcntl.LOCK_EX|fcntl.LOCK_NB)
-        metadata=os.fstat(self.directory)
-        self.namespace_sha256=hashlib.sha256(json.dumps([str(self.state_path),metadata.st_dev,metadata.st_ino],separators=(',',':')).encode()).hexdigest()
         expected=self.spec.get('receipt_namespaces',[])
+        # Directory metadata may change across remounts and may be reused after
+        # replacement. The private, fsynced random marker owns this namespace.
+        self.private_state()
+        try:
+            nonce=self.namespace_nonce(expected,directory)
+        except (OSError,UnicodeDecodeError) as error:
+            raise NativeReceiptUntrusted('Original namespace marker cannot be read') from error
+        self.namespace_sha256=hashlib.sha256((self.namespace+':'+nonce).encode()).hexdigest()
         if expected and any(value!=self.namespace_sha256 for value in expected):
             raise NativeReceiptUntrusted('Original receipt namespace changed')
         return self
 
+    def namespace_nonce(self,expected,directory):
+        try:
+            descriptor=os.open('namespace-id',os.O_RDONLY|os.O_NOFOLLOW,dir_fd=directory)
+        except FileNotFoundError:
+            if expected:
+                raise NativeReceiptUntrusted('Original receipt namespace marker is missing')
+            descriptor=os.open('namespace-id',os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=directory)
+            with os.fdopen(descriptor,'w') as handle:
+                handle.write(os.urandom(32).hex());handle.flush();os.fsync(handle.fileno())
+            os.fsync(directory)
+            descriptor=os.open('namespace-id',os.O_RDONLY|os.O_NOFOLLOW,dir_fd=directory)
+        with os.fdopen(descriptor) as handle:
+            metadata=os.fstat(handle.fileno())
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid!=os.geteuid() or metadata.st_mode&0o077:
+                raise NativeReceiptUntrusted('Native namespace marker is unsafe')
+            nonce=handle.read(65)
+        if not re.fullmatch(r'[a-f0-9]{64}',nonce):
+            raise NativeReceiptUntrusted('Native namespace marker is malformed')
+        return nonce
+
     def private_state(self,containers=None):
-        for container in self.inventory() if containers is None else containers:
-            for mount in container.get('Mounts',[]):
+        if containers is None:
+            self.inventory()
+            return
+        unavailable=False
+        for container in containers:
+            mounts=container.get('Mounts') if isinstance(container,dict) else None
+            if not isinstance(mounts,list):
+                unavailable=True
+                continue
+            for mount in mounts:
+                if not isinstance(mount,dict) or (mount.get('Source') is not None and not isinstance(mount['Source'],str)):
+                    unavailable=True
+                    continue
                 if mount.get('RW',True) and mount.get('Source'):
                     source=Path(mount['Source']).resolve(strict=False)
                     if source==self.state_path or source.is_relative_to(self.state_path) or self.state_path.is_relative_to(source):
                         raise NativeReceiptUntrusted('Native disposal state is exposed to a container')
+        if unavailable:
+            raise RuntimeError('Native container mount inventory is unavailable')
 
     def outcome(self,result):
         return {**result,'namespace_sha256':self.namespace_sha256}
@@ -115,7 +162,9 @@ class NativeMaintenanceHost:
                 return self.inspect(receipt)
         else:
             receipt={'identity':self.identity,'protocol':2,'retirement':{},'resources':{}}
+        self.current()
         receipt['state']='preserved'
+        self.current()
         self.save(receipt)
         return {'status':'preserved','no_stop_dispatched':True,'identity_sha256':self.digest}
 
@@ -147,14 +196,28 @@ class NativeMaintenanceHost:
             descriptor=os.open('native-'+self.digest+'.json',os.O_RDONLY|os.O_NOFOLLOW,dir_fd=self.directory)
         except FileNotFoundError:
             return None
-        with os.fdopen(descriptor) as handle:
-            metadata=os.fstat(handle.fileno())
-            if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid!=os.geteuid() or metadata.st_mode&0o077:
-                raise ValueError('Native receipt is unsafe')
-            receipt=json.loads(handle.read(65537))
-        if receipt.get('identity')!=self.identity:
-            raise ValueError('Native receipt belongs to another original copy')
-        return receipt
+        except OSError as error:
+            raise NativeReceiptUntrusted('Original receipt cannot be read') from error
+        try:
+            with os.fdopen(descriptor) as handle:
+                metadata=os.fstat(handle.fileno())
+                if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid!=os.geteuid() or metadata.st_mode&0o077:
+                    raise NativeReceiptUntrusted('Native receipt is unsafe')
+                receipt=json.loads(handle.read(65537))
+            if not isinstance(receipt,dict) or receipt.get('identity')!=self.identity or not isinstance(receipt.get('resources'),dict):
+                raise NativeReceiptUntrusted('Native receipt identity or shape changed')
+            state=receipt.get('state')
+            if state not in {'preserved','qualifying','retirement','retained','disposing','disposed'}:
+                raise NativeReceiptUntrusted('Native receipt state is unavailable')
+            if state=='retirement':
+                retirement=receipt.get('retirement')
+                if not isinstance(retirement,dict) or retirement and (not isinstance(retirement.get('originals'),dict) or not isinstance(retirement.get('stops'),dict) or any(not isinstance(step,dict) or step.get('state') not in {'not_dispatched','dispatching','stopped'} or type(step.get('ever_dispatched')) is not bool for step in retirement['stops'].values())):
+                    raise NativeReceiptUntrusted('Native stop WAL is malformed')
+            if state in {'retained','disposing','disposed'} and (any(not isinstance(receipt.get(name),dict) for name in ('containers','volumes','networks')) or type(receipt.get('qualification')) is not bool):
+                raise NativeReceiptUntrusted('Native disposal WAL is malformed')
+            return receipt
+        except (OSError,ValueError,KeyError,TypeError,AttributeError,IndexError) as error:
+            raise NativeReceiptUntrusted('Original receipt cannot be trusted') from error
 
     def save(self, receipt):
         name='native-'+self.digest+'.'+uuid.uuid4().hex+'.tmp'
@@ -173,17 +236,25 @@ class NativeMaintenanceHost:
 
     def inventory(self):
         identifiers=self.docker('ps','-aq').decode().splitlines()
-        return json.loads(self.docker('inspect',*identifiers)) if identifiers else []
+        result=json.loads(self.docker('inspect',*identifiers)) if identifiers else []
+        if not isinstance(result,list):
+            raise RuntimeError('Native container inventory is unavailable')
+        # Positive receipt exposure from this exact snapshot outranks unrelated
+        # unavailable metadata; malformed data still cannot authorize any work.
+        self.private_state(result)
+        if any(not isinstance(item,dict) or not isinstance(item.get('Id'),str) for item in result):
+            raise RuntimeError('Native container inventory is unavailable')
+        return result
 
     def volume(self, name):
         volumes=json.loads(self.docker('volume','inspect',name))
-        if len(volumes)!=1:
-            raise ValueError('Original volume inventory is ambiguous')
+        if not isinstance(volumes,list) or len(volumes)!=1 or not isinstance(volumes[0],dict):
+            raise RuntimeError('Original volume inventory is unavailable')
         volume=volumes[0]
         if volume.get('Name')!=name or volume.get('Driver')!='local' or volume.get('Options') not in (None,{}):
             raise ValueError('Native volume custody changed')
         if not isinstance(volume.get('CreatedAt'),str) or not volume['CreatedAt']:
-            raise ValueError('Native volume creation identity is unavailable')
+            raise RuntimeError('Native volume creation identity is unavailable')
         if (volume.get('Labels') or {}).get('io.launchplane.testing-resources')!=self.identity['resources_binding']:
             raise ValueError('Native volume allocation changed')
         path=Path(volume['Mountpoint']).resolve(strict=True)
@@ -194,8 +265,8 @@ class NativeMaintenanceHost:
     @staticmethod
     def fingerprint(container):
         state=container.get('State',{})
-        if any(not isinstance(state.get(name),str) for name in ('StartedAt','FinishedAt','Status')) or type(container.get('RestartCount')) is not int or container['RestartCount']<0:
-            raise ValueError('Native process lifetime is unavailable')
+        if any(not isinstance(state.get(name),str) for name in ('StartedAt','FinishedAt','Status')) or state.get('Status') not in {'running','exited','created','paused','restarting','dead'} or type(container.get('RestartCount')) is not int or container['RestartCount']<0:
+            raise RuntimeError('Native process lifetime is unavailable')
         return {'id':container['Id'],'labels':container.get('Config',{}).get('Labels') or {},
             'started_at':state.get('StartedAt'),'finished_at':state.get('FinishedAt'),
             'restart_count':container.get('RestartCount'),'state':state.get('Status')}
@@ -247,15 +318,20 @@ class NativeMaintenanceHost:
 
     def retirement_resources(self):
         try:
-            containers=inspect_copy_runtime(self.spec,expected_instance='testing')
+            containers=inspect_copy_runtime(self.spec,expected_instance='testing',receipt_namespace=self.state_path)
         except CopyRuntimeReceiptExposure as error:
             source=error.source_path
             if source==self.state_path or source.is_relative_to(self.state_path) or self.state_path.is_relative_to(source):
                 raise NativeReceiptUntrusted('Original receipt state was exposed') from error
             raise
         own={value[1]['Id'] for value in containers.values()}
+        # Validate native observation availability before the generic retained
+        # qualifier's negative-custody errors; its other callers stay unchanged.
+        for _,container in containers.values():
+            self.fingerprint(container)
         all_containers=self.inventory()
-        self.private_state(all_containers)
+        for container in all_containers:
+            native_container_observation(container,self.spec)
         logical=qualify_retained_copy(all_containers,{'project':self.spec['compose_project'],
             'context':self.identity['context'],'identity':self.spec['runtime_identity']})
         backings=inspect_volume_backings(logical['volumes'],all_containers,own)
@@ -266,10 +342,12 @@ class NativeMaintenanceHost:
         networks={}
         for network_name in database['NetworkSettings']['Networks']:
             network=json.loads(self.docker('inspect',network_name))[0]
-            if not isinstance(network.get('Containers'),dict) or not set(network['Containers'])<=own:
+            if not isinstance(network.get('Containers'),dict):
+                raise RuntimeError('Native private network inventory is unavailable')
+            if not set(network['Containers'])<=own:
                 raise ValueError('Native private network has a foreign consumer')
             if not isinstance(network.get('Id'),str) or not network['Id']:
-                raise ValueError('Native private network identity is unavailable')
+                raise RuntimeError('Native private network identity is unavailable')
             labels=network.get('Labels') or {}
             if network.get('Name')!=self.spec['compose_project']+'_default' or labels.get('com.docker.compose.project')!=self.spec['compose_project'] or labels.get('com.docker.compose.network')!='default' or network.get('Driver')!='bridge' or network.get('Scope')!='local' or network.get('Ingress') is not False:
                 raise ValueError('Native private network is not owned by its original Compose project')
@@ -376,14 +454,13 @@ class NativeMaintenanceHost:
         self.save(receipt)
         return self.inspect(receipt)
 
-    def inspect_retirement(self,receipt):
+    def inspect_retirement(self,receipt,current):
         retirement=receipt.get('retirement')
         if receipt.get('protocol')!=2:
             return {'status':'protected','reason':'original_retirement_evidence_missing'}
         if not retirement:
             return {'status':'resumable_retirement' if self.invocation_excluded(receipt) else 'active',
                 'reason':'original_retirement_not_dispatched'}
-        current={item['Id']:item for item in self.inventory()}
         originals=retirement['originals']
         if not set(originals)<=set(current):
             raise ValueError('Original retirement process disappeared')
@@ -406,26 +483,26 @@ class NativeMaintenanceHost:
     def inspect(self, receipt=None, *, continuing=False):
         self.private_state()
         receipt=receipt or self.read()
+        current={item['Id']:item for item in self.inventory()}
+        self.private_state(list(current.values()))
         if receipt is None:
             return {'status':'missing'}
-        self.private_state()
         if receipt['state']=='preserved':
             return {'status':'preserved','no_stop_dispatched':True,'identity_sha256':self.digest}
         if receipt['state']=='qualifying':
             return {'status':'protected' if self.invocation_excluded(receipt) else 'active',
                 'reason':'original_retirement_evidence_missing'}
         if receipt['state']=='retirement':
-            return self.inspect_retirement(receipt)
+            return self.inspect_retirement(receipt,current)
         if receipt['state']=='disposed':
             return {'status':'disposed','identity_sha256':self.digest}
-        current={item['Id']:item for item in self.inventory()}
         own=set(receipt['containers'])
         if not receipt.get('networks'):
             return {'status':'unqualified'}
         resources=receipt['resources']
         network_inventory=[json.loads(line) for line in self.docker('network','ls','--no-trunc','--format','{{json .}}').decode().splitlines()]
         if any(not isinstance(item,dict) or not item.get('ID') or not item.get('Name') for item in network_inventory):
-            raise ValueError('Native network inventory is unavailable')
+            raise RuntimeError('Native network inventory is unavailable')
         for original in receipt['networks'].values():
             identifier=original['id']
             resource=resources.get('network:'+identifier,{'state':'not_dispatched'})
@@ -433,6 +510,8 @@ class NativeMaintenanceHost:
                 raise ValueError('Retired private network was replaced')
             if any(item['ID']==identifier for item in network_inventory):
                 network=json.loads(self.docker('inspect',identifier))[0]
+                if not isinstance(network.get('Containers'),dict):
+                    raise RuntimeError('Native private network inventory is unavailable')
                 if network.get('Id')!=identifier or network.get('Name')!=original['name'] or network.get('Labels')!=original['labels'] or network.get('Driver')!=original['driver'] or network.get('Scope')!=original['scope'] or network.get('Ingress')!=original['ingress'] or network.get('Internal') is not True or not isinstance(network.get('Containers'),dict) or not set(network['Containers'])<=own&set(current):
                     raise ValueError('Retired private network changed or has another consumer')
                 if resource['state']=='dispatching':
@@ -441,7 +520,6 @@ class NativeMaintenanceHost:
                 raise ValueError('Original private network disappeared without its disposal intent')
             else:
                 resources['network:'+identifier]={'state':'absent'}
-        self.private_state(list(current.values()))
         # Replacement project members are not adopted into an original intent.
         if any((item.get('Config',{}).get('Labels') or {}).get('com.docker.compose.project')==self.spec['compose_project'] and identifier not in own for identifier,item in current.items()):
             raise ValueError('Native project contains a replacement process')
@@ -564,7 +642,9 @@ def native_maintenance_main(spec, command, *, receipt_root=None, lock_root=None,
         result=executor.failure(custody=True)
         result.update(status='protected',reason='native_copy_receipt_untrusted')
         return result
-    except (ValueError,CopyRuntimeDrift,KeyError,TypeError,AttributeError,IndexError):
+    except (json.JSONDecodeError,KeyError,TypeError,AttributeError,IndexError):
+        return executor.failure(custody=False)
+    except (ValueError,CopyRuntimeDrift):
         return executor.failure(custody=True)
     except (OSError,TimeoutError,RuntimeError,subprocess.SubprocessError):
         return executor.failure(custody=False)
