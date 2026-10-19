@@ -2471,6 +2471,28 @@ and a clean legacy-only dry-run baseline before proceeding.
 
 ### Dokploy domain authority
 
+In Product Ops, open the environment's **Actions → Repair route records** panel
+as a verified administrator. Domain authority and Route binding are separate
+decisions: enter a reason, review the current and proposed records, then Apply,
+Leave records unchanged, or Investigate evidence. A blocked binding names its
+missing evidence and cannot be applied; an unchanged review needs no write.
+The domain review preserves the destination and shows the proposed primary
+domain. These operations update Launchplane records only; they do not modify
+Dokploy, DNS or TLS, or establish website health. Existing no-op ingress audit
+automation remains separate.
+
+The browser preserves the exact reviewed request and idempotency key before
+dispatch. After an accepted apply, a separate inert review reads the current
+record. If acknowledgement or readback is uncertain, **Resume original** retries
+that same request and key before another readback. A denied readback or later
+authority change does not undo the historical apply or authorize a new one.
+Missing or invalid recovery storage locks a fresh apply; keep the original
+receipt trace for diagnosis. The controls require the existing strict-admin
+service admission and add no grant or machine authority.
+An exact precommit `stale` refusal settles that original request without a write;
+the panel discards the stale review and lets the administrator review current
+records with a new key. Other conflicts and unknown readbacks retain recovery.
+
 For an invalid tracked Dokploy target domain authority, use the `Dokploy Target
 Setup` workflow with `operation=repair-domain-authority`. Supply the exact
 tracked target type and target ID, a comma-separated tuple of bare DNS hosts,

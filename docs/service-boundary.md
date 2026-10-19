@@ -2727,6 +2727,27 @@ for apply and `dokploy_target.repair_domain_authority.plan` for dry-run. It
 remains fail-closed when any tracked or live identity/evidence is missing or
 changed.
 
+The setup repair operation and `POST /v1/route-bindings/reconcile` also support
+the explicit CSRF-checked strict-administrator browser decision. Their optional
+`browser_review` names the actual lane product and, on apply, the reviewed
+semantic plan digest. Setup retains its service namespace `product=launchplane`;
+the browser supplies no provider identity, placement, target or domain payload.
+The service resolves fresh lane records and read-only provider evidence. Binding
+browser dry-run uses the absent expectation as a discovery sentinel and returns
+the actual current expectation for apply. The typed top-level `review` exposes
+current/proposed records and findings, without arbitrary provider evidence.
+It is omitted for existing machine requests, whose result shape and authority
+remain unchanged.
+
+Browser apply rechecks the semantic review and current source rows through the
+existing atomic CAS/receipt boundary. A historical same-key replay is recovered
+before fresh-plan drift checks. The browser then performs a separate inert
+dry-run for current-record readback, using a distinct request identity. Failure
+or denial of that readback retains the original apply request/key and reports
+accepted but unverified; it does not turn a later record into proof of the
+historical operation or prove current site health. No other setup operation is
+admitted by this browser path.
+
 Besides `dokploy_target.setup` (or `dokploy_target.plan` for dry-run), checked on
 product and context `launchplane`, the route accepts the lane-scoped
 `dokploy_target.lane_setup` action for `create-compose` and the narrow

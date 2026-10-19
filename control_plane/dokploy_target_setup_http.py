@@ -6,6 +6,7 @@ from collections.abc import Callable
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.browser_route_repair import BrowserRouteRepairRequest
 from control_plane.contracts.deploy_target import DeployedTargetReference
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import (
@@ -242,6 +243,9 @@ class DokployTargetSetupEnvelope(BaseModel):
     state_volume_path: str = ""
     state_volume_plan_id: str = ""
     expected_plan_sha256: str = ""
+    browser_review: BrowserRouteRepairRequest | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     expected_current_provider_target: DeployedTargetReference | None = None
     expected_current_provider_target_fingerprint: str = Field(default="", max_length=256)
     replaces_operation_id: str = ""
@@ -255,6 +259,25 @@ class DokployTargetSetupEnvelope(BaseModel):
     @model_validator(mode="after")
     def _validate_setup(self) -> "DokployTargetSetupEnvelope":
         supplied_fields = self.model_fields_set.copy()
+        if self.browser_review is not None:
+            if self.operation != "repair-domain-authority":
+                raise ValueError("Browser review is only supported for domain authority repair.")
+            allowed = {
+                "schema_version",
+                "mode",
+                "operation",
+                "product",
+                "context",
+                "instance",
+                "reason",
+                "confirmation",
+                "browser_review",
+            }
+            if supplied_fields - allowed:
+                raise ValueError(
+                    "Browser domain repair derives its provider authority from the lane."
+                )
+            self.browser_review.validate_mode(self.mode)
         if self.product.strip() != "launchplane":
             raise ValueError("Dokploy target setup requires product 'launchplane'.")
         self.product = "launchplane"
@@ -340,7 +363,7 @@ class DokployTargetSetupEnvelope(BaseModel):
             self.operation != "repair-domain-authority" or self.mode != "dry-run"
         ):
             raise ValueError("Comparison fingerprints support domain-authority dry runs only.")
-        if self.operation == "repair-domain-authority":
+        if self.operation == "repair-domain-authority" and self.browser_review is None:
             if not self.target_id:
                 raise ValueError("Dokploy domain authority repair requires target_id.")
             if not self.domains:

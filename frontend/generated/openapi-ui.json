@@ -5058,6 +5058,116 @@
         "summary": "Read exact pull-request tenant admission and technical readiness"
       }
     },
+    "/v1/dokploy-targets/setup": {
+      "post": {
+        "operationId": "setup_dokploy_target",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DokployTargetSetupEnvelope"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DokployTargetSetupResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Plan or apply Dokploy target setup"
+      }
+    },
     "/v1/drivers/odoo/service-restart": {
       "post": {
         "operationId": "restart_lane_service",
@@ -9127,6 +9237,116 @@
         ]
       }
     },
+    "/v1/route-bindings/reconcile": {
+      "post": {
+        "operationId": "reconcile_route_binding",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RouteBindingReconcileEnvelope"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteBindingReconcileResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Dry-run or apply one provider-neutral route-binding reconcile"
+      }
+    },
     "/v1/service/delivery/apply-receipt": {
       "post": {
         "operationId": "read_service_delivery_apply_receipt",
@@ -11395,6 +11615,25 @@
           "run_status"
         ]
       },
+      "BrowserRouteRepairRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "reviewed_plan_sha256": {
+            "default": "",
+            "title": "Reviewed Plan Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product"
+        ],
+        "title": "BrowserRouteRepairRequest",
+        "type": "object"
+      },
       "BusinessHoursWindow": {
         "additionalProperties": false,
         "properties": {
@@ -12350,6 +12589,113 @@
         "title": "DeploymentRecord",
         "type": "object"
       },
+      "DokployDomainRepairReview": {
+        "additionalProperties": false,
+        "properties": {
+          "applied": {
+            "default": false,
+            "title": "Applied",
+            "type": "boolean"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "current_domains": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Current Domains",
+            "type": "array"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "observed_domains": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Observed Domains",
+            "type": "array"
+          },
+          "operation": {
+            "const": "repair-domain-authority",
+            "default": "repair-domain-authority",
+            "title": "Operation",
+            "type": "string"
+          },
+          "plan_sha256": {
+            "title": "Plan Sha256",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "proposed_domains": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Proposed Domains",
+            "type": "array"
+          },
+          "proposed_primary_domain": {
+            "title": "Proposed Primary Domain",
+            "type": "string"
+          },
+          "source_records": {
+            "items": {
+              "$ref": "#/components/schemas/RouteRepairSource"
+            },
+            "title": "Source Records",
+            "type": "array"
+          },
+          "status": {
+            "enum": [
+              "ready",
+              "unchanged"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "target_id": {
+            "title": "Target Id",
+            "type": "string"
+          },
+          "target_name": {
+            "title": "Target Name",
+            "type": "string"
+          },
+          "target_type": {
+            "enum": [
+              "application",
+              "compose"
+            ],
+            "title": "Target Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "applied",
+          "context",
+          "current_domains",
+          "instance",
+          "observed_domains",
+          "operation",
+          "plan_sha256",
+          "product",
+          "proposed_domains",
+          "proposed_primary_domain",
+          "source_records",
+          "status",
+          "target_id",
+          "target_name",
+          "target_type"
+        ],
+        "title": "DokployDomainRepairReview",
+        "type": "object"
+      },
       "DokployTargetIdRecord": {
         "additionalProperties": false,
         "properties": {
@@ -12676,6 +13022,323 @@
           "watch_paths"
         ],
         "title": "DokployTargetRecord",
+        "type": "object"
+      },
+      "DokployTargetSetupEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "app_name": {
+            "default": "",
+            "title": "App Name",
+            "type": "string"
+          },
+          "browser_review": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BrowserRouteRepairRequest"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "compose_path": {
+            "default": "docker-compose.yml",
+            "title": "Compose Path",
+            "type": "string"
+          },
+          "confirmation": {
+            "default": "",
+            "title": "Confirmation",
+            "type": "string"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "custom_git_branch": {
+            "default": "",
+            "title": "Custom Git Branch",
+            "type": "string"
+          },
+          "deploy_timeout_seconds": {
+            "anyOf": [
+              {
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deploy Timeout Seconds"
+          },
+          "description": {
+            "default": "",
+            "title": "Description",
+            "type": "string"
+          },
+          "domains": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Domains",
+            "type": "array"
+          },
+          "environment_description": {
+            "default": "",
+            "title": "Environment Description",
+            "type": "string"
+          },
+          "environment_id": {
+            "default": "",
+            "title": "Environment Id",
+            "type": "string"
+          },
+          "environment_name": {
+            "default": "",
+            "title": "Environment Name",
+            "type": "string"
+          },
+          "expected_current_provider_target": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DeployedTargetReference"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "expected_current_provider_target_fingerprint": {
+            "default": "",
+            "maxLength": 256,
+            "title": "Expected Current Provider Target Fingerprint",
+            "type": "string"
+          },
+          "expected_plan_sha256": {
+            "default": "",
+            "title": "Expected Plan Sha256",
+            "type": "string"
+          },
+          "expected_state_volume_custody_sha256": {
+            "default": "",
+            "title": "Expected State Volume Custody Sha256",
+            "type": "string"
+          },
+          "healthcheck_path": {
+            "default": "",
+            "title": "Healthcheck Path",
+            "type": "string"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "mode": {
+            "default": "dry-run",
+            "enum": [
+              "dry-run",
+              "apply",
+              "readback"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "operation": {
+            "enum": [
+              "adopt",
+              "create-application",
+              "create-compose",
+              "complete-compose-source",
+              "prune-compose-domain",
+              "reconcile-compose-domain",
+              "repair-domain-authority"
+            ],
+            "title": "Operation",
+            "type": "string"
+          },
+          "product": {
+            "default": "launchplane",
+            "title": "Product",
+            "type": "string"
+          },
+          "project_description": {
+            "default": "",
+            "title": "Project Description",
+            "type": "string"
+          },
+          "project_id": {
+            "default": "",
+            "title": "Project Id",
+            "type": "string"
+          },
+          "project_name": {
+            "default": "",
+            "title": "Project Name",
+            "type": "string"
+          },
+          "reason": {
+            "default": "",
+            "title": "Reason",
+            "type": "string"
+          },
+          "replaces_operation_id": {
+            "default": "",
+            "title": "Replaces Operation Id",
+            "type": "string"
+          },
+          "retain_state_volume_allocation": {
+            "default": false,
+            "title": "Retain State Volume Allocation",
+            "type": "boolean"
+          },
+          "runtime_port": {
+            "anyOf": [
+              {
+                "maximum": 65535,
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Runtime Port"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "server_id": {
+            "default": "",
+            "title": "Server Id",
+            "type": "string"
+          },
+          "source_git_ref": {
+            "default": "origin/main",
+            "title": "Source Git Ref",
+            "type": "string"
+          },
+          "source_type": {
+            "default": "raw",
+            "title": "Source Type",
+            "type": "string"
+          },
+          "state_volume_path": {
+            "default": "",
+            "title": "State Volume Path",
+            "type": "string"
+          },
+          "state_volume_plan_id": {
+            "default": "",
+            "title": "State Volume Plan Id",
+            "type": "string"
+          },
+          "target_id": {
+            "default": "",
+            "title": "Target Id",
+            "type": "string"
+          },
+          "target_name": {
+            "default": "",
+            "title": "Target Name",
+            "type": "string"
+          },
+          "target_type": {
+            "default": "compose",
+            "enum": [
+              "application",
+              "compose"
+            ],
+            "title": "Target Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation",
+          "context",
+          "instance"
+        ],
+        "title": "DokployTargetSetupEnvelope",
+        "type": "object"
+      },
+      "DokployTargetSetupResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "original_trace_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Original Trace Id"
+          },
+          "records": {
+            "additionalProperties": true,
+            "title": "Records",
+            "type": "object"
+          },
+          "replayed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Replayed"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result"
+          },
+          "review": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DokployDomainRepairReview"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
+          "status": {
+            "const": "accepted",
+            "default": "accepted",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "original_trace_id",
+          "records",
+          "replayed",
+          "result",
+          "status",
+          "trace_id"
+        ],
+        "title": "DokployTargetSetupResponse",
         "type": "object"
       },
       "DokployTargetShopifyPolicy": {
@@ -13329,6 +13992,78 @@
           "updated_at"
         ],
         "title": "EnvironmentInventory",
+        "type": "object"
+      },
+      "EnvironmentRouteBindingReadModel": {
+        "additionalProperties": false,
+        "properties": {
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "domains": {
+            "items": {
+              "$ref": "#/components/schemas/RouteBindingDomain"
+            },
+            "title": "Domains",
+            "type": "array"
+          },
+          "ingress": {
+            "$ref": "#/components/schemas/RouteBindingIngressReadModel"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "provider_target": {
+            "$ref": "#/components/schemas/RouteBindingProviderTargetReadModel"
+          },
+          "record_sha256": {
+            "title": "Record Sha256",
+            "type": "string"
+          },
+          "schema_version": {
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "source": {
+            "$ref": "#/components/schemas/RouteBindingSource"
+          },
+          "status": {
+            "enum": [
+              "active",
+              "disabled"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "tls": {
+            "$ref": "#/components/schemas/RouteBindingTlsReadModel"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "context",
+          "domains",
+          "ingress",
+          "instance",
+          "product",
+          "provider_target",
+          "record_sha256",
+          "schema_version",
+          "source",
+          "status",
+          "tls",
+          "updated_at"
+        ],
+        "title": "EnvironmentRouteBindingReadModel",
         "type": "object"
       },
       "EveryCodeSummaryReadModel": {
@@ -37984,6 +38719,507 @@
           "status",
           "target_deployment_record_id"
         ]
+      },
+      "RouteBindingDomain": {
+        "additionalProperties": false,
+        "properties": {
+          "domain_name": {
+            "title": "Domain Name",
+            "type": "string"
+          },
+          "role": {
+            "default": "primary",
+            "enum": [
+              "primary",
+              "alias"
+            ],
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "domain_name",
+          "role"
+        ],
+        "title": "RouteBindingDomain",
+        "type": "object"
+      },
+      "RouteBindingExpectedCurrent": {
+        "additionalProperties": false,
+        "properties": {
+          "record_sha256": {
+            "default": "",
+            "title": "Record Sha256",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "absent",
+              "present"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "record_sha256",
+          "state"
+        ],
+        "title": "RouteBindingExpectedCurrent",
+        "type": "object"
+      },
+      "RouteBindingIngressReadModel": {
+        "additionalProperties": false,
+        "properties": {
+          "endpoint_key": {
+            "default": "",
+            "title": "Endpoint Key",
+            "type": "string"
+          },
+          "provider": {
+            "title": "Provider",
+            "type": "string"
+          },
+          "termination_kind": {
+            "enum": [
+              "edge",
+              "direct",
+              "none"
+            ],
+            "title": "Termination Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "endpoint_key",
+          "provider",
+          "termination_kind"
+        ],
+        "title": "RouteBindingIngressReadModel",
+        "type": "object"
+      },
+      "RouteBindingProviderTargetReadModel": {
+        "additionalProperties": false,
+        "properties": {
+          "provider_id": {
+            "title": "Provider Id",
+            "type": "string"
+          },
+          "provider_target_type": {
+            "default": "",
+            "title": "Provider Target Type",
+            "type": "string"
+          },
+          "target_category": {
+            "title": "Target Category",
+            "type": "string"
+          },
+          "target_name": {
+            "title": "Target Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider_id",
+          "provider_target_type",
+          "target_category",
+          "target_name"
+        ],
+        "title": "RouteBindingProviderTargetReadModel",
+        "type": "object"
+      },
+      "RouteBindingReconcileEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "browser_review": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BrowserRouteRepairRequest"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "confirmation": {
+            "default": "",
+            "title": "Confirmation",
+            "type": "string"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "expected_current": {
+            "$ref": "#/components/schemas/RouteBindingExpectedCurrent"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "mode": {
+            "default": "dry-run",
+            "enum": [
+              "dry-run",
+              "apply"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "reason": {
+            "default": "",
+            "title": "Reason",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "source_label": {
+            "default": "operator-reconcile",
+            "title": "Source Label",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "context",
+          "instance",
+          "expected_current"
+        ],
+        "title": "RouteBindingReconcileEnvelope",
+        "type": "object"
+      },
+      "RouteBindingReconcileFinding": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "detail"
+        ],
+        "title": "RouteBindingReconcileFinding",
+        "type": "object"
+      },
+      "RouteBindingReconcileResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "original_trace_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Original Trace Id"
+          },
+          "records": {
+            "additionalProperties": true,
+            "title": "Records",
+            "type": "object"
+          },
+          "replayed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Replayed"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result"
+          },
+          "review": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RouteBindingRepairReview"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
+          "status": {
+            "const": "accepted",
+            "default": "accepted",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "original_trace_id",
+          "records",
+          "replayed",
+          "result",
+          "status",
+          "trace_id"
+        ],
+        "title": "RouteBindingReconcileResponse",
+        "type": "object"
+      },
+      "RouteBindingRepairReview": {
+        "additionalProperties": false,
+        "properties": {
+          "applied": {
+            "default": false,
+            "title": "Applied",
+            "type": "boolean"
+          },
+          "binding_operation": {
+            "enum": [
+              "create",
+              "refresh",
+              "none"
+            ],
+            "title": "Binding Operation",
+            "type": "string"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "current_domains": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Current Domains",
+            "type": "array"
+          },
+          "current_record": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EnvironmentRouteBindingReadModel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
+          "current_record_sha256": {
+            "title": "Current Record Sha256",
+            "type": "string"
+          },
+          "expected_current": {
+            "$ref": "#/components/schemas/RouteBindingExpectedCurrent"
+          },
+          "findings": {
+            "items": {
+              "$ref": "#/components/schemas/RouteBindingReconcileFinding"
+            },
+            "title": "Findings",
+            "type": "array"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "operation": {
+            "const": "reconcile-route-binding",
+            "default": "reconcile-route-binding",
+            "title": "Operation",
+            "type": "string"
+          },
+          "plan_sha256": {
+            "title": "Plan Sha256",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "proposed_domains": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Proposed Domains",
+            "type": "array"
+          },
+          "proposed_record": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EnvironmentRouteBindingReadModel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
+          "source_records": {
+            "items": {
+              "$ref": "#/components/schemas/RouteRepairSource"
+            },
+            "title": "Source Records",
+            "type": "array"
+          },
+          "status": {
+            "enum": [
+              "ready",
+              "unchanged",
+              "blocked",
+              "conflict"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "applied",
+          "binding_operation",
+          "context",
+          "current_domains",
+          "current_record_sha256",
+          "expected_current",
+          "findings",
+          "instance",
+          "operation",
+          "plan_sha256",
+          "product",
+          "proposed_domains",
+          "source_records",
+          "status"
+        ],
+        "title": "RouteBindingRepairReview",
+        "type": "object"
+      },
+      "RouteBindingSource": {
+        "additionalProperties": false,
+        "properties": {
+          "freshness_status": {
+            "default": "recorded",
+            "enum": [
+              "verified",
+              "recorded",
+              "stale",
+              "missing",
+              "unsupported"
+            ],
+            "title": "Freshness Status",
+            "type": "string"
+          },
+          "refreshed_at": {
+            "title": "Refreshed At",
+            "type": "string"
+          },
+          "source_kind": {
+            "default": "operator",
+            "enum": [
+              "operator",
+              "backfill",
+              "service"
+            ],
+            "title": "Source Kind",
+            "type": "string"
+          },
+          "source_label": {
+            "title": "Source Label",
+            "type": "string"
+          },
+          "source_record_ids": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Source Record Ids",
+            "type": "array"
+          },
+          "source_versions": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Source Versions",
+            "type": "object"
+          },
+          "stale_after": {
+            "default": "",
+            "title": "Stale After",
+            "type": "string"
+          }
+        },
+        "required": [
+          "freshness_status",
+          "refreshed_at",
+          "source_kind",
+          "source_label",
+          "source_record_ids",
+          "source_versions",
+          "stale_after"
+        ],
+        "title": "RouteBindingSource",
+        "type": "object"
+      },
+      "RouteBindingTlsReadModel": {
+        "additionalProperties": false,
+        "properties": {
+          "owner": {
+            "enum": [
+              "launchplane",
+              "provider",
+              "external",
+              "none"
+            ],
+            "title": "Owner",
+            "type": "string"
+          }
+        },
+        "required": [
+          "owner"
+        ],
+        "title": "RouteBindingTlsReadModel",
+        "type": "object"
+      },
+      "RouteRepairSource": {
+        "additionalProperties": false,
+        "properties": {
+          "identity": {
+            "title": "Identity",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "identity",
+          "version"
+        ],
+        "title": "RouteRepairSource",
+        "type": "object"
       },
       "RuntimeDependencyExpectations": {
         "additionalProperties": false,

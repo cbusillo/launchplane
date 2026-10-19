@@ -132,12 +132,26 @@ class RouteBindingReconcileRequest(BaseModel):
         return self
 
 
+class RouteBindingReviewSources(BaseModel):
+    """Private exact source snapshots for the browser's commit guard."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider_target: ProviderTargetRecord
+    dokploy_target: DokployTargetRecord
+    dokploy_target_id: DokployTargetIdRecord
+    edge_endpoint: EdgeEndpointRecord
+    ingress_audit: IngressRouteAuditRecord
+
+
 class RouteBindingReconcilePlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     status: Literal["ready", "unchanged", "blocked", "conflict"]
     operation: Literal["create", "refresh", "none"] = "none"
     findings: tuple[RouteBindingReconcileFinding, ...] = ()
+    review_target_id: str = Field(default="", exclude=True)
+    review_sources: RouteBindingReviewSources | None = Field(default=None, exclude=True)
     current_record_sha256: str = ""
     candidate_record_sha256: str = ""
     current_record: EnvironmentRouteBindingRecord | None = Field(default=None, exclude=True)
@@ -195,12 +209,15 @@ def plan_route_binding_reconcile(
     if candidate.record is None:
         return candidate
     record = candidate.record
+    review_target_id = candidate.review_target_id
     candidate_record_sha256 = route_binding_record_sha256(record)
     if current_record is None:
         return RouteBindingReconcilePlan(
             status="ready",
             operation="create",
             candidate_record_sha256=candidate_record_sha256,
+            review_target_id=review_target_id,
+            review_sources=candidate.review_sources,
             record=record,
         )
     external_handoff = _is_relinquished_external_operator_binding(current_record)
@@ -215,6 +232,8 @@ def plan_route_binding_reconcile(
     if external_handoff:
         return RouteBindingReconcilePlan(
             status="ready",
+            review_target_id=review_target_id,
+            review_sources=candidate.review_sources,
             operation="refresh",
             findings=(
                 RouteBindingReconcileFinding(
@@ -251,6 +270,8 @@ def plan_route_binding_reconcile(
     ):
         return RouteBindingReconcilePlan(
             status="ready",
+            review_target_id=review_target_id,
+            review_sources=candidate.review_sources,
             operation="refresh",
             current_record_sha256=current_record_sha256,
             candidate_record_sha256=candidate_record_sha256,
@@ -259,6 +280,8 @@ def plan_route_binding_reconcile(
         )
     return RouteBindingReconcilePlan(
         status="unchanged",
+        review_target_id=review_target_id,
+        review_sources=candidate.review_sources,
         current_record_sha256=current_record_sha256,
         candidate_record_sha256=current_record_sha256,
         current_record=current_record,
@@ -486,6 +509,14 @@ def build_route_binding_candidate(
         current_record=current_record,
         current_record_sha256=current_record_sha256,
         candidate_record_sha256=route_binding_record_sha256(record),
+        review_target_id=provider_target.target_id,
+        review_sources=RouteBindingReviewSources(
+            provider_target=provider_target,
+            dokploy_target=dokploy_target,
+            dokploy_target_id=dokploy_target_id,
+            edge_endpoint=edge_endpoint,
+            ingress_audit=audit_record,
+        ),
     )
 
 

@@ -165,6 +165,39 @@ class ApplicationStateVolumeTests(_DirectorTestingSetupFixture):
         self.assertTrue(result.json()["result"]["applied"])
         self.assert_production_unchanged()
 
+    async def test_original_plan_without_browser_field_still_applies_and_reads_back(self) -> None:
+        from control_plane.application_state_volume import PLAN_ROUTE
+        from control_plane.http_routes.mutation_support import request_fingerprint
+
+        plan = await self.plan()
+        original = self.store.read_idempotency_record(
+            scope="local-operator|local-owner-agent|local-owner-read",
+            route_path=PLAN_ROUTE,
+            idempotency_key=plan["state_volume_plan_id"],
+        )
+        self.assertIsNotNone(original)
+        assert original is not None
+        # Model an immutable pre-upgrade plan, whose request predates the browser adapter.
+        old_intent = deepcopy(original.response_payload)
+        old_intent["request"].pop("browser_review", None)
+        old_intent.pop("plan_sha256")
+        old_intent["plan_sha256"] = request_fingerprint(old_intent)
+        self.store.write_idempotency_record(
+            original.model_copy(
+                update={
+                    "request_fingerprint": old_intent["plan_sha256"],
+                    "response_payload": old_intent,
+                }
+            )
+        )
+        self.payload["expected_plan_sha256"] = old_intent["plan_sha256"]
+        applied = await self.post()
+        self.assertEqual(applied.status_code, 202, applied.text)
+        readback = await self.post(mode="readback")
+        self.assertEqual(readback.status_code, 202, readback.text)
+        self.assertTrue(readback.json()["result"]["configuration_matches"], readback.text)
+        self.assert_production_unchanged()
+
     async def test_creates_only_new_testing_volume_then_replays_and_reads_back(self) -> None:
         plan = await self.plan()
         result = await self.post()
