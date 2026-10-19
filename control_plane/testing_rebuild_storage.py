@@ -109,6 +109,8 @@ def require_rebuild_successor(
             if record != current:
                 raise ValueError("A terminal rebuild receipt cannot be replaced.")
             return
+        if current.retirement is not None and current.retirement != record.retirement:
+            raise ValueError("A rebuild cannot replace its original retirement disposition.")
         for flag in ("publication_started", "retirement_started", "rollback_started"):
             if getattr(current, flag) and not getattr(record, flag):
                 raise ValueError("A rebuild cannot forget an effect intent.")

@@ -2,7 +2,9 @@
 
 from datetime import UTC, datetime
 import unittest
+import json
 import time
+from types import SimpleNamespace
 from typing import Any, Self, cast
 from unittest.mock import Mock, patch
 
@@ -135,16 +137,21 @@ class ScheduledNativeRebuildTests(unittest.TestCase):
             "host_boot_id": "fixture-boot",
             "host_monotonic": time.monotonic(),
             "host_observed_at": time.time(),
+            "namespace_sha256": "9" * 64,
         }
         if payload["mode"] == "inspect-original":
             return {"type": "complete", "status": "missing", **clock}
         if payload["mode"] == "qualify-retirement":
+            # A bounded remote send never opens another CP write transaction.
+            # Keep the fixture's publication assertion outside that send.
+            snapshot = self.worker.current()
 
             def stop() -> None:
-                self.worker.provider_request(
-                    path="/api/compose.stop",
-                    payload={"composeId": payload["identity"]["target_id"]},
-                )
+                with patch.object(self.worker, "current", return_value=snapshot):
+                    self.worker.provider_request(
+                        path="/api/compose.stop",
+                        payload={"composeId": payload["identity"]["target_id"]},
+                    )
 
             kwargs["dispatch_guard"](stop)
             return {"type": "complete", "status": "eligible", **clock}
@@ -228,7 +235,12 @@ class ScheduledNativeRebuildTests(unittest.TestCase):
         self.assertIn(generation_binding(original), self.evidence().retained_copy_bindings)
 
     def test_five_scheduled_copies_reclaim_older_drills_and_preserve_manual_baseline(
-        self, *, manual_between: bool = False, cp_clock_jump: bool = False
+        self,
+        *,
+        manual_between: bool = False,
+        cp_clock_jump: bool = False,
+        fail_next_admission: bool = False,
+        recent_old: bool = False,
     ) -> None:
         from control_plane import odoo_testing_native_maintenance as maintenance
         from control_plane.dokploy import api
@@ -243,6 +255,7 @@ class ScheduledNativeRebuildTests(unittest.TestCase):
         host_monotonic = 10.0
         disposal_sends = 0
         clock_exercised = False
+        recent_namespace = ""
         from control_plane.provider_operations import run_durable_provider_operation
 
         run_provider = run_durable_provider_operation
@@ -285,7 +298,36 @@ class ScheduledNativeRebuildTests(unittest.TestCase):
                     held = run_provider(**kwargs)
                 self.assertEqual(held.status, "reconcile_required")
                 self.assertEqual(disposal_sends, 1)
-                host_monotonic += 121
+                host_monotonic = float(admission.response_payload["host_expires_at"]) + 1
+                if fail_next_admission:
+                    from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
+
+                    def fail_registration(*args: Any, **options: Any) -> Any:
+                        self.assertEqual(args[1].attempt, 2)
+                        raise NativeSourceUnavailable("fixture DB failed before admission 2")
+
+                    with (
+                        patch.object(
+                            maintenance, "register_native_admission", side_effect=fail_registration
+                        ),
+                        self.assertRaises(NativeSourceUnavailable),
+                    ):
+                        run_provider(**kwargs)
+                    current = self.store.read_idempotency_record(
+                        scope=DRILL_SCOPE,
+                        route_path=NATIVE_DRILL_MAINTENANCE_ROUTE,
+                        idempotency_key=kwargs["idempotency_key"],
+                    )
+                    assert current is not None
+                    self.assertEqual(current.attempt, 2)
+                    self.assertIsNone(
+                        self.store.read_idempotency_record(
+                            scope=DRILL_SCOPE,
+                            route_path=NATIVE_DRILL_MAINTENANCE_ROUTE + ":attempt",
+                            idempotency_key=current.idempotency_key + ":2",
+                        )
+                    )
+                    self.assertEqual(disposal_sends, 1)
                 return run_provider(**kwargs)
 
         fetch = cast(Mock, api.fetch_dokploy_target_payload).side_effect
@@ -302,24 +344,33 @@ class ScheduledNativeRebuildTests(unittest.TestCase):
             return {**read(), "execution_fence": {"status": "ready"}}
 
         def host(**kwargs: Any) -> dict[str, Any]:
-            nonlocal disposal_sends
+            nonlocal disposal_sends, recent_namespace
             payload = kwargs["payload"]
             identity = payload["identity"]
             namespace = identity["namespace"]
             if payload["mode"] == "qualify-retirement":
                 archived[identity["target_id"]] = dict(self.worker.old_provider)
                 qualified.add(namespace)
+                if not recent_namespace:
+                    recent_namespace = namespace
                 return self.native_maintenance(**kwargs)
             if payload["mode"] == "inspect-original":
                 return {
                     "type": "complete",
-                    "status": ("eligible" if namespace in qualified else "missing")
+                    "status": (
+                        "recent_use"
+                        if recent_old and namespace == recent_namespace
+                        else "eligible"
+                        if namespace in qualified
+                        else "missing"
+                    )
                     if namespace in physical
                     else "disposed",
                     "identity_sha256": payload["identity_sha256"],
                     "host_boot_id": "fixture-boot",
                     "host_monotonic": host_monotonic,
                     "host_observed_at": time.time(),
+                    "namespace_sha256": "9" * 64,
                 }
 
             disposal_sends += 1
@@ -370,11 +421,14 @@ class ScheduledNativeRebuildTests(unittest.TestCase):
                 self.assertIn(manual, physical)
                 # Collection precedes allocation, preserving the current and
                 # immediate predecessor at that boundary plus one new copy.
-                self.assertLessEqual(len(physical), 5 if manual_between else 4)
+                self.assertLessEqual(len(physical), (5 if manual_between else 4) + int(recent_old))
                 OdooTestingDrillScheduler(
                     self.store, clock=lambda: tick + number * DRILL_INTERVAL_SECONDS
                 ).run_once()
-                self.assertLessEqual(self.evidence().disposal_attention, 4 if manual_between else 3)
+                self.assertLessEqual(
+                    self.evidence().disposal_attention,
+                    (4 if manual_between else 3) + int(recent_old),
+                )
                 if manual_between and number == 0:
                     original = self.store.read_testing_candidate(
                         self.worker.fixture.candidate.namespace
@@ -416,11 +470,60 @@ class ScheduledNativeRebuildTests(unittest.TestCase):
                     with self.assertRaises(DrillPrerequisite):
                         maintenance._require_completed_copy(self.store, original, qualification)
                     self.store.write_odoo_stable_target_replacement_operation_record(successor)
-        self.assertEqual(len(removals), 2)
+        self.assertEqual(len(removals), 1 if recent_old else 2)
+        if recent_old:
+            self.assertIn(recent_namespace, physical)
+            self.assertNotIn(recent_namespace, removals)
         self.assertNotIn(manual, removals)
         if cp_clock_jump:
             self.assertTrue(clock_exercised)
             self.assertEqual(disposal_sends, len(removals) + 1)
+
+    def test_recent_old_copy_does_not_skip_another_eligible_original(self) -> None:
+        self.test_five_scheduled_copies_reclaim_older_drills_and_preserve_manual_baseline(
+            recent_old=True
+        )
+
+    def test_disposal_attempt_without_admission_reuses_the_complete_original_family(self) -> None:
+        self.test_five_scheduled_copies_reclaim_older_drills_and_preserve_manual_baseline(
+            cp_clock_jump=True, fail_next_admission=True
+        )
+
+    def test_recent_bounded_pass_does_not_hide_an_unseen_backlog(self) -> None:
+        from control_plane import odoo_testing_native_maintenance as maintenance
+        from control_plane.odoo_testing_drill import DRILL_SCOPE, DrillSkipped, DrillPrerequisite
+
+        observed = tuple(
+            SimpleNamespace(namespace=f"recent-{number}")
+            for number in range(MAX_DISPOSALS_PER_PASS)
+        )
+        unseen = SimpleNamespace(namespace="unseen-original")
+        executor = SimpleNamespace(
+            store=self.store,
+            operation=self.worker.operation.model_copy(update={"idempotency_scope": DRILL_SCOPE}),
+        )
+        with (
+            patch.object(
+                maintenance,
+                "native_drill_maintenance_candidates",
+                side_effect=[observed, (unseen,)],
+            ) as candidates,
+            patch.object(maintenance, "_qualification", return_value={}),
+            patch.object(
+                maintenance,
+                "_reconcile_copy",
+                side_effect=DrillSkipped("native_testing_copy_recent_successful_signin"),
+            ) as reconcile,
+        ):
+            with self.assertRaises(DrillPrerequisite) as refused:
+                maintenance.reconcile_native_drill_storage(executor)
+        self.assertEqual(refused.exception.code, "native_testing_copy_cleanup_pending")
+        self.assertEqual(reconcile.call_count, len(observed))
+        self.assertEqual(
+            set(candidates.call_args.kwargs["retained_namespaces"]),
+            {item.namespace for item in observed},
+        )
+        self.assertNotIn(unseen.namespace, candidates.call_args.kwargs["retained_namespaces"])
 
     def test_manual_native_successor_qualifies_original_drill_for_later_collection(self) -> None:
         self.test_five_scheduled_copies_reclaim_older_drills_and_preserve_manual_baseline(
@@ -450,6 +553,7 @@ class ScheduledNativeRebuildTests(unittest.TestCase):
                 "host_boot_id": "fixture-boot",
                 "host_monotonic": time.monotonic(),
                 "host_observed_at": time.time(),
+                "namespace_sha256": "9" * 64,
                 "status": "recovery_required" if dispatched else "missing",
                 "reason": "original_stop_outcome_unknown",
             }
@@ -520,7 +624,9 @@ class ScheduledNativeRebuildTests(unittest.TestCase):
             self.assertEqual(self.worker.current(), current)
             self.assertFalse(self.worker.retained["stopped"])
 
-    def test_original_retirement_resumes_only_after_host_no_dispatch_exclusion(self) -> None:
+    def test_original_retirement_resumes_only_after_host_no_dispatch_exclusion(
+        self, *, fail_next_admission: bool = False
+    ) -> None:
         from control_plane import odoo_testing_native_maintenance as maintenance
         from control_plane.contracts.testing_rebuild import REBUILD_SCOPE, REBUILD_ROUTE
 
@@ -529,10 +635,22 @@ class ScheduledNativeRebuildTests(unittest.TestCase):
         state = "missing"
         host_monotonic = 10.0
         calls = []
+        failed_second = False
 
         def host(**kwargs: Any) -> dict[str, Any]:
-            nonlocal state
+            nonlocal state, failed_second
             payload = kwargs["payload"]
+            if payload["mode"] == "inspect-original" and fail_next_admission and not failed_second:
+                current = self.store.read_idempotency_record(
+                    scope=REBUILD_SCOPE,
+                    route_path=REBUILD_ROUTE + ":effect",
+                    idempotency_key=self.worker.operation.operation_id + ":retire-old",
+                )
+                if current is not None and current.attempt == 2:
+                    from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
+
+                    failed_second = True
+                    raise NativeSourceUnavailable("fixture observation failed before admission 2")
             if payload["mode"] == "qualify-retirement":
                 if state == "missing":
                     kwargs["dispatch_guard"](lambda: None)
@@ -547,6 +665,7 @@ class ScheduledNativeRebuildTests(unittest.TestCase):
                 "host_boot_id": "fixture-boot",
                 "host_monotonic": host_monotonic,
                 "host_observed_at": time.time(),
+                "namespace_sha256": "9" * 64,
             }
 
         with patch.object(maintenance, "native_maintenance_operation", side_effect=host):
@@ -582,8 +701,24 @@ class ScheduledNativeRebuildTests(unittest.TestCase):
                 with self.assertRaises(service.NativeTestingRebuildPending):
                     self.worker.execute()
             self.assertEqual(calls, ["excluded-preflight"])
-            host_monotonic += 121
+            host_monotonic = float(admission.response_payload["host_expires_at"]) + 1
             state = "resumable_retirement"
+            if fail_next_admission:
+                with self.assertRaises(service.NativeTestingRebuildPending):
+                    self.worker.execute()
+                current = self.store.read_idempotency_record(
+                    scope=REBUILD_SCOPE, route_path=REBUILD_ROUTE + ":effect", idempotency_key=key
+                )
+                assert current is not None
+                self.assertEqual(current.attempt, 2)
+                self.assertIsNone(
+                    self.store.read_idempotency_record(
+                        scope=REBUILD_SCOPE,
+                        route_path=REBUILD_ROUTE + ":retirement-admission",
+                        idempotency_key=key + ":2",
+                    )
+                )
+                self.assertEqual(calls, ["excluded-preflight"])
             self.assertEqual(self.worker.execute().deploy_status, "pass")
             continued = self.store.read_idempotency_record(
                 scope=REBUILD_SCOPE, route_path=REBUILD_ROUTE + ":effect", idempotency_key=key
@@ -596,6 +731,251 @@ class ScheduledNativeRebuildTests(unittest.TestCase):
             )
             self.assertGreater(continued.attempt, original.attempt)
             self.assertEqual(calls, ["excluded-preflight", "original-stop"])
+
+    def test_retirement_attempt_without_admission_recovers_the_original_family(self) -> None:
+        self.test_original_retirement_resumes_only_after_host_no_dispatch_exclusion(
+            fail_next_admission=True
+        )
+
+    def test_real_host_preservation_completes_healthy_publication_after_lost_cp_close(self) -> None:
+        self.exercise_host_sealed_retirement(unhealthy=False)
+
+    def test_real_host_no_stop_allows_original_inverse_and_a_new_native_retirer(self) -> None:
+        self.exercise_host_sealed_retirement(unhealthy=True)
+
+    def test_native_rollback_exclusion_survives_lost_reply_and_recovered_new_health(self) -> None:
+        self.exercise_host_sealed_retirement(unhealthy=True, lost_rollback=True)
+
+    def test_receipt_exposure_remains_untrusted_after_the_mount_is_removed(self) -> None:
+        self.exercise_host_sealed_retirement(
+            unhealthy=False, exposure=True, late_shared_exposure=True
+        )
+
+    def exercise_host_sealed_retirement(
+        self,
+        *,
+        unhealthy: bool,
+        exposure: bool = False,
+        lost_rollback: bool = False,
+        late_shared_exposure: bool = False,
+    ) -> None:
+        from control_plane import odoo_testing_native_maintenance as maintenance
+        from control_plane.contracts.testing_rebuild import REBUILD_SCOPE, REBUILD_ROUTE
+        from control_plane.dokploy import testing_native_maintenance as transport
+        from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
+        from control_plane.testing_rebuild_storage import RecordTestingRebuildStore
+        from control_plane.workflows.odoo_stable_operation_worker import (
+            _target_replacement_terminal_operation,
+        )
+        from tests.test_testing_native_maintenance import NativeMaintenanceHostTests
+
+        tick = datetime.now(UTC).timestamp()
+        self.worker.complete_second_rebuild(scheduled=True, scheduled_at=tick)
+        original_copy = self.worker.fixture.candidate
+        original_app = self.worker.app
+        host = NativeMaintenanceHostTests()
+        host.setUp()
+        self.addCleanup(host.doCleanups)
+        if exposure and not late_shared_exposure:
+            host.containers["foreign"] = {
+                "Id": "foreign",
+                "Mounts": [{"Source": str(host.root), "RW": True}],
+            }
+        defer = unhealthy
+        closed = False
+        from control_plane.storage.testing_native_disposal import close_native_admissions
+
+        close = close_native_admissions
+
+        def lost_close(*args: Any, **kwargs: Any) -> Any:
+            nonlocal closed
+            if not unhealthy and not exposure and not closed:
+                closed = True
+                raise NativeSourceUnavailable("fixture lost CP close after host seal")
+            result = close(*args, **kwargs)
+            if lost_rollback and kwargs.get("rollback") and not closed:
+                closed = True
+                self.worker.fail_public = False
+                raise NativeSourceUnavailable("fixture lost original rollback closure reply")
+            return result
+
+        def remote(**kwargs: Any) -> None:
+            nonlocal defer
+            payload = kwargs["payload"]
+            if defer and payload["mode"] == "qualify-retirement":
+                defer = False
+                kwargs["dispatch_guard"](lambda: None)
+                raise NativeSourceUnavailable("fixture original payload never reached host")
+            if kwargs.get("dispatch_guard") is not None:
+                kwargs["dispatch_guard"](lambda: None)
+            if late_shared_exposure and payload["mode"] == "qualify-retirement":
+                # Match the real emitted shared guard through its final privacy
+                # check. The exposure appears after the CP pre-inspection.
+                namespace = payload["generation"]["namespace"]
+                old_namespace = host.fixture.gen.namespace
+                names = {name: name.replace(old_namespace, namespace) for name in host.volumes}
+                host.volumes = {
+                    names[name]: {
+                        **value,
+                        "Name": names[name],
+                        "Labels": {
+                            **value["Labels"],
+                            "io.launchplane.testing-resources": payload["generation"][
+                                "resources_binding_sha256"
+                            ],
+                        },
+                    }
+                    for name, value in host.volumes.items()
+                }
+                for member in host.containers.values():
+                    member["Config"]["Labels"]["com.docker.compose.project"] = payload[
+                        "compose_project"
+                    ]
+                    for mount in member["Mounts"]:
+                        mount["Name"] = names[mount["Name"]]
+                    if member["Id"] != "database":
+                        member["Config"]["Image"] = payload["image_reference"]
+                        environment = dict(
+                            value.split("=", 1) for value in member["Config"]["Env"] if "=" in value
+                        )
+                        environment.update(
+                            ODOO_DB_NAME=payload["database_name"],
+                            LAUNCHPLANE_RUNTIME_IDENTITY_JSON=json.dumps(
+                                payload["runtime_identity"]
+                            ),
+                        )
+                        member["Config"]["Env"] = [
+                            key + "=" + value for key, value in environment.items()
+                        ]
+                root = host.root / "fixture-home/.local/state/launchplane-testing-disposal"
+                host.containers["foreign"] = {
+                    "Id": "foreign",
+                    "Config": {"Labels": {}},
+                    "Mounts": [{"Source": str(root), "RW": True}],
+                }
+                frame = host.framed_mode(payload, default_layout=True)
+                del host.containers["foreign"]
+                # The previously writable, same-inode namespace can now carry
+                # a forged empty WAL. Only CP's observed loss may stop adoption.
+                receipt = (
+                    root
+                    / payload["identity"]["namespace"]
+                    / ("native-" + payload["identity_sha256"] + ".json")
+                )
+                data = json.loads(receipt.read_text())
+                data.update(protocol=2, state="retirement", retirement={}, resources={})
+                receipt.write_text(json.dumps(data))
+            else:
+                frame = host.framed_mode(payload, default_layout=late_shared_exposure)
+            kwargs["receive"](frame)
+
+        with (
+            patch.object(
+                maintenance,
+                "native_maintenance_operation",
+                side_effect=transport.native_maintenance_operation,
+            ),
+            patch.object(transport, "_read_remote", side_effect=remote),
+            patch.object(maintenance, "close_native_admissions", side_effect=lost_close),
+        ):
+            with self.assertRaises(service.NativeTestingRebuildPending):
+                self.worker.complete_second_rebuild(
+                    scheduled=True, scheduled_at=tick + DRILL_INTERVAL_SECONDS
+                )
+            stop = self.store.read_idempotency_record(
+                scope=REBUILD_SCOPE,
+                route_path=REBUILD_ROUTE + ":effect",
+                idempotency_key=self.worker.operation.operation_id + ":retire-old",
+            )
+            assert stop is not None
+            self.assertEqual(
+                bool(stop.provider_effect_started_at), not exposure or late_shared_exposure
+            )
+            self.assertIsNone(maintenance._qualification(self.store, original_copy.namespace))
+            effects = list(self.worker.effects)
+            if exposure:
+                host.containers.pop("foreign", None)
+                calls = list(host.calls)
+                with self.assertRaises(service.NativeTestingRebuildPending):
+                    self.worker.execute()
+                self.assertEqual(host.calls, calls)
+                self.assertEqual(self.worker.effects, effects)
+                self.assertIsNone(maintenance._qualification(self.store, original_copy.namespace))
+                return
+            self.worker.fail_public = unhealthy
+            if lost_rollback:
+                with self.assertRaises(service.NativeTestingRebuildPending):
+                    self.worker.execute()
+                self.assertFalse(self.worker.fail_public)
+            result = self.worker.execute()
+            self.assertEqual(result.deploy_status, "fail" if unhealthy else "pass")
+            self.assertFalse(any(call[0] == "stop" for call in host.calls))
+            parent = self.store.read_idempotency_record(
+                scope=REBUILD_SCOPE,
+                route_path=REBUILD_ROUTE,
+                idempotency_key=self.worker.operation.operation_id,
+            )
+            assert parent is not None
+            intent = service.NativeTestingRebuildIntent.model_validate(
+                self.store.read_original_mutation_intent(parent)
+            )
+            record = RecordTestingRebuildStore(self.store).load_operation(
+                product=intent.profile.product,
+                context=self.context,
+                operation_id=self.worker.operation.operation_id,
+            )
+            if not unhealthy:
+                assert record.retirement is not None
+                self.assertEqual(record.retirement.status, "preserved")
+                self.assertEqual(self.worker.effects, effects)
+            else:
+                self.assertEqual(
+                    self.worker.current().target_id.target_id, original_copy.compose_id
+                )
+                self.assertIsNotNone(record.retirement_recovery)
+                self.store.write_odoo_stable_target_replacement_operation_record(
+                    _target_replacement_terminal_operation(
+                        operation=self.worker.operation,
+                        result=result,
+                        lease_owner=self.worker.operation.lease_owner,
+                    )
+                )
+                self.worker.fail_public = False
+                original_spec = self.store.read_original_mutation_intent(stop)["native_retirement"]
+                admission = self.store.read_idempotency_record(
+                    scope=REBUILD_SCOPE,
+                    route_path=REBUILD_ROUTE + ":retirement-admission",
+                    idempotency_key=stop.idempotency_key + ":1",
+                )
+                assert admission is not None
+                self.worker.fixture.candidate = original_copy
+                self.worker.app = original_app
+                with patch.object(
+                    maintenance, "native_maintenance_operation", side_effect=self.native_maintenance
+                ):
+                    self.worker.complete_second_rebuild(
+                        operation_id="manual-after-original-exclusion", previous_status="fail"
+                    )
+                qualified = maintenance._qualification(self.store, original_copy.namespace)
+                assert qualified is not None
+                self.assertEqual(
+                    qualified["identity"]["retiring_operation_id"],
+                    "manual-after-original-exclusion",
+                )
+                self.assertEqual(
+                    self.store.read_original_mutation_intent(stop)["native_retirement"],
+                    original_spec,
+                )
+                late = host.framed_mode(
+                    {
+                        **original_spec,
+                        **admission.response_payload,
+                        "mode": "qualify-retirement",
+                        "receipt_namespaces": [admission.response_payload["namespace_sha256"]],
+                    }
+                )
+                self.assertEqual(late["status"], "preserved")
+                self.assertFalse(any(call[0] == "stop" for call in host.calls))
 
     def test_stale_scheduler_snapshot_keeps_fresh_refusal_original_operation_blocked(self) -> None:
         self.refuse_after_writer_dispatch()
@@ -677,8 +1057,9 @@ class ScheduledNativeRebuildTests(unittest.TestCase):
             patch.object(maintenance, "_qualification", return_value={}),
             patch.object(maintenance, "_reconcile_copy") as reconcile,
         ):
-            with self.assertRaisesRegex(DrillPrerequisite, "native_testing_copy_cleanup_pending"):
+            with self.assertRaises(DrillPrerequisite) as refused:
                 maintenance.reconcile_native_drill_storage(executor)
+            self.assertEqual(refused.exception.code, "native_testing_copy_cleanup_pending")
             self.assertEqual(reconcile.call_count, MAX_DISPOSALS_PER_PASS)
         with patch.object(maintenance, "native_drill_maintenance_candidates", return_value=()):
             maintenance.reconcile_native_drill_storage(executor)

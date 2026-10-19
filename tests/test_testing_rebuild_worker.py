@@ -260,7 +260,16 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertEqual(kwargs["path"], "/api/compose.stop")
         self.assertEqual(kwargs["payload"]["composeId"], self.intent.old.target_id)
         self.assertIsNotNone(self.owned)
-        self.assertEqual(self.current().target_id.target_id, self.fixture.candidate.compose_id)
+        held = getattr(self.store._disposable_authority_context, "session", None)
+        if held is not None:
+            from control_plane import testing_publication_storage
+
+            snapshot = testing_publication_storage._snapshot(
+                self.store, held, self.operation.product, self.operation.context
+            )
+        else:
+            snapshot = self.current()
+        self.assertEqual(snapshot.target_id.target_id, self.fixture.candidate.compose_id)
 
         self.assertFalse(self.fail_public)
         self.effects.append("stop-old")
@@ -1813,10 +1822,11 @@ class NativeTestingWorkerTests(unittest.TestCase):
         scheduled_at: float = 0,
         interrupted_storage: bool = False,
         expected_status: str = "pass",
+        previous_status: str = "pass",
     ) -> None:
         import yaml
 
-        self.assertEqual(self.execute().deploy_status, "pass")
+        self.assertEqual(self.execute().deploy_status, previous_status)
         previous_effects = list(self.effects)
         first = self.fixture.candidate
         previous = published_testing_copy(self.store, product=first.product, context=first.context)
@@ -1938,6 +1948,11 @@ class NativeTestingWorkerTests(unittest.TestCase):
                     "operation_id": operation_id,
                     "idempotency_key": operation_id,
                     "idempotency_scope": "fixture",
+                    "status": "pending",
+                    "attempt": 0,
+                    "lease_owner": "",
+                    "lease_expires_at": "",
+                    "heartbeat_at": "",
                 }
             )
         self.fixture.before, self.fixture.candidate = before, candidate

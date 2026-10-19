@@ -1,6 +1,7 @@
 """Read testing copy custody and private health without a provider mutation."""
 
 import inspect
+from control_plane.docker_errors import docker_daemon_authorization_denied
 from collections.abc import Callable
 from pathlib import Path
 from control_plane._odoo_copy_runtime_guard import VOLUME_BACKING_INSPECTION_LIBRARY
@@ -194,6 +195,7 @@ def native_storage_capacity(
 def retained_copy_host_program() -> str:
     return (
         "import base64,hashlib,json,os,subprocess,sys\nfrom typing import Any\nfrom collections.abc import Callable\nfrom pathlib import Path\n"
+        + inspect.getsource(docker_daemon_authorization_denied)
         + VOLUME_BACKING_INSPECTION_LIBRARY
         + FILESYSTEM_CAPACITY_LIBRARY
         + inspect.getsource(native_storage_capacity)
@@ -203,11 +205,14 @@ def retained_copy_host_program() -> str:
         + "\n"
         + r"""
 
+class RetainedCopyProviderDenied(PermissionError):
+    pass
+
 def docker(*arguments):
     result=subprocess.run(['docker',*arguments],stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=90,check=False)
     if result.returncode:
-        if any(token in result.stderr.lower() for token in (b'permission denied',b'unauthorized',b'access denied')):
-            raise PermissionError('Managed testing retirement was refused')
+        if docker_daemon_authorization_denied(result.stderr):
+            raise RetainedCopyProviderDenied('Managed testing retirement was refused')
         raise RuntimeError('Managed testing retirement did not complete')
     return result.stdout
 
@@ -240,7 +245,7 @@ try:
     elif spec['mode']!='read':
         raise ValueError('Unsupported retained testing operation')
     print(sys.argv[2]+json.dumps(result),flush=True)
-except PermissionError:
+except RetainedCopyProviderDenied:
     print(sys.argv[2]+json.dumps({'type':'denied'}),flush=True)
     sys.exit(1)
 except Exception:

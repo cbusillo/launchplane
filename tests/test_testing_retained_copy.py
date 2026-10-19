@@ -259,7 +259,12 @@ class RetainedTestingCopyTests(unittest.TestCase):
             qualify_retained_copy(self.containers, self.spec)
 
     def run_host(
-        self, *, mode: str = "read", deny: bool = False, extra: dict[str, Any] | None = None
+        self,
+        *,
+        mode: str = "read",
+        deny: bool = False,
+        extra: dict[str, Any] | None = None,
+        denial_stderr: bytes = b"authorization denied by plugin: fixture",
     ) -> tuple[dict[str, Any], list[list[str]]]:
         payload = {**self.spec, "mode": mode, "identity": self.identity, **(extra or {})}
         commands: list[list[str]] = []
@@ -267,9 +272,7 @@ class RetainedTestingCopyTests(unittest.TestCase):
         def run(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[bytes]:
             commands.append(command)
             if deny:
-                return subprocess.CompletedProcess(
-                    command, 1, stdout=b"", stderr=b"permission denied"
-                )
+                return subprocess.CompletedProcess(command, 1, stdout=b"", stderr=denial_stderr)
             if command[1:3] == ["ps", "-aq"]:
                 output = "\n".join(item["Id"] for item in self.containers).encode()
             elif command[1] == "inspect":
@@ -335,6 +338,19 @@ class RetainedTestingCopyTests(unittest.TestCase):
             }
         )
         self.assertEqual(self.run_host()[0]["type"], "failed")
+
+    def test_local_permission_errors_are_failed_observations_and_plugin_denial_is_terminal(
+        self,
+    ) -> None:
+        for stderr, expected in (
+            (b"psql: permission denied for table res_users_log", "failed"),
+            (b"volume: access denied", "failed"),
+            (b"authorization denied by plugin: fixture", "denied"),
+        ):
+            with self.subTest(stderr=stderr):
+                frame, commands = self.run_host(deny=True, denial_stderr=stderr)
+                self.assertEqual(frame["type"], expected)
+                self.assertEqual(len(commands), 1)
 
     def test_host_read_reports_denial_and_exposes_no_writer_mode(self) -> None:
         frame, commands = self.run_host(deny=True)

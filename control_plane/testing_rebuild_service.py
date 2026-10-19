@@ -48,6 +48,7 @@ from control_plane.contracts.testing_rebuild import (
     TestingCopyReceipt,
     TestingRebuildPlan,
     TestingRebuildRecord,
+    TestingRetirementDisposition,
     TestingRouteObservation,
 )
 from control_plane.dokploy import api, post_deploy, source
@@ -1716,7 +1717,7 @@ class NativeTestingRebuildExecution:
             recovery=True,
         )
 
-    def retire_old(self, plan: TestingRebuildPlan) -> None:
+    def retire_old(self, plan: TestingRebuildPlan) -> TestingRetirementDisposition:
         def disable_auto_deploy(dispatch: Callable[[Callable[[], None]], None]) -> None:
             def send() -> None:
                 api.dokploy_request(
@@ -1743,8 +1744,18 @@ class NativeTestingRebuildExecution:
 
         qualification = qualifying_retirement(self)
         if qualification is not None:
-            retire_qualified_copy(self, qualification)
-            return
+            from control_plane.odoo_testing_drill import DrillPrerequisite
+
+            try:
+                disposition = retire_qualified_copy(self, qualification)
+            except DrillPrerequisite as error:
+                raise NativeTestingRebuildPending(str(error), code=error.code) from error
+            return TestingRetirementDisposition(
+                status=disposition,
+                reason="native_testing_copy_recovery_or_retention_required"
+                if disposition == "preserved"
+                else "",
+            )
 
         def stop_compose() -> None:
             api.dokploy_request(
@@ -1768,6 +1779,7 @@ class NativeTestingRebuildExecution:
             lambda dispatch: dispatch(stop_compose),
             recovery=True,
         )
+        return TestingRetirementDisposition(status="stopped")
 
     def retirement_exclusion(self, plan: TestingRebuildPlan) -> TestingCopyReadiness | None:
         stop = self.store.read_idempotency_record(
@@ -1775,14 +1787,17 @@ class NativeTestingRebuildExecution:
             route_path=REBUILD_ROUTE + ":effect",
             idempotency_key=self.operation.operation_id + ":retire-old",
         )
-        if (
-            stop is None
-            or stop.state != "completed"
-            or stop.response_payload.get("not_dispatched") is not True
+        if stop is None:
+            return None
+        from control_plane.odoo_testing_native_maintenance import native_retirement_excluded
+
+        native = native_retirement_excluded(self, stop)
+        if not native and (
+            stop.state != "completed" or stop.response_payload.get("not_dispatched") is not True
         ):
             return None
         if (
-            stop.provider_effect_started_at
+            (stop.provider_effect_started_at and not native)
             or stop.provider_target_key != self.adapter.target_key() + ":retire-old"
             or stop.request_fingerprint
             != canonical_json_sha256({"intent": self.intent.digest, "phase": "retire-old"})
@@ -1811,6 +1826,12 @@ class NativeTestingRebuildExecution:
         )
 
     def unstarted_retirement(self, plan: TestingRebuildPlan) -> TestingCopyReadiness | None:
+        from control_plane.odoo_testing_native_maintenance import (
+            qualifying_retirement,
+            retire_qualified_copy,
+        )
+
+        qualification = qualifying_retirement(self)
         # Exclude all outstanding retirement writes before releasing the lane's
         # original fence. Unknown dispatched effects are observed, never retried.
         for phase in ("disable-old-auto-deploy", "retire-old"):
@@ -1819,6 +1840,10 @@ class NativeTestingRebuildExecution:
                 route_path=REBUILD_ROUTE + ":effect",
                 idempotency_key=self.operation.operation_id + ":" + phase,
             )
+            if phase == "retire-old" and qualification is not None:
+                if retire_qualified_copy(self, qualification, exclude=True) != "preserved":
+                    return None
+                continue
             if prior is not None and prior.provider_effect_started_at:
                 if phase == "retire-old":
                     return None
@@ -1926,20 +1951,30 @@ class NativeTestingRebuildExecution:
                     return ProviderMutationOutcome(200, provider_effect_performed=False)
 
                 def dispatch(send: Callable[[], None]) -> None:
-                    if phase in {"disable-old-auto-deploy", "retire-old"}:
-                        target = parent.store.read_dokploy_target_record(
-                            context_name=parent.operation.context,
-                            instance_name="testing",
-                        )
-                        if target.policies.staff_testing_hold is not None:
-                            raise NativeTestingRebuildPending(
-                                "Staff testing holds retirement of the old copy."
-                            )
                     parent.guard(recovery=recovery)
                     lease.assert_current()
-                    parent.lease.checkpoint_effect(phase)
-                    lease.checkpoint_effect(phase)
-                    send()
+
+                    def checkpoint_and_send() -> None:
+                        parent.lease.checkpoint_effect(phase)
+                        lease.checkpoint_effect(phase)
+                        send()
+
+                    if phase in {"disable-old-auto-deploy", "retire-old"}:
+                        from control_plane.storage.testing_native_disposal import (
+                            dispatch_testing_retirement,
+                        )
+                        from control_plane.odoo_testing_drill import DrillPrerequisite
+
+                        try:
+                            dispatch_testing_retirement(
+                                parent.store, parent.operation, checkpoint_and_send
+                            )
+                        except DrillPrerequisite as error:
+                            raise NativeTestingRebuildPending(
+                                str(error), code=error.code
+                            ) from error
+                    else:
+                        checkpoint_and_send()
 
                 execute(dispatch)
                 if not present():

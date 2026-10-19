@@ -1,6 +1,18 @@
 """Fixed, original-copy-only native drill retirement and storage removal."""
 
 NATIVE_MAINTENANCE_LIBRARY = r"""
+class NativeReceiptUntrusted(ValueError):
+    pass
+
+
+class NativeMaintenanceAdmissionExpired(TimeoutError):
+    pass
+
+
+class NativeMaintenanceProviderDenied(PermissionError):
+    pass
+
+
 def native_host_clock():
     return {'host_boot_id':Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
         'host_monotonic':time.clock_gettime(time.CLOCK_BOOTTIME),'host_observed_at':time.time()}
@@ -27,7 +39,7 @@ class NativeMaintenanceHost:
     def current(self):
         host=native_host_clock()
         if host['host_boot_id']!=self.spec.get('host_boot_id') or host['host_monotonic']>=self.spec.get('host_expires_at',0) or self.clock() >= self.spec.get('expires_at', 0) or self.monotonic() >= self.deadline:
-            raise TimeoutError('Original native maintenance admission expired')
+            raise NativeMaintenanceAdmissionExpired('Original native maintenance admission expired')
 
     def docker(self, *arguments, stdin=None, mutation=False):
         if mutation:
@@ -68,7 +80,60 @@ class NativeMaintenanceHost:
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid!=os.geteuid() or metadata.st_mode&0o077:
             raise ValueError('Native receipt lock is unsafe')
         fcntl.flock(descriptor,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        metadata=os.fstat(self.directory)
+        self.namespace_sha256=hashlib.sha256(json.dumps([str(self.state_path),metadata.st_dev,metadata.st_ino],separators=(',',':')).encode()).hexdigest()
+        expected=self.spec.get('receipt_namespaces',[])
+        if expected and any(value!=self.namespace_sha256 for value in expected):
+            raise NativeReceiptUntrusted('Original receipt namespace changed')
         return self
+
+    def private_state(self,containers=None):
+        for container in self.inventory() if containers is None else containers:
+            for mount in container.get('Mounts',[]):
+                if mount.get('RW',True) and mount.get('Source'):
+                    source=Path(mount['Source']).resolve(strict=False)
+                    if source==self.state_path or source.is_relative_to(self.state_path) or self.state_path.is_relative_to(source):
+                        raise NativeReceiptUntrusted('Native disposal state is exposed to a container')
+
+    def outcome(self,result):
+        return {**result,'namespace_sha256':self.namespace_sha256}
+
+    def seal(self):
+        # Both locks are held. A delayed payload must read this terminal seal
+        # before it can dispatch; expiry alone never excludes daemon work.
+        self.private_state()
+        receipt=self.read()
+        if receipt is not None:
+            if receipt.get('state')=='preserved':
+                return {'status':'preserved','no_stop_dispatched':True,'identity_sha256':self.digest}
+            if receipt.get('protocol')!=2:
+                return {'status':'protected','reason':'original_retirement_evidence_missing'}
+            stops=receipt.get('retirement',{}).get('stops',{})
+            if any(step.get('ever_dispatched') is not False for step in stops.values()):
+                return self.inspect(receipt)
+            if receipt.get('resources') or receipt.get('state') not in {'retirement'}:
+                return self.inspect(receipt)
+        else:
+            receipt={'identity':self.identity,'protocol':2,'retirement':{},'resources':{}}
+        receipt['state']='preserved'
+        self.save(receipt)
+        return {'status':'preserved','no_stop_dispatched':True,'identity_sha256':self.digest}
+
+    def failure(self,*,custody):
+        try:
+            receipt=self.read() if self.directory is not None else None
+            uncertain=receipt is not None and (
+                any(item.get('state')=='dispatching' for item in receipt.get('resources',{}).values()) or
+                any(item.get('ever_dispatched') is True and item.get('state')!='stopped' for item in receipt.get('retirement',{}).get('stops',{}).values()))
+            unresolved=uncertain and (custody or self.invocation_excluded(receipt))
+        except (OSError,ValueError,KeyError,TypeError,AttributeError,IndexError):
+            # An unreadable receipt is not an empty WAL and cannot exclude work.
+            uncertain=True;unresolved=True
+        result={'status':'recovery_required' if unresolved else ('protected' if custody else 'observation_unavailable'),
+            'reason':'original_mutation_outcome_unknown' if uncertain else ('native_copy_custody_changed' if custody else 'native_copy_observation_unavailable')}
+        if hasattr(self,'namespace_sha256'):
+            result['namespace_sha256']=self.namespace_sha256
+        return result
 
     def close(self):
         for descriptor in reversed(self.descriptors):
@@ -144,7 +209,7 @@ class NativeMaintenanceHost:
                 return result
             receipt=existing
         else:
-            receipt={'identity':self.identity,'state':'retirement','retirement':{},
+            receipt={'identity':self.identity,'protocol':2,'state':'retirement','retirement':{},
                 'qualification':False,'max_login_at':None,'resources':{}}
         receipt.update(invocation_expires_at=self.spec['expires_at'],
             invocation_boot_id=self.spec['host_boot_id'],
@@ -158,7 +223,7 @@ class NativeMaintenanceHost:
                 raise ValueError('Original retirement custody changed')
             self.unchanged_lifetimes(originals,retirement['originals'])
         else:
-            retirement.update(originals=originals,stops={key:{'state':'not_dispatched'} for key in originals},history='unavailable')
+            retirement.update(originals=originals,stops={key:{'state':'not_dispatched','ever_dispatched':False} for key in originals},history='unavailable')
             receipt.update(volumes=volumes,networks=networks,containers={})
             self.save(receipt)
         for service in ('web','script-runner'):
@@ -181,9 +246,16 @@ class NativeMaintenanceHost:
         return host['host_boot_id']!=receipt.get('invocation_boot_id') or host['host_monotonic']>=receipt.get('invocation_host_expires_at',float('inf'))
 
     def retirement_resources(self):
-        containers=inspect_copy_runtime(self.spec,expected_instance='testing')
+        try:
+            containers=inspect_copy_runtime(self.spec,expected_instance='testing')
+        except CopyRuntimeReceiptExposure as error:
+            source=error.source_path
+            if source==self.state_path or source.is_relative_to(self.state_path) or self.state_path.is_relative_to(source):
+                raise NativeReceiptUntrusted('Original receipt state was exposed') from error
+            raise
         own={value[1]['Id'] for value in containers.values()}
         all_containers=self.inventory()
+        self.private_state(all_containers)
         logical=qualify_retained_copy(all_containers,{'project':self.spec['compose_project'],
             'context':self.identity['context'],'identity':self.spec['runtime_identity']})
         backings=inspect_volume_backings(logical['volumes'],all_containers,own)
@@ -225,10 +297,17 @@ class NativeMaintenanceHost:
             step.update(state='stopped',fingerprint=self.fingerprint(current[identifier]))
             self.save(receipt)
             return
-        if step['state']!='not_dispatched':
+        if step['state']!='not_dispatched' or step.get('ever_dispatched') is not False:
             raise TimeoutError('Original stop remains uncertain')
-        step['state']='dispatching';self.save(receipt)
-        self.docker('stop','--timeout','-1',identifier,mutation=True)
+        step.update(state='dispatching',ever_dispatched=True);self.save(receipt)
+        try:
+            self.docker('stop','--timeout','-1',identifier,mutation=True)
+        except NativeMaintenanceAdmissionExpired:
+            # current() refused synchronously before command(), unlike a CLI
+            # timeout or a lost daemon reply. Preserve positive no-send proof.
+            step.update(state='not_dispatched',ever_dispatched=False)
+            self.save(receipt)
+            raise
         current={item['Id']:item for item in self.inventory()}
         if identifier not in current or current[identifier]['State']['Status'] not in {'created','exited'}:
             raise TimeoutError('Original stop remains uncertain')
@@ -246,9 +325,22 @@ class NativeMaintenanceHost:
             sql=("BEGIN READ ONLY; SET LOCAL statement_timeout='5s'; SELECT json_build_object("
                 "'witness',(SELECT value FROM ir_config_parameter WHERE key=:'witness_key'),"
                 "'max_login_at',(SELECT MAX(create_date) FROM res_users_log WHERE create_date>=:'prepared'::timestamp)); COMMIT;\n")
-            output=self.docker('exec','-i',database['Id'],'sh','-c',
+            for attempt in range(2):
+                self.current()
+                current={item['Id']:item for item in self.inventory()}
+                if database['Id'] not in current or current[database['Id']].get('State',{}).get('Status')!='running':
+                    raise ValueError('Original database is not running')
+                self.unchanged_lifetimes({database['Id']:self.fingerprint(current[database['Id']])},{database['Id']:receipt['retirement']['originals'][database['Id']]})
+                try:
+                    output=self.docker('exec','-i',database['Id'],'sh','-c',
                 'psql -X -q -t -A -v ON_ERROR_STOP=1 -v witness_key="$2" -v prepared="$3" -U "$POSTGRES_USER" -d "$1"',
-                '_',self.spec['database_name'],self.spec['copy_witness_parameter'],self.spec['generation']['prepared_at'],stdin=sql.encode())
+                        '_',self.spec['database_name'],self.spec['copy_witness_parameter'],self.spec['generation']['prepared_at'],stdin=sql.encode())
+                    break
+                except NativeMaintenanceProviderDenied:
+                    raise
+                except (RuntimeError,TimeoutError,subprocess.SubprocessError):
+                    if attempt:
+                        raise
             usage=json.loads(output.decode())
             if usage.get('witness')!=self.identity['copy_binding']:
                 raise ValueError('Original database witness changed')
@@ -263,7 +355,9 @@ class NativeMaintenanceHost:
                 login=login.isoformat()
             receipt.update(qualification=True,max_login_at=login)
             receipt['retirement']['history']='captured'
-        except (ValueError,RuntimeError,TimeoutError,subprocess.SubprocessError):
+        except (NativeMaintenanceProviderDenied,NativeMaintenanceAdmissionExpired):
+            raise
+        except (ValueError,RuntimeError,TimeoutError,subprocess.SubprocessError,OSError,KeyError,TypeError,AttributeError,IndexError):
             # Ordinary admitted native retirement still preserves the copy.
             receipt['qualification']=False
             receipt['retirement']['history']='protected'
@@ -284,6 +378,8 @@ class NativeMaintenanceHost:
 
     def inspect_retirement(self,receipt):
         retirement=receipt.get('retirement')
+        if receipt.get('protocol')!=2:
+            return {'status':'protected','reason':'original_retirement_evidence_missing'}
         if not retirement:
             return {'status':'resumable_retirement' if self.invocation_excluded(receipt) else 'active',
                 'reason':'original_retirement_not_dispatched'}
@@ -308,9 +404,13 @@ class NativeMaintenanceHost:
             'reason':'original_stop_outcome_unknown' if uncertain else 'original_retirement_remaining_steps'}
 
     def inspect(self, receipt=None, *, continuing=False):
+        self.private_state()
         receipt=receipt or self.read()
         if receipt is None:
             return {'status':'missing'}
+        self.private_state()
+        if receipt['state']=='preserved':
+            return {'status':'preserved','no_stop_dispatched':True,'identity_sha256':self.digest}
         if receipt['state']=='qualifying':
             return {'status':'protected' if self.invocation_excluded(receipt) else 'active',
                 'reason':'original_retirement_evidence_missing'}
@@ -341,12 +441,7 @@ class NativeMaintenanceHost:
                 raise ValueError('Original private network disappeared without its disposal intent')
             else:
                 resources['network:'+identifier]={'state':'absent'}
-        for container in current.values():
-            for mount in container.get('Mounts',[]):
-                if mount.get('Source'):
-                    source=Path(mount['Source']).resolve(strict=False)
-                    if source==self.state_path or source.is_relative_to(self.state_path) or self.state_path.is_relative_to(source):
-                        raise ValueError('Native disposal state is exposed to a container')
+        self.private_state(list(current.values()))
         # Replacement project members are not adopted into an original intent.
         if any((item.get('Config',{}).get('Labels') or {}).get('com.docker.compose.project')==self.spec['compose_project'] and identifier not in own for identifier,item in current.items()):
             raise ValueError('Native project contains a replacement process')
@@ -434,7 +529,12 @@ class NativeMaintenanceHost:
                     return result
                 self.current()
                 resource['state']='dispatching';self.save(receipt)
-                self.docker(kind,'rm',name,mutation=True)
+                try:
+                    self.docker(kind,'rm',name,mutation=True)
+                except NativeMaintenanceAdmissionExpired:
+                    resource['state']='not_dispatched'
+                    self.save(receipt)
+                    raise
                 # A successful command is still checked against actual absence.
                 result=self.inspect(receipt)
                 if result['status']=='unknown':
@@ -448,25 +548,26 @@ def native_maintenance_main(spec, command, *, receipt_root=None, lock_root=None,
     try:
         executor.open()
         if spec['mode']=='qualify-retirement':
-            return executor.qualify()
+            return executor.outcome(executor.qualify())
         if spec['mode']=='inspect-original':
-            return executor.inspect()
+            return executor.outcome(executor.inspect())
         if spec['mode']=='dispose-original':
-            return executor.dispose()
+            return executor.outcome(executor.dispose())
+        if spec['mode']=='seal-retirement':
+            return executor.outcome(executor.seal())
         raise ValueError('Unsupported native maintenance mode')
-    except PermissionError:
+    except NativeMaintenanceProviderDenied:
         raise
     except BlockingIOError:
         return {'status':'active','reason':'native_copy_lock_busy'}
-    except ValueError:
-        return {'status':'protected','reason':'native_copy_custody_changed'}
-    except (TimeoutError,RuntimeError,subprocess.SubprocessError):
-        receipt=executor.read() if executor.directory is not None else None
-        uncertain=receipt is not None and (
-            any(item.get('state')=='dispatching' for item in receipt.get('resources',{}).values()) or
-            any(item.get('state')=='dispatching' for item in receipt.get('retirement',{}).get('stops',{}).values()))
-        return {'status':'recovery_required' if uncertain and executor.invocation_excluded(receipt) else 'observation_unavailable',
-            'reason':'original_mutation_outcome_unknown' if uncertain else 'native_copy_observation_unavailable'}
+    except NativeReceiptUntrusted:
+        result=executor.failure(custody=True)
+        result.update(status='protected',reason='native_copy_receipt_untrusted')
+        return result
+    except (ValueError,CopyRuntimeDrift,KeyError,TypeError,AttributeError,IndexError):
+        return executor.failure(custody=True)
+    except (OSError,TimeoutError,RuntimeError,subprocess.SubprocessError):
+        return executor.failure(custody=False)
     finally:
         executor.close()
 """

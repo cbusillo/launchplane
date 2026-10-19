@@ -12,6 +12,7 @@ from control_plane.contracts.testing_rebuild import (
     TestingCopyReceipt,
     TestingRebuildPlan,
     TestingRebuildRecord,
+    TestingRetirementDisposition,
     TestingRouteObservation,
 )
 from control_plane.traffic_switch import (
@@ -82,7 +83,7 @@ class TestingRebuildProvider(Protocol):
         """
         ...
 
-    def retire_old(self, plan: TestingRebuildPlan) -> None:
+    def retire_old(self, plan: TestingRebuildPlan) -> TestingRetirementDisposition | None:
         """Drain/stop the old copy idempotently; retain its storage and custody."""
         ...
 
@@ -402,6 +403,6 @@ def execute_testing_rebuild(
         if record.step == "retiring":
             provider.guard(plan, recovery=True)
             save(retirement_started=True)
-            provider.retire_old(plan)
-            save(step="complete", route=observation, ended_at=clock())
+            retirement = provider.retire_old(plan)
+            save(step="complete", route=observation, ended_at=clock(), retirement=retirement)
         return record

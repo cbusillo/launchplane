@@ -3,6 +3,7 @@
 from typing import Any, Literal
 from collections.abc import Callable
 import inspect
+from control_plane.docker_errors import docker_daemon_authorization_denied
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from control_plane._odoo_copy_runtime_guard import COPY_RUNTIME_INSPECTION_LIBRARY
@@ -20,6 +21,7 @@ class NativeMaintenanceOutcome(BaseModel):
     type: Literal["complete"]
     status: Literal[
         "missing",
+        "preserved",
         "eligible",
         "recent_use",
         "unqualified",
@@ -43,11 +45,14 @@ class NativeMaintenanceOutcome(BaseModel):
             "original_removal_outcome_unknown",
             "native_copy_lock_busy",
             "native_copy_custody_changed",
+            "native_copy_receipt_untrusted",
             "original_mutation_outcome_unknown",
             "native_copy_observation_unavailable",
         ]
         | None
     ) = None
+    no_stop_dispatched: bool | None = None
+    namespace_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     host_boot_id: str = Field(min_length=1, max_length=128)
     host_monotonic: float = Field(ge=0, allow_inf_nan=False)
     host_observed_at: float = Field(ge=0, allow_inf_nan=False)
@@ -60,14 +65,15 @@ def native_maintenance_host_program() -> str:
         "from datetime import datetime,timezone\nfrom pathlib import Path\nfrom typing import Any\n"
         + COPY_RUNTIME_INSPECTION_LIBRARY
         + inspect.getsource(qualify_retained_copy)
+        + inspect.getsource(docker_daemon_authorization_denied)
         + NATIVE_MAINTENANCE_LIBRARY
         + r"""
 def command(*arguments, stdin=None, pass_fds=(), timeout=30):
     result=subprocess.run(['docker',*arguments],input=stdin,capture_output=True,
         pass_fds=pass_fds,timeout=timeout,check=False)
     if result.returncode:
-        if any(value in result.stderr.lower() for value in (b'permission denied',b'unauthorized',b'access denied')):
-            raise PermissionError('Native maintenance was refused')
+        if docker_daemon_authorization_denied(result.stderr):
+            raise NativeMaintenanceProviderDenied('Native maintenance was refused')
         raise RuntimeError('Native maintenance command did not complete')
     return result.stdout
 def docker(*arguments,stdin=None):
@@ -81,7 +87,7 @@ try:
     spec=json.loads(base64.b64decode(sys.argv[1],validate=True))
     result=native_maintenance_main(spec,command)
     print(sys.argv[2]+json.dumps({'type':'complete',**result,**native_host_clock()}),flush=True)
-except PermissionError:
+except NativeMaintenanceProviderDenied:
     print(sys.argv[2]+json.dumps({'type':'denied'}),flush=True)
     sys.exit(1)
 except Exception:

@@ -497,6 +497,46 @@ class TestingRebuildTests(unittest.TestCase):
             self.store.save(record.model_copy(update={"step": "switching"}))
         self.assertEqual(self.store.load(self.plan), record)
 
+    def test_preserved_retirement_survives_lost_final_checkpoint_without_inverse(self) -> None:
+        from control_plane.contracts.testing_rebuild import TestingRetirementDisposition
+
+        preserved = TestingRetirementDisposition(
+            status="preserved", reason="native_testing_copy_recovery_or_retention_required"
+        )
+        save = self.store.save
+        lost = False
+
+        def save_once(record: TestingRebuildRecord) -> None:
+            nonlocal lost
+            if record.step == "complete" and not lost:
+                lost = True
+                raise TimeoutError("fixture lost final retirement checkpoint")
+            save(record)
+
+        with (
+            patch.object(self.provider, "retire_old", return_value=preserved),
+            patch.object(self.store, "save", side_effect=save_once),
+        ):
+            with self.assertRaises(TimeoutError):
+                self.run_rebuild()
+            completed = self.run_rebuild()
+        self.assertEqual(completed.retirement, preserved)
+        self.assertEqual(self.provider.serving, self.plan.new)
+        self.assertTrue(self.provider.old_running)
+        self.assertNotIn("retire", self.provider.actions)
+        legacy = completed.model_dump(exclude={"retirement"})
+        self.assertIsNone(TestingRebuildRecord.model_validate(legacy).retirement)
+        with self.assertRaises(ValueError):
+            TestingRebuildRecord.model_validate(
+                {**completed.model_dump(), "step": "retiring", "ended_at": None}
+            )
+        with self.assertRaises(ValueError):
+            self.store.save(
+                completed.model_copy(
+                    update={"retirement": TestingRetirementDisposition(status="stopped")}
+                )
+            )
+
     def test_undispatched_retirement_proof_and_rollback_are_saved_together(self) -> None:
         self.provider.refuse_stop = True
         with self.assertRaises(PermissionError):

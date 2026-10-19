@@ -2210,16 +2210,23 @@ provider configuration include ordinary deploys between creation and retirement.
 
 Retirement completion and deletion qualification are separate facts. Before the
 first stop, the host persists every original container ID and process lifetime.
-Each exact-ID stop has a durable dispatch marker and observed stopped result;
-the history result is persisted before the database stop. Lost replies observe
+Each exact-ID stop records dispatch separately from its observed stopped result;
+observing a stopped process never erases whether its stop was dispatched. The
+history result is persisted before the database stop. A bounded transient history
+read may retry under the same admission while that exact original database is
+already running. Witness mismatch, malformed history and a cold database remain
+protected; an authorization denial is never retried. Lost replies observe
 that original work. After the original boot-bound admission is excluded, a new
 attempt of the same effect may continue only never-dispatched steps, and only
 after all dispatched original stops are observed stopped. A still-running
 uncertain stop is never resent. A local timeout, wall-clock expiry or CLI exit
 does not exclude Docker daemon work. All original processes stopped can complete
 retirement even when history is unavailable; that copy remains unqualified and
-protected. Legacy incomplete receipts without per-stop evidence remain protected
-and cannot acquire invented no-dispatch proof.
+protected. The full retirement specification belongs to the immutable original
+child intent. Namespace qualification is published only after stopped completion,
+so an excluded or rolled-back retirer cannot own a later successful retirement.
+Legacy incomplete receipts or effects without the original admission protocol
+remain protected and cannot acquire invented no-dispatch proof.
 
 A custody refusal or denial never falls through to another stop command.
 Authorization denial retains its original identity and trace. Active invocation,
@@ -2233,14 +2240,35 @@ roll traffic back or re-adopt the old copy while its original stop is uncertain.
 Explicit retention protects storage but does not cancel that stop or exclude its
 effect. Rebuild an independent copy rather than restarting retired processes.
 
+Every admission is inserted against the exact current child reservation and
+lease, serialized with original-family observation, send and terminal closure.
+Continuation checks every admitted payload, including prior attempts when the
+latest attempt never registered. CP wall time cannot exclude a host payload.
+Positive no-stop proof requires an intact private receipt namespace and a terminal
+host seal under both original locks; delayed payloads read that seal before any
+stop. A dispatched stop, even one later observed stopped, cannot produce no-stop
+proof. Observed writable container access to the receipt namespace remains
+untrusted after the mount is removed. A healthy successor may complete with a
+truthful preserved retirement; only an explicit original rollback request plus
+fresh private old-copy health permits the inverse. Both generic retirement API
+calls and native host sends serialize supported hold writes through their bounded
+send. A preexisting hold refuses the generic call before its effect checkpoints.
+
+Normally qualified, stopped drill copies are collected automatically. Exceptional
+preserved copies, unavailable history and unresolved physical effects keep their
+original custody and attention. Recovery or explicit retention uses the existing
+supported original operation and policy; it does not silently qualify a copy,
+cancel dispatched work, authorize re-adoption or copy credentials.
+
 The collector keeps the serving copy and its immediate predecessor from the
 current applied publication. It removes older qualified drill copies, up to four
 per pass, only while the original stopped process fingerprints, allocation labels,
 actual volume backing, private network membership, completed operations and route
 fences still agree. Holds, needed-copy/shared-resource facts, serving aliases,
 provider jobs and current explicit retention protect custody. Recent captured
-use skips cleanup until its existing daily window expires; unchanged stopped
-processes establish that the captured old-copy history has not changed. Today's
+use skips only that observed copy until its existing daily window expires. Other
+eligible copies in the bounded pass still progress; an unseen backlog still
+blocks another allocation. Unchanged stopped processes establish that the captured old-copy history has not changed. Today's
 serving-copy sign-ins cannot qualify another copy.
 
 The fixed executor holds the original namespace and host-owned receipt locks,

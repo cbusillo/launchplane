@@ -1,5 +1,10 @@
 """Original native copy qualification and crash-safe physical reclamation."""
 
+import ast
+import base64
+from contextlib import redirect_stdout
+import io
+import sys
 from copy import deepcopy
 from datetime import UTC, datetime, timezone
 import fcntl
@@ -154,6 +159,75 @@ class NativeMaintenanceHostTests(unittest.TestCase):
             "host_monotonic": self.monotonic,
             "host_observed_at": self.now,
         }
+
+    def framed_mode(
+        self, payload: dict[str, Any], *, stderr: bytes | None = None, default_layout: bool = False
+    ) -> dict[str, Any]:
+        """Run the real generated framing and command classifier with fixture host dependencies."""
+        from control_plane.dokploy.testing_native_maintenance import native_maintenance_host_program
+
+        program = ast.parse(native_maintenance_host_program())
+        entry = next(item for item in program.body if isinstance(item, ast.Try))
+        namespace: dict[str, Any] = {}
+        exec(
+            compile(
+                ast.Module(
+                    body=[item for item in program.body if item is not entry], type_ignores=[]
+                ),
+                "<native-host-definitions>",
+                "exec",
+            ),
+            namespace,
+        )
+        host = namespace["NativeMaintenanceHost"]
+        original_init = host.__init__
+
+        def initialize(executor: Any, spec: dict[str, Any], command: Any, **_options: Any) -> None:
+            original_init(
+                executor,
+                spec,
+                command,
+                receipt_root=None if default_layout else self.state,
+                lock_root=self.locks,
+                clock=lambda: self.now,
+                monotonic=lambda: self.monotonic,
+            )
+
+        namespace["native_host_clock"] = self.host["native_host_clock"]
+
+        def run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+            if stderr is not None:
+                self.calls.append(tuple(command[1:]))
+                return subprocess.CompletedProcess(command, 1, stdout=b"", stderr=stderr)
+            output = self.docker(
+                *command[1:], stdin=kwargs.get("input"), pass_fds=kwargs.get("pass_fds", ())
+            )
+            return subprocess.CompletedProcess(command, 0, stdout=output, stderr=b"")
+
+        stdout = io.StringIO()
+        home = self.root / "fixture-home"
+        home.mkdir(mode=0o700, exist_ok=True)
+        with (
+            redirect_stdout(stdout),
+            patch.object(Path, "home", return_value=home),
+            patch.object(host, "__init__", initialize),
+            patch.object(subprocess, "run", side_effect=run),
+            patch.object(
+                sys,
+                "argv",
+                ["fixture", base64.b64encode(json.dumps(payload).encode()).decode(), "FRAME:"],
+            ),
+        ):
+            try:
+                exec(
+                    compile(
+                        ast.Module(body=[entry], type_ignores=[]), "<native-host-entry>", "exec"
+                    ),
+                    namespace,
+                )
+            except SystemExit as error:
+                self.assertEqual(error.code, 1)
+        return dict(json.loads(stdout.getvalue().removeprefix("FRAME:")))
 
     def one_inspection(self, identifier: str) -> dict[str, Any]:
         return dict(json.loads(self.docker("inspect", identifier))[0])
@@ -382,8 +456,7 @@ class NativeMaintenanceHostTests(unittest.TestCase):
         target = self.root / "foreign.json"
         target.write_text("{}")
         (self.state / ("native-" + self.spec["identity_sha256"] + ".json")).symlink_to(target)
-        with self.assertRaises(OSError):
-            self.run_mode("qualify-retirement")
+        self.assertEqual(self.run_mode("qualify-retirement")["status"], "recovery_required")
         self.assertFalse(any(call[0] == "stop" for call in self.calls))
 
     def test_host_wall_clock_rollback_cannot_extend_an_original_boot_deadline(self) -> None:
@@ -528,6 +601,162 @@ class NativeMaintenanceHostTests(unittest.TestCase):
         self.assertFalse(any(call[0] in {"exec", "start"} for call in self.calls))
         self.assertTrue(self.volumes)
 
+    def test_deterministic_runtime_drift_can_only_seal_without_stopping(self) -> None:
+        self.containers["one-off"] = deepcopy(self.containers["web"])
+        self.containers["one-off"]["Id"] = "one-off"
+        self.assertEqual(self.run_mode("qualify-retirement")["status"], "protected")
+        seal = self.run_mode("seal-retirement")
+        self.assertEqual(seal["status"], "preserved")
+        self.assertTrue(seal["no_stop_dispatched"])
+        self.next_admission()
+        self.assertEqual(self.run_mode("qualify-retirement")["status"], "preserved")
+        self.assertFalse(any(call[0] == "stop" for call in self.calls))
+
+    def test_observed_completed_stop_never_becomes_no_stop_proof(self) -> None:
+        command = self.docker
+
+        def lost(*arguments: str, **kwargs: Any) -> bytes:
+            result = command(*arguments, **kwargs)
+            if arguments[0] == "stop":
+                raise TimeoutError("fixture original stop reply lost")
+            return result
+
+        with patch.object(self, "docker", side_effect=lost):
+            self.assertEqual(
+                self.run_mode("qualify-retirement")["status"], "observation_unavailable"
+            )
+        self.next_admission()
+        self.assertEqual(self.run_mode("inspect-original")["status"], "resumable_retirement")
+        self.assertNotEqual(self.run_mode("seal-retirement")["status"], "preserved")
+        self.assertEqual(sum(call[0] == "stop" for call in self.calls), 1)
+
+    def test_expiry_after_stop_wal_before_command_has_positive_no_send_proof(self) -> None:
+        host = self.host["NativeMaintenanceHost"]
+        save = host.save
+
+        def expire(executor: Any, receipt: dict[str, Any]) -> None:
+            save(executor, receipt)
+            if any(
+                step.get("state") == "dispatching"
+                for step in receipt.get("retirement", {}).get("stops", {}).values()
+            ):
+                self.monotonic = float(self.spec["host_expires_at"]) + 1
+
+        with patch.object(host, "save", expire):
+            self.assertEqual(
+                self.run_mode("qualify-retirement")["status"], "observation_unavailable"
+            )
+        self.assertFalse(any(call[0] == "stop" for call in self.calls))
+        self.assertEqual(self.run_mode("seal-retirement")["status"], "preserved")
+
+    def test_expiry_after_removal_wal_before_command_can_continue_without_resend(self) -> None:
+        self.assertEqual(self.run_mode("qualify-retirement")["status"], "eligible")
+        host = self.host["NativeMaintenanceHost"]
+        save = host.save
+
+        def expire(executor: Any, receipt: dict[str, Any]) -> None:
+            save(executor, receipt)
+            if any(
+                step.get("state") == "dispatching" for step in receipt.get("resources", {}).values()
+            ):
+                self.monotonic = float(self.spec["host_expires_at"]) + 1
+
+        with patch.object(host, "save", expire):
+            self.assertEqual(self.run_mode("dispose-original")["status"], "observation_unavailable")
+        self.assertFalse(any(len(call) > 1 and call[1] == "rm" for call in self.calls))
+        self.next_admission()
+        self.assertEqual(self.run_mode("dispose-original")["status"], "disposed")
+        removals = [call for call in self.calls if len(call) > 1 and call[1] == "rm"]
+        self.assertEqual(len(removals), len(set(removals)))
+
+    def test_state_mount_exposure_refuses_both_stop_and_seal(self) -> None:
+        self.containers["foreign"] = {
+            "Id": "foreign",
+            "Mounts": [{"Source": str(self.root), "RW": True}],
+        }
+        self.assertEqual(self.run_mode("qualify-retirement")["status"], "protected")
+        self.assertEqual(self.run_mode("seal-retirement")["status"], "protected")
+        self.assertFalse(any(call[0] == "stop" for call in self.calls))
+
+    def test_shared_receipt_exposure_keeps_the_exact_namespace_scope(self) -> None:
+        for own in (True, False):
+            with self.subTest(own=own):
+                fixture = NativeMaintenanceHostTests()
+                fixture.setUp()
+                self.addCleanup(fixture.doCleanups)
+                home = fixture.root / "fixture-home"
+                root = home / ".local/state/launchplane-testing-disposal"
+                source = root if own else root / ("lp-testing-" + "b" * 32)
+                fixture.containers["foreign"] = {
+                    "Id": "foreign",
+                    "Config": {"Labels": {}},
+                    "Mounts": [{"Source": str(source), "RW": True}],
+                }
+                result = fixture.framed_mode(
+                    {**fixture.spec, "mode": "qualify-retirement"}, default_layout=True
+                )
+                self.assertEqual(result["status"], "protected")
+                self.assertEqual(
+                    result["reason"],
+                    "native_copy_receipt_untrusted" if own else "native_copy_custody_changed",
+                )
+                self.assertNotIn(str(source), json.dumps(result))
+                self.assertFalse(any(call[0] == "stop" for call in fixture.calls))
+
+    def test_namespace_replacement_cannot_supply_missing_receipt_exclusion(self) -> None:
+        original = self.run_mode("inspect-original")
+        self.spec["receipt_namespaces"] = [original["namespace_sha256"]]
+        previous = self.state.with_name("previous-state")
+        self.state.rename(previous)
+        self.state.mkdir(mode=0o700)
+        self.assertEqual(self.run_mode("seal-retirement")["status"], "protected")
+        self.assertFalse(any(call[0] == "stop" for call in self.calls))
+
+    def test_transient_history_read_retries_only_before_the_running_database_stops(self) -> None:
+        command = self.docker
+        reads = 0
+
+        def transient(*arguments: str, **kwargs: Any) -> bytes:
+            nonlocal reads
+            if arguments[0] == "exec":
+                reads += 1
+                if reads == 1:
+                    raise RuntimeError("fixture transient SQL transport")
+            return command(*arguments, **kwargs)
+
+        with patch.object(self, "docker", side_effect=transient):
+            self.assertEqual(self.run_mode("qualify-retirement")["status"], "eligible")
+        self.assertEqual(reads, 2)
+        self.assertEqual(
+            sum(call[0] == "stop" and call[-1] == "database" for call in self.calls), 1
+        )
+
+    def test_local_io_and_shape_errors_stay_typed_and_cannot_invent_empty_wal(self) -> None:
+        for error in (
+            OSError("fixture IO"),
+            PermissionError("fixture filesystem"),
+            KeyError("fixture shape"),
+        ):
+            with (
+                self.subTest(error=type(error).__name__),
+                patch.object(self, "docker", side_effect=error),
+            ):
+                self.assertIn(
+                    self.run_mode("inspect-original")["status"],
+                    {"protected", "observation_unavailable"},
+                )
+        self.assertFalse(any(call[0] == "stop" for call in self.calls))
+        host = self.host["NativeMaintenanceHost"]
+        with patch.object(host, "read", side_effect=OSError("fixture unreadable receipt")):
+            self.assertEqual(self.run_mode("seal-retirement")["status"], "recovery_required")
+
+    def test_malformed_receipt_shape_cannot_become_an_empty_no_stop_wal(self) -> None:
+        receipt = self.state / ("native-" + self.spec["identity_sha256"] + ".json")
+        with os.fdopen(os.open(receipt, os.O_CREAT | os.O_WRONLY, 0o600), "w") as handle:
+            json.dump([], handle)
+        self.assertEqual(self.run_mode("seal-retirement")["status"], "recovery_required")
+        self.assertFalse(any(call[0] == "stop" for call in self.calls))
+
     def test_legacy_incomplete_receipt_stays_protected(self) -> None:
         executor = self.host["NativeMaintenanceHost"](
             self.spec, self.docker, receipt_root=self.state, lock_root=self.locks
@@ -549,18 +778,55 @@ class NativeMaintenanceHostTests(unittest.TestCase):
         self.assertFalse(any(call[0] == "stop" for call in self.calls))
 
     def test_provider_denial_cannot_fall_through_to_another_stop(self) -> None:
-        command = self.docker
+        for boundary in ("stop", "exec"):
+            with self.subTest(boundary=boundary):
+                fixture = NativeMaintenanceHostTests()
+                fixture.setUp()
+                self.addCleanup(fixture.doCleanups)
+                command = fixture.docker
+                denied_type = fixture.host["NativeMaintenanceProviderDenied"]
 
-        def denied(*arguments: str, **kwargs: Any) -> bytes:
-            if arguments[0] == "stop":
-                self.calls.append(arguments)
-                raise PermissionError("fixture daemon denied stop")
-            return command(*arguments, **kwargs)
+                def denied(*arguments: str, **kwargs: Any) -> bytes:
+                    if arguments[0] == boundary:
+                        fixture.calls.append(arguments)
+                        raise denied_type("fixture daemon denied original action")
+                    return command(*arguments, **kwargs)
 
-        with patch.object(self, "docker", side_effect=denied), self.assertRaises(PermissionError):
-            self.run_mode("qualify-retirement")
-        self.assertEqual(sum(call[0] == "stop" for call in self.calls), 1)
-        self.assertTrue(self.volumes)
+                with (
+                    patch.object(fixture, "docker", side_effect=denied),
+                    self.assertRaises(denied_type),
+                ):
+                    fixture.run_mode("qualify-retirement")
+                self.assertEqual(sum(call[0] == boundary for call in fixture.calls), 1)
+                if boundary == "stop":
+                    self.assertEqual(sum(call[0] == "stop" for call in fixture.calls), 1)
+                else:
+                    self.assertTrue(
+                        all(
+                            fixture.containers[name]["State"]["Status"] == "exited"
+                            for name in ("web", "script-runner")
+                        )
+                    )
+                    self.assertEqual(fixture.containers["database"]["State"]["Status"], "running")
+                    self.assertFalse(
+                        any(call[0] == "stop" and call[-1] == "database" for call in fixture.calls)
+                    )
+                self.assertTrue(fixture.volumes)
+
+    def test_generated_host_frames_distinguish_daemon_denial_from_local_errors(self) -> None:
+        for stderr, expected in (
+            (b"authorization denied by plugin: fixture", "denied"),
+            (b"Error response from daemon: unauthorized", "denied"),
+            (b"psql: permission denied for table res_users_log", "complete"),
+            (b"volume data: access denied", "complete"),
+        ):
+            with self.subTest(stderr=stderr):
+                before = len(self.calls)
+                frame = self.framed_mode({**self.spec, "mode": "inspect-original"}, stderr=stderr)
+                self.assertEqual(frame["type"], expected)
+                self.assertEqual(len(self.calls) - before, 1)
+                if expected == "complete":
+                    self.assertEqual(frame["status"], "observation_unavailable")
 
     def test_transport_preserves_protection_and_rejects_untyped_outcomes(self) -> None:
         from control_plane.dokploy import testing_native_maintenance as transport
