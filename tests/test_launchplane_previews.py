@@ -58,6 +58,14 @@ from control_plane.workflows.odoo_prod_backup_gate import (
 )
 
 
+def _tenant_action_sections(rendered_html: str) -> int:
+    # Tests that expect these sections and tests that expect none share this
+    # count, so a renamed section fails the first instead of passing the second.
+    return rendered_html.count('<section class="lane-actions">') + rendered_html.count(
+        '<section class="promotion-stage">'
+    )
+
+
 CLI_MAIN = cast(Command, main)
 
 
@@ -1140,6 +1148,7 @@ ODOO_DB_PASSWORD = "local-secret"
             )
             self.assertIn("Testing is ready to promote into prod.", rendered_html)
             self.assertIn("Rebuild long-lived lanes", rendered_html)
+            self.assertEqual(_tenant_action_sections(rendered_html), 2)
             self.assertIn("Re-ship current testing artifact", rendered_html)
             self.assertIn("ship resolve -&gt; ship execute", rendered_html)
             self.assertIn("Promotion candidate", rendered_html)
@@ -1246,8 +1255,7 @@ ODOO_DB_PASSWORD = "local-secret"
             self.assertEqual(result.exit_code, 0, msg=result.output)
             rendered_html = output_file.read_text(encoding="utf-8")
             self.assertIn("opw/tenant-opw/pr-130", rendered_html)
-            self.assertNotIn("Rebuild long-lived lanes", rendered_html)
-            self.assertNotIn("Launchplane cannot plan the next promotion yet.", rendered_html)
+            self.assertEqual(_tenant_action_sections(rendered_html), 0)
 
     def test_launchplane_previews_render_index_page_marks_missing_lane_action_evidence(
         self,
