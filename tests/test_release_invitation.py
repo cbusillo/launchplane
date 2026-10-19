@@ -77,6 +77,7 @@ from tests.test_release_review import decision, github_read, profile, seed
 
 class ReleaseInvitationTests(unittest.TestCase):
     def test_manual_request_adoption_is_receipt_only_and_preserves_original(self) -> None:
+        release_test_change = self.add_release_test_change()
         assert self.review.checklist is not None
         candidate_marker = release_invitation_marker(
             self.profile.product, self.review.checklist.candidate
@@ -135,6 +136,13 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.assertEqual(len(self.posts), 2)
         self.assertTrue(adopt_release_invitation(**kwargs, dry_run=False))
         self.assertEqual(len(self.posts), 2)
+        # Adoption covers only already-requested Client changes. Later preview
+        # evidence for a release-only change is still a material addition.
+        self.record_client_evidence(release_test_change, request_only=True)
+        self.change_candidate(source_commit="e" * 40)
+        self.assertTrue(self.publish())
+        self.assertEqual(len(self.posts), 3)
+        self.assertIn(f"@{self.profile.owner.github_login}", self.comments[-1]["body"])
         self.complete_release()
         self.assertFalse(self.publish())
         self.assertEqual(self.comments[0], original)
@@ -1102,7 +1110,7 @@ class ReleaseInvitationTests(unittest.TestCase):
         body = self.comments[0]["body"]
         self.assertIn(item.url, body)
         self.assertIn(item.owner_test_notes.splitlines()[1], body)
-        self.assertNotIn("@site-owner", body)
+        self.assertNotIn(f"@{self.profile.owner.github_login}", body)
         self.assertNotIn(ENGINEERING_RELEASE_TESTS, body)
         # A later material addition still includes the release-only test steps.
         self.add_client_change(43)
@@ -1111,6 +1119,26 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.assertEqual(len(self.posts), posts + 1)
         self.assertIn(item.url, self.comments[-1]["body"])
         self.assertIn(item.owner_test_notes.splitlines()[1], self.comments[-1]["body"])
+
+    def test_current_request_and_reminder_refresh_release_steps_without_an_extra_ping(self) -> None:
+        self.make_engineering_only()
+        self.assertTrue(self.publish(urgent_reason="Reliability fix."))
+        # Model a request emitted by the old publisher for the same candidate:
+        # adding the previously omitted checklist item changes no lane version.
+        no_test_action = self.comments[0]["body"].split("\n\n")[-3]
+        item = self.add_release_test_change()
+        posts = len(self.posts)
+        self.assertTrue(self.publish(ReleaseInvitationBackoff()))
+        self.assertEqual(len(self.posts), posts)
+        body = self.comments[0]["body"]
+        self.assertIn(item.url, body)
+        self.assertIn(item.owner_test_notes.splitlines()[1], body)
+        self.assertNotEqual(body.split("\n\n")[-3], no_test_action)
+        self.now += timedelta(days=4)
+        self.assertTrue(self.publish())
+        self.assertEqual(len(self.posts), posts + 1)
+        self.assertIn(item.owner_test_notes.splitlines()[1], self.comments[-1]["body"])
+        self.assertNotEqual(self.comments[-1]["body"].split("\n\n")[-3], no_test_action)
 
     def test_batch_release_test_steps_use_the_constituent_without_preview_evidence(self) -> None:
         batch = self.seed_train_batch()

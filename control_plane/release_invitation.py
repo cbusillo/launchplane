@@ -844,7 +844,7 @@ def publish_release_invitation(
                 if request
                 else _now() + timedelta(days=3)
             )
-            announced = _announced_changes(request, client_changes, marker)
+            announced = _announced_changes(request, notification_changes, marker)
             added = {
                 key: item for key, item in notification_changes.items() if key not in announced
             }
@@ -855,7 +855,21 @@ def publish_release_invitation(
                 and any(line.startswith("Updated at: ") for line in _comment_lines(request))
                 and any(line.startswith("**Release review**") for line in _comment_lines(request))
             )
-            if request and marker in _comment_lines(request) and formatted and not added:
+            # An unchanged candidate can still have a request from before release
+            # steps were displayed, or corrected notes on its source PR. Refresh
+            # that content silently before trusting or reminding from the receipt.
+            release_steps_changed = request is not None and any(
+                _change_link(change) not in _comment_lines(request)
+                for change in client_changes.values()
+                if change.release_test_notes
+            )
+            if (
+                request
+                and marker in _comment_lines(request)
+                and formatted
+                and not added
+                and not release_steps_changed
+            ):
                 _replace_older_invitations(
                     comments=comments,
                     current=request,
@@ -906,7 +920,13 @@ def publish_release_invitation(
                 changes = ["- Engineering updates only; no new Client change needs checking."]
             client = f"@{profile.owner.github_login}" if notify else profile.owner.github_login
             heading = (
-                "Added to this release" if request and added else "What to check in this release"
+                "Added to this release"
+                if request
+                and added
+                and not any(
+                    not change.client_review_requested for change in display_changes.values()
+                )
+                else "What to check in this release"
             )
             receipts = "\n".join(
                 f"<!-- launchplane:release-client-change:{key} -->"
@@ -1090,7 +1110,8 @@ def adopt_release_invitation(
                     ADOPTED_ORIGINAL_PREFIX + str(comment_id) + " -->",
                     *(
                         f"<!-- launchplane:release-client-change:{key} -->"
-                        for key in sorted(changes)
+                        for key, change in sorted(changes.items())
+                        if change.client_review_requested
                     ),
                     "",
                     "Existing release request adopted; no new Client action or decision.",
