@@ -183,6 +183,11 @@ exit 0
                     "CANDIDATE_IMAGE": "example/candidate@sha256:" + "a" * 64,
                     "RUNNER_TEMP": str(root),
                     "LAUNCHPLANE_PREFLIGHT_OWNER": "fixture:qualification",
+                    # Real uv still parses the step's command, but runs it in this
+                    # test's environment instead of syncing or rebuilding the
+                    # checkout's .venv for .python-version (launchplane#2432).
+                    "UV_NO_SYNC": "1",
+                    "UV_PROJECT_ENVIRONMENT": sys.prefix,
                 },
                 capture_output=True,
                 text=True,
