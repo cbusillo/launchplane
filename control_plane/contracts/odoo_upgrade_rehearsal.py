@@ -104,6 +104,10 @@ class RehearsalHostResult(BaseModel):
     business_host_frozen: Literal[False]
     completed: bool = True
     raw_source_retained: bool = False
+    refusal_code: Literal[
+        "", "rehearsal_storage_capacity_insufficient", "rehearsal_precheck_refused"
+    ] = ""
+    attempt_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
 
 
 def rehearsal_identity(product: str, principal: str, key: str) -> str:

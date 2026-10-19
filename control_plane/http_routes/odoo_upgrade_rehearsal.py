@@ -133,6 +133,8 @@ def register_odoo_upgrade_rehearsal_routes(
                         return adapter.host(record, "observe", check)
 
                 result = await run_in_worker_thread(observe)
+                if result.get("refusal_code"):
+                    refuse(409, str(result["refusal_code"]))
                 result = {
                     **adapter.public(record),
                     "observed_state": result["state"],

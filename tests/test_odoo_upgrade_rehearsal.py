@@ -453,6 +453,8 @@ class RehearsalScenario(unittest.TestCase):
             record: OdooUpgradeRehearsalRecord,
             mode: str,
             checkpoint: Callable[[], None],
+            *,
+            operation_key: str,
         ) -> dict[str, object]:
             checkpoint()
             action = adapter.request.action
@@ -536,6 +538,98 @@ class RehearsalScenario(unittest.TestCase):
             self.assertEqual(self.store.read_odoo_upgrade_rehearsal(self.identifier), prepared)
             # Any later call is observation only; the original apply cannot run.
             self.assertTrue(all(call.args[1] == "observe" for call in host.call_args_list[calls:]))
+
+    def run_operation(
+        self, adapter: OdooRehearsalAdapter, key: str
+    ) -> DurableProviderOperationResult:
+        return run_durable_provider_operation(
+            store=self.store,
+            scope=self.principal,
+            route_path="fixture-route",
+            idempotency_key=key,
+            request_fingerprint="fixture-intent",
+            lease_owner="fixture-worker",
+            response_trace_id="fixture-trace",
+            adapter=adapter,
+        )
+
+    def test_terminal_refusal_releases_the_operation_target_for_a_new_key(self) -> None:
+        retained = self.record.model_copy(
+            update={
+                "state": "switched",
+                "compose_id": "own-compose",
+                "copies": (self.copy("source"), self.copy("final_source")),
+            }
+        )
+        self.store.compare_and_write_odoo_upgrade_rehearsal(self.record, retained)
+        adapter = self.adapter("verify")
+        refused: dict[str, object] = {
+            "refusal_code": "rehearsal_storage_capacity_insufficient",
+            "completed": False,
+        }
+        completed: dict[str, object] = {
+            "state": "verified",
+            "copies": [copy.model_dump(mode="json") for copy in retained.copies]
+            + [self.copy("final_upgrade").model_dump(mode="json")],
+            "elapsed_seconds": {"verify": 0.1},
+        }
+        with (
+            patch.object(adapter, "host", side_effect=[refused, completed]) as host,
+            patch.object(adapter, "publish", wraps=adapter.publish) as publish,
+        ):
+            first = self.run_operation(adapter, "first-review")
+            self.assertEqual((first.status, first.response_status_code), ("completed", 409))
+            self.assertEqual(
+                first.response_payload["error"], adapter.refusal_response(refused)["error"]
+            )
+            publish.assert_not_called()
+            self.assertEqual(self.store.read_odoo_upgrade_rehearsal(self.identifier), retained)
+            replay = self.run_operation(adapter, "first-review")
+            self.assertEqual(replay.response_status_code, 409)
+            host.assert_called_once()
+            second = self.run_operation(adapter, "new-review")
+            self.assertEqual((second.status, second.response_status_code), ("completed", 202))
+            publish.assert_called_once()
+            self.assertTrue(all(call.args[1] == "apply" for call in host.call_args_list))
+            self.assertNotEqual(
+                host.call_args_list[0].kwargs["operation_key"],
+                host.call_args_list[1].kwargs["operation_key"],
+            )
+
+    def test_lost_refusal_response_reconciles_only_the_same_operation_key(self) -> None:
+        retained = self.record.model_copy(update={"state": "switched", "compose_id": "own-compose"})
+        self.store.compare_and_write_odoo_upgrade_rehearsal(self.record, retained)
+        adapter = self.adapter("verify")
+        original = ""
+
+        def host(
+            record: OdooUpgradeRehearsalRecord,
+            mode: str,
+            checkpoint: Callable[[], None],
+            *,
+            operation_key: str,
+        ) -> dict[str, object]:
+            nonlocal original
+            checkpoint()
+            if mode == "apply":
+                original = operation_key
+                raise TimeoutError("Refusal response was lost")
+            self.assertEqual(operation_key, original)
+            return {"refusal_code": "rehearsal_precheck_refused", "completed": False}
+
+        with (
+            patch.object(adapter, "host", side_effect=host) as transport,
+            patch.object(adapter, "publish") as publish,
+        ):
+            with self.assertRaises(TimeoutError):
+                self.run_operation(adapter, "lost-review")
+            result = self.run_operation(adapter, "lost-review")
+            self.assertEqual((result.status, result.response_status_code), ("adopted", 409))
+            self.assertEqual(
+                [call.args[1] for call in transport.call_args_list], ["apply", "observe"]
+            )
+            publish.assert_not_called()
+        self.assertEqual(self.store.read_odoo_upgrade_rehearsal(self.identifier), retained)
 
 
 class RehearsalHostSafetyTests(unittest.TestCase):
@@ -631,8 +725,40 @@ class RehearsalHostSafetyTests(unittest.TestCase):
             upper = self.fixture.root / (role + "-upper")
             upper.mkdir()
             containers[role][1]["GraphDriver"] = {"Data": {"UpperDir": str(upper)}}
-        spec = {"record": {"rehearsal_id": self.identifier, "storage": budget}}
+        spec = {
+            "record": {
+                "rehearsal_id": self.identifier,
+                "storage": budget,
+                "state": "switched",
+                "intent_sha256": hashlib.sha256(b"fixture").hexdigest(),
+                "copies": [],
+                "elapsed_seconds": {},
+            },
+            "attempt_sha256": hashlib.sha256(b"fixture-attempt").hexdigest(),
+            "mode": "apply",
+            "action": "verify",
+            "target_image": self.spec["image_reference"],
+        }
         return spec, root, containers
+
+    def run_host(self, spec: dict[str, Any]) -> dict[str, Any]:
+        import base64
+        import io
+        import json
+        import sys
+        from contextlib import redirect_stdout
+
+        output = io.StringIO()
+        encoded = base64.b64encode(json.dumps(spec).encode()).decode()
+        with (
+            patch.object(sys, "argv", ["rehearsal", encoded]),
+            patch.object(Path, "home", return_value=self.fixture.root),
+            redirect_stdout(output),
+        ):
+            self.host["main"]()
+        return cast(
+            dict[str, Any], json.loads(bytes.fromhex(output.getvalue().strip().split("=", 1)[1]))
+        )
 
     def test_historical_capture_fits_without_recharging_completed_copies(self) -> None:
         from types import SimpleNamespace
@@ -708,7 +834,7 @@ class RehearsalHostSafetyTests(unittest.TestCase):
                     free[device] += 2
             # Final restoration's temporary dump belongs to the database
             # writable layer. It must not borrow runner or host free space.
-            free[2] = 10
+            free[2] = 0
             free[3] = 230
             free[4] -= 2
             self.assertFalse(
@@ -717,6 +843,12 @@ class RehearsalHostSafetyTests(unittest.TestCase):
             free[4] += 2
             self.assertTrue(
                 self.host["rehearsal_storage_capacity"](spec, root, containers, "simulate-final")
+            )
+            free[1] = 0
+            free[3] = 150
+            free[4] = 0
+            self.assertTrue(
+                self.host["rehearsal_storage_capacity"](spec, root, containers, "verify")
             )
 
     def test_unknown_runner_or_database_staging_backing_refuses(self) -> None:
@@ -738,13 +870,11 @@ class RehearsalHostSafetyTests(unittest.TestCase):
                         self.host["rehearsal_storage_capacity"](spec, root, containers, phase)
                     containers[role][1]["GraphDriver"] = driver
 
-    def test_verify_refuses_insufficient_space_before_new_snapshot_or_runtime_write(self) -> None:
-        import base64
+    def test_capacity_refusal_is_terminal_per_attempt_and_new_attempt_can_start(self) -> None:
         import json
-        import sys
         from types import SimpleNamespace
 
-        spec, _, containers = self.storage_fixture(
+        spec, root, containers = self.storage_fixture(
             {
                 "database_bytes": 40,
                 "filestore_bytes": 80,
@@ -752,24 +882,21 @@ class RehearsalHostSafetyTests(unittest.TestCase):
                 "reserve_bytes": 10,
             }
         )
-        spec.update(mode="apply", action="verify", target_image=self.spec["image_reference"])
-        spec["record"].update(
-            state="switched", intent_sha256=hashlib.sha256(b"fixture").hexdigest(), copies=[]
-        )
         self.host["inspection"] = Mock(return_value=containers)
         self.host["validate_snapshots"] = Mock()
-        self.host["snapshot"] = Mock()
+        self.host["snapshot"] = Mock(return_value={"database": "fixture-new-snapshot"})
         self.host["private_health"] = Mock()
         self.host["docker"] = Mock(wraps=self.host["docker"])
-        with (
-            patch.object(sys, "argv", ["rehearsal", base64.b64encode(json.dumps(spec).encode())]),
-            patch.object(Path, "home", return_value=self.fixture.root),
-            patch.object(os, "statvfs", return_value=SimpleNamespace(f_bavail=149, f_frsize=1)),
-            self.assertRaisesRegex(RuntimeError, "Insufficient independent backing capacity"),
-        ):
-            self.host["main"]()
+        with patch.object(os, "statvfs", return_value=SimpleNamespace(f_bavail=149, f_frsize=1)):
+            result = self.run_host(spec)
+        self.assertFalse(result["completed"])
+        self.assertEqual(result["refusal_code"], "rehearsal_storage_capacity_insufficient")
+        self.assertEqual(result["attempt_sha256"], spec["attempt_sha256"])
+        receipt = root / ("verify.refused-" + spec["attempt_sha256"] + ".json")
+        self.assertEqual(json.loads(receipt.read_text()), result)
         self.host["snapshot"].assert_not_called()
         self.host["private_health"].assert_not_called()
+        self.assertFalse((root / "verify.started").exists())
         # Capacity may inspect volume backing, but must not stop a container
         # or run SQL before refusing the new recovery allocation.
         self.assertTrue(
@@ -778,6 +905,73 @@ class RehearsalHostSafetyTests(unittest.TestCase):
                 for call in self.host["docker"].call_args_list
             )
         )
+        self.host["inspection"].reset_mock()
+        with patch.object(os, "statvfs", return_value=SimpleNamespace(f_bavail=150, f_frsize=1)):
+            self.assertEqual(self.run_host(spec), result)
+            spec["mode"] = "observe"
+            self.assertEqual(self.run_host(spec), result)
+            self.host["inspection"].assert_not_called()
+            spec["attempt_sha256"] = hashlib.sha256(b"new-attempt").hexdigest()
+            unknown = self.run_host(spec)
+            self.assertFalse(unknown["completed"])
+            self.assertNotIn("refusal_code", unknown)
+            spec["mode"] = "apply"
+            completed = self.run_host(spec)
+        self.assertEqual(completed["state"], "verified")
+        self.host["snapshot"].assert_called_once()
+        self.assertTrue((root / "verify.started").is_file())
+        self.assertTrue((root / "verify.json").is_file())
+        self.assertEqual(json.loads(receipt.read_text()), result)
+
+    def test_read_only_precheck_failures_refuse_before_the_started_marker(self) -> None:
+        spec, root, containers = self.storage_fixture(
+            {"database_bytes": 40, "filestore_bytes": 80, "staging_bytes": 20, "reserve_bytes": 10}
+        )
+        self.host["docker"] = Mock(side_effect=AssertionError("No runtime write may start"))
+        self.host["snapshot"] = Mock()
+        for failure, error in (
+            ("inspection", RuntimeError("Unverified fixture prerequisite")),
+            ("inspection", TypeError("Malformed fixture observation")),
+            ("inspection", AttributeError("Missing fixture observation")),
+            ("validate_snapshots", OSError("Unavailable fixture snapshot")),
+            ("retire-presence", None),
+        ):
+            with self.subTest(failure=failure, error=type(error).__name__):
+                spec["attempt_sha256"] = hashlib.sha256(
+                    (failure + type(error).__name__).encode()
+                ).hexdigest()
+                spec["action"] = "retire" if failure == "retire-presence" else "verify"
+                self.host["inspection"] = Mock(return_value=containers)
+                self.host["validate_snapshots"] = Mock()
+                if failure != "retire-presence":
+                    self.host[failure].side_effect = error
+                result = self.run_host(spec)
+                self.assertFalse(result["completed"])
+                self.assertEqual(result["refusal_code"], "rehearsal_precheck_refused")
+                self.assertFalse((root / (spec["action"] + ".started")).exists())
+        self.host["docker"].assert_not_called()
+        self.host["snapshot"].assert_not_called()
+
+    def test_started_custody_cannot_be_reconciled_as_an_earlier_refusal(self) -> None:
+        import json
+
+        spec, root, _ = self.storage_fixture(
+            {"database_bytes": 40, "filestore_bytes": 80, "staging_bytes": 20, "reserve_bytes": 10}
+        )
+        self.host["inspection"] = Mock(side_effect=RuntimeError("Unknown backing"))
+        refused = self.run_host(spec)
+        receipt = root / ("verify.refused-" + spec["attempt_sha256"] + ".json")
+        started = root / "verify.started"
+        started.touch()
+        spec["mode"] = "observe"
+        observed = self.run_host(spec)
+        self.assertFalse(observed["completed"])
+        self.assertNotIn("refusal_code", observed)
+        spec["mode"] = "apply"
+        with self.assertRaisesRegex(RuntimeError, "Uncertain original effect"):
+            self.run_host(spec)
+        self.assertTrue(started.is_file())
+        self.assertEqual(json.loads(receipt.read_text()), refused)
 
     def test_runtime_guard_accepts_only_the_private_standalone_network(self) -> None:
         qualified = self.inspect()

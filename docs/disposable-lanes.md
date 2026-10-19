@@ -2409,8 +2409,17 @@ database growth and migration/WAL requirements; a measured dump size alone does
 not bound restored size. Each action rechecks actual volume mountpoints,
 writable-layer backing and custody using `st_dev` and non-root available bytes,
 with `reserve_bytes` added once per backing device. Unknown backing fails closed.
+Known paths with zero new allocation are validated but do not consume a reserve.
 These checks do not reserve space or impose filesystem quotas. All four working
 copies and every recovery tuple remain preserved.
+
+A failed read-only action precheck returns a determinate HTTP 409 with
+`rehearsal_storage_capacity_insufficient` or `rehearsal_precheck_refused`.
+Its operation-bound refusal receipt proves no rehearsal action started; the same
+key returns that refusal. After correcting and requalifying the prerequisite,
+review the unchanged action and use a new operation key. A lost response is still
+observed under the original key first. Once an action's start marker exists,
+its uncertain-effect recovery rules remain unchanged.
 
 The candidate artifact must already be registered, immutable, attributable to
 this product's repository, and declare its Odoo version and exact module intent.

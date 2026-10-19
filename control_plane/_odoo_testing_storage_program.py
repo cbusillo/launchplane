@@ -41,7 +41,8 @@ def storage_capacity(spec, containers, budget, staged_bytes=0, assembly_bytes=0,
         device = path.stat().st_dev
         stat = os.statvfs(path)
         free = stat.f_bavail * stat.f_frsize
-        required[device] = required.get(device, 0) + size
+        if size:
+            required[device] = required.get(device, 0) + size
         available[device] = min(available.get(device, free), free)
     for suffix, size in (('-db', budget['database_bytes']), ('-data', budget['filestore_bytes'])):
         volume = json.loads(docker('volume', 'inspect', gen['namespace'] + suffix))[0]

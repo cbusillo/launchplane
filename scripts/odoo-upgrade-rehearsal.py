@@ -130,15 +130,21 @@ def main() -> int:
         except (ValueError, TypeError, AttributeError):
             trace = ""
             code = "rehearsal_unavailable"
+        refused = error.code == 409 and code in {
+            "rehearsal_storage_capacity_insufficient",
+            "rehearsal_precheck_refused",
+        }
         print(
             json.dumps(
                 {
-                    "status": "reconciliation_required" if args.mode == "apply" else "unavailable",
+                    "status": "reconciliation_required"
+                    if args.mode == "apply" and not refused
+                    else "unavailable",
                     "mode": args.mode,
                     "http_status": error.code,
                     "trace_id": trace,
                     "error_code": code if code.isidentifier() else "rehearsal_unavailable",
-                    "original_key_required": args.mode == "apply",
+                    "original_key_required": args.mode == "apply" and not refused,
                 }
             )
         )
