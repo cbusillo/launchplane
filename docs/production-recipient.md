@@ -206,7 +206,10 @@ proof. An original completed receipt remains historical and is never refreshed
 by replay. The later #3711 consumer must also require proof after its observation
 window. This producer performs no retirement and clears no backup, health,
 ownership or uncertain-effect gate. Host/service clock skew fails closed; a
-failed timestamp check does not grant qualification.
+failed timestamp check does not grant qualification. An authenticated terminal
+witness with ineligible capture times completes without proof and releases its
+target. Malformed identity, unproved source settlement and persistence failures
+remain uncertain.
 
 The verifier inventories every running and stopped container. Only the exact
 pinned, running application and database containers may reference the allocated

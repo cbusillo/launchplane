@@ -12561,6 +12561,12 @@ class RealPostgresPublishedRecipientRecoveryTests(unittest.TestCase):
     def test_custody_append_collision_merges_original_proof(self) -> None:
         self.fixture.test_custody_append_collision_merges_without_discarding_current_proof()
 
+    def test_future_terminal_capture_completes_without_qualification(self) -> None:
+        self.fixture.test_future_terminal_capture_completes_without_qualification()
+
+    def test_prepublication_terminal_capture_completes_without_qualification(self) -> None:
+        self.fixture.test_prepublication_terminal_capture_completes_without_qualification()
+
 
 class RealPostgresProductionRecipientTests(unittest.TestCase):
     def setUp(self) -> None:

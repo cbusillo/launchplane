@@ -412,6 +412,62 @@ class PublishedRecoveryTests(unittest.TestCase):
         ]
         self.assertEqual(owner["original_key"], self.adapter.original_key)
 
+    def assert_terminal_clock_refusal(self, *, future_completion: bool) -> None:
+        evidence: dict[str, str] = {}
+
+        def terminal(_root: Any, _record: Any, spec: Any, _program: Any, checkpoint: Any) -> Any:
+            checkpoint("terminal_capture")
+            if not evidence:
+                evidence.update(self.evidence(spec))
+                if future_completion:
+                    evidence["recipient_recovery_epoch"] = str(
+                        int((datetime.now(timezone.utc) + timedelta(days=1)).timestamp() * 1000)
+                    )
+                else:
+                    published = datetime.fromisoformat(self.record.publication["published_at"])
+                    evidence["recipient_recovery_started"] = str(
+                        int(published.timestamp() * 1000) - 1
+                    )
+            return dict(evidence)
+
+        with patch(
+            "control_plane.production_recipient_recovery.run_recipient_program",
+            side_effect=terminal,
+        ):
+            first = self.run_recovery()
+        self.assertEqual(first.status, "completed")
+        self.assertFalse(first.response_payload["result"]["recovered"])
+        self.assertEqual(self.store.list_held_provider_target_reservations(), ())
+        saved = custody(self.store, self.record.product, self.record.context)
+        assert saved is not None
+        self.assertFalse(saved.published_recovery_proofs)
+        owner = saved.execution[
+            "published_recovery_owner:" + self.adapter.request.reviewed_plan_sha256
+        ]
+        self.assertEqual(owner["original_key"], self.adapter.original_key)
+        other = replace(self.adapter, original_key="another-key-after-clock-refusal")
+        with self.assertRaises(ValueError):
+            other.current()
+        with self.assertRaises(ValueError):
+            self.run_recovery(other)
+        with (
+            patch(
+                "control_plane.production_recipient_published_recovery.datetime", wraps=datetime
+            ) as clock,
+            patch("control_plane.production_recipient_recovery.run_recipient_program") as transport,
+        ):
+            clock.now.return_value = datetime.now(timezone.utc) + timedelta(days=2)
+            replay = self.run_recovery()
+        self.assertEqual(replay.status, "replayed")
+        self.assertEqual(replay.response_payload, first.response_payload)
+        transport.assert_not_called()
+
+    def test_future_terminal_capture_completes_without_qualification(self) -> None:
+        self.assert_terminal_clock_refusal(future_completion=True)
+
+    def test_prepublication_terminal_capture_completes_without_qualification(self) -> None:
+        self.assert_terminal_clock_refusal(future_completion=False)
+
     def test_stopped_create_custody_completes_and_replays_without_a_new_capture(self) -> None:
         retained: dict[str, str] = {}
 

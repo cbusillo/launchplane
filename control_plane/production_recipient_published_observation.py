@@ -8,7 +8,10 @@ from control_plane.contracts.production_recipient import RecipientRecoveryPlan
 from control_plane.integration_allowances import canonical_sha256
 from control_plane.production_recipient import authority_snapshot, custody
 from control_plane.production_recipient_published_host import PUBLISHED_RECOVERY_INSPECT_PROGRAM
-from control_plane.production_recipient_published_recovery import PublishedAuthorityChanged
+from control_plane.production_recipient_published_recovery import (
+    PublishedAuthorityChanged,
+    PublishedWitnessUnqualified,
+)
 from control_plane.provider_operations import (
     ProviderObservation,
     build_provider_operation_key,
@@ -125,7 +128,7 @@ def observe_published(
                     if current.plan_sha256 != binding:
                         return ProviderObservation("unknown")
                     result = adapter.record_host_result(current_record, current, evidence)
-                except PublishedAuthorityChanged:
+                except (PublishedAuthorityChanged, PublishedWitnessUnqualified):
                     pass
         return ProviderObservation(
             "present",

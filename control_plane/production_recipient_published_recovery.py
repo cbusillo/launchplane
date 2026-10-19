@@ -192,6 +192,9 @@ def record_published_result(
     started = int(evidence["recipient_recovery_started"])
     ended = int(evidence["recipient_recovery_epoch"])
     duration = int(evidence["recipient_recovery_duration_ms"])
+    owner = record.execution.get("published_recovery_owner:" + result.plan_sha256, {})
+    if not owner or evidence.get("recipient_recovery_operation") != owner.get("operation"):
+        raise ValueError("Recovery witness does not belong to the original operation.")
     published = datetime.fromisoformat(record.publication["published_at"].replace("Z", "+00:00"))
     if (
         started < int(published.timestamp() * 1000)
@@ -199,13 +202,12 @@ def record_published_result(
         or ended > datetime.now(timezone.utc).timestamp() * 1000 + 1000
         or not 0 < duration <= CAPTURE_TIMEOUT_SECONDS * 1000
     ):
-        raise ValueError("Recovery must follow publication and use a bounded capture window.")
+        raise PublishedWitnessUnqualified(
+            "Recovery must follow publication and use a bounded capture window."
+        )
     authority = authority_snapshot(adapter.store, adapter.product, record.context)
     if canonical_sha256(authority) != result.authority_sha256:
         raise PublishedAuthorityChanged("Published recovery authority changed before commit.")
-    owner = record.execution.get("published_recovery_owner:" + result.plan_sha256, {})
-    if not owner or evidence.get("recipient_recovery_operation") != owner.get("operation"):
-        raise ValueError("Recovery witness does not belong to the original operation.")
     proof = {
         "binding": result.plan_sha256,
         "actor": adapter.actor,
@@ -241,6 +243,10 @@ class PublishedAuthorityChanged(ValueError):
     """An exact authority/publication comparison proved the capture outdated."""
 
 
+class PublishedWitnessUnqualified(ValueError):
+    """An authenticated terminal witness cannot satisfy capture-time eligibility."""
+
+
 def merge_published_entry(
     adapter: "RecipientRecoveryAdapter",
     record: ProductionRecipientRecord,
@@ -269,10 +275,10 @@ def merge_published_entry(
                 expected_authority=authority,
             )
             return replacement
-        except ValueError:
+        except ValueError as error:
             observed = custody(adapter.store, adapter.product, record.context)
             if observed is None:
-                raise
+                raise ValueError("Production recipient custody is unavailable.") from error
             if (observed.plan_sha256, observed.publication) != (
                 record.plan_sha256,
                 record.publication,
