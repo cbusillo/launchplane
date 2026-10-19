@@ -978,6 +978,9 @@ from control_plane.http_routes.product_testing_restore_policy import (
 from control_plane.http_routes.testing_replacement_resources import (
     register_testing_replacement_resource_routes,
 )
+from control_plane.http_routes.testing_override_sanitization import (
+    register_testing_override_sanitization_routes,
+)
 from control_plane.http_routes.testing_replacement_bootstrap import (
     register_testing_replacement_bootstrap_routes,
 )
@@ -30107,6 +30110,11 @@ def create_launchplane_fastapi_app(
         mutation_identity=read_browser_mutation_identity,
         root=resolved_control_plane_root,
         run_provider_mutation=run_provider_mutation,
+    )
+    register_testing_override_sanitization_routes(
+        app,
+        dependencies=read_route_dependencies,
+        mutation_identity=read_browser_mutation_identity,
     )
     register_testing_public_ingress_routes(
         app,
