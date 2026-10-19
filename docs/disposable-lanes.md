@@ -2383,7 +2383,40 @@ product's production records; application, database and runner topology comes
 from the common Odoo renderer. Only explicit sizing keys are inherited. Routing,
 volumes, credentials, database names, cron and connections are isolated.
 
-Before planning, supply a private intent file outside the checkout. It contains
+Before planning, use the read-only
+`GET /v1/products/{product}/odoo-upgrade-rehearsal/preflight?source_context=…`
+through the service's existing registered testing reader:
+
+```bash
+uv run python scripts/odoo-upgrade-rehearsal.py preflight \
+  --operator-helper <installed-launchplane-skill>/scripts/launchplane-write-action.py \
+  --product <product> --source-context <source-reader-context> \
+  --evidence-file <private-preflight-evidence.json>
+```
+
+No rehearsal identity, intent or operation key is needed. The optional private
+evidence file is created exclusively. The response includes a trace, observation
+time, registered reader placement and opaque host identity, source database size
+from `pg_database_size`, actual source Odoo version, apparent and allocated
+filestore bytes, and opaque backing groups with non-root available bytes.
+Source reads reuse capture's existing SSH identity and strict known-host trust.
+This requires no workstation-to-host SSH login. It creates no rehearsal record,
+password, capture, provider schedule, application or host-custody directory.
+Existing `operations.read` authority covers it; a refusal never selects another
+identity or transport.
+
+Before prepare, the rehearsal's volumes and writable layers do not exist. The
+preflight therefore labels its backing basis `allocation-parent`: existing
+Docker local-volume and overlay2 directories, and the nearest existing custody
+ancestor on the recorded reader host. Grouping uses their actual `st_dev` and
+minimum available bytes per device. Unsupported or unavailable backing refuses;
+it never guesses the host root filesystem. This observation reserves no space
+and certifies no future runtime or budget. Each allocating phase still checks
+the actual rehearsal mountpoints and writable layers. Source measurements alone
+do not budget archive overhead, block allocation, database growth or migration
+work; choose reviewed headroom from fresh evidence.
+
+Then supply a private intent file outside the checkout. It contains
 `source_context` (the product's existing testing source-reader context),
 `source_odoo_version`, `target_artifact_id`, `storage` and `reason`. `storage` uses
 `database_bytes`, `filestore_bytes`, `staging_bytes` and `reserve_bytes`. The
@@ -2461,7 +2494,8 @@ uv run python scripts/odoo-upgrade-rehearsal.py dry-run \
 ```
 
 Review its result, then repeat with `apply --reviewed-dry-run`, exactly the same
-intent, key and evidence file. Planning writes only its own rehearsal evidence.
+intent, key and evidence file. Metadata planning writes its own rehearsal record;
+it does not perform the source/backing preflight above.
 Apply is restricted to the authenticated Director agent and PostgreSQL-backed
 execution. Existing read authority covers planning and readback. It is a source
 capability until the completing PR is deployed; a missing route is unavailable,

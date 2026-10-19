@@ -4,7 +4,11 @@ Only the separately owned compose and its data are writable. Source SSH is read
 only, and raw failure material remains outside every application mount.
 """
 
-ODOO_UPGRADE_REHEARSAL_PROGRAM = r"""
+from control_plane._odoo_rehearsal_source_reader import REHEARSAL_SOURCE_READER_LIBRARY
+
+ODOO_UPGRADE_REHEARSAL_PROGRAM = (
+    REHEARSAL_SOURCE_READER_LIBRARY
+    + r"""
 import base64
 import fcntl
 import hashlib
@@ -262,24 +266,7 @@ def capture(spec,root,containers,database):
         raise RuntimeError('Partial source capture is retained; do not recapture')
     raw.mkdir(mode=0o700)
     values=spec['source']
-    for key in ('ODOO_UPSTREAM_HOST','ODOO_UPSTREAM_USER','ODOO_UPSTREAM_DB_USER','ODOO_UPSTREAM_DB_NAME'):
-        if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.:-]*',values[key]):
-            raise RuntimeError('Unsupported source coordinate')
-    filestore=values['ODOO_UPSTREAM_FILESTORE_PATH']
-    if not re.fullmatch(r'/[A-Za-z0-9_./-]+',filestore) or '..' in Path(filestore).parts:
-        raise RuntimeError('Unsupported source filestore')
-    ssh_directory=Path(values.get('DATA_WORKFLOW_SSH_DIR') or '/home/ubuntu/.ssh')
-    key=values.get('DATA_WORKFLOW_SSH_KEY','')
-    for prefix in ('/root/.ssh/','/home/ubuntu/.ssh/'):
-        if key.startswith(prefix):
-            key=str(ssh_directory/Path(key).name)
-            break
-    if not key:
-        key=next((str(ssh_directory/name) for name in ('id_ed25519','id_ecdsa','id_rsa') if (ssh_directory/name).is_file()),'')
-    if not key or not Path(key).is_file() or not (ssh_directory/'known_hosts').is_file():
-        raise RuntimeError('Existing read-only source identity is unavailable')
-    ssh=['ssh','-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','IdentitiesOnly=yes','-o','UserKnownHostsFile='+str(ssh_directory/'known_hosts'),'-i',key]
-    destination=values['ODOO_UPSTREAM_USER']+'@'+values['ODOO_UPSTREAM_HOST']
+    ssh,destination,filestore=rehearsal_source_reader(values)
     remote=shlex.join(['sudo','-u',values['ODOO_UPSTREAM_DB_USER'],'pg_dump','-Fc','--',values['ODOO_UPSTREAM_DB_NAME']])
     budget=spec['record']['storage']
     bounded_capture([*ssh,destination,remote],raw/'database.dump',budget['database_bytes'])
@@ -545,3 +532,4 @@ def main():
 
 main()
 """
+)
