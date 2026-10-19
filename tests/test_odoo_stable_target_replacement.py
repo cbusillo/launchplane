@@ -6,7 +6,7 @@ import unittest
 from collections.abc import Callable
 from tempfile import TemporaryDirectory
 from pathlib import Path
-from typing import Literal, cast
+from typing import Any, Literal, cast
 from unittest.mock import Mock, patch
 
 import click
@@ -217,6 +217,9 @@ class _Store:
         if record_id not in self.backup_records:
             raise FileNotFoundError(record_id)
         return self.backup_records[record_id]
+
+    def list_product_profile_records(self) -> tuple[LaunchplaneProductProfileRecord, ...]:
+        return (self.profile,)
 
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord:
         if product != self.profile.product:
@@ -3286,6 +3289,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         external_checkpoint: Callable[[str], None] | None = None,
         fresh_generation: FreshOdooTestingGeneration | None = None,
         revoke_on_pending: bool = False,
+        provider_extra_env: tuple[str, ...] = (),
     ) -> tuple[OdooStableTargetReplacementApplyResult, Mock, Mock, _Store]:
         profile = _opw_profile_with_prelaunch_policy(enabled=True)
         if live:
@@ -3388,6 +3392,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 or "\n".join(
                     (
                         *_DATABASE_ENV_LINES,
+                        *provider_extra_env,
                         "ODOO_DATA_VOLUME=opw_prod_odoo_data",
                         "ODOO_LOG_VOLUME=opw_prod_odoo_logs",
                         "ODOO_DB_VOLUME=opw_prod_odoo_db",
@@ -3679,6 +3684,67 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 )
             finally:
                 records.close()
+
+    def test_fresh_restore_retires_unused_secret_pointers(self) -> None:
+        from tests.test_odoo_testing_restore import generation
+
+        key = "ODOO_OVERRIDE_SECRET__ADDON__SHOPIFY__API_TOKEN"
+        fresh = generation().model_copy(
+            update={
+                "product": "odoo-tenant-opw",
+                "context": "opw",
+                "target_id": "compose-opw",
+                "reconcile_requested_at": generation().prepared_at,
+                "omitted_runtime_keys": (key,),
+            }
+        )
+        override = _opw_website_override_record().model_copy(update={"instance": "testing"})
+        original_plan = build_odoo_stable_target_replacement_plan
+
+        for selected in (fresh.model_copy(update={"omitted_runtime_keys": ()}), fresh):
+            with self.subTest(omitted=bool(selected.omitted_runtime_keys)):
+
+                def seed_retirement(**kwargs: Any) -> OdooStableTargetReplacementPlan:
+                    store = kwargs["record_store"]
+                    store.runtime_environment_records = tuple(
+                        record.model_copy(
+                            update={"schema_version": 2, "retired_provider_keys": (key,)}
+                        )
+                        if record.scope == "instance"
+                        else record
+                        for record in store.runtime_environment_records
+                    )
+                    return original_plan(**kwargs)
+
+                with patch(
+                    "control_plane.workflows.odoo_stable_target_replacement.build_odoo_stable_target_replacement_plan",
+                    side_effect=seed_retirement,
+                ):
+                    result, post_deploy, _, store = self._apply_upstream_restore(
+                        override_record=override,
+                        post_deploy_results=(
+                            OdooPostDeployResult(
+                                context="opw",
+                                instance="testing",
+                                phase="restore",
+                                post_deploy_status="pass",
+                                override_evidence=_prefix_post_deploy_readback_evidence(
+                                    {
+                                        "testing_copy_sanitized": "true",
+                                        "integration_readback_ok": "true",
+                                        "odoo_restore_completed": "true",
+                                    }
+                                ),
+                            ),
+                        ),
+                        test_instance="testing",
+                        fresh_generation=selected,
+                        provider_extra_env=(key + "=obsolete-external-value",),
+                    )
+                    self.assertEqual(result.deploy_status, "pass")
+                    self.assertNotIn(key, store.last_provider_env)
+                    self.assertEqual(store.odoo_instance_override_record, override)
+                    post_deploy.assert_called_once()
 
     def test_fresh_restore_finishes_only_with_sanitized_post_deploy_readback(self) -> None:
         from tests.test_odoo_testing_restore import generation

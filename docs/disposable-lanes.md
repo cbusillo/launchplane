@@ -1811,6 +1811,17 @@ or schedule writes; drift records `deploy_blocked.fresh_testing_intent_invalid`
 instead of an unexpected failure. Completed generations and production keep their
 ordinary deployment paths.
 
+Unused override secret pointers may remain in a testing lane's retirement record.
+The shared retirement check allows their removal only on an exactly owned testing
+lane when no current product declaration, plain lane setting, or stored override
+in any phase requires the pointer. A pointer still used by an override remains a
+conflict: sanitize the stored override through its supported service path first.
+Generation omissions remain bootstrap evidence; generation readiness does not
+govern ordinary retirement or unrelated settings edits. Other protected driver,
+identity and database keys cannot be retired this way. Replacement, runtime sync,
+product-config and artifact sync use the same check. Missing ownership or consumer
+authority refuses the exception, and production retains strict prefix protection.
+
 The service compares the existing local testing passwords with the supported
 production source's managed versions internally, without returning or retaining
 plaintext or password hashes. Missing versions or overlap refuse preparation;
