@@ -21,6 +21,9 @@ from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_COPY_CHUN
 
 
 DEFAULT_DOKPLOY_LOG_LINE_COUNT = 200
+# Linux permits 128 KiB for one exec argument. Dokploy base64-materializes
+# scripts in one shell command; reserve 8 KiB for its paths and shell framing.
+DOKPLOY_SCHEDULE_MATERIALIZATION_LIMIT_BYTES = 120 * 1024
 # Dokploy keeps `schedule.runManually` open until the job ends. This deadline
 # only bounds that request; how long the job may run is a separate execution
 # budget, observed by polling the exact provider deployment.
@@ -1591,6 +1594,25 @@ def schedule_key(schedule: JsonObject) -> str:
     return ""
 
 
+def validate_dokploy_schedule_script(schedule_payload: JsonObject) -> int:
+    """Bound the remote shell materializer before it persists a schedule row."""
+    script = schedule_payload.get("script") or ""
+    if not isinstance(script, str):
+        raise click.ClickException("Dokploy schedule script must be text.")
+    # Include Dokploy's PID/schedule-id line before its base64 expansion. Paths
+    # occur five times in handleScript, in addition to the fixed framing reserve.
+    content_bytes = len(script.encode()) + 256
+    materialization_bytes = 4 * ((content_bytes + 2) // 3) + 5 * len(
+        str(schedule_payload.get("appName") or "").encode()
+    )
+    if materialization_bytes >= DOKPLOY_SCHEDULE_MATERIALIZATION_LIMIT_BYTES:
+        raise click.ClickException(
+            "Dokploy schedule script exceeds the safe materialization size; "
+            "deliver a compact host program before retrying the original operation."
+        )
+    return materialization_bytes
+
+
 def upsert_dokploy_schedule(
     *,
     host: str,
@@ -1601,6 +1623,7 @@ def upsert_dokploy_schedule(
     app_name: str,
     schedule_payload: JsonObject,
 ) -> JsonObject:
+    validate_dokploy_schedule_script(schedule_payload)
     existing_schedule = find_matching_dokploy_schedule(
         host=host,
         token=token,

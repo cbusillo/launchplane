@@ -505,6 +505,7 @@ def run_manual_data_schedule(
     before_provider_mutation: Callable[[str], None] | None = None,
     provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
 ) -> dict[str, str]:
+    api.validate_dokploy_schedule_script(schedule_payload)
     with (provider_mutation_guard or nullcontext)():
         if before_provider_mutation is not None:
             before_provider_mutation(ODOO_POST_DEPLOY_SCHEDULE_UPSERT)
