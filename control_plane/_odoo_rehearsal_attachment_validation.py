@@ -1,27 +1,44 @@
 """Read-only validation with content-free evidence for the rejected attachment."""
 
-ATTACHMENT_MISMATCH_LIBRARY = r"""
+ATTACHMENT_METADATA_LIMITS = {"name": 4096, "res_model": 255, "mimetype": 255}
+ATTACHMENT_EVIDENCE_MAX_BYTES = 128 * 1024
+
+ATTACHMENT_MISMATCH_LIBRARY = (
+    f"ATTACHMENT_METADATA_LIMITS = {ATTACHMENT_METADATA_LIMITS!r}\n"
+    f"ATTACHMENT_EVIDENCE_MAX_BYTES = {ATTACHMENT_EVIDENCE_MAX_BYTES!r}\n"
+    + r"""
 def valid_attachment_mismatch(value):
     fields={'reason','store_fname','name','res_model','res_id','mimetype',
-        'database_size','database_checksum','file_size','file_checksum'}
+        'database_size','database_checksum','file_size','file_checksum','file_status','truncated_fields'}
     if not isinstance(value,dict) or set(value)!=fields:
         return False
     if any(value[key] is not None and (not isinstance(value[key],str) or len(value[key])>limit)
-            for key,limit in (('name',4096),('res_model',255),('mimetype',255))):
+            for key,limit in ATTACHMENT_METADATA_LIMITS.items()):
+        return False
+    truncated=value['truncated_fields']
+    if (not isinstance(truncated,list) or any(not isinstance(key,str) or key not in ATTACHMENT_METADATA_LIMITS for key in truncated)
+            or len(truncated)!=len(set(truncated))):
         return False
     if value['res_id'] is not None and (type(value['res_id']) is not int or value['res_id']<0):
         return False
     if any(type(value[key]) is not int or value[key]<0 for key in ('database_size','file_size')):
         return False
-    if any(not isinstance(value[key],str) or not re.fullmatch('[a-f0-9]{40}',value[key])
-            for key in ('database_checksum','file_checksum')):
+    if not isinstance(value['database_checksum'],str) or not re.fullmatch('[a-f0-9]{40}',value['database_checksum']):
+        return False
+    measured=value['file_status']=='measured'
+    if measured:
+        if not isinstance(value['file_checksum'],str) or not re.fullmatch('[a-f0-9]{40}',value['file_checksum']):
+            return False
+    elif (value['file_status'] not in {'unreadable','changed'} or value['file_checksum'] is not None
+            or value['reason']!='attachment_size_mismatch'):
         return False
     if value['store_fname']!=value['database_checksum'][:2]+'/'+value['database_checksum']:
         return False
     return ((value['reason']=='attachment_size_mismatch' and value['database_size']!=value['file_size'])
-        or (value['reason']=='attachment_hash_mismatch' and value['database_size']==value['file_size']
+        or (value['reason']=='attachment_hash_mismatch' and measured and value['database_size']==value['file_size']
             and value['database_checksum']!=value['file_checksum']))
 """
+)
 
 ATTACHMENT_VALIDATION_PROGRAM = (
     ATTACHMENT_MISMATCH_LIBRARY
@@ -36,8 +53,28 @@ import sys
 import time
 
 
+def record_attachment_mismatch(row,metadata,mismatch,reason,*,file_checksum=None,file_status='unreadable'):
+    if len(row)!=7:
+        return False
+    evidence={'reason':reason,'store_fname':row[0],'name':row[3],
+        'res_model':row[4],'res_id':row[5],'mimetype':row[6],
+        'database_size':row[2],'database_checksum':row[1],
+        'file_size':metadata.st_size,'file_checksum':file_checksum,
+        'file_status':file_status,'truncated_fields':[]}
+    for key,limit in ATTACHMENT_METADATA_LIMITS.items():
+        if isinstance(evidence[key],str) and len(evidence[key])>limit:
+            evidence[key]=evidence[key][:limit]
+            evidence['truncated_fields'].append(key)
+    if not valid_attachment_mismatch(evidence):
+        return False
+    mismatch.update(evidence)
+    return True
+
+
 def validate_attachment_files(rows, root, deadline, *, check_content=True, classify_size=False,
         failure_reference=None, mismatch=None):
+    if mismatch is not None:
+        mismatch.clear()
     if root.resolve() != root.absolute() or not root.is_dir():
         return 'attachment_path_unsafe'
     for row in rows:
@@ -60,6 +97,9 @@ def validate_attachment_files(rows, root, deadline, *, check_content=True, class
             size_mismatch = metadata.st_size != size
             if size_mismatch and not classify_size and mismatch is None:
                 return 'attachment_size_mismatch'
+            if size_mismatch and mismatch is not None and not record_attachment_mismatch(
+                    row,metadata,mismatch,'attachment_size_mismatch'):
+                return 'attachment_metadata_invalid'
             if not check_content and not size_mismatch:
                 continue
             value = hashlib.sha1()
@@ -75,19 +115,16 @@ def validate_attachment_files(rows, root, deadline, *, check_content=True, class
                 after = os.fstat(stream.fileno())
                 if (metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns) != (
                         after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+                    if mismatch:
+                        mismatch['file_status']='changed'
+                        return 'attachment_size_mismatch'
                     return 'attachment_unreadable'
             file_checksum=value.hexdigest()
             if mismatch is not None and (size_mismatch or file_checksum!=checksum):
                 reason='attachment_size_mismatch' if size_mismatch else 'attachment_hash_mismatch'
-                if len(row)!=7:
+                if not record_attachment_mismatch(row,metadata,mismatch,reason,
+                        file_checksum=file_checksum,file_status='measured'):
                     return 'attachment_metadata_invalid'
-                evidence={'reason':reason,'store_fname':name,'name':row[3],
-                    'res_model':row[4],'res_id':row[5],'mimetype':row[6],
-                    'database_size':size,'database_checksum':checksum,
-                    'file_size':metadata.st_size,'file_checksum':file_checksum}
-                if not valid_attachment_mismatch(evidence):
-                    return 'attachment_metadata_invalid'
-                mismatch.update(evidence)
                 return reason
             if file_checksum != checksum:
                 if size_mismatch and failure_reference is not None:
@@ -99,6 +136,8 @@ def validate_attachment_files(rows, root, deadline, *, check_content=True, class
         except FileNotFoundError:
             return 'attachment_missing'
         except OSError:
+            if mismatch:
+                return 'attachment_size_mismatch'
             return 'attachment_unreadable'
         finally:
             if descriptor is not None:
@@ -162,7 +201,7 @@ if __name__ == '__main__':
     payload = {'reason':result}
     if sys.argv[1:] == ['compare'] and result == 'attachment_size_and_hash_mismatch':
         payload['reference'] = reference
-    if mismatch:
+    if mismatch and result==mismatch['reason']:
         payload['mismatch'] = mismatch
     print('attachment_validation='+json.dumps(payload).encode().hex())
 """

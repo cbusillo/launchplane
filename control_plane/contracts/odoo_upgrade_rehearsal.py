@@ -6,6 +6,7 @@ from typing import Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane._odoo_rehearsal_attachment_validation import ATTACHMENT_METADATA_LIMITS
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
@@ -166,19 +167,24 @@ class RehearsalAttachmentFacts(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     reason: Literal["attachment_size_mismatch", "attachment_hash_mismatch"]
     store_fname: str = Field(pattern=r"^[a-f0-9]{2}/[a-f0-9]{40}$")
-    name: str | None = Field(max_length=4096)
-    res_model: str | None = Field(max_length=255)
+    name: str | None = Field(max_length=ATTACHMENT_METADATA_LIMITS["name"])
+    res_model: str | None = Field(max_length=ATTACHMENT_METADATA_LIMITS["res_model"])
     res_id: int | None = Field(ge=0)
-    mimetype: str | None = Field(max_length=255)
+    mimetype: str | None = Field(max_length=ATTACHMENT_METADATA_LIMITS["mimetype"])
     database_size: int = Field(ge=0)
     database_checksum: str = Field(pattern=r"^[a-f0-9]{40}$")
     file_size: int = Field(ge=0)
-    file_checksum: str = Field(pattern=r"^[a-f0-9]{40}$")
+    file_checksum: str | None = Field(pattern=r"^[a-f0-9]{40}$")
+    file_status: Literal["measured", "unreadable", "changed"]
+    truncated_fields: list[Literal["name", "res_model", "mimetype"]]
 
     @model_validator(mode="after")
     def compared_facts(self) -> "RehearsalAttachmentFacts":
         if (
             self.store_fname != self.database_checksum[:2] + "/" + self.database_checksum
+            or len(self.truncated_fields) != len(set(self.truncated_fields))
+            or (self.file_status == "measured") != (self.file_checksum is not None)
+            or (self.file_status != "measured" and self.reason != "attachment_size_mismatch")
             or (self.reason == "attachment_size_mismatch" and self.database_size == self.file_size)
             or (
                 self.reason == "attachment_hash_mismatch"

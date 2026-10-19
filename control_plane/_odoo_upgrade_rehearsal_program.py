@@ -460,7 +460,7 @@ def read_attachment_mismatch(spec,root):
         return None
     with os.fdopen(descriptor,'r') as stream:
         metadata=os.fstat(stream.fileno())
-        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_size>32768
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_size>ATTACHMENT_EVIDENCE_MAX_BYTES
                 or stat.S_IMODE(metadata.st_mode)!=0o600):
             raise RuntimeError('Attachment evidence custody is unverified')
         value=json.load(stream)
