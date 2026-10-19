@@ -2621,6 +2621,27 @@ holds the existing host execution lock while inspecting custody and reports a
 fixed busy observation if a host process still owns it. It creates no replacement lock.
 For a bound, checkpointed original execute with a retained raw capture and no
 source snapshot, readback may also return `capture_attachment_validation`.
+New capture executions retain `execute.attachment-mismatch.json` when attachment
+validation rejects a size or checksum mismatch. This private, content-free
+receipt records `store_fname`, attachment `name`, nullable `res_model`, `res_id`
+and `mimetype`, and the database/file sizes and SHA-1 checksums. The validator
+selects this metadata in its existing attachment cursor and hashes the same
+open file that failed; it adds no scan or related-record lookup. The original
+size/hash refusal still stops capture. Successful validation creates no mismatch
+receipt and does not change the capture's success result.
+
+The receipt binds to the rehearsal intent, full record binding and provider
+operation attempt. Checkpointed original-key execute readback returns it as
+`attachment_mismatch` under the existing execution lock, without a runtime,
+archive or database scan. Changed bindings, malformed metadata, content fields
+and unsafe receipt custody refuse readback. It identifies the attachment this
+operation rejected, not a unique conflict across the database or today's
+production state, and does not authorize recovery or accepting inconsistent
+Client data. No new grant is required. Older held operations have no such
+receipt; their historical failure identity cannot be reconstructed by this fix.
+
+For historical executions without that saved evidence, the existing readback
+probe below remains available:
 Under that existing host lock, the verified isolated runtime must have stopped
 web before the probe reads the restored source database and copied filestore.
 The probe uses the same emitted validator as capture, an explicitly read-only
@@ -2648,8 +2669,8 @@ means its bytes match the database checksum despite different `file_size`
 metadata; `attachment_size_and_hash_mismatch` means both disagree. Neither code
 proves the retained archive, other attachments, sanitization or recovery
 eligibility. No attachment path, checksum or size is exported. The file must
-remain stable while hashed. Capture/apply still refuses a size mismatch before
-hashing; these additional readback codes do not relax that gate or authorize a
+remain stable while hashed. Capture/apply still refuses a size mismatch;
+measuring the rejected file for its evidence does not relax that gate or authorize a
 metadata rewrite. A timeout retains `incomplete` and the original hold.
 If both size and content disagree, the same bound observation may compare that
 exact row/file with the retained original tar. Its canonical reference stays

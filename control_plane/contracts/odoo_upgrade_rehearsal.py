@@ -162,6 +162,44 @@ class RehearsalHostBusy(BaseModel):
     host_busy: Literal[True]
 
 
+class RehearsalAttachmentFacts(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    reason: Literal["attachment_size_mismatch", "attachment_hash_mismatch"]
+    store_fname: str = Field(pattern=r"^[a-f0-9]{2}/[a-f0-9]{40}$")
+    name: str | None = Field(max_length=4096)
+    res_model: str | None = Field(max_length=255)
+    res_id: int | None = Field(ge=0)
+    mimetype: str | None = Field(max_length=255)
+    database_size: int = Field(ge=0)
+    database_checksum: str = Field(pattern=r"^[a-f0-9]{40}$")
+    file_size: int = Field(ge=0)
+    file_checksum: str = Field(pattern=r"^[a-f0-9]{40}$")
+
+    @model_validator(mode="after")
+    def compared_facts(self) -> "RehearsalAttachmentFacts":
+        if (
+            self.store_fname != self.database_checksum[:2] + "/" + self.database_checksum
+            or (self.reason == "attachment_size_mismatch" and self.database_size == self.file_size)
+            or (
+                self.reason == "attachment_hash_mismatch"
+                and (
+                    self.database_size != self.file_size
+                    or self.database_checksum == self.file_checksum
+                )
+            )
+        ):
+            raise ValueError("Attachment evidence must describe its observed mismatch.")
+        return self
+
+
+class RehearsalAttachmentMismatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    intent_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    attempt_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    record_binding_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    attachment: RehearsalAttachmentFacts
+
+
 class RehearsalHostResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
     intent_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
@@ -175,6 +213,7 @@ class RehearsalHostResult(BaseModel):
     raw_source_retained: bool = False
     prepare_not_started: bool = False
     custody: RehearsalCustodyObservation | None = None
+    attachment_mismatch: RehearsalAttachmentMismatch | None = None
     capture_attachment_validation: (
         Literal[
             "dependency_unavailable",
