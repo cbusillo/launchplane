@@ -724,20 +724,17 @@ class OdooRehearsalAdapter:
                 lines = ()
                 log_available = complete = False
             log = "\n".join(lines)
-            frames = sorted(
-                {
-                    name
-                    for name in functions
-                    if re.search(
-                        r'File "'
-                        + re.escape(REHEARSAL_HOST_FILENAME)
-                        + r'", line \d+, in '
-                        + re.escape(name)
-                        + r"(?:\n|$)",
-                        log,
-                    )
-                }
-            )
+            locations = [
+                {"function": match[2], "line": int(match[1])}
+                for match in re.finditer(
+                    r'File "'
+                    + re.escape(REHEARSAL_HOST_FILENAME)
+                    + r'", line ([0-9]{1,9}), in ([A-Za-z_][A-Za-z0-9_]*)(?:\n|$)',
+                    log,
+                )
+                if match[2] in functions
+            ]
+            frames = sorted({str(location["function"]) for location in locations})
             status = api.deployment_status(deployment)
             events.append(
                 {
@@ -749,6 +746,7 @@ class OdooRehearsalAdapter:
                     "log_available": log_available,
                     "traceback_present": "Traceback (most recent call last):" in log,
                     "failure_frames": frames,
+                    "failure_locations": locations,
                 }
             )
         return events, complete

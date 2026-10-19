@@ -784,8 +784,15 @@ class RehearsalScenario(unittest.TestCase):
                 host_fixture.host["bounded_capture"](
                     ["fixture-command"], host_fixture.fixture.root / "partial.dump", 100
                 )
-        except RuntimeError:
+        except RuntimeError as error:
             log = traceback.format_exc().splitlines()
+            from control_plane.odoo_upgrade_rehearsal import REHEARSAL_HOST_FILENAME
+
+            locations = [
+                {"function": frame.name, "line": frame.lineno}
+                for frame in traceback.extract_tb(error.__traceback__)
+                if frame.filename == REHEARSAL_HOST_FILENAME
+            ]
         else:
             self.fail("An incomplete source process must refuse capture")
         log += ["PRIVATE_VALUE=do-not-export"]
@@ -819,6 +826,7 @@ class RehearsalScenario(unittest.TestCase):
         assert isinstance(frames, list)
         self.assertIn(host_fixture.host["bounded_capture"].__name__, frames)
         self.assertTrue(events[0]["traceback_present"])
+        self.assertEqual(events[0]["failure_locations"], locations)
         self.assertEqual(events[1]["provider_status"], killed["status"])
         self.assertFalse(events[1]["traceback_present"])
         self.assertNotIn("PRIVATE_VALUE", str(events))
