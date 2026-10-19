@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, cast
 from collections.abc import Callable
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, PropertyMock, patch
 
 from control_plane import secrets
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
@@ -46,6 +46,7 @@ class RehearsalScenario(unittest.TestCase):
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
         self.store = fixture.store
+        self.app = fixture.app
         self.root = fixture.root
         self.product = fixture.profile.product
         self.profile = fixture.profile
@@ -735,6 +736,7 @@ class RehearsalHostSafetyTests(unittest.TestCase):
                 "elapsed_seconds": {},
             },
             "attempt_sha256": hashlib.sha256(b"fixture-attempt").hexdigest(),
+            "record_binding_sha256": hashlib.sha256(b"fixture-record").hexdigest(),
             "mode": "apply",
             "action": "verify",
             "target_image": self.spec["image_reference"],
@@ -871,7 +873,6 @@ class RehearsalHostSafetyTests(unittest.TestCase):
                     containers[role][1]["GraphDriver"] = driver
 
     def test_capacity_refusal_is_terminal_per_attempt_and_new_attempt_can_start(self) -> None:
-        import json
         from types import SimpleNamespace
 
         spec, root, containers = self.storage_fixture(
@@ -892,8 +893,9 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         self.assertFalse(result["completed"])
         self.assertEqual(result["refusal_code"], "rehearsal_storage_capacity_insufficient")
         self.assertEqual(result["attempt_sha256"], spec["attempt_sha256"])
-        receipt = root / ("verify.refused-" + spec["attempt_sha256"] + ".json")
-        self.assertEqual(json.loads(receipt.read_text()), result)
+        receipt = self.host["refusal_receipt"](spec, root, result["refusal_code"])
+        self.assertEqual(receipt.read_bytes(), b"")
+        self.assertEqual(self.host["read_refusal"](spec, root), result)
         self.host["snapshot"].assert_not_called()
         self.host["private_health"].assert_not_called()
         self.assertFalse((root / "verify.started").exists())
@@ -921,7 +923,7 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         self.host["snapshot"].assert_called_once()
         self.assertTrue((root / "verify.started").is_file())
         self.assertTrue((root / "verify.json").is_file())
-        self.assertEqual(json.loads(receipt.read_text()), result)
+        self.assertEqual(receipt.read_bytes(), b"")
 
     def test_read_only_precheck_failures_refuse_before_the_started_marker(self) -> None:
         spec, root, containers = self.storage_fixture(
@@ -953,14 +955,12 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         self.host["snapshot"].assert_not_called()
 
     def test_started_custody_cannot_be_reconciled_as_an_earlier_refusal(self) -> None:
-        import json
-
         spec, root, _ = self.storage_fixture(
             {"database_bytes": 40, "filestore_bytes": 80, "staging_bytes": 20, "reserve_bytes": 10}
         )
         self.host["inspection"] = Mock(side_effect=RuntimeError("Unknown backing"))
         refused = self.run_host(spec)
-        receipt = root / ("verify.refused-" + spec["attempt_sha256"] + ".json")
+        receipt = self.host["refusal_receipt"](spec, root, refused["refusal_code"])
         started = root / "verify.started"
         started.touch()
         spec["mode"] = "observe"
@@ -971,7 +971,31 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "Uncertain original effect"):
             self.run_host(spec)
         self.assertTrue(started.is_file())
-        self.assertEqual(json.loads(receipt.read_text()), refused)
+        self.assertEqual(receipt.read_bytes(), b"")
+
+    def test_interrupted_refusal_marker_is_complete_and_bound_to_attempt_and_record(self) -> None:
+        spec, root, _ = self.storage_fixture(
+            {"database_bytes": 40, "filestore_bytes": 80, "staging_bytes": 20, "reserve_bytes": 10}
+        )
+        self.host["inspection"] = Mock(side_effect=RuntimeError("Unknown backing"))
+        self.host["docker"] = Mock(side_effect=AssertionError("No runtime effect may start"))
+        with patch.object(os, "fsync", side_effect=RuntimeError("Interrupted after creation")):
+            with self.assertRaisesRegex(RuntimeError, "Interrupted after creation"):
+                self.run_host(spec)
+        self.assertFalse((root / "verify.started").exists())
+        spec["mode"] = "observe"
+        result = self.run_host(spec)
+        self.assertEqual(result["refusal_code"], "rehearsal_precheck_refused")
+        self.assertFalse(result["completed"])
+        self.host["docker"].assert_not_called()
+        for field in ("attempt_sha256", "record_binding_sha256"):
+            with self.subTest(field=field):
+                previous = spec[field]
+                spec[field] = hashlib.sha256(field.encode()).hexdigest()
+                unknown = self.run_host(spec)
+                self.assertFalse(unknown["completed"])
+                self.assertNotIn("refusal_code", unknown)
+                spec[field] = previous
 
     def test_runtime_guard_accepts_only_the_private_standalone_network(self) -> None:
         qualified = self.inspect()
@@ -1271,6 +1295,122 @@ class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
         self.fixture = RehearsalScenario()
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
+
+    async def test_terminal_http_outcomes_preserve_fixed_refusal_codes_through_the_client(
+        self,
+    ) -> None:
+        from control_plane.contracts.odoo_upgrade_rehearsal import (
+            ODOO_UPGRADE_REHEARSAL_ROUTE,
+            REHEARSAL_PUBLIC_FAILURE_MESSAGES,
+        )
+        from control_plane.http_routes.mutation_support import idempotency_scope
+        from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
+        from control_plane.service_auth import (
+            configured_local_operator_identity,
+            LaunchplaneAuthzPolicy,
+        )
+        from control_plane.storage.postgres import PostgresRecordStore
+        from tests.http_app_test_support import _local_operator_bearer_config
+        from tests.support.http import request
+        from tests.test_odoo_upgrade_rehearsal_client import RehearsalClientTests
+
+        identity = configured_local_operator_identity(
+            _local_operator_bearer_config(token_label="local-owner-write")
+        )
+        assert identity is not None
+        self.fixture.principal = idempotency_scope(identity)
+        retained = self.fixture.record.model_copy(
+            update={
+                "principal": self.fixture.principal,
+                "state": "switched",
+                "compose_id": "own-compose",
+            }
+        )
+        self.fixture.store.compare_and_write_odoo_upgrade_rehearsal(self.fixture.record, retained)
+        self.fixture.store.seed_authz_policy_if_absent(
+            LaunchplaneAuthzPolicyRecord(
+                record_id="fixture-http-policy",
+                source="test",
+                updated_at=retained.updated_at.isoformat(),
+                policy=LaunchplaneAuthzPolicy(schema_version=2),
+            )
+        )
+        adapter = self.fixture.adapter("verify")
+        payload = adapter.request.model_dump(mode="json")
+        client = RehearsalClientTests()
+        self.addCleanup(client.doCleanups)
+        private_message = "private-provider-detail-must-stay-private"
+        for code in (*REHEARSAL_PUBLIC_FAILURE_MESSAGES, "unsupported_provider_code"):
+            refusal: dict[str, object] = {"refusal_code": code, "completed": False}
+            failure = {
+                "trace_id": "fixture-trace",
+                "error": {"code": code, "message": private_message},
+            }
+            with patch.object(OdooRehearsalAdapter, "refusal_response", return_value=failure):
+                with patch.object(OdooRehearsalAdapter, "host", return_value=refusal):
+                    fresh = self.fixture.run_operation(adapter, code)
+                    replay = self.fixture.run_operation(adapter, code)
+                with patch.object(
+                    OdooRehearsalAdapter,
+                    "host",
+                    side_effect=[TimeoutError("Lost refusal response"), refusal],
+                ):
+                    with self.assertRaises(TimeoutError):
+                        self.fixture.run_operation(adapter, code + "-lost")
+                    adopted = self.fixture.run_operation(adapter, code + "-lost")
+            self.assertEqual(
+                (fresh.status, adopted.status, replay.status), ("completed", "adopted", "replayed")
+            )
+            for outcome in (fresh, adopted, replay):
+                with (
+                    self.subTest(code=code, outcome=outcome.status),
+                    # Only bypass the production-storage admission for this
+                    # HTTP mapping proof. Journal outcomes above use real
+                    # SQLite storage and make no PostgreSQL-locking claim.
+                    patch.object(
+                        PostgresRecordStore,
+                        "database_dialect_name",
+                        new_callable=PropertyMock,
+                        return_value="postgresql",
+                    ),
+                    patch(
+                        "control_plane.http_app.run_durable_provider_operation",
+                        return_value=outcome,
+                    ),
+                ):
+                    response = await request(
+                        self.fixture.app,
+                        "POST",
+                        ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=self.fixture.product),
+                        payload=payload,
+                        headers={
+                            "Authorization": "Bearer local-operator-token",
+                            "Idempotency-Key": code,
+                        },
+                    )
+                self.assertEqual(response.status_code, 409, response.text)
+                public = response.json()
+                terminal = code in REHEARSAL_PUBLIC_FAILURE_MESSAGES
+                expected_code = code if terminal else "provider_mutation_failed"
+                self.assertEqual(public["error"]["code"], expected_code)
+                if terminal:
+                    self.assertEqual(
+                        public["error"]["message"], REHEARSAL_PUBLIC_FAILURE_MESSAGES[code]
+                    )
+                self.assertNotIn(private_message, response.text)
+                client_code, result, post = client.call(
+                    "apply", failure=(response.status_code, public)
+                )
+                self.assertNotEqual(client_code, 0)
+                self.assertEqual(result["error_code"], expected_code)
+                self.assertEqual(result["original_key_required"], not terminal)
+                self.assertEqual(
+                    result["status"], "unavailable" if terminal else "reconciliation_required"
+                )
+                post.assert_called_once()
+        self.assertEqual(
+            self.fixture.store.read_odoo_upgrade_rehearsal(self.fixture.identifier), retained
+        )
 
     async def test_read_role_can_plan_without_changing_any_lane_and_cannot_apply(self) -> None:
         from fastapi import FastAPI, HTTPException

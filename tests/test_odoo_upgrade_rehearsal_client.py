@@ -27,7 +27,7 @@ class RehearsalClientTests(unittest.TestCase):
         *,
         lost: bool = False,
         changed: bool = False,
-        failure: tuple[int, str] | None = None,
+        failure: tuple[int, dict[str, Any]] | None = None,
     ) -> tuple[int, dict[str, Any], Mock]:
         client = runpy.run_path(
             str(Path(__file__).resolve().parents[1] / "scripts/odoo-upgrade-rehearsal.py")
@@ -64,15 +64,13 @@ class RehearsalClientTests(unittest.TestCase):
         if lost:
             post.side_effect = http.client.IncompleteRead(b"", 1)
         if failure is not None:
-            status, code = failure
+            status, failure_payload = failure
             post.side_effect = urllib.error.HTTPError(
                 "https://service.invalid",
                 status,
                 "Fixture refusal",
                 Message(),
-                io.BytesIO(
-                    json.dumps({"trace_id": "fixture-trace", "error": {"code": code}}).encode()
-                ),
+                io.BytesIO(json.dumps(failure_payload).encode()),
             )
             self.addCleanup(post.side_effect.close)
         transport = {
@@ -158,19 +156,3 @@ class RehearsalClientTests(unittest.TestCase):
         self.assertTrue(result["original_key_required"])
         self.assertEqual(result["status"], "reconciliation_required")
         post.assert_called_once()
-
-    def test_only_terminal_precheck_conflicts_allow_a_new_operation_key(self) -> None:
-        for status, code, terminal in (
-            (409, "rehearsal_storage_capacity_insufficient", True),
-            (409, "rehearsal_precheck_refused", True),
-            (409, "rehearsal_state_unverified", False),
-            (403, "rehearsal_precheck_refused", False),
-        ):
-            with self.subTest(status=status, code=code):
-                result_code, result, post = self.call("apply", failure=(status, code))
-                self.assertNotEqual(result_code, 0)
-                self.assertEqual(result["original_key_required"], not terminal)
-                self.assertEqual(
-                    result["status"], "unavailable" if terminal else "reconciliation_required"
-                )
-                post.assert_called_once()

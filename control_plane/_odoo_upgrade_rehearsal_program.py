@@ -338,28 +338,38 @@ def rehearsal_storage_capacity(spec, root, containers, action):
         database_staging_bytes=database if action=='simulate-final' else 0)
 
 
-def refusal_receipt(spec, root):
+def refusal_receipt(spec, root, code):
     attempt=spec.get('attempt_sha256','')
-    if not re.fullmatch(r'[a-f0-9]{64}',attempt):
+    binding=spec.get('record_binding_sha256','')
+    if not all(re.fullmatch(r'[a-f0-9]{64}',value) for value in (attempt,binding)):
         return None
-    path=root/(spec['action']+'.refused-'+attempt+'.json')
-    if path.is_symlink():
-        raise RuntimeError('Refusal custody is aliased')
-    return path
+    kind={'rehearsal_storage_capacity_insufficient':'capacity',
+        'rehearsal_precheck_refused':'precheck'}[code]
+    return root/(spec['action']+'.refused-'+attempt+'-'+binding+'-'+kind)
+
+
+def refusal_result(spec, code):
+    record=spec['record']
+    return {'intent_sha256':record['intent_sha256'],'state':record['state'],
+        'copies':record['copies'],'elapsed_seconds':record['elapsed_seconds'],
+        'resources_preserved':True,'public_route':False,'business_host_frozen':False,
+        'completed':False,'refusal_code':code,'attempt_sha256':spec['attempt_sha256']}
 
 
 def read_refusal(spec, root):
-    path=refusal_receipt(spec,root)
-    if path is None or not path.is_file():
-        return None
-    result=json.loads(path.read_text())
-    if (result['intent_sha256']!=spec['record']['intent_sha256']
-        or result['attempt_sha256']!=spec['attempt_sha256']
-        or result['state']!=spec['record']['state']
-        or result['copies']!=spec['record']['copies']
-        or result['completed'] is not False
-        or result['refusal_code'] not in {'rehearsal_storage_capacity_insufficient','rehearsal_precheck_refused'}):
-        raise RuntimeError('Refusal belongs to another attempt')
+    result=None
+    for code in ('rehearsal_storage_capacity_insufficient','rehearsal_precheck_refused'):
+        path=refusal_receipt(spec,root,code)
+        if path is None:
+            continue
+        try:
+            metadata=path.lstat()
+        except FileNotFoundError:
+            continue
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_size!=0
+            or stat.S_IMODE(metadata.st_mode)!=0o600 or result is not None):
+            raise RuntimeError('Refusal custody is unverified')
+        result=refusal_result(spec,code)
     return result
 
 
@@ -457,14 +467,22 @@ def main():
                 # malformed provider observations are determinate refusals too.
                 code='rehearsal_precheck_refused'
             if code:
-                result={'intent_sha256':record['intent_sha256'],'state':record['state'],
-                    'copies':record['copies'],'elapsed_seconds':record['elapsed_seconds'],
-                    'resources_preserved':True,'public_route':False,'business_host_frozen':False,
-                    'completed':False,'refusal_code':code,'attempt_sha256':spec['attempt_sha256']}
-                path=refusal_receipt(spec,root)
+                path=refusal_receipt(spec,root,code)
                 if path is None:
                     raise RuntimeError('Missing refusal attempt identity')
-                save(path,result)
+                # Creation itself is the complete no-effect proof. There is no
+                # partial JSON/rename window to strand a killed refusal writer.
+                descriptor=os.open(path,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+                descriptor=os.open(root,os.O_RDONLY|os.O_DIRECTORY)
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+                result=refusal_result(spec,code)
                 print('rehearsal_result='+json.dumps(result).encode().hex())
                 return
             (root/(action+'.started')).touch(mode=0o600)

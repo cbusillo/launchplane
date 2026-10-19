@@ -2415,11 +2415,13 @@ copies and every recovery tuple remain preserved.
 
 A failed read-only action precheck returns a determinate HTTP 409 with
 `rehearsal_storage_capacity_insufficient` or `rehearsal_precheck_refused`.
-Its operation-bound refusal receipt proves no rehearsal action started; the same
-key returns that refusal. After correcting and requalifying the prerequisite,
-review the unchanged action and use a new operation key. A lost response is still
-observed under the original key first. Once an action's start marker exists,
-its uncertain-effect recovery rules remain unchanged.
+Its empty, atomically created refusal marker binds the exact operation and
+record and proves no rehearsal action started, even if the process stops before
+replying. The same key returns that refusal. After correcting and requalifying
+the prerequisite, review the unchanged action and use a new operation key. A lost response is still
+reconciled by repeating the original apply request and key first; ordinary
+readback does not identify an operation's refusal. Once an action's start marker
+exists, its uncertain-effect recovery rules remain unchanged.
 
 The candidate artifact must already be registered, immutable, attributable to
 this product's repository, and declare its Odoo version and exact module intent.

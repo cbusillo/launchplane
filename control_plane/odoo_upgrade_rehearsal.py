@@ -577,6 +577,7 @@ class OdooRehearsalAdapter:
             record, self.request.action, mode, source_values, shape, credentials
         )
         spec["attempt_sha256"] = canonical_json_sha256({"operation_key": operation_key})
+        spec["record_binding_sha256"] = record.binding_sha256
         program = str(spec.pop("program"))
         encoded = base64.b64encode(json.dumps(spec, sort_keys=True).encode()).decode()
         script = (
@@ -614,10 +615,7 @@ class OdooRehearsalAdapter:
     def refusal_response(self, result: dict[str, object]) -> dict[str, object]:
         return {
             "trace_id": self.trace,
-            "error": {
-                "code": result["refusal_code"],
-                "message": "No rehearsal action started. Requalify the prerequisite and review a new operation key.",
-            },
+            "error": {"code": result["refusal_code"]},
         }
 
     def publish(
