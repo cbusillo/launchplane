@@ -1552,6 +1552,116 @@ class RehearsalScenario(unittest.TestCase):
 
 
 class RehearsalHostSafetyTests(unittest.TestCase):
+    def test_captured_table_decoder_bounds_output_and_closes_its_process(self) -> None:
+        import subprocess
+        import sys
+        import time
+
+        _, root, _ = self.storage_fixture(
+            {
+                "database_bytes": 4096,
+                "filestore_bytes": 10240,
+                "staging_bytes": 20,
+                "reserve_bytes": 10,
+            }
+        )
+        dump = root / "dump-fixture"
+        dump.write_bytes(b"fixture stdin")
+        original_popen = subprocess.Popen
+        processes = []
+        output = b"COPY fixture\nrow\n"
+        exit_code = 0
+
+        def decoder_process(arguments: list[str], **kwargs: Any) -> Any:
+            self.assertIn("--file=-", arguments)
+            self.assertFalse(any(arg == "-d" or arg.startswith("--dbname") for arg in arguments))
+            program = (
+                "import sys; assert sys.stdin.buffer.read()==b'fixture stdin'; "
+                f"sys.stdout.buffer.write(bytes.fromhex({output.hex()!r})); sys.exit({exit_code})"
+            )
+            process = original_popen([sys.executable, "-c", program], **kwargs)
+            processes.append(process)
+            return process
+
+        decode = self.host["captured_attachment_table_lines"]
+        with patch.object(self.host["subprocess"], "Popen", side_effect=decoder_process):
+            with dump.open("rb") as stream:
+                self.assertEqual(
+                    list(decode(stream, self.inspect(), time.monotonic() + 10, len(output))),
+                    output.splitlines(keepends=True),
+                )
+            with dump.open("rb") as stream, self.assertRaises(ValueError):
+                list(decode(stream, self.inspect(), time.monotonic() + 10, len(output) - 1))
+            exit_code = 1
+            with dump.open("rb") as stream, self.assertRaises(ValueError):
+                list(decode(stream, self.inspect(), time.monotonic() + 10, len(output)))
+            exit_code = 124  # GNU timeout reports its expired child this way.
+            with dump.open("rb") as stream, self.assertRaises(TimeoutError):
+                list(decode(stream, self.inspect(), time.monotonic() + 10, len(output)))
+            with dump.open("rb") as stream, self.assertRaises(TimeoutError):
+                list(decode(stream, self.inspect(), time.monotonic() - 1, len(output)))
+        self.assertTrue(all(process.poll() is not None for process in processes))
+        self.assertEqual(dump.read_bytes(), b"fixture stdin")
+
+    def test_captured_attachment_reference_requires_verified_original_dump(self) -> None:
+        import json
+
+        spec, root, _ = self.storage_fixture(
+            {
+                "database_bytes": 4096,
+                "filestore_bytes": 10240,
+                "staging_bytes": 20,
+                "reserve_bytes": 10,
+            }
+        )
+        binding = hashlib.sha256(b"source fixture").hexdigest()
+        spec["record"]["source_binding_sha256"] = binding
+        raw = root / "raw-source"
+        raw.mkdir()
+        dump = raw / "database.dump"
+        dump.write_bytes(b"custom dump fixture")
+        checksum = hashlib.sha1(b"original attachment").hexdigest()
+        name = checksum[:2] + "/" + checksum
+        reference = {
+            "name": name,
+            "checksum": checksum,
+            "size": 19,
+            "copied_size": 3,
+            "copied_sha1": hashlib.sha1(b"bad").hexdigest(),
+        }
+        receipt = {
+            "source_binding_sha256": binding,
+            "database_sha256": hashlib.sha256(dump.read_bytes()).hexdigest(),
+            "filestore_sha256": hashlib.sha256(b"tar fixture").hexdigest(),
+        }
+        (root / "capture.json").write_text(json.dumps(receipt))
+        header = (
+            b"COPY public.ir_attachment (id, name, file_size, checksum, store_fname) FROM stdin;\n"
+        )
+        row = ("42\tprivate\\tfixture\\nname\t19\t" + checksum + "\t" + name + "\n").encode()
+        lines = [b"-- dump fixture\n", header, row, b"\\.\n"]
+        decoder = Mock(return_value=iter(lines))
+        compare = self.host["compare_captured_database_reference"]
+        before = {p: p.read_bytes() for p in (root / "capture.json", dump)}
+        with patch.dict(self.host, {"captured_attachment_table_lines": decoder}):
+            self.assertEqual(compare(spec, root, self.inspect(), reference), "reference_present")
+            decoder.return_value = iter([header, row.replace(b"\t19\t", b"\t20\t"), b"\\.\n"])
+            self.assertEqual(compare(spec, root, self.inspect(), reference), "reference_not_found")
+            decoder.return_value = iter([header, row])
+            self.assertEqual(compare(spec, root, self.inspect(), reference), "unavailable")
+            decoder.return_value = iter([header, b"too\tfew\n", b"\\.\n"])
+            self.assertEqual(compare(spec, root, self.inspect(), reference), "unavailable")
+            decoder.side_effect = TimeoutError("private reference must not escape")
+            self.assertEqual(compare(spec, root, self.inspect(), reference), "incomplete")
+            decoder.side_effect = OSError("private transport detail")
+            self.assertEqual(compare(spec, root, self.inspect(), reference), "unavailable")
+            decoder.reset_mock(side_effect=True)
+            dump.write_bytes(b"changed dump")
+            self.assertEqual(compare(spec, root, self.inspect(), reference), "unavailable")
+            decoder.assert_not_called()
+        dump.write_bytes(before[dump])
+        self.assertEqual({p: p.read_bytes() for p in before}, before)
+
     def test_retained_archive_comparison_preserves_custody_and_requires_its_receipt(self) -> None:
         import io
         import json
@@ -1698,6 +1808,27 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         )
         self.assertFalse(observed["completed"])
         self.assertTrue(observed["raw_source_retained"])
+        for value in (name, checksum, reference["copied_sha1"]):
+            self.assertNotIn(value, json.dumps(observed))
+        archive([(name, b"bad")])
+        dump_before = (raw / "database.dump").read_bytes()
+        table = [
+            b"COPY public.ir_attachment (store_fname, checksum, file_size) FROM stdin;\n",
+            (name + "\t" + checksum + "\t" + str(reference["size"]) + "\n").encode(),
+            b"\\.\n",
+        ]
+        with patch.dict(
+            self.host, {"captured_attachment_table_lines": Mock(return_value=iter(table))}
+        ):
+            observed = self.run_host(spec)
+        RehearsalHostResult.model_validate(observed)
+        self.assertEqual(
+            observed["capture_attachment_validation"],
+            "capture_attachment_matches_copy_reference_differs",
+        )
+        self.assertEqual(observed["capture_database_reference_validation"], "reference_present")
+        self.assertFalse(observed["completed"])
+        self.assertEqual((raw / "database.dump").read_bytes(), dump_before)
         for value in (name, checksum, reference["copied_sha1"]):
             self.assertNotIn(value, json.dumps(observed))
         private["reference"] = {**reference, "name": "../private-fixture"}
@@ -2859,6 +2990,9 @@ class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.subTest(log_status=status, attachment_reason=attachment_reason):
                 observed["capture_attachment_validation"] = attachment_reason
+                observed.pop("capture_database_reference_validation", None)
+                if attachment_reason == "capture_attachment_matches_copy_reference_differs":
+                    observed["capture_database_reference_validation"] = "reference_present"
                 error = api.DokployRequestFailed(
                     method="GET",
                     path="/api/deployment.allByType",
@@ -2898,6 +3032,10 @@ class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(host.call_args.kwargs["operation_key"])
                 self.assertTrue(host.call_args.kwargs["inspect_capture"])
                 self.assertEqual(result["capture_attachment_validation"], attachment_reason)
+                self.assertEqual(
+                    result.get("capture_database_reference_validation"),
+                    observed.get("capture_database_reference_validation"),
+                )
                 self.assertEqual(result["recovery_disposition"], "hold_unknown")
         with patch.object(OdooRehearsalAdapter, "host", return_value=observed) as host:
             response = await request(

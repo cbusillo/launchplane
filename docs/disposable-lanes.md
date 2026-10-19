@@ -2679,6 +2679,26 @@ was found in the verified archive. These are observations of one row and the
 retained archive, not proof about the current business source, other attachment
 rows, the raw database dump, sanitization or recovery eligibility. They retain
 `hold_unknown` and never recopy, rewrite, recapture, restore or resume execute.
+When the captured member and copied file agree but conflict with the observed
+reference, the same original-bound readback may additionally report
+`capture_database_reference_validation`. It first verifies the retained dump's
+recorded digest and stable regular-file custody. The existing database
+container's `pg_restore` decodes only public `ir_attachment` data to a pipe,
+without a database connection, SQL execution, output file or dump copy. A
+bounded parser compares the canonical path, checksum and size tuple. It exports
+no table rows or private values and leaves the archive classification intact.
+`reference_present` proves that the conflicting tuple also occurs in the
+captured database. Together with the verified archive comparison, this proves
+an inconsistency within those captured inputs, without diagnosing current
+production data or identifying which attachment row originally failed.
+`reference_not_found` means that exact tuple was absent from the completely
+decoded selected table; it does not establish a sanitizer defect.
+Unsupported, incomplete, changed or unavailable input returns `unavailable`;
+the ten-minute dump/hash/decode budget returns `incomplete` on expiry. Decoded
+output is bounded by the reviewed database byte budget, and individual lines
+are bounded to one MiB. The decoder has a native timeout and its local process
+and pipes are closed on every exit. These codes keep the original journal and
+`hold_unknown`; they authorize neither data repair nor resumed execution.
 `failure_events_after_checkpoint` projects bounded provider event identities,
 times, fixed provider statuses, traceback presence, host function names and
 native traceback line numbers from
