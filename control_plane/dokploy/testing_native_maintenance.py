@@ -1,13 +1,57 @@
 """Fixed native drill maintenance over the existing managed host transport."""
 
-from typing import Any
+from typing import Any, Literal
 from collections.abc import Callable
 import inspect
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from control_plane._odoo_copy_runtime_guard import COPY_RUNTIME_INSPECTION_LIBRARY
 from control_plane._odoo_testing_native_maintenance_program import NATIVE_MAINTENANCE_LIBRARY
 from control_plane.dokploy.native_copy_stream import _read_remote
 from control_plane.dokploy.testing_retained_copy import qualify_retained_copy
+from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
+
+
+class NativeMaintenanceOutcome(BaseModel):
+    """Closed, value-free evidence from the fixed host protocol."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["complete"]
+    status: Literal[
+        "missing",
+        "eligible",
+        "recent_use",
+        "unqualified",
+        "disposed",
+        "incomplete",
+        "resumable",
+        "unknown",
+        "protected",
+        "active",
+        "resumable_retirement",
+        "recovery_required",
+        "observation_unavailable",
+    ]
+    reason: (
+        Literal[
+            "original_retirement_evidence_missing",
+            "original_retirement_not_dispatched",
+            "original_retirement_active",
+            "original_stop_outcome_unknown",
+            "original_retirement_remaining_steps",
+            "original_removal_outcome_unknown",
+            "native_copy_lock_busy",
+            "native_copy_custody_changed",
+            "original_mutation_outcome_unknown",
+            "native_copy_observation_unavailable",
+        ]
+        | None
+    ) = None
+    host_boot_id: str = Field(min_length=1, max_length=128)
+    host_monotonic: float = Field(ge=0, allow_inf_nan=False)
+    host_observed_at: float = Field(ge=0, allow_inf_nan=False)
+    identity_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
 
 
 def native_maintenance_host_program() -> str:
@@ -66,5 +110,10 @@ def native_maintenance_operation(
         dispatch_guard=dispatch_guard,
     )
     if len(frames) != 1 or frames[0].get("type") != "complete":
-        raise ValueError("Original native maintenance requires observation.")
-    return frames[0]
+        raise NativeSourceUnavailable("Original native maintenance requires observation.")
+    try:
+        return NativeMaintenanceOutcome.model_validate(frames[0]).model_dump(exclude_none=True)
+    except ValidationError as error:
+        raise NativeSourceUnavailable(
+            "Original native maintenance returned an invalid outcome."
+        ) from error

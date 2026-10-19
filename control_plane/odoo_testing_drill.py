@@ -717,6 +717,7 @@ class OdooTestingDrillScheduler:
             if (
                 not refused_before_publication
                 and operation.status in {"pending", "running"}
+                and not operation.error_code.startswith("native_testing_copy_")
                 and now
                 - datetime.fromisoformat(operation.created_at.replace("Z", "+00:00")).timestamp()
                 < DRILL_TIMEOUT_SECONDS
@@ -791,7 +792,7 @@ class OdooTestingDrillScheduler:
                     ),
                 )
             if payload["status"] == "fail":
-                if payload.get("failure_step") != payload["step"]:
+                if payload.get("failure_step") not in {payload["step"], DRILL_DEADLINE_STEP}:
                     payload.update(
                         failure_step=payload["step"],
                         failure_trace=payload["trace"],

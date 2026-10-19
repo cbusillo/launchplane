@@ -16,6 +16,7 @@ import time
 from typing import Any
 import unittest
 import uuid
+from unittest.mock import patch
 
 from control_plane._odoo_copy_runtime_guard import COPY_RUNTIME_INSPECTION_LIBRARY
 from control_plane._odoo_testing_native_maintenance_program import NATIVE_MAINTENANCE_LIBRARY
@@ -196,7 +197,8 @@ class NativeMaintenanceHostTests(unittest.TestCase):
             )
             return json.dumps({"witness": self.witness, "max_login_at": self.login}).encode()
         if arguments[0] == "stop":
-            self.assertEqual(arguments[1:3], ("--timeout", "-1"))
+            options = dict(zip(arguments[1:-1:2], arguments[2:-1:2]))
+            self.assertEqual(int(options.get("--timeout", options.get("-t", "0"))), -1)
             for descriptor in kwargs["pass_fds"]:
                 os.fstat(descriptor)
             self.containers[arguments[3]]["State"].update(
@@ -262,21 +264,18 @@ class NativeMaintenanceHostTests(unittest.TestCase):
     def test_backing_drift_after_control_plane_admission_refuses_before_stopping(self) -> None:
         self.spec["identity"]["physical_binding"] = "a" * 64
         self.spec["identity_sha256"] = canonical_json_sha256(self.spec["identity"])
-        with self.assertRaisesRegex(ValueError, "physical backing"):
-            self.run_mode("qualify-retirement")
+        self.assertEqual(self.run_mode("qualify-retirement")["status"], "protected")
         self.assertFalse(any(call[0] == "stop" for call in self.calls))
 
     def test_foreign_private_network_member_refuses_before_quiescing(self) -> None:
         self.network_members.add("foreign-consumer")
-        with self.assertRaisesRegex(ValueError, "foreign consumer"):
-            self.run_mode("qualify-retirement")
+        self.assertEqual(self.run_mode("qualify-retirement")["status"], "protected")
         self.assertFalse(any(call[0] == "stop" for call in self.calls))
 
     def test_restart_or_replacement_after_retirement_never_qualifies_for_removal(self) -> None:
         self.run_mode("qualify-retirement")
         self.containers["web"]["RestartCount"] += 1
-        with self.assertRaisesRegex(ValueError, "restarted or changed"):
-            self.run_mode("dispose-original")
+        self.assertEqual(self.run_mode("dispose-original")["status"], "protected")
         self.assertTrue(self.volumes)
 
     def test_same_name_volume_replacement_and_foreign_bind_consumer_refuse(self) -> None:
@@ -284,52 +283,45 @@ class NativeMaintenanceHostTests(unittest.TestCase):
         name = next(iter(self.volumes))
         original = deepcopy(self.volumes[name])
         self.volumes[name]["CreatedAt"] = "replacement"
-        with self.assertRaisesRegex(ValueError, "replaced"):
-            self.run_mode("dispose-original")
+        self.assertEqual(self.run_mode("dispose-original")["status"], "protected")
         self.volumes[name] = original
         self.containers["foreign"] = {
             "Id": "foreign",
             "Config": {},
             "Mounts": [{"Type": "bind", "Source": original["Mountpoint"]}],
         }
-        with self.assertRaisesRegex(ValueError, "another consumer"):
-            self.run_mode("dispose-original")
+        self.assertEqual(self.run_mode("dispose-original")["status"], "protected")
 
     def test_new_private_network_consumer_after_retirement_protects_the_copy(self) -> None:
         self.run_mode("qualify-retirement")
         self.network_members.add("new-foreign-consumer")
-        with self.assertRaisesRegex(ValueError, "network changed or has another consumer"):
-            self.run_mode("dispose-original")
+        self.assertEqual(self.run_mode("dispose-original")["status"], "protected")
         self.assertTrue(self.volumes)
 
     def test_private_network_requires_exact_original_compose_ownership(self) -> None:
         network = self.networks["original-private-network"]
         labels = dict(network["Labels"])
         network["Labels"] = {**labels, "com.docker.compose.project": "foreign-project"}
-        with self.assertRaisesRegex(ValueError, "not owned"):
-            self.run_mode("qualify-retirement")
+        self.assertEqual(self.run_mode("qualify-retirement")["status"], "protected")
         self.assertFalse(any(call[0] == "stop" for call in self.calls))
 
     def test_same_name_replacement_network_is_preserved(self) -> None:
         self.run_mode("qualify-retirement")
         original = self.networks.pop("original-private-network")
         self.networks["replacement-network"] = {**original, "Id": "replacement-network"}
-        with self.assertRaisesRegex(ValueError, "network was replaced"):
-            self.run_mode("dispose-original")
+        self.assertEqual(self.run_mode("dispose-original")["status"], "protected")
         self.assertTrue(self.containers)
         self.assertIn("replacement-network", self.networks)
 
     def test_nonlocal_network_is_not_given_deletion_authority(self) -> None:
         self.networks["original-private-network"].update(Driver="overlay", Scope="swarm")
-        with self.assertRaisesRegex(ValueError, "not owned"):
-            self.run_mode("qualify-retirement")
+        self.assertEqual(self.run_mode("qualify-retirement")["status"], "protected")
         self.assertFalse(any(call[0] == "stop" for call in self.calls))
 
     def test_lost_network_removal_reply_is_read_back_without_a_second_removal(self) -> None:
         self.run_mode("qualify-retirement")
         self.lose_after = ("network", "original-private-network")
-        with self.assertRaises(TimeoutError):
-            self.run_mode("dispose-original")
+        self.assertEqual(self.run_mode("dispose-original")["status"], "observation_unavailable")
         self.assertEqual(self.run_mode("inspect-original")["status"], "disposed")
         self.assertEqual(self.run_mode("dispose-original")["status"], "disposed")
         self.assertEqual(self.calls.count(("network", "rm", "original-private-network")), 1)
@@ -338,12 +330,11 @@ class NativeMaintenanceHostTests(unittest.TestCase):
         self.run_mode("qualify-retirement")
         self.lose_after = ("network", "original-private-network")
         self.remove_before_loss = False
-        with self.assertRaises(TimeoutError):
-            self.run_mode("dispose-original")
+        self.assertEqual(self.run_mode("dispose-original")["status"], "observation_unavailable")
         self.now += 121
         self.monotonic += 121
         self.spec.update(expires_at=self.now + 120, host_expires_at=self.monotonic + 120)
-        self.assertEqual(self.run_mode("dispose-original")["status"], "unknown")
+        self.assertEqual(self.run_mode("dispose-original")["status"], "recovery_required")
         self.assertEqual(self.calls.count(("network", "rm", "original-private-network")), 1)
 
     def test_partial_removal_lost_reply_resumes_only_original_resources_after_exclusion(
@@ -351,8 +342,7 @@ class NativeMaintenanceHostTests(unittest.TestCase):
     ) -> None:
         self.run_mode("qualify-retirement")
         self.lose_after = ("container", "web")
-        with self.assertRaises(TimeoutError):
-            self.run_mode("dispose-original")
+        self.assertEqual(self.run_mode("dispose-original")["status"], "observation_unavailable")
         self.assertEqual(self.run_mode("inspect-original")["status"], "incomplete")
         self.now += 121
         self.monotonic += 121
@@ -367,21 +357,19 @@ class NativeMaintenanceHostTests(unittest.TestCase):
         self.run_mode("qualify-retirement")
         self.lose_after = ("container", "web")
         self.remove_before_loss = False
-        with self.assertRaises(TimeoutError):
-            self.run_mode("dispose-original")
+        self.assertEqual(self.run_mode("dispose-original")["status"], "observation_unavailable")
         self.now += 121
         self.monotonic += 121
         self.spec["expires_at"] = self.now + 120
         self.spec["host_expires_at"] = self.monotonic + 120
-        self.assertEqual(self.run_mode("dispose-original")["status"], "unknown")
+        self.assertEqual(self.run_mode("dispose-original")["status"], "recovery_required")
         self.assertEqual(self.calls.count(("container", "rm", "web")), 1)
 
     def test_partial_volume_removal_uses_the_original_set_after_a_lost_reply(self) -> None:
         self.run_mode("qualify-retirement")
         name = next(iter(self.volumes))
         self.lose_after = ("volume", name)
-        with self.assertRaises(TimeoutError):
-            self.run_mode("dispose-original")
+        self.assertEqual(self.run_mode("dispose-original")["status"], "observation_unavailable")
         self.now += 121
         self.monotonic += 121
         self.spec["expires_at"] = self.now + 120
@@ -401,22 +389,19 @@ class NativeMaintenanceHostTests(unittest.TestCase):
     def test_host_wall_clock_rollback_cannot_extend_an_original_boot_deadline(self) -> None:
         self.monotonic += 121
         self.now -= 1000
-        with self.assertRaises(TimeoutError):
-            self.run_mode("qualify-retirement")
+        self.assertEqual(self.run_mode("qualify-retirement")["status"], "observation_unavailable")
         self.assertFalse(any(call[0] == "stop" for call in self.calls))
 
     def test_expired_original_payload_and_busy_host_lock_cannot_dispatch(self) -> None:
         self.spec["expires_at"] = self.now - 1
-        with self.assertRaises(TimeoutError):
-            self.run_mode("qualify-retirement")
+        self.assertEqual(self.run_mode("qualify-retirement")["status"], "observation_unavailable")
         self.spec["expires_at"] = self.now + 120
         executor = self.host["NativeMaintenanceHost"](
             self.spec, self.docker, receipt_root=self.state, lock_root=self.locks
         )
         executor.open()
         try:
-            with self.assertRaises(BlockingIOError):
-                self.run_mode("qualify-retirement")
+            self.assertEqual(self.run_mode("qualify-retirement")["status"], "active")
         finally:
             executor.close()
         self.assertFalse(any(call[0] == "stop" for call in self.calls))
@@ -433,3 +418,173 @@ class NativeMaintenanceHostTests(unittest.TestCase):
             update={"retained_candidate_namespaces": (self.fixture.gen.namespace,)}
         )
         self.assertNotEqual(original.model_dump(), retained.model_dump())
+
+    def next_admission(self) -> None:
+        self.now += 121
+        self.monotonic += 121
+        self.spec.update(expires_at=self.now + 120, host_expires_at=self.monotonic + 120)
+
+    def test_original_no_dispatch_retirement_continues_only_after_exclusion(self) -> None:
+        self.network_members.add("foreign")
+        self.assertEqual(self.run_mode("qualify-retirement")["status"], "protected")
+        self.assertFalse(any(call[0] == "stop" for call in self.calls))
+        self.network_members.remove("foreign")
+        self.assertEqual(self.run_mode("inspect-original")["status"], "active")
+        old = dict(self.spec)
+        self.next_admission()
+        self.assertEqual(self.run_mode("inspect-original")["status"], "resumable_retirement")
+        self.assertEqual(self.run_mode("qualify-retirement")["status"], "eligible")
+        mutations = [call for call in self.calls if call[0] == "stop"]
+        result = self.host["native_maintenance_main"](
+            {**old, "mode": "qualify-retirement"},
+            self.docker,
+            receipt_root=self.state,
+            lock_root=self.locks,
+            clock=lambda: self.now,
+            monotonic=lambda: self.monotonic,
+        )
+        self.assertEqual(result["status"], "observation_unavailable")
+        self.assertEqual(mutations, [call for call in self.calls if call[0] == "stop"])
+
+    def test_lost_stop_reply_continues_only_remaining_original_steps(self) -> None:
+        for service in ("web", "script-runner", "database"):
+            with self.subTest(service=service):
+                fixture = NativeMaintenanceHostTests()
+                fixture.setUp()
+                self.addCleanup(fixture.doCleanups)
+                command = fixture.docker
+
+                def lost(*arguments: str, **kwargs: Any) -> bytes:
+                    result = command(*arguments, **kwargs)
+                    if arguments[0] == "stop" and arguments[-1] == service:
+                        raise TimeoutError("fixture lost original stop reply")
+                    return result
+
+                with patch.object(fixture, "docker", side_effect=lost):
+                    self.assertEqual(
+                        fixture.run_mode("qualify-retirement")["status"], "observation_unavailable"
+                    )
+                if service != "database":
+                    self.assertEqual(fixture.run_mode("inspect-original")["status"], "active")
+                    fixture.next_admission()
+                    self.assertEqual(
+                        fixture.run_mode("inspect-original")["status"], "resumable_retirement"
+                    )
+                self.assertEqual(fixture.run_mode("qualify-retirement")["status"], "eligible")
+                self.assertEqual(
+                    sum(call[0] == "stop" and call[-1] == service for call in fixture.calls), 1
+                )
+
+    def test_uncertain_running_stop_is_never_repeated_after_expiry(self) -> None:
+        command = self.docker
+
+        def unknown(*arguments: str, **kwargs: Any) -> bytes:
+            if arguments[0] == "stop":
+                self.calls.append(arguments)
+                raise TimeoutError("fixture daemon work remains unknown")
+            return command(*arguments, **kwargs)
+
+        with patch.object(self, "docker", side_effect=unknown):
+            self.assertEqual(
+                self.run_mode("qualify-retirement")["status"], "observation_unavailable"
+            )
+        self.next_admission()
+        self.assertEqual(self.run_mode("inspect-original")["status"], "recovery_required")
+        self.assertEqual(self.run_mode("qualify-retirement")["status"], "recovery_required")
+        self.assertEqual(sum(call[0] == "stop" for call in self.calls), 1)
+        self.assertTrue(self.volumes)
+        self.containers["web"]["State"].update(Status="exited", FinishedAt="late-original-stop")
+        self.assertEqual(self.run_mode("inspect-original")["status"], "resumable_retirement")
+        self.assertEqual(self.run_mode("qualify-retirement")["status"], "eligible")
+        self.assertEqual(sum(call[0] == "stop" and call[-1] == "web" for call in self.calls), 1)
+
+    def test_history_is_durable_before_database_stop_and_finalization_recovers(self) -> None:
+        self.login = datetime.fromtimestamp(self.now - 60, UTC).isoformat()
+        command = self.docker
+        failed = False
+
+        def lost(*arguments: str, **kwargs: Any) -> bytes:
+            nonlocal failed
+            if (
+                arguments[:2] == ("ps", "-aq")
+                and all(item["State"]["Status"] == "exited" for item in self.containers.values())
+                and not failed
+            ):
+                failed = True
+                raise RuntimeError("fixture inventory failed after all stops")
+            return command(*arguments, **kwargs)
+
+        with patch.object(self, "docker", side_effect=lost):
+            self.assertEqual(
+                self.run_mode("qualify-retirement")["status"], "observation_unavailable"
+            )
+        self.assertEqual(self.run_mode("inspect-original")["status"], "recent_use")
+        self.assertEqual(sum(call[0] == "exec" for call in self.calls), 1)
+        self.assertEqual(sum(call[0] == "stop" for call in self.calls), 3)
+
+    def test_stopped_database_never_creates_unused_history(self) -> None:
+        self.containers["database"]["State"]["Status"] = "exited"
+        self.assertEqual(self.run_mode("qualify-retirement")["status"], "unqualified")
+        self.assertFalse(any(call[0] in {"exec", "start"} for call in self.calls))
+        self.assertTrue(self.volumes)
+
+    def test_legacy_incomplete_receipt_stays_protected(self) -> None:
+        executor = self.host["NativeMaintenanceHost"](
+            self.spec, self.docker, receipt_root=self.state, lock_root=self.locks
+        )
+        executor.open()
+        try:
+            executor.save(
+                {
+                    "identity": self.spec["identity"],
+                    "state": "qualifying",
+                    "invocation_boot_id": "earlier-boot",
+                    "containers": {},
+                }
+            )
+        finally:
+            executor.close()
+        self.assertEqual(self.run_mode("inspect-original")["status"], "protected")
+        self.assertEqual(self.run_mode("qualify-retirement")["status"], "protected")
+        self.assertFalse(any(call[0] == "stop" for call in self.calls))
+
+    def test_provider_denial_cannot_fall_through_to_another_stop(self) -> None:
+        command = self.docker
+
+        def denied(*arguments: str, **kwargs: Any) -> bytes:
+            if arguments[0] == "stop":
+                self.calls.append(arguments)
+                raise PermissionError("fixture daemon denied stop")
+            return command(*arguments, **kwargs)
+
+        with patch.object(self, "docker", side_effect=denied), self.assertRaises(PermissionError):
+            self.run_mode("qualify-retirement")
+        self.assertEqual(sum(call[0] == "stop" for call in self.calls), 1)
+        self.assertTrue(self.volumes)
+
+    def test_transport_preserves_protection_and_rejects_untyped_outcomes(self) -> None:
+        from control_plane.dokploy import testing_native_maintenance as transport
+        from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
+
+        frame = {
+            "type": "complete",
+            "status": "protected",
+            "reason": "native_copy_custody_changed",
+            "host_boot_id": "fixture-boot",
+            "host_monotonic": self.monotonic,
+            "host_observed_at": self.now,
+        }
+
+        def receive(**kwargs: Any) -> None:
+            kwargs["receive"](dict(frame))
+
+        with patch.object(transport, "_read_remote", side_effect=receive):
+            result = transport.native_maintenance_operation(
+                host="fixture", token="fixture", server_id="fixture", payload={}
+            )
+            self.assertEqual(result, frame)
+            frame["status"] = "unsafe_or_unknown_protocol"
+            with self.assertRaises(NativeSourceUnavailable):
+                transport.native_maintenance_operation(
+                    host="fixture", token="fixture", server_id="fixture", payload={}
+                )

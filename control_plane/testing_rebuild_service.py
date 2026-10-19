@@ -139,6 +139,10 @@ from control_plane.workflows.testing_rebuild import (
 class NativeTestingRebuildPending(ValueError):
     """The original effects need another observation, never an alternate dispatch."""
 
+    def __init__(self, message: str, *, code: str = "") -> None:
+        self.code = code
+        super().__init__(message)
+
 
 class NativeTestingRebuildAdmissionChanged(ValueError):
     """A source-defined admission refusal with a safe, useful operator cause."""
@@ -1732,16 +1736,17 @@ class NativeTestingRebuildExecution:
             recovery=True,
         )
 
-        def stop_compose() -> None:
-            from control_plane.odoo_testing_native_maintenance import (
-                qualifying_retirement,
-                qualify_and_stop,
-            )
+        from control_plane.odoo_testing_native_maintenance import (
+            qualifying_retirement,
+            retire_qualified_copy,
+        )
 
-            qualification = qualifying_retirement(self)
-            if qualification is not None:
-                qualify_and_stop(self, qualification)
-                return
+        qualification = qualifying_retirement(self)
+        if qualification is not None:
+            retire_qualified_copy(self, qualification)
+            return
+
+        def stop_compose() -> None:
             api.dokploy_request(
                 host=self.host,
                 token=self.token,

@@ -2100,6 +2100,10 @@ class NativeTestingWorkerTests(unittest.TestCase):
         for response in (
             success,
             service.NativeTestingRebuildPending("fixture observation pending"),
+            service.NativeTestingRebuildPending(
+                "fixture original stop observation required",
+                code="native_testing_copy_retirement_original_stop_outcome_unknown",
+            ),
             RuntimeError("Fixture execution lock lost after dispatch"),
             KeyError("Fixture malformed frame after dispatch"),
         ):
@@ -2150,6 +2154,8 @@ class NativeTestingWorkerTests(unittest.TestCase):
             self.assertFalse(terminal.finished_at if isinstance(response, Exception) else False)
             if isinstance(response, service.NativeTestingRebuildPending):
                 self.assertEqual(terminal.error_message, str(response))
+                if response.code:
+                    self.assertEqual(terminal.error_code, response.code)
 
     def test_lost_execution_lock_after_route_dispatch_keeps_original_observation(self) -> None:
         from contextlib import contextmanager

@@ -66,15 +66,13 @@ def _qualification(store: PostgresRecordStore, namespace: str) -> dict[str, Any]
         return None
     spec = record.response_payload
     if record.state != "completed" or record.request_fingerprint != canonical_json_sha256(spec):
-        raise ValueError("Original native qualification intent changed.")
+        raise DrillPrerequisite("native_testing_copy_recovery_or_retention_required")
     return spec
 
 
 def qualifying_retirement(executor: Any) -> dict[str, Any] | None:
     """Capture the actual retirement runtime, including intervening ordinary deploys."""
     operation, store, intent = executor.operation, executor.store, executor.intent
-    if operation.idempotency_scope != DRILL_SCOPE:
-        return None
     candidate = store.find_testing_candidate_by_target(intent.old.target_id)
     if candidate is None or candidate.application is None:
         return None
@@ -84,8 +82,18 @@ def qualifying_retirement(executor: Any) -> dict[str, Any] | None:
         # Historical/manual candidates without original drill lineage retain
         # the generic native storage-preserving stop behavior.
         return None
-    if creator.status != "pass" or creator.idempotency_scope != DRILL_SCOPE:
+    if creator.idempotency_scope != DRILL_SCOPE:
         return None
+    from control_plane.testing_rebuild_service import NativeTestingRebuildPending
+
+    def protected() -> NativeTestingRebuildPending:
+        return NativeTestingRebuildPending(
+            "Original drill-copy history requires recovery or retention.",
+            code="native_testing_copy_recovery_or_retention_required",
+        )
+
+    if creator.status != "pass" or not creator.is_native_testing_rebuild:
+        raise protected()
     publication = _publication(store, operation.product, operation.context, creator.operation_id)
     generation = intent.before.generation
     if (
@@ -94,20 +102,30 @@ def qualifying_retirement(executor: Any) -> dict[str, Any] | None:
         or generation is None
         or publication.plan.after.generation is None
     ):
-        return None
+        raise protected()
     if publication.plan.candidate != candidate or generation_binding(
         generation
     ) != generation_binding(publication.plan.after.generation):
-        raise ValueError("Retirement differs from the original drill copy witness.")
-    existing = _qualification(store, candidate.namespace)
+        raise protected()
+    try:
+        existing = _qualification(store, candidate.namespace)
+    except DrillPrerequisite as error:
+        from control_plane.testing_rebuild_service import NativeTestingRebuildPending
+
+        raise NativeTestingRebuildPending(str(error), code=str(error)) from error
     if existing is not None:
         if existing["identity"]["retiring_operation_id"] != operation.operation_id:
-            return None
+            from control_plane.testing_rebuild_service import NativeTestingRebuildPending
+
+            raise NativeTestingRebuildPending(
+                "An original retirement already owns this physical copy.",
+                code="native_testing_copy_original_retirement_owned",
+            )
         return existing
     provider = executor.old_provider()
     runtime = intent.before.runtime
     if runtime is None or not runtime.env.get("ODOO_DB_NAME"):
-        return None
+        raise protected()
     identity = {
         "namespace": candidate.namespace,
         "target_id": candidate.compose_id,
@@ -127,6 +145,7 @@ def qualifying_retirement(executor: Any) -> dict[str, Any] | None:
         "database_name": runtime.env["ODOO_DB_NAME"],
     }
     spec = {
+        "retirement_protocol": 1,
         "identity": identity,
         "identity_sha256": canonical_json_sha256(identity),
         "generation": generation.model_dump(mode="json"),
@@ -164,26 +183,168 @@ def qualifying_retirement(executor: Any) -> dict[str, Any] | None:
     return spec
 
 
-def qualify_and_stop(executor: Any, spec: dict[str, Any]) -> None:
-    """The caller dispatches this inside its existing original retire-old effect."""
-    clock = native_maintenance_operation(
-        host=executor.host,
-        token=executor.token,
-        server_id=executor.intent.server_id,
-        payload={**spec, "mode": "inspect-original"},
+def retire_qualified_copy(executor: Any, spec: dict[str, Any]) -> None:
+    """Settle the original stop independently of deletion qualification."""
+    from control_plane.testing_rebuild_service import NativeTestingRebuildPending
+
+    store, operation = executor.store, executor.operation
+    phase = "retire-old"
+    fingerprint = canonical_json_sha256({"intent": executor.intent.digest, "phase": phase})
+    key = operation.operation_id + ":" + phase
+    attempt_route = REBUILD_ROUTE + ":retirement-admission"
+    last: dict[str, Any] = {}
+
+    def pending(result: dict[str, Any]) -> NativeTestingRebuildPending:
+        code = "native_testing_copy_retirement_" + str(
+            result.get("reason", result.get("status", "unknown"))
+        )
+        return NativeTestingRebuildPending(code, code=code)
+
+    def remote(
+        mode: str,
+        admission: dict[str, Any] | None = None,
+        dispatch_guard: Callable[[Callable[[], None]], None] | None = None,
+    ) -> dict[str, Any]:
+        result = native_maintenance_operation(
+            host=executor.host,
+            token=executor.token,
+            server_id=executor.intent.server_id,
+            payload={**spec, **(admission or {}), "mode": mode},
+            dispatch_guard=dispatch_guard,
+        )
+        last.clear()
+        last.update(result)
+        return result
+
+    def stopped(result: dict[str, Any]) -> bool:
+        return result.get("status") in {"eligible", "recent_use", "unqualified", "disposed"}
+
+    class Retirement:
+        def target_key(self) -> str:
+            return str(executor.adapter.target_key()) + ":" + phase
+
+        def reconciliation_key(self) -> str:
+            return fingerprint
+
+        def observe(
+            self, provider_operation_key: str, provider_effect_phase: str, reconciliation_key: str
+        ) -> ProviderObservation:
+            result = remote("inspect-original")
+            if stopped(result):
+                return ProviderObservation("present", 200, {"retirement": "stopped"})
+            current = store.read_idempotency_record(
+                scope=REBUILD_SCOPE, route_path=REBUILD_ROUTE + ":effect", idempotency_key=key
+            )
+            admission = (
+                store.read_idempotency_record(
+                    scope=REBUILD_SCOPE,
+                    route_path=attempt_route,
+                    idempotency_key=key + ":" + str(current.attempt),
+                )
+                if current is not None
+                else None
+            )
+            # An expired WAL-protocol admission, observed under the original host
+            # locks, excludes delayed first dispatch. Receipt absence alone does not.
+            excluded_missing = (
+                result.get("status") == "missing"
+                and spec.get("retirement_protocol") == 1
+                and admission is not None
+                and (
+                    result.get("host_boot_id") != admission.response_payload["host_boot_id"]
+                    or float(result["host_monotonic"])
+                    >= float(admission.response_payload["host_expires_at"])
+                )
+            )
+            if result.get("status") == "resumable_retirement" or excluded_missing:
+                return ProviderObservation(
+                    "absent", retry_safe=True, preserve_effect_checkpoint=True
+                )
+            return ProviderObservation("unknown" if provider_effect_phase else "absent")
+
+        def apply(
+            self, provider_operation_key: str, lease: ProviderOperationLease
+        ) -> ProviderMutationOutcome:
+            assert isinstance(lease, ProviderEvidenceLease)
+            reservation = lease.evidence_reservation()
+            admission_key = key + ":" + str(reservation.attempt)
+            admission = store.read_idempotency_record(
+                scope=REBUILD_SCOPE, route_path=attempt_route, idempotency_key=admission_key
+            )
+            if admission is None:
+                clock = remote("inspect-original")
+                if stopped(clock):
+                    return ProviderMutationOutcome(
+                        200, {"retirement": "stopped"}, provider_effect_performed=False
+                    )
+                if clock.get("status") not in {"missing", "resumable_retirement"}:
+                    raise pending(clock)
+                stamp = datetime.now(UTC)
+                values = {
+                    "expires_at": stamp.timestamp() + 120,
+                    "host_boot_id": str(clock["host_boot_id"]),
+                    "host_expires_at": float(clock["host_monotonic"]) + 120,
+                }
+                store.write_idempotency_record_once(
+                    LaunchplaneIdempotencyRecord(
+                        record_id=build_launchplane_mutation_reservation_id(
+                            scope=REBUILD_SCOPE,
+                            route_path=attempt_route,
+                            idempotency_key=admission_key,
+                        ),
+                        scope=REBUILD_SCOPE,
+                        route_path=attempt_route,
+                        idempotency_key=admission_key,
+                        request_fingerprint=str(spec["identity_sha256"]),
+                        created_at=stamp.isoformat(),
+                        updated_at=stamp.isoformat(),
+                        recorded_at=stamp.isoformat(),
+                        response_status_code=200,
+                        response_trace_id=operation.operation_id,
+                        response_payload=values,
+                    )
+                )
+                admission = store.read_idempotency_record(
+                    scope=REBUILD_SCOPE, route_path=attempt_route, idempotency_key=admission_key
+                )
+            assert admission is not None
+            if admission.request_fingerprint != spec["identity_sha256"]:
+                raise ValueError("Original retirement admission changed copy identity.")
+
+            def dispatch(send: Callable[[], None]) -> None:
+                executor.guard(recovery=True)
+                target = store.read_dokploy_target_record(
+                    context_name=operation.context, instance_name="testing"
+                )
+                if target.policies.staff_testing_hold is not None:
+                    raise NativeTestingRebuildPending("staff_testing_hold")
+                lease.assert_current()
+                executor.lease.checkpoint_effect(phase)
+                original = lease.evidence_reservation()
+                if original.provider_effect_started_at:
+                    if original.provider_effect_phase != phase:
+                        raise pending({"status": "protected"})
+                else:
+                    lease.checkpoint_effect(phase)
+                send()
+
+            result = remote("qualify-retirement", admission.response_payload, dispatch)
+            if not stopped(result):
+                raise pending(result)
+            return ProviderMutationOutcome(200, {"retirement": "stopped"})
+
+    result = run_durable_provider_operation(
+        store=store,
+        scope=REBUILD_SCOPE,
+        route_path=REBUILD_ROUTE + ":effect",
+        idempotency_key=key,
+        request_fingerprint=fingerprint,
+        lease_owner=executor.lease.evidence_reservation().lease_owner,
+        response_trace_id=operation.operation_id,
+        adapter=Retirement(),
     )
-    native_maintenance_operation(
-        host=executor.host,
-        token=executor.token,
-        server_id=executor.intent.server_id,
-        payload={
-            **spec,
-            "mode": "qualify-retirement",
-            "expires_at": datetime.now(UTC).timestamp() + 120,
-            "host_boot_id": str(clock["host_boot_id"]),
-            "host_expires_at": float(clock["host_monotonic"]) + 120,
-        },
-    )
+    if result.status not in {"completed", "adopted", "replayed"}:
+        raise pending(last)
 
 
 def _settled_route_children(store: PostgresRecordStore, operation_id: str) -> bool:
@@ -235,15 +396,21 @@ def _require_completed_copy(
         candidate.resources_binding_sha256,
         candidate.operation_id,
     ):
-        raise ValueError("Native collection changed original copy custody.")
+        raise DrillPrerequisite("native_testing_copy_recovery_or_retention_required")
     for name in ("creator_operation_id", "retiring_operation_id"):
-        operation = store.read_odoo_stable_target_replacement_operation_record(identity[name])
+        try:
+            operation = store.read_odoo_stable_target_replacement_operation_record(identity[name])
+        except FileNotFoundError as error:
+            raise DrillPrerequisite("native_testing_copy_original_execution_unsettled") from error
         publication = _publication(
             store, candidate.product, candidate.context, operation.operation_id
         )
         if (
             operation.status != "pass"
-            or operation.idempotency_scope != DRILL_SCOPE
+            or not operation.is_native_testing_rebuild
+            or (name == "creator_operation_id" and operation.idempotency_scope != DRILL_SCOPE)
+            or (operation.product, operation.context, operation.instance)
+            != (candidate.product, candidate.context, "testing")
             or publication is None
             or publication.state != "applied"
             or not _settled_route_children(store, operation.operation_id)
@@ -254,9 +421,9 @@ def _require_completed_copy(
                 publication.plan.candidate != candidate
                 or publication.plan.digest != identity["creator_publication_sha256"]
             ):
-                raise ValueError("Native creator publication changed.")
+                raise DrillPrerequisite("native_testing_copy_recovery_or_retention_required")
         elif publication.plan.before.target_id.target_id != candidate.compose_id:
-            raise ValueError("Native retiring successor changed.")
+            raise DrillPrerequisite("native_testing_copy_recovery_or_retention_required")
         parent = store.read_idempotency_record(
             scope=REBUILD_SCOPE, route_path=REBUILD_ROUTE, idempotency_key=operation.operation_id
         )
@@ -273,6 +440,13 @@ def _require_completed_copy(
         intent = NativeTestingRebuildIntent.model_validate(
             store.read_original_mutation_intent(parent)
         )
+        if (
+            intent.operation_id != operation.operation_id
+            or intent.profile.product != candidate.product
+            or intent.old.target_id != publication.plan.before.target_id.target_id
+            or intent.before.target_id != publication.plan.before.target_id
+        ):
+            raise DrillPrerequisite("native_testing_copy_original_execution_unsettled")
         phase = "route:" + publication.plan.candidate.namespace
         forward = store.read_idempotency_record(
             scope=REBUILD_SCOPE,
@@ -289,7 +463,7 @@ def _require_completed_copy(
         ):
             raise DrillPrerequisite("native_testing_copy_original_route_unsettled")
         if name == "retiring_operation_id" and intent.digest != identity["retiring_intent_sha256"]:
-            raise ValueError("Original retiring intent changed.")
+            raise DrillPrerequisite("native_testing_copy_recovery_or_retention_required")
     for phase in ("disable-old-auto-deploy", "retire-old"):
         record = store.read_idempotency_record(
             scope=REBUILD_SCOPE,
@@ -509,15 +683,19 @@ def _reconcile_copy(
                 if current is not None
                 else None
             )
-            expired = admission is not None and datetime.now(UTC).timestamp() >= float(
-                admission.response_payload["expires_at"]
+            excluded = admission is not None and (
+                result.get("host_boot_id") != admission.response_payload["host_boot_id"]
+                or float(result["host_monotonic"])
+                >= float(admission.response_payload["host_expires_at"])
             )
             if (
                 provider_effect_phase
-                and expired
+                and excluded
                 and result.get("status") in {"missing", "eligible", "resumable"}
             ):
-                return ProviderObservation("absent", retry_safe=True)
+                return ProviderObservation(
+                    "absent", retry_safe=True, preserve_effect_checkpoint=True
+                )
             return ProviderObservation("unknown" if provider_effect_phase else "absent")
 
         def apply(
@@ -528,7 +706,15 @@ def _reconcile_copy(
                 lease.assert_current()
                 executor.lease.assert_current()
                 executor.lease.checkpoint_effect("native-copy-disposal")
-                lease.checkpoint_effect("native-copy-disposal")
+                assert isinstance(lease, ProviderEvidenceLease)
+                original = lease.evidence_reservation()
+                if original.provider_effect_started_at:
+                    if original.provider_effect_phase != "native-copy-disposal":
+                        raise DrillPrerequisite(
+                            "native_testing_copy_recovery_or_retention_required"
+                        )
+                else:
+                    lease.checkpoint_effect("native-copy-disposal")
                 from control_plane.storage.testing_native_disposal import dispatch_native_disposal
 
                 assert isinstance(lease, ProviderEvidenceLease)
@@ -609,9 +795,15 @@ def _reconcile_copy(
     inspection = remote("inspect-original")
     if inspection.get("status") == "recent_use":
         raise DrillSkipped("native_testing_copy_recent_successful_signin")
-    if inspection.get("status") in {"unknown", "incomplete"}:
+    if inspection.get("status") in {"unknown", "incomplete", "active", "observation_unavailable"}:
         raise DrillPrerequisite("native_testing_copy_cleanup_pending")
-    if inspection.get("status") in {"missing", "unqualified"}:
+    if inspection.get("status") in {
+        "missing",
+        "unqualified",
+        "protected",
+        "recovery_required",
+        "resumable_retirement",
+    }:
         raise DrillPrerequisite("native_testing_copy_recovery_or_retention_required")
     assert isinstance(executor.lease, ProviderEvidenceLease)
     result = run_durable_provider_operation(

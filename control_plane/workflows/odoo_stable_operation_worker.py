@@ -2414,7 +2414,11 @@ def _execute_target_replacement_with_checkpoint(
         terminal_operation = (
             _retry_source_order_read(
                 operation,
-                code="testing_rebuild_observation_pending",
+                code=(
+                    error.code
+                    if isinstance(error, NativeTestingRebuildPending) and error.code
+                    else "testing_rebuild_observation_pending"
+                ),
                 message=rebuild_message,
             )
             if rebuild_pending

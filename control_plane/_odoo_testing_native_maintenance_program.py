@@ -139,7 +139,48 @@ class NativeMaintenanceHost:
         self.current()
         existing=self.read()
         if existing is not None:
-            return self.inspect(existing)
+            result=self.inspect(existing)
+            if result['status']!='resumable_retirement':
+                return result
+            receipt=existing
+        else:
+            receipt={'identity':self.identity,'state':'retirement','retirement':{},
+                'qualification':False,'max_login_at':None,'resources':{}}
+        receipt.update(invocation_expires_at=self.spec['expires_at'],
+            invocation_boot_id=self.spec['host_boot_id'],
+            invocation_host_expires_at=self.spec['host_expires_at'])
+        self.save(receipt)
+        containers,volumes,networks=self.retirement_resources()
+        originals={item['Id']:self.fingerprint(item) for _,item in containers.values()}
+        retirement=receipt['retirement']
+        if retirement:
+            if set(originals)!=set(retirement['originals']) or volumes!=receipt['volumes'] or networks!=receipt['networks']:
+                raise ValueError('Original retirement custody changed')
+            self.unchanged_lifetimes(originals,retirement['originals'])
+        else:
+            retirement.update(originals=originals,stops={key:{'state':'not_dispatched'} for key in originals},history='unavailable')
+            receipt.update(volumes=volumes,networks=networks,containers={})
+            self.save(receipt)
+        for service in ('web','script-runner'):
+            self.stop_original(receipt,containers[service][1])
+        database=containers['database'][1]
+        if retirement['history']=='unavailable':
+            self.capture_history(receipt,database)
+        self.stop_original(receipt,database)
+        return self.finish_retirement(receipt)
+
+    @staticmethod
+    def unchanged_lifetimes(current,originals):
+        for identifier,original in originals.items():
+            item=current[identifier]
+            if any(item[key]!=original[key] for key in ('id','labels','started_at','restart_count')):
+                raise ValueError('Original retirement process was replaced or restarted')
+
+    def invocation_excluded(self,receipt):
+        host=native_host_clock()
+        return host['host_boot_id']!=receipt.get('invocation_boot_id') or host['host_monotonic']>=receipt.get('invocation_host_expires_at',float('inf'))
+
+    def retirement_resources(self):
         containers=inspect_copy_runtime(self.spec,expected_instance='testing')
         own={value[1]['Id'] for value in containers.values()}
         all_containers=self.inventory()
@@ -170,18 +211,37 @@ class NativeMaintenanceHost:
                 if json.loads(environment.get('LAUNCHPLANE_RUNTIME_IDENTITY_JSON','null'))!=self.spec['runtime_identity']:
                     raise ValueError('Retirement runtime identity changed')
         volumes={name:self.volume(name) for name in (self.namespace+'-data',self.namespace+'-db',self.namespace+'-logs')}
-        receipt={'identity':self.identity,'state':'qualifying','volumes':volumes,'containers':{},
-            'networks':networks,
-            'qualification':False,'max_login_at':None,'observed_at':self.clock(),'resources':{},
-            'invocation_expires_at':self.spec['expires_at'],
-            'invocation_boot_id':self.spec['host_boot_id'],'invocation_host_expires_at':self.spec['host_expires_at']}
+        return containers,volumes,networks
+
+    def stop_original(self,receipt,container):
+        identifier=container['Id']
+        current={item['Id']:item for item in self.inventory()}
+        original=receipt['retirement']['originals'][identifier]
+        if identifier not in current:
+            raise ValueError('Original retirement process disappeared')
+        self.unchanged_lifetimes({identifier:self.fingerprint(current[identifier])},{identifier:original})
+        step=receipt['retirement']['stops'][identifier]
+        if current[identifier]['State']['Status'] in {'created','exited'}:
+            step.update(state='stopped',fingerprint=self.fingerprint(current[identifier]))
+            self.save(receipt)
+            return
+        if step['state']!='not_dispatched':
+            raise TimeoutError('Original stop remains uncertain')
+        step['state']='dispatching';self.save(receipt)
+        self.docker('stop','--timeout','-1',identifier,mutation=True)
+        current={item['Id']:item for item in self.inventory()}
+        if identifier not in current or current[identifier]['State']['Status'] not in {'created','exited'}:
+            raise TimeoutError('Original stop remains uncertain')
+        self.unchanged_lifetimes({identifier:self.fingerprint(current[identifier])},{identifier:original})
+        step.update(state='stopped',fingerprint=self.fingerprint(current[identifier]))
         self.save(receipt)
-        for service in ('web','script-runner'):
-            self.docker('stop','--timeout','-1',containers[service][1]['Id'],mutation=True)
+
+    def capture_history(self,receipt,database):
         # No old database is started. A successful NULL is distinct from a
         # failed query. PostgreSQL timestamps in Odoo are naive UTC.
         try:
-            if database.get('State',{}).get('Status')!='running':
+            current={item['Id']:item for item in self.inventory()}
+            if database['Id'] not in current or current[database['Id']].get('State',{}).get('Status')!='running':
                 raise ValueError('Original database is not running')
             sql=("BEGIN READ ONLY; SET LOCAL statement_timeout='5s'; SELECT json_build_object("
                 "'witness',(SELECT value FROM ir_config_parameter WHERE key=:'witness_key'),"
@@ -202,26 +262,60 @@ class NativeMaintenanceHost:
                     raise ValueError('Original login timestamp is unreadable')
                 login=login.isoformat()
             receipt.update(qualification=True,max_login_at=login)
+            receipt['retirement']['history']='captured'
         except (ValueError,RuntimeError,TimeoutError,subprocess.SubprocessError):
             # Ordinary admitted native retirement still preserves the copy.
             receipt['qualification']=False
-        self.docker('stop','--timeout','-1',database['Id'],mutation=True)
+            receipt['retirement']['history']='protected'
+        self.save(receipt)
+
+    def finish_retirement(self,receipt):
         current=self.inventory()
+        own=set(receipt['retirement']['originals'])
         members=[item for item in current if item['Id'] in own]
         if len(members)!=len(own) or any(item.get('State',{}).get('Status') not in {'created','exited'} for item in members):
             raise ValueError('Original retirement remains unknown')
-        if {name:self.volume(name) for name in volumes}!=volumes:
+        self.unchanged_lifetimes({item['Id']:self.fingerprint(item) for item in members},receipt['retirement']['originals'])
+        if {name:self.volume(name) for name in receipt['volumes']}!=receipt['volumes']:
             raise ValueError('Retired storage backing changed')
         receipt.update(state='retained',containers={item['Id']:self.fingerprint(item) for item in members},observed_at=self.clock())
         self.save(receipt)
         return self.inspect(receipt)
+
+    def inspect_retirement(self,receipt):
+        retirement=receipt.get('retirement')
+        if not retirement:
+            return {'status':'resumable_retirement' if self.invocation_excluded(receipt) else 'active',
+                'reason':'original_retirement_not_dispatched'}
+        current={item['Id']:item for item in self.inventory()}
+        originals=retirement['originals']
+        if not set(originals)<=set(current):
+            raise ValueError('Original retirement process disappeared')
+        self.unchanged_lifetimes({key:self.fingerprint(current[key]) for key in originals},originals)
+        for identifier,step in retirement['stops'].items():
+            item=current[identifier]
+            if step['state']=='stopped' and self.fingerprint(item)!=step['fingerprint']:
+                raise ValueError('Stopped original retirement process changed')
+            if item['State']['Status'] in {'created','exited'}:
+                step.update(state='stopped',fingerprint=self.fingerprint(item))
+        self.save(receipt)
+        if all(step['state']=='stopped' for step in retirement['stops'].values()):
+            return self.finish_retirement(receipt)
+        uncertain=any(step['state']=='dispatching' for step in retirement['stops'].values())
+        if not self.invocation_excluded(receipt):
+            return {'status':'active','reason':'original_retirement_active'}
+        return {'status':'recovery_required' if uncertain else 'resumable_retirement',
+            'reason':'original_stop_outcome_unknown' if uncertain else 'original_retirement_remaining_steps'}
 
     def inspect(self, receipt=None, *, continuing=False):
         receipt=receipt or self.read()
         if receipt is None:
             return {'status':'missing'}
         if receipt['state']=='qualifying':
-            return {'status':'incomplete'}
+            return {'status':'protected' if self.invocation_excluded(receipt) else 'active',
+                'reason':'original_retirement_evidence_missing'}
+        if receipt['state']=='retirement':
+            return self.inspect_retirement(receipt)
         if receipt['state']=='disposed':
             return {'status':'disposed','identity_sha256':self.digest}
         current={item['Id']:item for item in self.inventory()}
@@ -242,7 +336,7 @@ class NativeMaintenanceHost:
                 if network.get('Id')!=identifier or network.get('Name')!=original['name'] or network.get('Labels')!=original['labels'] or network.get('Driver')!=original['driver'] or network.get('Scope')!=original['scope'] or network.get('Ingress')!=original['ingress'] or network.get('Internal') is not True or not isinstance(network.get('Containers'),dict) or not set(network['Containers'])<=own&set(current):
                     raise ValueError('Retired private network changed or has another consumer')
                 if resource['state']=='dispatching':
-                    return {'status':'unknown'}
+                    return self.uncertain_removal(receipt)
             elif resource['state'] not in {'dispatching','absent'}:
                 raise ValueError('Original private network disappeared without its disposal intent')
             else:
@@ -263,7 +357,7 @@ class NativeMaintenanceHost:
                 if self.fingerprint(current[identifier])!=fingerprint:
                     raise ValueError('Retired process restarted or changed')
                 if resource['state']=='dispatching':
-                    return {'status':'unknown'}
+                    return self.uncertain_removal(receipt)
             elif resource['state'] not in {'dispatching','absent'}:
                 raise ValueError('Original container disappeared without its disposal intent')
             else:
@@ -274,7 +368,7 @@ class NativeMaintenanceHost:
                 if self.volume(name)!=original:
                     raise ValueError('Retired volume was replaced')
                 if resource['state']=='dispatching':
-                    return {'status':'unknown'}
+                    return self.uncertain_removal(receipt)
                 path=Path(original['path'])
                 for identifier,container in current.items():
                     for mount in container.get('Mounts',[]):
@@ -302,6 +396,10 @@ class NativeMaintenanceHost:
             # dispatched. A delayed old invocation must reject its own expiry.
             return {'status':'resumable'}
         return {'status':'eligible'}
+
+    def uncertain_removal(self,receipt):
+        return {'status':'recovery_required' if self.invocation_excluded(receipt) else 'unknown',
+            'reason':'original_removal_outcome_unknown'}
 
     @staticmethod
     def original_resources(receipt):
@@ -356,6 +454,19 @@ def native_maintenance_main(spec, command, *, receipt_root=None, lock_root=None,
         if spec['mode']=='dispose-original':
             return executor.dispose()
         raise ValueError('Unsupported native maintenance mode')
+    except PermissionError:
+        raise
+    except BlockingIOError:
+        return {'status':'active','reason':'native_copy_lock_busy'}
+    except ValueError:
+        return {'status':'protected','reason':'native_copy_custody_changed'}
+    except (TimeoutError,RuntimeError,subprocess.SubprocessError):
+        receipt=executor.read() if executor.directory is not None else None
+        uncertain=receipt is not None and (
+            any(item.get('state')=='dispatching' for item in receipt.get('resources',{}).values()) or
+            any(item.get('state')=='dispatching' for item in receipt.get('retirement',{}).get('stops',{}).values()))
+        return {'status':'recovery_required' if uncertain and executor.invocation_excluded(receipt) else 'observation_unavailable',
+            'reason':'original_mutation_outcome_unknown' if uncertain else 'native_copy_observation_unavailable'}
     finally:
         executor.close()
 """

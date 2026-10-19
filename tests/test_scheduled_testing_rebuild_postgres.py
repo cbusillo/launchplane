@@ -36,6 +36,18 @@ class ScheduledNativePostgresTests(unittest.TestCase):
     def test_five_daily_copies_with_ordinary_deploys_keep_bounded_physical_custody(self) -> None:
         self.fixture().test_five_scheduled_copies_reclaim_older_drills_and_preserve_manual_baseline()
 
+    def test_manual_native_successor_preserves_original_drill_collection_proof(self) -> None:
+        self.fixture().test_manual_native_successor_qualifies_original_drill_for_later_collection()
+
+    def test_original_retirement_continuation_preserves_its_effect_fence(self) -> None:
+        self.fixture().test_original_retirement_resumes_only_after_host_no_dispatch_exclusion()
+
+    def test_disposal_cp_clock_cannot_exclude_live_host_admission(self) -> None:
+        self.fixture().test_disposal_cp_clock_jump_cannot_exclude_live_host_admission()
+
+    def test_retention_cannot_exclude_uncertain_stop_or_authorize_inverse(self) -> None:
+        self.fixture().test_uncertain_original_retirement_cannot_rollback_or_borrow_retention()
+
     def test_unknown_failed_original_allocation_blocks_new_capture(self) -> None:
         self.fixture().test_unknown_failed_allocation_blocks_another_physical_capture()
 

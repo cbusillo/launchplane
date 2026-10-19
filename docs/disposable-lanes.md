@@ -2198,12 +2198,40 @@ or expired observations cannot substitute for that hold.
 The native rebuild stops its predecessor only after verified cutover and
 publication and preserves its storage. Scheduled drills add separate bounded
 maintenance before another allocation. A copy qualifies only when its original
-creator and retiring successor are both passing service drill operations. During
-that original retirement, the fixed host program quiesces its own web and runner,
+creator is a passing native service drill and its exact retiring successor is a
+passing native rebuild. The successor may be a scheduled drill or the supported
+manual native rebuild; its original intent, lane, parent reservation, publication
+and route/retirement effects must agree. A passing unrelated operation supplies
+no proof. During that original retirement, the fixed host program quiesces its own web and runner,
 reads its committed database witness and maximum successful-login timestamp
 across all accounts, and gracefully stops the existing database. It never starts
 a stopped database to manufacture evidence. The recorded effective runtime and
 provider configuration include ordinary deploys between creation and retirement.
+
+Retirement completion and deletion qualification are separate facts. Before the
+first stop, the host persists every original container ID and process lifetime.
+Each exact-ID stop has a durable dispatch marker and observed stopped result;
+the history result is persisted before the database stop. Lost replies observe
+that original work. After the original boot-bound admission is excluded, a new
+attempt of the same effect may continue only never-dispatched steps, and only
+after all dispatched original stops are observed stopped. A still-running
+uncertain stop is never resent. A local timeout, wall-clock expiry or CLI exit
+does not exclude Docker daemon work. All original processes stopped can complete
+retirement even when history is unavailable; that copy remains unqualified and
+protected. Legacy incomplete receipts without per-stop evidence remain protected
+and cannot acquire invented no-dispatch proof.
+
+A custody refusal or denial never falls through to another stop command.
+Authorization denial retains its original identity and trace. Active invocation,
+transient unavailable observation, protected custody drift and original mutation
+uncertainty have distinct outcomes. Expired incomplete qualification and
+long-lived cleanup uncertainty identify original recovery or explicit retention
+as the remedy, instead of remaining generic cleanup pending forever. A held
+retirement keeps the original service-owned operation observable; it does not
+require a different caller or a new grant. A failed new-copy health check cannot
+roll traffic back or re-adopt the old copy while its original stop is uncertain.
+Explicit retention protects storage but does not cancel that stop or exclude its
+effect. Rebuild an independent copy rather than restarting retired processes.
 
 The collector keeps the serving copy and its immediate predecessor from the
 current applied publication. It removes older qualified drill copies, up to four
