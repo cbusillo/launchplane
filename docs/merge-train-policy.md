@@ -2215,66 +2215,81 @@ the controller lease.
 
 Both native controller and standalone batch landings persist pending completed
 feedback before candidate cleanup or returning to the caller. The existing
-terminal-feedback recovery drains it even during an otherwise idle worker pass;
-repeated cleanup does not queue the same landing again. Queueing performs no
-provider calls under the controller lease. For a merged PR on the default branch,
-completed feedback reconciles planning metadata for its native closing references. For a managed
-issue authored by an identity already trusted by the repository's enqueue
-policy, it requires completed closure, a reviewed clear wait, and closed native
-blockers and sub-issues. It preserves open finish lines and reporter-owned
-issues. It never closes or reopens an issue. The repository's
-`.github/github.json` planning labels and configured Project select the metadata;
-otherwise the planning protocol's standard labels apply. Unrelated labels and
-the issue body remain intact. Its saved comment carries a hidden
-`launchplane-planning-reconciliation` receipt with the landing SHA and issue
-readbacks. The persisted record schema stays compatible with older workers
-during rolling deployment and rollback. A receipt is evidence, never authority;
-each retry uses the current policy's trusted identities.
+terminal-feedback recovery drains it even during an otherwise idle worker pass.
+The feedback delivery lock serializes queue observation and persistence. An earlier
+building record for the same landing cannot suppress completion, even when its
+clock is later: the new receipt retains that later observed timestamp and its
+fresh creation order. A completed record with a saved planning receipt is not
+queued again; legacy completion without that receipt can recover. Newer feedback
+from a different controller attempt remains protected. Queueing performs no
+provider calls under the controller lease.
 
-Completed feedback also covers closed stack children and release-branch trains.
-Those preserve their existing completion comment with an explicit
-`not_applicable`, `ok: false` receipt: no issue discovery or metadata mutation
-applies, and the receipt is not planning-completion proof. The provider must
-return a real merged flag, matching feedback/PR base and a known default branch;
-missing or mismatched identity evidence remains a global hold. A null merge
-timestamp is normal for an unmerged stack child and is not parsed on this path.
+For a merged PR on the default branch, completed feedback discovers its native
+closing references and their direct blocking dependents and parents, including
+neighbors of non-plan or held sources. The deduplicated neighborhood is bounded
+to 100 records and is discovered before metadata writes; it is not recursive.
+Each planning target's status and labels derive from its current open native
+blockers and trusted structured wait through the same pinned pure package used
+by the catalog. The last blocker closing makes an otherwise clear open target
+active; remaining blockers and actual waits remain visible. Open stale/done
+scope holds and unread open waits preserve their labels for owning review.
+Closed lifecycle cleanup preserves actual waits and recorded waiting when the
+wait history is unread. No issue is closed or reopened, and no issue body,
+comment, wait record or native relationship is rewritten.
 
-A held, reporter-owned or not-yet-closed source does not prevent other eligible
-sources in the same PR from being reconciled. The held source stays unchanged,
-and its diagnostic keeps the overall planning receipt incomplete. Provider
-metadata-write failures still stop that delivery through existing retry/denial
-handling.
-Issue-specific Project membership gaps are preflight holds, so they also preserve
-only that issue. Unresolvable Project configuration, permissions, mutations and
-readback failures stop delivery. Saved receipts retain successful source readbacks
-even when a later source's provider operation fails; that source is marked
-interrupted. Once every source has been visited and only terminal source holds
-remain, the landed PR comment is published with a visible incomplete-planning
-note and a failed, nonretryable receipt. This preserves landing feedback without
-claiming all source metadata is complete. Pending projection and global/provider
-failures still withhold the comment.
+Full source completion retains the stronger existing guards: a managed issue
+created by a numerically trusted automation identity, completed native closure,
+a reviewed clear wait, and closed native blockers and sub-issues. Reporter-owned
+sources and open finish lines require source acceptance review. A closed managed source
+with an actual or unread wait can receive only lifecycle label cleanup; its
+full completion remains unverified. An issue-specific Project membership gap
+also permits label cleanup while keeping full completion in review. Configured
+Project mutations retain their existing capability and readback requirements.
+
+Every target uses its actual default branch's `.github/github.json`, or verified
+standard planning labels when that file is absent. Same-account foreign targets
+require an existing authorized repository policy and their own exact repository
+token and trusted author IDs. HTTP delivery checks the current identity before
+target token resolution and again for the actual default-branch policy. The
+scheduler admits only the active service authorization scope. Enrollment alone
+supplies no authority. Missing target scope and another account require review;
+there is no source-token, default-main or alternate-credential fallback. Current
+policy reconstructs this resolver for initial delivery and terminal retries;
+tokens and callbacks are never persisted in feedback.
+
+Fresh issue, native graph, wait and configuration reads guard writes and verify
+readback. The hidden `launchplane-planning-reconciliation` receipt retains the
+landing SHA and every known target, including skipped targets and verified
+prior results. Per-row success, verified evidence, coverage and full source
+completion are distinct. A known repository denial prevents that repository's
+writes while independent authorized repositories can continue. A global identity
+failure or unknown write outcome stops later writes. Discovery-time failures
+apply before any metadata write and retain already discovered neighbors. Failed
+source provider evidence withholds comment delivery; terminal source holds can
+publish the existing incomplete-planning note. These outcomes do not undo the
+landing or grant access.
 
 Provider failures use terminal feedback's existing retry and quota backoff.
-Explicit transient GraphQL errors, including HTTP-200 rate-limit responses, use
-that same retry path; authorization denial takes precedence. Unknown GraphQL
-failures need review. GitHub's delayed keyword-closure projection waits only within
-15 minutes of the verified PR merge time. This includes an issue reopened before
-a later merge whose new closure has not projected yet. Any still-open source
-after that window requires owning review and stays unchanged. A merge timestamp
-slightly ahead of the worker clock waits within the same bounded grace, before
-any issue IO. Missing, invalid, inconsistent or further-future timestamps need
-owning review. A real wait, incomplete prerequisite, cross-repository closing link,
-untrusted author, malformed evidence or readback mismatch leaves a failed
-receipt for owning-agent review. This failure does not undo the landing. Queueing
-does no GitHub IO, but metadata delivery adds requests to the serial scheduler;
-latency can delay later targets and shared App quota can affect other repositories.
-Permission failures remain failures, without
-a credential or identity fallback. Configured Projects require the existing
-token's Projects capability; no new grant is requested by this path.
-An owning agent can review these cases and use the catalog's supported
-`gh-plan.py reconcile-landing --pr N --apply` for retrospective repair.
-Historical feedback records without a planning receipt are not proof that
-planning was reconciled.
+Completion and retry share a sanitized classification cached on the original
+HTTP error, so a one-shot secondary-quota body is consumed only once. Explicit
+transient GraphQL errors, including HTTP-200 rate-limit responses, use that same
+retry path; authorization denial takes precedence. Unknown GraphQL failures need
+review. No raw error body or token is stored in planning receipts.
+
+Completed feedback for unmerged closed stack children or release-branch trains
+preserves its existing comment with an explicit `not_applicable`, `ok: false`
+receipt: no issue discovery or metadata mutation applies. Missing or mismatched
+provider identity remains a hold. GitHub's keyword-closure projection and a
+slightly future merge timestamp wait only within 15 minutes of the verified
+merge time. Still-open sources after that grace require owning review.
+
+The persisted feedback record schema remains compatible with older workers
+through rolling deployment and rollback. A receipt is evidence, never authority.
+Metadata delivery adds requests to the serial scheduler; shared App quota and
+latency can affect other repositories. An owning agent can review partial cases
+and use the catalog's supported `gh-plan.py reconcile-landing --pr N --apply` or
+explicit `reconcile-status` recovery. Historical feedback without a planning
+receipt does not prove reconciliation.
 
 ## Original review recovery
 
