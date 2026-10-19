@@ -679,6 +679,81 @@ class RehearsalScenario(unittest.TestCase):
             # Any later call is observation only; the original apply cannot run.
             self.assertTrue(all(call.args[1] == "observe" for call in host.call_args_list[calls:]))
 
+    def test_input_refusal_before_any_effect_releases_only_its_fresh_reservation(self) -> None:
+        adapter = self.adapter("prepare")
+        with (
+            patch.object(
+                OdooRehearsalAdapter,
+                "inputs",
+                side_effect=RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED),
+            ),
+            patch.object(OdooRehearsalAdapter, "host") as host,
+            self.assertRaises(RehearsalRefused),
+        ):
+            self.run_operation(adapter, "fresh-refusal")
+        self.assertEqual(self.store.list_held_provider_target_reservations(), ())
+        host.assert_not_called()
+        self.assertEqual(self.store.read_odoo_upgrade_rehearsal(self.identifier), self.record)
+
+    def test_partial_execute_journal_is_bound_to_its_original_key_without_writes(self) -> None:
+        prepare_rehearsal_local_credentials(self.store, self.identifier, actor=self.principal)
+        prepared = self.record.model_copy(update={"state": "prepared", "compose_id": "own-compose"})
+        self.store.compare_and_write_odoo_upgrade_rehearsal(self.record, prepared)
+        adapter = self.adapter("execute")
+        with patch.object(OdooRehearsalAdapter, "host", side_effect=TimeoutError("private detail")):
+            with self.assertRaises(TimeoutError):
+                self.run_operation(adapter, "original-execute")
+        before = self.store.list_held_provider_target_reservations()
+        journal = adapter.operation_readback(prepared, "original-execute")
+        self.assertEqual(journal["operation_state"], before[0].state)
+        self.assertEqual(journal["provider_effect_phase"], before[0].provider_effect_phase)
+        self.assertEqual(
+            journal["provider_effect_started_at"], before[0].provider_effect_started_at
+        )
+        with self.assertRaises(RehearsalRefused):
+            adapter.operation_readback(prepared, "different-key")
+        self.assertEqual(self.store.list_held_provider_target_reservations(), before)
+        self.assertEqual(self.store.read_odoo_upgrade_rehearsal(self.identifier), prepared)
+
+    def test_failure_events_expose_only_fixed_codes_and_frames_since_original_checkpoint(
+        self,
+    ) -> None:
+        from control_plane.dokploy import api
+
+        record = self.record.model_copy(update={"compose_id": "own-compose"})
+        checkpoint = datetime.now(timezone.utc)
+        current = {"deploymentId": "failed-source-event", "createdAt": checkpoint.isoformat()}
+        older = {"deploymentId": "older-event", "createdAt": "2000-01-01T00:00:00Z"}
+        log = [
+            'File "<rehearsal>", line 99, in capture',
+            'File "<rehearsal>", line 10, in bounded_capture',
+            "RuntimeError: Incomplete source copy",
+            "PRIVATE_VALUE=do-not-export",
+        ]
+        with (
+            patch.object(
+                api,
+                "fetch_dokploy_target_payload",
+                return_value={"serverId": record.server_id, "appName": record.rehearsal_id},
+            ),
+            patch(
+                "control_plane.dokploy.post_deploy._resolve_dokploy_schedule_runtime",
+                return_value=("server", record.server_id, "", record.server_id),
+            ),
+            patch.object(
+                api, "find_matching_dokploy_schedule", return_value={"scheduleId": "owned"}
+            ),
+            patch.object(api, "dokploy_request", return_value=[current, older]),
+            patch.object(api, "fetch_dokploy_deployment_logs", return_value=log) as logs,
+        ):
+            events = self.adapter("execute").failure_events(record, checkpoint.isoformat())
+        logs.assert_called_once()
+        self.assertEqual(events[0]["deployment_id"], current["deploymentId"])
+        self.assertEqual(events[0]["failure_frames"], ["bounded_capture", "capture"])
+        self.assertEqual(events[0]["failure_codes"], ["source_stream_incomplete"])
+        self.assertNotIn("PRIVATE_VALUE", str(events))
+        self.assertNotIn("do-not-export", str(events))
+
     def run_operation(
         self, adapter: OdooRehearsalAdapter, key: str
     ) -> DurableProviderOperationResult:
@@ -1281,6 +1356,57 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         return cast(
             dict[str, Any], json.loads(bytes.fromhex(output.getvalue().strip().split("=", 1)[1]))
         )
+
+    def test_partial_prepare_and_capture_report_custody_without_replaying(self) -> None:
+        spec, root, _ = self.storage_fixture(
+            {"database_bytes": 40, "filestore_bytes": 80, "staging_bytes": 20, "reserve_bytes": 10}
+        )
+        spec.update(mode="observe", action="prepare")
+        spec["record"]["state"] = "planned"
+        (root / "prepare.started").touch()
+        self.host["docker"] = Mock(
+            side_effect=AssertionError("Custody observation must not execute")
+        )
+        observed = self.run_host(spec)
+        self.assertEqual(
+            observed["custody"],
+            {
+                "effect_started": True,
+                "raw_database_bytes": None,
+                "raw_filestore_bytes": None,
+                "raw_filestore_extracted": False,
+                "capture_receipt_present": False,
+                "capture_pending_present": False,
+                "source_snapshot_directory_present": False,
+            },
+        )
+        self.assertFalse(observed["completed"])
+        self.assertFalse(observed["prepare_not_started"])
+        spec.update(action="execute")
+        spec["record"]["state"] = "prepared"
+        (root / "execute.started").touch()
+        raw = root / "raw-source"
+        raw.mkdir()
+        (raw / "database.dump").write_bytes(b"partial fixture")
+        before = (raw / "database.dump").read_bytes()
+        observed = self.run_host(spec)
+        self.assertTrue(observed["custody"]["effect_started"])
+        self.assertEqual(observed["custody"]["raw_database_bytes"], len(before))
+        self.assertIsNone(observed["custody"]["raw_filestore_bytes"])
+        self.assertTrue(observed["raw_source_retained"])
+        self.assertFalse(observed["completed"])
+        self.assertEqual((raw / "database.dump").read_bytes(), before)
+        self.host["docker"].assert_not_called()
+        import fcntl
+
+        with (root / ".execution.lock").open("w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with self.assertRaises(BlockingIOError):
+                self.run_host(spec)
+        self.assertEqual((raw / "database.dump").read_bytes(), before)
+        (raw / "filestore").symlink_to(self.fixture.root, target_is_directory=True)
+        with self.assertRaisesRegex(RuntimeError, "custody directory is aliased"):
+            self.run_host(spec)
 
     def test_historical_capture_fits_without_recharging_completed_copies(self) -> None:
         from types import SimpleNamespace

@@ -304,15 +304,16 @@ class RehearsalClientTests(unittest.TestCase):
                 )
                 post.assert_called_once()
 
-    def test_readback_only_preserves_prepare_key_for_a_recovery_refusal(self) -> None:
+    def test_readback_preserves_each_original_key_for_an_uncertain_effect(self) -> None:
         from control_plane.contracts.odoo_upgrade_rehearsal import RehearsalPrerequisite
 
         for action, status, code, required in (
             ("prepare", 409, RehearsalPrerequisite.RECOVERY_REQUIRED, True),
             ("prepare", 403, "authorization_denied", False),
             ("prepare", 404, "not_found", False),
-            ("prepare", 409, RehearsalPrerequisite.STATE_UNVERIFIED, False),
-            ("execute", 409, RehearsalPrerequisite.RECOVERY_REQUIRED, False),
+            ("prepare", 409, RehearsalPrerequisite.STATE_UNVERIFIED, True),
+            ("execute", 409, RehearsalPrerequisite.RECOVERY_REQUIRED, True),
+            ("execute", 409, RehearsalPrerequisite.STATE_UNVERIFIED, True),
         ):
             with self.subTest(action=action, status=status, code=code):
                 result_code, result, post = self.call(

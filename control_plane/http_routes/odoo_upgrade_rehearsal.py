@@ -217,7 +217,27 @@ def register_odoo_upgrade_rehearsal_routes(
                                     )
                                 },
                             }
-                        return adapter.host(record, "observe", check)
+                        observation = adapter.host(record, "observe", check)
+                        if idempotency_key and observation.get("completed") is False:
+                            observation.update(adapter.operation_readback(record, idempotency_key))
+                            try:
+                                observation["failure_events_after_checkpoint"] = (
+                                    adapter.failure_events(
+                                        record, str(observation["provider_effect_started_at"])
+                                    )
+                                )
+                            except api.DokployRequestFailed as error:
+                                if error.status_code in {401, 403}:
+                                    raise
+                                observation["failure_events_unavailable"] = True
+                            except (ValueError, RuntimeError, OSError, click.ClickException):
+                                observation["failure_events_unavailable"] = True
+                            observation.update(
+                                recovery_disposition="hold_unknown",
+                                recovery_reason="incomplete_original_effect",
+                                original_key_required=True,
+                            )
+                        return observation
 
                 result = await run_in_worker_thread(observe)
                 result = {
@@ -239,6 +259,21 @@ def register_odoo_upgrade_rehearsal_routes(
                     "completed": result["completed"],
                     "raw_source_retained": result["raw_source_retained"],
                     "prepare_not_started": result.get("prepare_not_started", False),
+                    **({"custody": result["custody"]} if result.get("custody") else {}),
+                    **(
+                        {"failure_events_unavailable": True}
+                        if result.get("failure_events_unavailable")
+                        else {}
+                    ),
+                    **(
+                        {
+                            "failure_events_after_checkpoint": result[
+                                "failure_events_after_checkpoint"
+                            ]
+                        }
+                        if "failure_events_after_checkpoint" in result
+                        else {}
+                    ),
                 }
             else:
                 record, _, _ = await run_in_worker_thread(

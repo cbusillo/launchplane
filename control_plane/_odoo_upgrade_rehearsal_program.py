@@ -360,6 +360,88 @@ def read_refusal(spec, root):
     return result
 
 
+def custody_observation(spec, root, action):
+    def size(path):
+        try:
+            metadata=path.lstat()
+        except FileNotFoundError:
+            return None
+        if not stat.S_ISREG(metadata.st_mode):
+            raise RuntimeError('Rehearsal custody file is aliased')
+        return metadata.st_size
+    def directory(path):
+        try:
+            metadata=path.lstat()
+        except FileNotFoundError:
+            return False
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise RuntimeError('Rehearsal custody directory is aliased')
+        return True
+    raw=root/'raw-source'
+    directory(raw)
+    return {'effect_started':size(root/(action+'.started')) is not None,
+        'raw_database_bytes':size(raw/'database.dump'),
+        'raw_filestore_bytes':size(raw/'filestore.tar'),
+        'raw_filestore_extracted':directory(raw/'filestore'),
+        'capture_receipt_present':size(root/'capture.json') is not None,
+        'capture_pending_present':size(root/'capture.pending') is not None,
+        'source_snapshot_directory_present':directory(root/database_names(spec)['source'])}
+
+
+def observe(spec, root, receipt):
+    record=spec['record']
+    namespace=record['rehearsal_id']
+    action=spec['action']
+    if not receipt.is_file() or receipt.is_symlink():
+        if not (root/(action+'.started')).exists():
+            refused=read_refusal(spec,root)
+            if refused is not None:
+                print('rehearsal_result='+json.dumps(refused).encode().hex())
+                return
+        copies=[]
+        for database in database_names(spec).values():
+            saved=root/database/'receipt.json'
+            if saved.is_file() and not saved.is_symlink():
+                copy=json.loads(saved.read_text())
+                validate_snapshots(spec,root,{},[copy],retired=True)
+                copies.append(copy)
+        prepare_not_started=False
+        marker=root/(action+'.started')
+        raw=root/'raw-source'
+        if (action=='prepare' and record['state']=='planned' and not copies
+                and not marker.exists() and not marker.is_symlink()
+                and not receipt.exists() and not receipt.is_symlink()
+                and not raw.exists() and not raw.is_symlink()):
+            try:
+                prepare_not_started=not docker('ps','-a','--filter',
+                    'label=com.docker.compose.project='+namespace,'--format','{{.ID}}').strip()
+            except Exception:
+                pass
+        result={'intent_sha256':record['intent_sha256'],'state':record['state'],'copies':copies,
+            'elapsed_seconds':record['elapsed_seconds'],'resources_preserved':True,'public_route':False,
+            'business_host_frozen':False,'completed':False,'raw_source_retained':raw.is_dir(),
+            'prepare_not_started':prepare_not_started,
+            'custody':custody_observation(spec,root,action)}
+        print('rehearsal_result='+json.dumps(result).encode().hex())
+        return
+    result=json.loads(receipt.read_text())
+    if result['intent_sha256']!=record['intent_sha256']:
+        raise RuntimeError('Another rehearsal owns this receipt')
+    states=['planned','prepared','upgraded','switched','verified','retired']
+    historical=states.index(record['state'])>states.index(result['state'])
+    observed_state=record['state'] if historical else result['state']
+    database,image=current({**spec,'record':{**record,'state':observed_state}})
+    containers=inspection(spec,database,image)
+    validate_snapshots(spec,root,containers,result['copies'],retired=historical or observed_state=='retired')
+    if observed_state=='retired':
+        if any(item[1].get('State',{}).get('Running') is not False for item in containers.values()):
+            raise RuntimeError('Rehearsal runtime retirement is not observed')
+    elif observed_state in {'upgraded','switched'}:
+        private_health(spec,containers)
+    print('rehearsal_result='+json.dumps(result).encode().hex())
+    return
+
+
 def main():
     spec=json.loads(base64.b64decode(sys.argv[1],validate=True))
     record=spec['record']
@@ -372,52 +454,17 @@ def main():
     action=spec['action']
     receipt=root/(action+'.json')
     if spec['mode']=='observe':
-        if not receipt.is_file() or receipt.is_symlink():
-            if not (root/(action+'.started')).exists():
-                refused=read_refusal(spec,root)
-                if refused is not None:
-                    print('rehearsal_result='+json.dumps(refused).encode().hex())
-                    return
-            copies=[]
-            for database in database_names(spec).values():
-                saved=root/database/'receipt.json'
-                if saved.is_file() and not saved.is_symlink():
-                    copy=json.loads(saved.read_text())
-                    validate_snapshots(spec,root,{},[copy],retired=True)
-                    copies.append(copy)
-            prepare_not_started=False
-            marker=root/(action+'.started')
-            raw=root/'raw-source'
-            if (action=='prepare' and record['state']=='planned' and not copies
-                    and not marker.exists() and not marker.is_symlink()
-                    and not receipt.exists() and not receipt.is_symlink()
-                    and not raw.exists() and not raw.is_symlink()):
-                try:
-                    prepare_not_started=not docker('ps','-a','--filter',
-                        'label=com.docker.compose.project='+namespace,'--format','{{.ID}}').strip()
-                except Exception:
-                    pass
-            result={'intent_sha256':record['intent_sha256'],'state':record['state'],'copies':copies,
-                'elapsed_seconds':record['elapsed_seconds'],'resources_preserved':True,'public_route':False,
-                'business_host_frozen':False,'completed':False,'raw_source_retained':raw.is_dir(),
-                'prepare_not_started':prepare_not_started}
-            print('rehearsal_result='+json.dumps(result).encode().hex())
-            return
-        result=json.loads(receipt.read_text())
-        if result['intent_sha256']!=record['intent_sha256']:
-            raise RuntimeError('Another rehearsal owns this receipt')
-        states=['planned','prepared','upgraded','switched','verified','retired']
-        historical=states.index(record['state'])>states.index(result['state'])
-        observed_state=record['state'] if historical else result['state']
-        database,image=current({**spec,'record':{**record,'state':observed_state}})
-        containers=inspection(spec,database,image)
-        validate_snapshots(spec,root,containers,result['copies'],retired=historical or observed_state=='retired')
-        if observed_state=='retired':
-            if any(item[1].get('State',{}).get('Running') is not False for item in containers.values()):
-                raise RuntimeError('Rehearsal runtime retirement is not observed')
-        elif observed_state in {'upgraded','switched'}:
-            private_health(spec,containers)
-        print('rehearsal_result='+json.dumps(result).encode().hex())
+        lock_path=root/'.execution.lock'
+        if lock_path.is_symlink():
+            raise RuntimeError('Rehearsal execution lock is aliased')
+        try:
+            lock=lock_path.open('r')
+        except FileNotFoundError:
+            observe(spec,root,receipt)
+        else:
+            with lock:
+                fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                observe(spec,root,receipt)
         return
     root.mkdir(mode=0o700,parents=True,exist_ok=True)
     os.chmod(root,0o700)

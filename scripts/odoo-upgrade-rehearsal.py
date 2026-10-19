@@ -187,10 +187,13 @@ def main() -> int:
                     or (
                         args.mode == "readback"
                         and draft is not None
-                        and draft.action == "prepare"
                         and bool(args.idempotency_key)
                         and error.code == 409
-                        and code == RehearsalPrerequisite.RECOVERY_REQUIRED
+                        and code
+                        in {
+                            RehearsalPrerequisite.RECOVERY_REQUIRED,
+                            RehearsalPrerequisite.STATE_UNVERIFIED,
+                        }
                     ),
                 }
             )
