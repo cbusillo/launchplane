@@ -132,6 +132,10 @@ class MergeTrainControllerReplyResult(TypedDict, total=False):
     branch_update_result: dict[str, Any]
     details: dict[str, Any]
     error: dict[str, Any]
+    # Read-only and recorded historical completion passes, requested with
+    # `historical_completion` instead of an ordinary pass.
+    historical_completion_preflight: dict[str, Any]
+    historical_completion_disposition: dict[str, Any]
 
 
 @with_config(_CLOSED)

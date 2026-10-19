@@ -459,6 +459,16 @@
           "title": "Error",
           "type": "object"
         },
+        "historical_completion_disposition": {
+          "additionalProperties": true,
+          "title": "Historical Completion Disposition",
+          "type": "object"
+        },
+        "historical_completion_preflight": {
+          "additionalProperties": true,
+          "title": "Historical Completion Preflight",
+          "type": "object"
+        },
         "landing_plan": {
           "additionalProperties": true,
           "title": "Landing Plan",
