@@ -6,6 +6,7 @@ from unittest.mock import patch
 from cryptography.fernet import Fernet
 
 from control_plane.workflows.launchplane_self_deploy import (
+    _RETIRED_WORK_GRAPH_ENV_KEYS,
     LaunchplaneSelfDeployRequest,
     execute_launchplane_self_deploy,
 )
@@ -41,16 +42,7 @@ class LaunchplaneSelfDeployWorkflowTests(unittest.TestCase):
         )
 
     def test_retired_work_graph_env_can_be_removed_but_not_delivered(self) -> None:
-        retired_env = {
-            "GH_TOKEN": "synthetic-retired-credential",
-            "LAUNCHPLANE_WORK_GRAPH_PROJECT_OWNER": "example-owner",
-            "LAUNCHPLANE_WORK_GRAPH_PROJECT_NUMBER": "4",
-            "LAUNCHPLANE_WORK_GRAPH_PROJECT_LIMIT": "200",
-            "LAUNCHPLANE_WORK_GRAPH_PROJECT_SIGNAL_LIMIT": "50",
-            "LAUNCHPLANE_WORK_GRAPH_ISSUE_INBOX_REPOSITORIES": "example/repo",
-            "LAUNCHPLANE_WORK_GRAPH_ISSUE_INBOX_LIMIT": "100",
-            "LAUNCHPLANE_WORK_GRAPH_GH_BINARY": "gh",
-        }
+        retired_env = dict.fromkeys(_RETIRED_WORK_GRAPH_ENV_KEYS, "synthetic-retired-value")
         payload = {
             "target_type": "compose",
             "target_id": "compose-test",
@@ -58,10 +50,6 @@ class LaunchplaneSelfDeployWorkflowTests(unittest.TestCase):
         }
         for key, value in retired_env.items():
             with (
-                patch(
-                    "control_plane.workflows.launchplane_self_deploy.dokploy_source.read_dokploy_config",
-                    return_value=("https://dokploy.example.test", "synthetic-provider-token"),
-                ),
                 self.subTest(key=key),
                 self.assertRaisesRegex(ValueError, "does not accept oauth_env key"),
             ):

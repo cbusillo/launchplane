@@ -51,7 +51,7 @@ const ENGINEERING_SURFACES = [
   },
   {
     detail:
-      "Inspect explicit repository inventory and Code Plans membership without browser reconciliation.",
+      "Review the issue inbox and its source status.",
     icon: GitPullRequestArrow,
     label: "Read only",
     title: "Issue inbox",

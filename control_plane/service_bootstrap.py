@@ -45,10 +45,6 @@ from control_plane.preview_lifecycle_scheduler import PreviewLifecycleScheduler
 from control_plane.release_digest import ReleaseDigestScheduler
 
 
-def _utc_now_timestamp() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
 def _now_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 

@@ -4,7 +4,7 @@ title: Work Graph Read Model
 
 ## Status
 
-The work graph remains available under [DIRECTION.md](../DIRECTION.md).
+The work graph remains available under the Q543 implementation scope.
 [Q543](https://github.com/cbusillo/launchplane/issues/2436#issuecomment-6273441298)
 removes the GitHub Project and issue-inbox sources. The future location of this
 view is an open Director decision tracked in [#4137](https://github.com/cbusillo/launchplane/issues/4137).
@@ -101,7 +101,7 @@ Project-sourced planning facts and the GitHub issue-inbox reader/reconciler were
 removed under [Q543](https://github.com/cbusillo/launchplane/issues/2436#issuecomment-6273441298).
 Empty planning facts do not erase work-request facts. Engineering > Work graph
 continues to rank and display these non-Project items. No GitHub token is needed
-for this view. Where the view lives going forward remains Chris's decision.
+for this view. Where the view lives going forward remains the Director's decision.
 The snapshot route writes no records.
 
 Agents and admin tools can read the same repository classification source

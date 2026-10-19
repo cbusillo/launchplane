@@ -11,6 +11,7 @@ import unittest
 
 from control_plane.deploy_failure_alert import FINAL_VERIFICATION_TIMEOUT_SECONDS
 from tests.support.workflows import load_workflow
+from control_plane.workflows.launchplane_self_deploy import _RETIRED_WORK_GRAPH_ENV_KEYS
 
 
 class DeployLaunchplaneWorkflowTests(unittest.TestCase):
@@ -356,16 +357,7 @@ if [ -f "$RUNNER_TEMP/probed" ] || [ "${HEALTH_RECOVERED:-false}" = true ]; then
         self.assertEqual(oauth_env["LAUNCHPLANE_DEPLOYMENT_MARKER"], "deploy-marker")
 
     def test_self_deploy_removes_project_source_even_when_old_inputs_are_present(self) -> None:
-        retired = {
-            "LAUNCHPLANE_WORK_GRAPH_PROJECT_OWNER": "example-owner",
-            "LAUNCHPLANE_WORK_GRAPH_PROJECT_NUMBER": "4",
-            "LAUNCHPLANE_WORK_GRAPH_PROJECT_LIMIT": "200",
-            "LAUNCHPLANE_WORK_GRAPH_PROJECT_SIGNAL_LIMIT": "50",
-            "LAUNCHPLANE_WORK_GRAPH_ISSUE_INBOX_REPOSITORIES": "example/repo",
-            "LAUNCHPLANE_WORK_GRAPH_ISSUE_INBOX_LIMIT": "100",
-            "LAUNCHPLANE_WORK_GRAPH_GH_BINARY": "gh",
-            "GH_TOKEN": "synthetic-retired-credential",
-        }
+        retired = dict.fromkeys(_RETIRED_WORK_GRAPH_ENV_KEYS, "synthetic-retired-value")
         payload = self._render(
             "Render Launchplane self deploy request",
             {
