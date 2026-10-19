@@ -3008,7 +3008,10 @@ def _sync_artifact_image_reference_for_target(
     retired_keys = site_environment.retired_keys
     try:
         control_plane_live_target_runtime.validate_provider_key_retirement(
-            retired_keys=set(retired_keys), application_keys=set()
+            retired_keys=set(retired_keys),
+            application_keys=set(),
+            context_name=context_name,
+            instance_name=instance_name,
         )
     except control_plane_live_target_runtime.LiveTargetRuntimeError as error:
         raise click.ClickException(str(error)) from error
