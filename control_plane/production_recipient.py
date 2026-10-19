@@ -137,11 +137,15 @@ def readable_provider_compose(document: Any) -> dict[str, Any]:
 
 
 def read_provider_compose(raw: str) -> dict[str, Any]:
-    """Dokploy accepts YAML; malformed text remains an unreadable observation."""
+    """Preserve JSON source semantics and accept Dokploy's YAML observations."""
     try:
-        return readable_provider_compose(yaml.safe_load(raw))
-    except yaml.YAMLError as error:
-        raise ValueError("Provider Compose observation is unreadable.") from error
+        document = json.loads(raw)
+    except json.JSONDecodeError:
+        try:
+            document = yaml.safe_load(raw)
+        except yaml.YAMLError as error:
+            raise ValueError("Provider Compose observation is unreadable.") from error
+    return readable_provider_compose(document)
 
 
 def authority_snapshot(store: PostgresRecordStore, product: str, context: str) -> dict[str, Any]:

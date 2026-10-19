@@ -23,6 +23,7 @@ from control_plane.production_recipient import (
     custody,
     plan,
     qualified_render,
+    read_provider_compose,
 )
 from control_plane.provider_operations import run_durable_provider_operation
 from control_plane.runtime_environments import SiteRuntimeEnvironment
@@ -606,3 +607,28 @@ class ProductionRecipientTests(unittest.TestCase):
         document["services"]["web"]["environment"]["DB_HOST"] = "database"
         document["services"]["web"]["environment"]["DATABASE_URL"] = "mysql://database:3306/example"
         qualified_render(record.model_copy(update={"compose_source": json.dumps(document)}), values)
+
+
+class ProviderComposeReaderTests(unittest.TestCase):
+    def test_json_primitives_keep_their_source_semantics(self) -> None:
+        document = {
+            "services": {
+                "web": {
+                    "image": "example/site",
+                    "command": ["serve", "--title=Shipping \U0001f680"],
+                    "environment": {
+                        "DISPLAY_NAME": "Shipping \U0001f680",
+                        "RATE": 1e-7,
+                        "LARGE": 1e20,
+                        "COUNT": 3,
+                        "EMPTY": None,
+                        "ON_WORD": "on",
+                        "HEX_LIKE": "0x10",
+                    },
+                    "init": True,
+                    "read_only": False,
+                }
+            },
+            "volumes": {},
+        }
+        self.assertEqual(read_provider_compose(json.dumps(document)), document)

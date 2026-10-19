@@ -6,7 +6,6 @@ from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timezone
 import json
-
 from typing import Any
 from unittest.mock import patch
 
@@ -530,3 +529,70 @@ def assert_committed_receipt_survives_later_drift(fixture: Any, *, recovered: bo
         fixture.assertEqual(adapter.current()[1].recovered, recovered)
         fixture.assertEqual(store.list_held_provider_target_reservations(), ())
     fixture.assertEqual(calls.count("apply"), 1)
+
+
+def assert_json_number_source_qualifies(case: Any) -> None:
+    """Prepare and recover a valid source whose JSON exponent differs from YAML 1.1."""
+    from tests.test_production_recipient import ProductionRecipientTests
+
+    original_setup = ProductionRecipientTests.setUp
+    original_run = ProductionRecipientTests.run_operation
+
+    def source_setup(fixture: Any) -> None:
+        original_setup(fixture)
+        fixture.document["services"]["web"]["environment"]["RATE"] = 1e-7
+        fixture.body = fixture.body.model_copy(
+            update={"mode": "dry-run", "reviewed_plan_sha256": ""}
+        )
+        fixture.adapter.request = fixture.body
+        reviewed = fixture.adapter.current()
+        fixture.body = fixture.body.model_copy(
+            update={"mode": "apply", "reviewed_plan_sha256": reviewed.plan_sha256}
+        )
+        fixture.adapter.request = fixture.body
+
+    def converted(fixture: Any, **kwargs: Any) -> str:
+        document = json.loads(fixture.provider[kwargs["compose_id"]]["composeFile"])
+        return yaml.safe_dump(document, allow_unicode=True)
+
+    def prepare(fixture: Any, *args: Any, **kwargs: Any) -> Any:
+        with patch(
+            "control_plane.production_recipient.compose.fetch_dokploy_converted_compose_file",
+            side_effect=lambda **kw: converted(fixture, **kw),
+        ):
+            result = original_run(fixture, *args, **kwargs)
+        fixture.assertEqual(result.status, "completed")
+        return result
+
+    database_factory = case.scenario_database
+    with (
+        nullcontext("") if database_factory is None else database_factory() as database_url,
+        patch.object(ProductionRecipientTests, "setUp", source_setup),
+        patch.object(ProductionRecipientTests, "run_operation", prepare),
+    ):
+        fixture = type(case)()
+        fixture.database_url = database_url
+        try:
+            fixture.setUp()
+            with (
+                patch(
+                    "control_plane.production_recipient.compose.fetch_dokploy_converted_compose_file",
+                    side_effect=lambda **kw: converted(fixture.fixture, **kw),
+                ),
+                patch(
+                    "control_plane.production_recipient_recovery.run_recipient_program",
+                    side_effect=fixture.host,
+                ),
+            ):
+                completed = fixture.run_recovery()
+                fixture.assertTrue(completed.response_payload["result"]["recovered"])
+                fixture.assertTrue(fixture.adapter.current()[1].recovered)
+                fixture.assertEqual(len(fixture.calls), 1)
+                with patch(
+                    "control_plane.production_recipient_recovery.run_recipient_program",
+                    side_effect=AssertionError("Receipt replay must not contact the host"),
+                ):
+                    replay = fixture.run_recovery()
+                fixture.assertEqual(replay.response_payload, completed.response_payload)
+        finally:
+            fixture.doCleanups()

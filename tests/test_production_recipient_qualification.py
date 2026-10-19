@@ -31,6 +31,7 @@ from tests.support.recipient_recovery_observation import (
     UNREADABLE_OBSERVATIONS,
     assert_observation_scenarios,
     assert_equivalent_yaml_source_qualifies,
+    assert_json_number_source_qualifies,
     assert_committed_receipt_survives_later_drift,
     assert_optional_provider_fields_remain_qualified,
 )
@@ -441,6 +442,9 @@ class RecipientRecoveryTests(unittest.TestCase):
 
     def test_equivalent_yaml_provider_source_qualifies(self) -> None:
         assert_equivalent_yaml_source_qualifies(self)
+
+    def test_json_number_provider_source_qualifies(self) -> None:
+        assert_json_number_source_qualifies(self)
 
     def test_committed_receipt_survives_later_provider_drift(self) -> None:
         assert_committed_receipt_survives_later_drift(self)

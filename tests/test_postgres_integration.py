@@ -12556,6 +12556,9 @@ class RealPostgresRecipientRecoveryTests(unittest.TestCase):
     def test_equivalent_yaml_provider_source_qualifies(self) -> None:
         self.fixture.test_equivalent_yaml_provider_source_qualifies()
 
+    def test_json_number_provider_source_qualifies(self) -> None:
+        self.fixture.test_json_number_provider_source_qualifies()
+
     def test_committed_receipt_survives_later_provider_drift(self) -> None:
         self.fixture.test_committed_receipt_survives_later_provider_drift()
 
@@ -12613,6 +12616,9 @@ class RealPostgresPublishedRecipientRecoveryTests(unittest.TestCase):
 
     def test_equivalent_yaml_provider_source_qualifies(self) -> None:
         self.fixture.test_equivalent_yaml_provider_source_qualifies()
+
+    def test_json_number_provider_source_qualifies(self) -> None:
+        self.fixture.test_json_number_provider_source_qualifies()
 
     def test_committed_receipt_survives_later_provider_drift(self) -> None:
         self.fixture.test_committed_receipt_survives_later_provider_drift()
