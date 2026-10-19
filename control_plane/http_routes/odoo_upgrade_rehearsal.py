@@ -5,10 +5,11 @@ from pathlib import Path
 from typing import Annotated, NoReturn
 
 import click
-from fastapi import Depends, Header, Path as PathParameter
+from fastapi import Depends, Header, Path as PathParameter, Query
 
 from control_plane.contracts.odoo_upgrade_rehearsal import (
     ODOO_UPGRADE_REHEARSAL_ROUTE as ROUTE,
+    ODOO_UPGRADE_REHEARSAL_PREFLIGHT_ROUTE,
     REHEARSAL_PUBLIC_FAILURE_MESSAGES,
     OdooUpgradeRehearsalRequest,
     RehearsalPrerequisite,
@@ -37,6 +38,7 @@ from control_plane.odoo_upgrade_rehearsal import (
 from control_plane.service_auth import LaunchplaneIdentity, director_agent_identity
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.dokploy import api
+from control_plane.odoo_rehearsal_preflight import rehearsal_preflight
 
 
 def register_odoo_upgrade_rehearsal_routes(
@@ -47,6 +49,49 @@ def register_odoo_upgrade_rehearsal_routes(
     root: Path,
     run_provider_mutation: Callable[..., Awaitable[AcceptedEvidenceResponse]],
 ) -> None:
+    async def preflight(
+        product: Annotated[str, PathParameter(min_length=1, pattern=r"^\S+$")],
+        source_context: Annotated[str, Query(min_length=1, pattern=r"^\S+$")],
+        identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_identity)],
+        record_store: Annotated[object, Depends(dependencies.get_record_store)],
+    ) -> AcceptedEvidenceResponse:
+        trace = dependencies.next_trace_id()
+
+        def refuse(status: int, code: str) -> NoReturn:
+            raise dependencies.http_error(
+                status_code=status,
+                trace_id=trace,
+                code=code,
+                message="The read-only rehearsal preflight is unavailable. No rehearsal was prepared.",
+            )
+
+        if not dependencies.authorization_allows(
+            identity=identity, action="operations.read", product=product, context=source_context
+        ):
+            refuse(403, "authorization_denied")
+        if not isinstance(record_store, PostgresRecordStore):
+            refuse(503, "database_storage_required")
+        try:
+            result = await run_in_worker_thread(
+                lambda: rehearsal_preflight(root, record_store, product, source_context)
+            )
+            return accepted_evidence_response(
+                trace_id=trace, records={"product": product}, result=result.model_dump(mode="json")
+            )
+        except DurableOperationAuthorizationDeniedError:
+            refuse(403, "authorization_denied")
+        except api.DokployRequestFailed as error:
+            refuse(
+                403 if error.status_code in {401, 403} else 503,
+                "authorization_denied"
+                if error.status_code in {401, 403}
+                else "rehearsal_provider_unavailable",
+            )
+        except RehearsalRefused as error:
+            refuse(409, error.code)
+        except (ValueError, RuntimeError, OSError, click.ClickException):
+            refuse(409, "rehearsal_preflight_unavailable")
+
     async def rehearsal(
         product: Annotated[str, PathParameter(min_length=1, pattern=r"^\S+$")],
         body: OdooUpgradeRehearsalRequest,
@@ -177,4 +222,10 @@ def register_odoo_upgrade_rehearsal_routes(
 
     app.add_api_route(
         ROUTE, rehearsal, methods=["POST"], response_model=AcceptedEvidenceResponse, status_code=202
+    )
+    app.add_api_route(
+        ODOO_UPGRADE_REHEARSAL_PREFLIGHT_ROUTE,
+        preflight,
+        methods=["GET"],
+        response_model=AcceptedEvidenceResponse,
     )

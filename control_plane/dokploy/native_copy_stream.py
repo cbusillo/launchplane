@@ -279,6 +279,27 @@ def inspect_native_testing_receiver(
     )
 
 
+def read_odoo_rehearsal_preflight(
+    *,
+    host: str,
+    token: str,
+    server_id: str,
+    source: dict[str, str],
+    receive: Callable[[dict[str, object]], None],
+) -> None:
+    from control_plane._odoo_rehearsal_preflight_program import REHEARSAL_PREFLIGHT_PROGRAM
+
+    _read_remote(
+        host=host,
+        token=token,
+        server_id=server_id,
+        program=REHEARSAL_PREFLIGHT_PROGRAM,
+        payload={"source": source, "server_id": server_id},
+        receive=receive,
+        timeout_seconds=420,
+    )
+
+
 def write_native_testing_chunk(
     *,
     host: str,
