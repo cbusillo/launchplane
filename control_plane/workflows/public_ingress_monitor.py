@@ -129,6 +129,7 @@ from control_plane.contracts.public_dns import (
 from control_plane.outbound_http import probe_public_tls
 from control_plane.contracts.product_topology_read_model import product_lane_public_domains
 from control_plane.outbound_http import request_private_http
+from control_plane.outbound_http import PublicHttpResponse
 from control_plane.workflows.generic_web_deploy_provider import (
     decode_generic_web_provider_reconciliation_target,
 )
@@ -804,6 +805,51 @@ def run_public_ingress_monitor_once(
         _check_monitor_cancelled(should_stop)
         target_http_get = private_get if target.check_kind == "private_http" else public_get
         if (
+            target.check_kind == "private_http"
+            and target.instance == "testing"
+            and target.private_endpoint_key
+            and _public_url_error(target.health_url) is None
+            and private_http_get is None
+        ):
+
+            def testing_edge_get(url: str, timeout: int) -> HttpObservation:
+                # Keep existing private DNS/scoped-CA transport. Only a refused
+                # address may continue through the separately verified edge.
+                try:
+                    return fetch_private_health_url(
+                        url, timeout, tls_ca_pem=target.private_tls_ca_pem
+                    )
+                except PublicHttpDestinationError as error:
+                    if error.code != "private_url" or target.private_tls_ca_pem:
+                        raise
+                # Import lazily: the route driver also uses deploy workflows.
+                from control_plane.launchplane_mutations import control_plane_root
+                from control_plane.storage.postgres import PostgresRecordStore
+                from control_plane.testing_private_health import fetch_testing_private_health
+
+                if (
+                    not isinstance(record_store, PostgresRecordStore)
+                    or not target.require_runtime_identity
+                ):
+                    raise PublicHttpDestinationError(
+                        "private_url",
+                        "Testing edge health requires database authority and runtime identity.",
+                    )
+                response = fetch_testing_private_health(
+                    root=control_plane_root(),
+                    store=record_store,
+                    product=target.product,
+                    context=target.context,
+                    instance=target.instance,
+                    endpoint_key=target.private_endpoint_key,
+                    endpoint_sha256=target.private_endpoint_sha256,
+                    url=url,
+                    timeout_seconds=timeout,
+                )
+                return _private_health_observation(response)
+
+            target_http_get = testing_edge_get
+        elif (
             target.check_kind == "private_http"
             and target.private_tls_ca_pem
             and private_http_get is None
@@ -2513,6 +2559,10 @@ def fetch_private_health_url(
         max_redirects=0 if tls_ca_pem else MAX_REDIRECTS,
         ssl_context=tls_context,
     )
+    return _private_health_observation(response)
+
+
+def _private_health_observation(response: PublicHttpResponse) -> HttpObservation:
     payload: object = None
     if response.body and "json" in response.header("content-type").lower():
         try:
