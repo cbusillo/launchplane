@@ -15,7 +15,6 @@ from control_plane import cli as control_plane_cli
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
-from control_plane.contracts.preview_enablement_record import PreviewEnablementRecord
 from control_plane.contracts.preview_generation_record import (
     PreviewGenerationState,
     PreviewGenerationRecord,
@@ -26,10 +25,6 @@ from control_plane.contracts.preview_record import PreviewRecord, PreviewState
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.product_profile_record import ProductImageProfile
 from control_plane.contracts.product_profile_record import ProductPreviewProfile
-from control_plane.contracts.preview_request_metadata import (
-    LaunchplaneCompanionPullRequestReference,
-    LaunchplanePreviewRequestParseStatus,
-)
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.promotion_record import (
@@ -41,7 +36,6 @@ from control_plane.contracts.promotion_record import (
     PromotionRecord,
     ReleaseStatus,
 )
-from control_plane.contracts.github_pull_request_event import PullRequestAction, PullRequestState
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.launchplane import (
@@ -251,40 +245,6 @@ def _environment_inventory(
     )
 
 
-def _preview_enablement_record(
-    *,
-    context: str = "opw",
-    anchor_repo: str = "tenant-opw",
-    anchor_pr_number: int = 123,
-    anchor_pr_url: str = "https://github.com/every/tenant-opw/pull/123",
-    anchor_head_sha: str = "aaaa1111",
-    action: PullRequestAction = "opened",
-    pr_state: PullRequestState = "open",
-    updated_at: str = "2026-04-14T11:15:00Z",
-    request_metadata_status: LaunchplanePreviewRequestParseStatus = "missing",
-    request_metadata_error: str = "",
-    request_metadata_baseline_channel: str = "",
-    request_metadata_companions: tuple[LaunchplaneCompanionPullRequestReference, ...] = (),
-    request_metadata_companion_summaries: tuple[PreviewPullRequestSummary, ...] = (),
-) -> PreviewEnablementRecord:
-    return PreviewEnablementRecord(
-        record_id=f"{context}-{anchor_repo}-pr-{anchor_pr_number}",
-        context=context,
-        anchor_repo=anchor_repo,
-        anchor_pr_number=anchor_pr_number,
-        anchor_pr_url=anchor_pr_url,
-        anchor_head_sha=anchor_head_sha,
-        action=action,
-        pr_state=pr_state,
-        updated_at=updated_at,
-        request_metadata_status=request_metadata_status,
-        request_metadata_error=request_metadata_error,
-        request_metadata_baseline_channel=request_metadata_baseline_channel,
-        request_metadata_companions=request_metadata_companions,
-        request_metadata_companion_summaries=request_metadata_companion_summaries,
-    )
-
-
 def _backup_gate_record(
     *,
     record_id: str = "backup-opw-prod-20260414T111500Z",
@@ -434,95 +394,6 @@ def _runtime_environments_env(control_plane_root: Path) -> dict[str, str]:
 
 
 class LaunchplanePreviewReadModelTests(unittest.TestCase):
-    def test_launchplane_preview_enablement_item_helpers_classify_states(
-        self,
-    ) -> None:
-        running_preview: dict[str, object] = {
-            "state": "active",
-            "serving_generation_id": "generation-1",
-        }
-        paused_preview: dict[str, object] = {
-            "state": "paused",
-            "serving_generation_id": "generation-1",
-        }
-        destroyed_preview: dict[str, object] = {
-            "state": "destroyed",
-            "serving_generation_id": "",
-        }
-
-        self.assertEqual(
-            control_plane_cli._launchplane_preview_enablement_item_state(
-                preview_row=running_preview,
-                pr_state="open",
-            ),
-            "running",
-        )
-        self.assertEqual(
-            control_plane_cli._launchplane_preview_enablement_item_state(
-                preview_row=paused_preview,
-                pr_state="open",
-            ),
-            "paused",
-        )
-        self.assertEqual(
-            control_plane_cli._launchplane_preview_enablement_item_state(
-                preview_row=destroyed_preview,
-                pr_state="closed",
-            ),
-            "retained",
-        )
-        self.assertEqual(
-            control_plane_cli._launchplane_preview_enablement_item_state(
-                preview_row=None,
-                pr_state="open",
-            ),
-            "candidate",
-        )
-        self.assertEqual(
-            control_plane_cli._launchplane_preview_enablement_item_tone("running"), "good"
-        )
-        self.assertEqual(
-            control_plane_cli._launchplane_preview_enablement_item_tone("requested"),
-            "warn",
-        )
-
-    def test_launchplane_preview_enablement_item_helpers_summarize_sources(
-        self,
-    ) -> None:
-        preview_row: dict[str, object] = {
-            "state": "active",
-            "serving_generation_id": "generation-1",
-        }
-
-        self.assertEqual(
-            control_plane_cli._launchplane_preview_enablement_item_source(
-                preview_row=preview_row,
-                latest_requested_reason="",
-            ),
-            "history",
-        )
-        self.assertEqual(
-            control_plane_cli._launchplane_preview_enablement_item_source(
-                preview_row=preview_row,
-                latest_requested_reason="operator_requested_enablement",
-            ),
-            "launchplane",
-        )
-        self.assertEqual(
-            control_plane_cli._launchplane_preview_enablement_item_status_summary(
-                state="candidate",
-                preview_row=None,
-            ),
-            "Ready for opt-in preview enablement.",
-        )
-        self.assertEqual(
-            control_plane_cli._launchplane_preview_enablement_item_status_summary(
-                state="running",
-                preview_row={"status_summary": "Preview is serving traffic."},
-            ),
-            "Preview is serving traffic.",
-        )
-
     def test_launchplane_preview_identity_helpers_are_deterministic(self) -> None:
         self.assertEqual(
             build_preview_label(
@@ -1080,21 +951,6 @@ ODOO_DB_PASSWORD = "local-secret"
                     latest_manifest_fingerprint="",
                 )
             )
-            store.write_preview_enablement_record(
-                _preview_enablement_record(
-                    anchor_pr_number=124,
-                    anchor_pr_url="https://github.com/every/tenant-opw/pull/124",
-                    action="labeled",
-                )
-            )
-            store.write_preview_enablement_record(
-                _preview_enablement_record(
-                    anchor_pr_number=125,
-                    anchor_pr_url="https://github.com/every/tenant-opw/pull/125",
-                    anchor_head_sha="bbbb2222",
-                    updated_at="2026-04-14T11:16:00Z",
-                )
-            )
             store.write_preview_record(
                 _preview_record(
                     preview_id="hpr_launchplane",
@@ -1139,10 +995,6 @@ ODOO_DB_PASSWORD = "local-secret"
             self.assertEqual(payload["anchor_repo"], "tenant-opw")
             self.assertEqual(payload["preview_counts"]["live"], 2)
             self.assertEqual(payload["preview_counts"]["in_flight"], 1)
-            self.assertEqual(len(payload["preview_candidates"]), 1)
-            self.assertEqual(payload["preview_enablement_counts"]["candidate"], 1)
-            self.assertEqual(payload["preview_enablement_counts"]["requested"], 1)
-            self.assertEqual(payload["preview_enablement_counts"]["running"], 2)
             self.assertEqual(
                 payload["environments"]["testing"]["live"]["artifact_id"], "artifact-testing"
             )
@@ -1182,19 +1034,6 @@ ODOO_DB_PASSWORD = "local-secret"
             self.assertEqual(payload["promotion_detail"]["status"], "blocked")
             self.assertEqual(payload["promotion_detail"]["from_instance"], "testing")
             self.assertEqual(payload["promotion_detail"]["to_instance"], "prod")
-            enablement_by_pr = {
-                item["anchor_pr_number"]: item for item in payload["preview_enablement"]
-            }
-            self.assertEqual(enablement_by_pr[125]["state"], "candidate")
-            self.assertEqual(enablement_by_pr[125]["request_source"], "none")
-            self.assertEqual(enablement_by_pr[125]["action"]["status"], "actionable")
-            self.assertIn("request-generation", enablement_by_pr[125]["action"]["recipe"])
-            self.assertEqual(enablement_by_pr[124]["state"], "requested")
-            self.assertEqual(enablement_by_pr[124]["request_source"], "history")
-            self.assertEqual(enablement_by_pr[124]["action"]["status"], "existing_preview")
-            self.assertEqual(enablement_by_pr[126]["state"], "running")
-            self.assertEqual(enablement_by_pr[126]["request_source"], "launchplane")
-            self.assertEqual(enablement_by_pr[126]["action"]["status"], "existing_preview")
 
     def test_launchplane_promotion_backup_gate_check_records_failed_gate(self) -> None:
         evidence_check = control_plane_cli._launchplane_promotion_backup_gate_evidence_check(
@@ -1213,127 +1052,6 @@ ODOO_DB_PASSWORD = "local-secret"
         self.assertEqual(evidence_check["label"], "Prod backup gate")
         self.assertEqual(evidence_check["status"], "pending")
         self.assertIn("recovery-only", evidence_check["detail"])
-
-    def test_launchplane_previews_write_enablement_persists_typed_record(self) -> None:
-        runner = CliRunner()
-        with TemporaryDirectory() as temporary_directory_name:
-            state_dir = Path(temporary_directory_name) / "state"
-            input_file = Path(temporary_directory_name) / "preview-enablement.json"
-            input_file.write_text(
-                json.dumps(
-                    _preview_enablement_record(
-                        anchor_pr_number=131,
-                        anchor_pr_url="https://github.com/every/tenant-opw/pull/131",
-                        anchor_head_sha="eeee5555",
-                        action="labeled",
-                        request_metadata_status="valid",
-                        request_metadata_baseline_channel="testing",
-                    ).model_dump(mode="json")
-                ),
-                encoding="utf-8",
-            )
-
-            result = runner.invoke(
-                CLI_MAIN,
-                [
-                    "launchplane-previews",
-                    "write-enablement",
-                    "--local-rehearsal",
-                    "--state-dir",
-                    str(state_dir),
-                    "--input-file",
-                    str(input_file),
-                ],
-            )
-
-            self.assertEqual(result.exit_code, 0, msg=result.output)
-            self.assertIn("opw-tenant-opw-pr-131", result.output)
-            record = FilesystemRecordStore(state_dir=state_dir).read_preview_enablement_record(
-                "opw-tenant-opw-pr-131"
-            )
-            self.assertEqual(record.request_metadata_status, "valid")
-            self.assertEqual(record.request_metadata_baseline_channel, "testing")
-
-    def test_launchplane_previews_show_tenant_uses_valid_metadata_snapshot_for_enablement_actions(
-        self,
-    ) -> None:
-        runner = CliRunner()
-        with TemporaryDirectory() as temporary_directory_name:
-            state_dir = Path(temporary_directory_name) / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
-            store.write_preview_enablement_record(
-                _preview_enablement_record(
-                    anchor_pr_number=129,
-                    anchor_pr_url="https://github.com/every/tenant-opw/pull/129",
-                    anchor_head_sha="dddd4444",
-                    action="labeled",
-                    request_metadata_status="valid",
-                    request_metadata_baseline_channel="testing",
-                )
-            )
-
-            result = runner.invoke(
-                CLI_MAIN,
-                [
-                    "launchplane-previews",
-                    "show-tenant",
-                    "--state-dir",
-                    str(state_dir),
-                    "--context",
-                    "opw",
-                ],
-            )
-
-            self.assertEqual(result.exit_code, 0, msg=result.output)
-            payload = json.loads(result.output)
-            enablement_by_pr = {
-                item["anchor_pr_number"]: item for item in payload["preview_enablement"]
-            }
-            self.assertEqual(enablement_by_pr[129]["request_metadata_status"], "valid")
-            self.assertEqual(enablement_by_pr[129]["action"]["status"], "actionable")
-
-    def test_launchplane_previews_render_site_release_tuple_records_resolve_enablement_recipe(
-        self,
-    ) -> None:
-        runner = CliRunner()
-        with TemporaryDirectory() as temporary_directory_name:
-            temporary_directory = Path(temporary_directory_name)
-            state_dir = temporary_directory / "state"
-            output_dir = temporary_directory / "site"
-            _write_release_tuples_file(temporary_directory)
-            store = FilesystemRecordStore(state_dir=state_dir)
-            store.write_preview_enablement_record(
-                _preview_enablement_record(
-                    anchor_pr_number=130,
-                    anchor_pr_url="https://github.com/every/tenant-opw/pull/130",
-                    anchor_head_sha="dddd4444",
-                    action="labeled",
-                    request_metadata_status="valid",
-                    request_metadata_baseline_channel="testing",
-                )
-            )
-
-            result = runner.invoke(
-                CLI_MAIN,
-                [
-                    "launchplane-previews",
-                    "render-site",
-                    "--state-dir",
-                    str(state_dir),
-                    "--context",
-                    "opw",
-                    "--output-dir",
-                    str(output_dir),
-                ],
-                env=_runtime_environments_env(temporary_directory),
-            )
-
-            self.assertEqual(result.exit_code, 0, msg=result.output)
-            index_html = (output_dir / "index.html").read_text(encoding="utf-8")
-            self.assertIn("opw-testing-2026-04-13", index_html)
-            self.assertIn("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", index_html)
-            self.assertNotIn("&lt;resolved-baseline-tuple-id&gt;", index_html)
-            self.assertNotIn("&lt;resolved-manifest-fingerprint&gt;", index_html)
 
     def test_launchplane_previews_render_index_page_leads_with_tenant_environment_when_scoped(
         self,
@@ -1380,22 +1098,6 @@ ODOO_DB_PASSWORD = "local-secret"
                     state="ready",
                     manifest_fingerprint="launchplane-manifest-live",
                     artifact_id="artifact-live",
-                )
-            )
-            store.write_preview_enablement_record(
-                _preview_enablement_record(
-                    anchor_pr_number=124,
-                    anchor_pr_url="https://github.com/every/tenant-opw/pull/124",
-                    action="labeled",
-                    updated_at="2026-04-14T11:16:00Z",
-                )
-            )
-            store.write_preview_enablement_record(
-                _preview_enablement_record(
-                    anchor_pr_number=125,
-                    anchor_pr_url="https://github.com/every/tenant-opw/pull/125",
-                    anchor_head_sha="bbbb2222",
-                    updated_at="2026-04-14T11:17:00Z",
                 )
             )
             store.write_backup_gate_record(
@@ -1451,14 +1153,6 @@ ODOO_DB_PASSWORD = "local-secret"
             self.assertNotIn("--allow-direct-db-mutation", rendered_html)
             self.assertNotIn("LAUNCHPLANE_DATABASE_URL", rendered_html)
             self.assertNotIn("backup-gates write", rendered_html)
-            self.assertIn("Why each PR does or does not have a preview", rendered_html)
-            self.assertIn("Eligible tenant PR. No preview request is active yet.", rendered_html)
-            self.assertIn(
-                "Launchplane still has preview evidence from an earlier request.", rendered_html
-            )
-            self.assertIn("Request Launchplane preview", rendered_html)
-            self.assertIn("Show Launchplane request recipe", rendered_html)
-            self.assertIn("request-generation", rendered_html)
             self.assertIn("artifact-testing", rendered_html)
             self.assertIn("artifact-prod", rendered_html)
             self.assertIn("Pull request previews", rendered_html)
@@ -1515,7 +1209,7 @@ ODOO_DB_PASSWORD = "local-secret"
             self.assertIn("--local-rehearsal", rendered_html)
             self.assertNotIn("promote resolve", rendered_html)
 
-    def test_launchplane_previews_render_index_page_leads_with_enablement_when_no_lane_evidence_exists(
+    def test_launchplane_previews_render_index_page_leads_with_previews_when_no_lane_evidence_exists(
         self,
     ) -> None:
         runner = CliRunner()
@@ -1523,14 +1217,15 @@ ODOO_DB_PASSWORD = "local-secret"
             state_dir = Path(temporary_directory_name) / "state"
             output_file = Path(temporary_directory_name) / "launchplane-index.html"
             store = FilesystemRecordStore(state_dir=state_dir)
-            store.write_preview_enablement_record(
-                _preview_enablement_record(
+            store.write_preview_record(
+                _preview_record(
+                    preview_id="hpr_live",
                     anchor_pr_number=130,
                     anchor_pr_url="https://github.com/every/tenant-opw/pull/130",
-                    anchor_head_sha="eeee5555",
-                    action="labeled",
-                    request_metadata_status="valid",
-                    request_metadata_baseline_channel="testing",
+                    preview_label="opw/tenant-opw/pr-130",
+                    active_generation_id="hgen_live_1",
+                    serving_generation_id="hgen_live_1",
+                    latest_generation_id="hgen_live_1",
                 )
             )
 
@@ -1550,11 +1245,11 @@ ODOO_DB_PASSWORD = "local-secret"
 
             self.assertEqual(result.exit_code, 0, msg=result.output)
             rendered_html = output_file.read_text(encoding="utf-8")
+            self.assertIn("Tenant environment", rendered_html)
             self.assertIn(
-                "Preview enablement is the first meaningful control surface", rendered_html
+                "it has not recorded current testing or prod lane evidence yet", rendered_html
             )
-            self.assertIn("Why each PR does or does not have a preview", rendered_html)
-            self.assertIn("Request Launchplane preview", rendered_html)
+            self.assertIn("opw/tenant-opw/pr-130", rendered_html)
             self.assertNotIn("Rebuild long-lived lanes", rendered_html)
             self.assertNotIn("Launchplane cannot plan the next promotion yet.", rendered_html)
 
@@ -2053,57 +1748,6 @@ ODOO_DB_PASSWORD = "local-secret"
             self.assertIn('href="../../../index.html"', detail_html)
             self.assertIn('href="../../../policy.html"', detail_html)
             self.assertIn('href="previews/opw/tenant-opw/pr-123.html"', policy_html)
-
-    def test_launchplane_previews_render_site_enablement_row_links_to_existing_preview_detail(
-        self,
-    ) -> None:
-        runner = CliRunner()
-        with TemporaryDirectory() as temporary_directory_name:
-            state_dir = Path(temporary_directory_name) / "state"
-            output_dir = Path(temporary_directory_name) / "site"
-            store = FilesystemRecordStore(state_dir=state_dir)
-            store.write_preview_record(
-                _preview_record(
-                    preview_id="hpr_pending",
-                    anchor_pr_number=124,
-                    anchor_pr_url="https://github.com/every/tenant-opw/pull/124",
-                    preview_label="opw/tenant-opw/pr-124",
-                    canonical_url="https://launchplane.example/previews/opw/tenant-opw/pr-124",
-                    state="pending",
-                    active_generation_id="",
-                    serving_generation_id="",
-                    latest_generation_id="",
-                    latest_manifest_fingerprint="",
-                )
-            )
-            store.write_preview_enablement_record(
-                _preview_enablement_record(
-                    anchor_pr_number=124,
-                    anchor_pr_url="https://github.com/every/tenant-opw/pull/124",
-                    action="labeled",
-                )
-            )
-
-            result = runner.invoke(
-                CLI_MAIN,
-                [
-                    "launchplane-previews",
-                    "render-site",
-                    "--state-dir",
-                    str(state_dir),
-                    "--context",
-                    "opw",
-                    "--output-dir",
-                    str(output_dir),
-                ],
-            )
-
-            self.assertEqual(result.exit_code, 0, msg=result.output)
-            index_html = (output_dir / "index.html").read_text(encoding="utf-8")
-            self.assertIn(
-                'href="https://github.com/every/tenant-opw/pull/124">PR</a><a href="previews/opw/tenant-opw/pr-124.html">Detail</a>',
-                index_html,
-            )
 
     def test_launchplane_previews_render_site_writes_environment_detail_pages_and_links_from_overview(
         self,
@@ -3629,126 +3273,6 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertEqual(
                 preview.latest_generation_id, "preview-verireel-pr-123-generation-0003"
             )
-
-    def test_launchplane_previews_show_tenant_uses_companion_sha_snapshot_for_enablement_recipe(
-        self,
-    ) -> None:
-        runner = CliRunner()
-        with TemporaryDirectory() as temporary_directory_name:
-            control_plane_root = Path(temporary_directory_name)
-            _write_release_tuples_file(control_plane_root)
-            state_dir = control_plane_root / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
-            store.write_preview_enablement_record(
-                _preview_enablement_record(
-                    anchor_pr_number=129,
-                    anchor_pr_url="https://github.com/every/tenant-opw/pull/129",
-                    anchor_head_sha="dddd4444",
-                    action="labeled",
-                    request_metadata_status="valid",
-                    request_metadata_baseline_channel="testing",
-                    request_metadata_companions=(
-                        LaunchplaneCompanionPullRequestReference(
-                            repo="shared-addons", pr_number=456
-                        ),
-                    ),
-                    request_metadata_companion_summaries=(
-                        PreviewPullRequestSummary(
-                            repo="shared-addons",
-                            pr_number=456,
-                            head_sha="bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222",
-                            pr_url="https://github.com/every/shared-addons/pull/456",
-                        ),
-                    ),
-                )
-            )
-
-            with (
-                patch("control_plane.cli._control_plane_root", return_value=control_plane_root),
-                patch(
-                    "control_plane.workflows.launchplane.fetch_github_pull_request_head",
-                    side_effect=AssertionError("unexpected live companion lookup"),
-                ),
-            ):
-                result = runner.invoke(
-                    CLI_MAIN,
-                    [
-                        "launchplane-previews",
-                        "show-tenant",
-                        "--state-dir",
-                        str(state_dir),
-                        "--context",
-                        "opw",
-                    ],
-                )
-
-            self.assertEqual(result.exit_code, 0, msg=result.output)
-            payload = json.loads(result.output)
-            enablement_by_pr = {
-                item["anchor_pr_number"]: item for item in payload["preview_enablement"]
-            }
-            action = enablement_by_pr[129]["action"]
-            self.assertEqual(action["status"], "actionable")
-            self.assertIn("bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222", action["recipe"])
-            self.assertIn("companion_summaries", action["recipe"])
-            self.assertEqual(
-                enablement_by_pr[129]["request_metadata_companion_summaries"][0]["repo"],
-                "shared-addons",
-            )
-
-    def test_launchplane_previews_show_tenant_blocks_unresolved_companion_enablement_recipe(
-        self,
-    ) -> None:
-        runner = CliRunner()
-        with TemporaryDirectory() as temporary_directory_name:
-            control_plane_root = Path(temporary_directory_name)
-            _write_release_tuples_file(control_plane_root)
-            state_dir = control_plane_root / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
-            store.write_preview_enablement_record(
-                _preview_enablement_record(
-                    anchor_pr_number=130,
-                    anchor_pr_url="https://github.com/every/tenant-opw/pull/130",
-                    anchor_head_sha="eeee5555",
-                    action="labeled",
-                    request_metadata_status="valid",
-                    request_metadata_baseline_channel="testing",
-                    request_metadata_companions=(
-                        LaunchplaneCompanionPullRequestReference(
-                            repo="shared-addons", pr_number=456
-                        ),
-                    ),
-                )
-            )
-
-            with (
-                patch("control_plane.cli._control_plane_root", return_value=control_plane_root),
-                patch(
-                    "control_plane.workflows.launchplane.fetch_github_pull_request_head",
-                    side_effect=AssertionError("unexpected live companion lookup"),
-                ),
-            ):
-                result = runner.invoke(
-                    CLI_MAIN,
-                    [
-                        "launchplane-previews",
-                        "show-tenant",
-                        "--state-dir",
-                        str(state_dir),
-                        "--context",
-                        "opw",
-                    ],
-                )
-
-            self.assertEqual(result.exit_code, 0, msg=result.output)
-            payload = json.loads(result.output)
-            enablement_by_pr = {
-                item["anchor_pr_number"]: item for item in payload["preview_enablement"]
-            }
-            action = enablement_by_pr[130]["action"]
-            self.assertEqual(action["status"], "blocked")
-            self.assertEqual(action["recipe"], "")
-            self.assertIn("Companion PR snapshots", action["headline"])
 
     def test_launchplane_previews_list_keeps_destroyed_previews_visible_and_filters_by_context(
         self,

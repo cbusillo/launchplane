@@ -3807,20 +3807,22 @@ with a fresh backup gate.
 
 ## Launchplane Preview Operations
 
-Launchplane commands operate on durable preview, generation, and enablement records.
+Launchplane commands operate on durable preview and generation records.
 The current command group supports:
 
 - inventory and detail reads: `list`, `show`, `history`, `show-tenant`
 - static rendering: `render-status-page`, `render-index-page`,
   `render-policy-page`, `render-site`
-- direct record writes: `write-preview`, `write-generation`,
-  `write-enablement`
+- direct record writes: `write-preview`, `write-generation`
 - external evidence ingest: `write-from-generation`, `write-destroyed`
 - lifecycle transitions: `request-generation`, `mark-generation-ready`,
   `mark-generation-failed`, `destroy-preview`
 
 The label-driven PR-event ingest and webhook replay commands are deleted
-(#2738). Previews follow the pull request's state through the event reconciler.
+(#2738). Previews follow the pull request's state through the event reconciler. The
+manual `write-enablement` command and the tenant render's preview enablement
+rows are also deleted (#2875); see the
+[retired record](records.md#retired-preview-enablement-record).
 
 `show-tenant`, `render-index-page`, and `render-site` now resolve stable-lane
 baseline tuples from Launchplane's DB-backed release-tuple records. Cockpit and
@@ -4488,11 +4490,6 @@ health status, next action, and apply outcome.
 Launchplane treats product PRs as preview anchors. Companion, infra, and tooling
 repos should remain source inputs only unless a product explicitly maps them to
 a preview context.
-
-Preview enablement records retain the anchor PR head SHA plus any resolved
-companion PR head SHA snapshots. Tenant renders use those stored
-snapshots for preview request recipes and keep unresolved companion requests
-blocked instead of guessing source inputs.
 
 ## Launchplane Boundary
 

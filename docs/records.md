@@ -1789,8 +1789,6 @@ state/
     <record-id>.json
   launchplane_preview_generations/
     <generation-id>.json
-  launchplane_preview_enablement/
-    <enablement-id>.json
   launchplane_previews/
     <preview-id>.json
   promotions/
@@ -2781,14 +2779,15 @@ trusted-maintenance evidence. The receiver verifies the signature and ignores
 `issue_comment` commands; it cannot record approval or merge. No webhook,
 credential, runtime grant, or stored record is changed by this code retirement.
 
-## Launchplane Preview Enablement Record
+## Retired Preview Enablement Record
 
-- One file per tenant PR enablement snapshot.
-- Record the anchor PR identity, enablement state, normalized preview-request
-  metadata, candidate/request evidence, and timestamps.
-- `launchplane-previews write-enablement` writes the record. The PR-event ingest
-  that also wrote it is deleted (#2738). Records written earlier name whether
-  the retired preview label was present; renders no longer read it.
+- Retired in #2875. Every open pull request gets a preview (#2735), so opt-in
+  enablement has nothing left to decide. No command writes the record and
+  tenant renders no longer show enablement rows or request recipes.
+- The `launchplane_preview_enablement` table and its existing rows stay in
+  place; dropping the table would delete data. Detached application retirement
+  still scans those stored payloads, and any `launchplane_preview_enablement/`
+  files left in filesystem state, as an authority source.
 
 ## Launchplane Preview Inventory Scan Record
 

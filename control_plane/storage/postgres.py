@@ -395,7 +395,6 @@ from control_plane.owner_control_challenge import (
     owner_control_challenge_semantics,
 )
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
-from control_plane.contracts.preview_enablement_record import PreviewEnablementRecord
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
 from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord
 from control_plane.contracts.preview_lifecycle_cleanup_record import PreviewLifecycleCleanupRecord
@@ -19681,51 +19680,21 @@ class PostgresRecordStore(HumanSessionStore):
             rows = session.scalars(statement).all()
             return tuple(self._owner_acceptance_record_from_row(row) for row in rows)
 
-    def write_preview_enablement_record(self, record: PreviewEnablementRecord) -> None:
-        self._write_row(
-            LaunchplanePreviewEnablementRow(
-                record_id=record.record_id,
-                context=record.context,
-                anchor_repo=record.anchor_repo,
-                anchor_pr_number=record.anchor_pr_number,
-                pr_state=record.pr_state,
-                updated_at=record.updated_at,
-                payload=self._payload_dict(record),
-            )
-        )
+    def list_retired_preview_enablement_payloads(self) -> tuple[PayloadDict, ...]:
+        """Return stored payloads of the retired preview enablement record type.
 
-    def read_preview_enablement_record(self, record_id: str) -> PreviewEnablementRecord:
-        return self._read_model(
-            model_type=PreviewEnablementRecord,
-            orm_model=LaunchplanePreviewEnablementRow,
-            filters=(LaunchplanePreviewEnablementRow.record_id == record_id,),
+        Nothing writes these rows any more, and the table is kept so existing
+        data stays in place. Detached application retirement still scans the
+        existing payloads as an authority source, so they are read without a
+        record model.
+        """
+        statement = select(LaunchplanePreviewEnablementRow).order_by(
+            LaunchplanePreviewEnablementRow.updated_at.desc(),
+            LaunchplanePreviewEnablementRow.record_id.desc(),
         )
-
-    def list_preview_enablement_records(
-        self,
-        *,
-        context_name: str = "",
-        anchor_repo: str = "",
-        pr_state: str = "",
-        limit: int | None = None,
-    ) -> tuple[PreviewEnablementRecord, ...]:
-        filters: list[object] = []
-        if context_name:
-            filters.append(LaunchplanePreviewEnablementRow.context == context_name)
-        if anchor_repo:
-            filters.append(LaunchplanePreviewEnablementRow.anchor_repo == anchor_repo)
-        if pr_state:
-            filters.append(LaunchplanePreviewEnablementRow.pr_state == pr_state)
-        return self._list_models(
-            model_type=PreviewEnablementRecord,
-            orm_model=LaunchplanePreviewEnablementRow,
-            filters=filters,
-            order_by=(
-                LaunchplanePreviewEnablementRow.updated_at.desc(),
-                LaunchplanePreviewEnablementRow.record_id.desc(),
-            ),
-            limit=limit,
-        )
+        with self._session_factory() as session:
+            rows = session.scalars(statement).all()
+            return tuple(_payload_from_row(row) for row in rows)
 
     def write_preview_inventory_scan_record(self, record: PreviewInventoryScanRecord) -> None:
         self._write_row(
@@ -30905,7 +30874,6 @@ class PostgresRecordStore(HumanSessionStore):
             "product_owner_requirements": 0,
             "product_owner_routing": 0,
             "preview_records": 0,
-            "preview_enablement": 0,
             "preview_generations": 0,
             "owner_acceptance_events": 0,
             "privileged_operation_events": 0,
@@ -31025,10 +30993,6 @@ class PostgresRecordStore(HumanSessionStore):
         for preview_record in filesystem_store.list_preview_records():
             self.write_preview_record(preview_record)
             counts["preview_records"] += 1
-        if hasattr(filesystem_store, "list_preview_enablement_records"):
-            for enablement_record in filesystem_store.list_preview_enablement_records():
-                self.write_preview_enablement_record(enablement_record)
-                counts["preview_enablement"] += 1
         for generation_record in filesystem_store.list_preview_generation_records():
             self.write_preview_generation_record(generation_record)
             counts["preview_generations"] += 1
