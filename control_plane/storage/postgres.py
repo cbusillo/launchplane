@@ -129,6 +129,7 @@ from control_plane.contracts.authz_policy_write_transition import (
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 
 if TYPE_CHECKING:
+    from control_plane.testing_override_sanitization import TestingOverrideSanitizationRequest
     from control_plane.testing_never_served import NeverServedRecords
     from control_plane.stored_record_snapshot import SnapshotAuthorization
     from control_plane.testing_generation_retirement import (
@@ -11320,6 +11321,121 @@ class PostgresRecordStore(HumanSessionStore):
                     response_payload=mutation.response_payload,
                 )
                 self._sync_idempotency_row(reservation_row, completion)
+                check()
+                session.commit()
+                return "written", completion
+
+    def sanitize_testing_overrides(
+        self,
+        *,
+        product: str,
+        request: TestingOverrideSanitizationRequest,
+        mutation: DbOnlyMutationRequest,
+    ) -> tuple[str, LaunchplaneIdempotencyRecord]:
+        """Commit the override, private preimage and public receipt together."""
+        from control_plane.testing_override_sanitization import (
+            AUDIT_SCOPE,
+            AUDIT_ROUTE,
+            TestingOverrideSanitizationAudit,
+            audit_key,
+            sanitization_snapshot,
+        )
+
+        with self.testing_replacement_execution_lock(request.operation_id) as check:
+            if check is None:
+                raise ValueError("The testing executor cannot be excluded.")
+            with self._session_factory() as session:
+                self._begin_serialized_write(session)
+                status, receipt_row, reservation = self._reserve_db_only_mutation_in_session(
+                    session=session, mutation=mutation
+                )
+                if status != "acquired":
+                    return status, reservation
+                assert receipt_row is not None
+                if self.database_dialect_name == "postgresql":
+                    self._lock_odoo_stable_lane(
+                        session, product=product, context=request.context, instance="testing"
+                    )
+                if (
+                    self._active_odoo_stable_lane_operation_owner(
+                        session,
+                        product=product,
+                        context=request.context,
+                        instance="testing",
+                    )
+                    is not None
+                ):
+                    raise ValueError("A testing lane operation is active.")
+                self._lock_product_authority_bundle_write(session)
+                generation_row = session.get(
+                    LaunchplaneFreshOdooTestingGenerationRow,
+                    (product, request.context),
+                    with_for_update=True,
+                )
+                snapshot = sanitization_snapshot(self, product, request)
+                if (
+                    generation_row is None
+                    or FreshOdooTestingGeneration.model_validate(generation_row.payload)
+                    != snapshot.generation
+                    or snapshot.plan.plan_sha256 != request.reviewed_plan_sha256
+                ):
+                    raise ValueError("The reviewed sanitization authority changed.")
+                key = audit_key(product, request)
+                if (
+                    session.scalar(
+                        self._idempotency_statement(
+                            scope=AUDIT_SCOPE,
+                            route_path=AUDIT_ROUTE,
+                            idempotency_key=key,
+                            for_update=True,
+                        )
+                    )
+                    is not None
+                ):
+                    raise ValueError("Sanitization already committed; retain its original key.")
+                now = self._database_mutation_timestamp(session)
+                after = snapshot.after.model_copy(update={"updated_at": now})
+                audit = TestingOverrideSanitizationAudit(
+                    plan=snapshot.plan.model_copy(update={"applied": True}),
+                    reason=request.reason,
+                    before=snapshot.before,
+                    after=after,
+                    applied_by=mutation.scope,
+                    applied_at=now,
+                )
+                archive = LaunchplaneIdempotencyRecord(
+                    record_id=build_launchplane_mutation_reservation_id(
+                        scope=AUDIT_SCOPE,
+                        route_path=AUDIT_ROUTE,
+                        idempotency_key=key,
+                    ),
+                    scope=AUDIT_SCOPE,
+                    route_path=AUDIT_ROUTE,
+                    idempotency_key=key,
+                    request_fingerprint=request.reviewed_plan_sha256,
+                    response_status_code=200,
+                    response_trace_id=mutation.response_trace_id,
+                    recorded_at=now,
+                    response_payload=audit.model_dump(mode="json"),
+                )
+                session.add(self._idempotency_row(archive))
+                session.merge(
+                    LaunchplaneOdooInstanceOverrideRow(
+                        context=after.context,
+                        instance=after.instance,
+                        updated_at=after.updated_at,
+                        payload=self._payload_dict(after),
+                    )
+                )
+                self._after_product_authority_bundle_step("sanitize_testing_overrides")
+                completion = complete_launchplane_mutation_reservation(
+                    reservation,
+                    response_status_code=mutation.response_status_code,
+                    response_trace_id=mutation.response_trace_id,
+                    completed_at=now,
+                    response_payload=mutation.response_payload,
+                )
+                self._sync_idempotency_row(receipt_row, completion)
                 check()
                 session.commit()
                 return "written", completion

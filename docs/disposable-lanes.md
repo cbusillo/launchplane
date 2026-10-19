@@ -1811,6 +1811,44 @@ or schedule writes; drift records `deploy_blocked.fresh_testing_intent_invalid`
 instead of an unexpected failure. Completed generations and production keep their
 ordinary deployment paths.
 
+### Sanitize retained testing override intent
+
+An unfinished fresh generation may retain integration overrides from its previous
+lane. `POST /v1/products/{product}/testing-override-sanitization` is the
+Director-agent record-only continuation. It reuses the candidate neutralizer:
+remove integration/analytics parameters and secret-backed override references,
+remove Shopify settings, preserve unrelated literal settings and website intent,
+and retain the current testing origin and connection fences. It changes no
+credential, provider environment, allocation, source capture, copy or queue.
+The ordinary fresh-restore intent guard remains enforced by replacement.
+
+Use the bounded client from the exact source that supplies the service route:
+
+```bash
+uv run python scripts/sanitize-testing-overrides.py dry-run \
+  --operator-helper <installed-launchplane-skill>/scripts/launchplane-write-action.py \
+  --product <product> --context <context> --operation-id <original-preparation> \
+  --reason <unchanged-reason> --evidence-file <private-review-file>
+```
+
+Review the removed setting/key names in the private evidence file. Run
+`apply` with the same arguments, `--reviewed-dry-run` and the original stable
+sanitization key in `--idempotency-key`, then `readback` with the same review
+file. The key belongs to this record operation; retain the original resource,
+bootstrap and copy keys independently. The service refuses a different or used,
+held, completed or unqualified generation, an active executor, stale authority,
+and a changed reviewed record. Apply requires PostgreSQL fencing. Override,
+private prior/replacement snapshots and the public idempotency receipt commit
+atomically in existing storage. Prior values and binding references stay inside
+the service; responses contain names and digests only. Readback checks the same
+generation and current override intent while tolerating later apply timestamps.
+
+After an uncertain response, preserve the review and original key, inspect
+readback and replay only that key through the service. Never bootstrap, restore,
+allocate, use a direct DB/provider write or invent a credential to repair this
+record operation. A successful sanitization receipt does not prove copy
+completion, runtime identity, public health or TLS; those remain their own gates.
+
 The service compares the existing local testing passwords with the supported
 production source's managed versions internally, without returning or retaining
 plaintext or password hashes. Missing versions or overlap refuse preparation;
