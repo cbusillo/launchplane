@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 from email.message import Message
 from io import BytesIO
+from itertools import product
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -12,6 +13,7 @@ from urllib.error import HTTPError, URLError
 
 import click
 from github_plan_status import DEFAULT_STATUS_LABELS
+from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane import merge_train_github_token as token_module
 from control_plane import merge_train_planning_completion as completion
@@ -22,6 +24,7 @@ from control_plane.contracts.merge_train_policy import (
     MergeTrainSchedulerPolicy,
 )
 from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.github_app_identity import GitHubAppIdentityError
 from control_plane.merge_train_controller_run_once import MergeTrainControllerRunOnceResult
 from control_plane.storage.filesystem import FilesystemRecordStore
 from tests.http_app_test_support import _post_merge_train_pr_feedback
@@ -104,10 +107,20 @@ def _token_reader(graph: NativeGraphProvider, record: MergeTrainPolicyRecord) ->
 
 class NativePlanningHttpTests(IsolatedAsyncioTestCase):
     async def test_target_token_resolution_preserves_transient_cause_for_saved_retry(self) -> None:
-        for failure in ("network", "503", "403", "missing"):
-            with self.subTest(failure=failure), TemporaryDirectory() as directory:
+        for failure, closing_source in product(
+            ("network", "503", "403", "401", "404", "identity", "store", "missing"), (False, True)
+        ):
+            with (
+                self.subTest(failure=failure, closing_source=closing_source),
+                TemporaryDirectory() as directory,
+            ):
                 graph, _names = _graph()
                 target = graph.nodes[_TARGET, 8]
+                independent = graph.add(_REPO, 10)
+                graph.blocking.append(graph.ref(_REPO, 10))
+                if failure not in {"network", "503"}:
+                    graph.add(_TARGET, 9)
+                    graph.blocking.append(graph.ref(_TARGET, 9))
                 policy = _policy()
                 store = FilesystemRecordStore(Path(directory))
                 store.write_merge_train_policy_record(policy)
@@ -125,7 +138,7 @@ class NativePlanningHttpTests(IsolatedAsyncioTestCase):
                     headers["X-GitHub-Request-Id"] = "fixture-token-mint"
                     cause = HTTPError(
                         "https://example.test/app/installations/1/access_tokens",
-                        503 if failure == "503" else 403,
+                        int(failure) if failure.isdigit() else 403,
                         "fixture rejection",
                         headers,
                         BytesIO(b"{}"),
@@ -133,6 +146,11 @@ class NativePlanningHttpTests(IsolatedAsyncioTestCase):
                     self.addCleanup(cause.close)
                 error = click.ClickException("fixture token mint failed")
                 error.__cause__ = cause
+                mint_error = (
+                    GitHubAppIdentityError("fixture invalid installation")
+                    if failure == "identity"
+                    else error
+                )
 
                 def resolve(**kwargs: Any) -> str:
                     if kwargs["repository"] == _REPO:
@@ -142,8 +160,20 @@ class NativePlanningHttpTests(IsolatedAsyncioTestCase):
                     self.assertEqual(kwargs["source"], policy.policy.policies[1].github_token)
                     return token_module.resolve_merge_train_github_token(**kwargs)
 
+                def request(**kwargs: Any) -> Any:
+                    result = graph.request(**kwargs)
+                    if (
+                        closing_source
+                        and kwargs["path"] == "/graphql"
+                        and "closingIssuesReferences" in kwargs["body"]["query"]
+                    ):
+                        result["data"]["repository"]["pullRequest"]["closingIssuesReferences"][
+                            "nodes"
+                        ].append({"number": 8, "repository": {"nameWithOwner": _TARGET}})
+                    return result
+
                 with (
-                    patch.object(completion, "github_api_request", side_effect=graph.request),
+                    patch.object(completion, "github_api_request", side_effect=request),
                     patch.object(scope_module, "github_api_request", side_effect=graph.request),
                     patch(
                         "control_plane.http_app.resolve_merge_train_github_token",
@@ -152,9 +182,12 @@ class NativePlanningHttpTests(IsolatedAsyncioTestCase):
                     patch(
                         "control_plane.merge_train_github_token.secrets.resolve_context_secret_value",
                         return_value="" if failure == "missing" else "noncredential-test-fixture",
+                        side_effect=SQLAlchemyError("fixture store unavailable")
+                        if failure == "store"
+                        else None,
                     ) as secret,
                     patch.object(
-                        token_module, "mint_merge_train_installation_token", side_effect=error
+                        token_module, "mint_merge_train_installation_token", side_effect=mint_error
                     ) as mint,
                     patch("control_plane.http_app.utc_now_timestamp", return_value=_TIME),
                     patch(
@@ -164,7 +197,7 @@ class NativePlanningHttpTests(IsolatedAsyncioTestCase):
                             "comment_id": 3,
                             "comment_url": "",
                         },
-                    ),
+                    ) as comment,
                 ):
                     response = await _post_merge_train_pr_feedback(
                         app,
@@ -184,9 +217,10 @@ class NativePlanningHttpTests(IsolatedAsyncioTestCase):
                     [_REPO, _TARGET],
                 )
                 secret.assert_called_once()
-                self.assertEqual(mint.call_count, failure != "missing")
+                self.assertEqual(mint.call_count, failure not in {"missing", "store"})
                 self.assertFalse(target.writes)
                 self.assertFalse(any(call["repo"] == _TARGET for call in graph.calls))
+                self.assertTrue(independent.writes)
                 self.assertEqual(record.retryable, failure in {"network", "503"})
                 rows = {(row["repo"], row["number"]): row for row in _receipt(record)["issues"]}
                 if failure in {"network", "503"}:
@@ -198,8 +232,15 @@ class NativePlanningHttpTests(IsolatedAsyncioTestCase):
                         rows[_TARGET, 8]["failure"]["status_code"],
                         503 if failure == "503" else None,
                     )
-                elif failure == "missing":
+                else:
                     self.assertEqual(rows[_TARGET, 8]["status"], "review_posting_authority")
+                    self.assertEqual(
+                        record.delivery_status, "failed" if closing_source else "delivered"
+                    )
+                    comment.assert_called_once()
+                    self.assertEqual(rows[_TARGET, 9]["status"], "not_attempted_posting_authority")
+                    if failure in {"401", "403", "404"}:
+                        self.assertEqual(rows[_TARGET, 8]["failure"]["status_code"], int(failure))
 
     async def test_completed_feedback_projects_only_current_identity_authorized_targets(
         self,

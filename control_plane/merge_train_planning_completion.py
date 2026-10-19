@@ -754,6 +754,9 @@ def reconcile_completed_change(
                 add(parent_repository, parent_number)
         except (click.ClickException, KeyError, TypeError, ValueError) as error:
             target.discovery_error = error
+            if isinstance(error, PlanningScopeReview):
+                denied_repositories.add(target.repository.casefold())
+                continue
             evidence = provider_failure(error)
             cause = (
                 error.cause
@@ -800,6 +803,20 @@ def reconcile_completed_change(
                     else "review_posting_authority",
                     reason=error.message,
                 )
+                if isinstance(error, PlanningScopeReview):
+                    denied_repositories.add(key)
+                    if error.credential_failure is not None:
+                        evidence = error.credential_failure
+                        row.update(
+                            phase="credential_resolution",
+                            failure={
+                                "cause": evidence.cause,
+                                "status_code": evidence.status_code,
+                                "request_id": evidence.request_id,
+                                "write_outcome": None,
+                                "retryable": False,
+                            },
+                        )
             except (click.ClickException, KeyError, TypeError, ValueError) as error:
                 evidence = provider_failure(error)
                 cause = (

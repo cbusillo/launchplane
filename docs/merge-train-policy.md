@@ -2259,6 +2259,10 @@ tokens and callbacks are never persisted in feedback.
 Scoped token resolution preserves failed-mint transport evidence for that retry
 path. A proved transient mint failure retries; a missing binding or grant remains
 review, and a real provider refusal never selects another credential.
+An unissued target credential that fails authentication, installation validation
+or resolution holds only that repository for owning review. Independent scopes
+and the landing comment continue. Authentication failure using an issued token
+still follows the existing delivery-wide stop rule.
 
 Fresh issue, native graph, wait and configuration reads guard writes and verify
 readback. The hidden `launchplane-planning-reconciliation` receipt retains the

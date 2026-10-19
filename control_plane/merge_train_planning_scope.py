@@ -8,11 +8,16 @@ from dataclasses import dataclass, field
 import click
 
 from control_plane.contracts.merge_train_policy import MergeTrainPolicy, MergeTrainRepositoryPolicy
+from control_plane.merge_train_provider_failure import ProviderFailure, provider_failure
 from control_plane.workflows.launchplane import github_api_request
 
 
 class PlanningScopeReview(click.ClickException):
     """The current delivery has no proven authority for this repository."""
+
+    def __init__(self, message: str, *, credential_failure: ProviderFailure | None = None) -> None:
+        super().__init__(message)
+        self.credential_failure = credential_failure
 
 
 @dataclass(frozen=True)
@@ -36,6 +41,20 @@ def planning_scope_resolver(
     """Select once before provider IO; a refusal never tries another credential."""
     owner = source_repository.split("/", 1)[0].casefold()
 
+    def resolve_credential(target: MergeTrainRepositoryPolicy) -> str:
+        try:
+            return resolve_token(target)
+        except click.ClickException as error:
+            evidence = provider_failure(error)
+            if evidence.retryable:
+                raise
+            # A failed target App mint proves no authority for that repository.
+            # It says nothing about credentials already issued to other scopes.
+            raise PlanningScopeReview(
+                "Planning target's configured repository credential requires owning review.",
+                credential_failure=evidence,
+            ) from error
+
     def resolve(repository: str) -> PlanningRepositoryScope:
         if repository.split("/", 1)[0].casefold() != owner:
             raise PlanningScopeReview(
@@ -49,7 +68,7 @@ def planning_scope_resolver(
         if not eligible:
             raise PlanningScopeReview("Planning target has no authorized repository policy.")
         selected = sorted(eligible, key=lambda item: item.policy_key)[0]
-        token = resolve_token(selected)
+        token = resolve_credential(selected)
         if not token:
             raise PlanningScopeReview(
                 "Planning target's configured repository credential is unavailable."
@@ -74,7 +93,7 @@ def planning_scope_resolver(
                 "Planning target's actual default-branch policy is unauthorized."
             )
         if target.policy_key != selected.policy_key:
-            token = resolve_token(target)
+            token = resolve_credential(target)
             if not token:
                 raise PlanningScopeReview(
                     "Planning target's default-branch credential is unavailable."

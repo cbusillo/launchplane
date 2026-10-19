@@ -522,34 +522,58 @@ class PlanningScopeTests(TestCase):
 
     def test_actual_default_is_reauthorized_before_its_token(self) -> None:
         tokens: list[str] = []
-        for allow_release in (False, True):
-            with self.subTest(allow_release=allow_release):
+        for result in ("unauthorized", "ok", "401", "404", "503"):
+            with self.subTest(result=result):
                 tokens.clear()
 
                 def token_for(policy: Any) -> str:
                     tokens.append(policy.base_branch)
+                    if policy.base_branch == "release" and result.isdigit():
+                        cause = HTTPError(
+                            "https://example.test/app/installations/1/access_tokens",
+                            int(result),
+                            "fixture rejection",
+                            Message(),
+                            BytesIO(b"{}"),
+                        )
+                        self.addCleanup(cause.close)
+                        raise click.ClickException("fixture mint failed") from cause
                     return f"token:{policy.base_branch}"
 
                 resolver = scope_module.planning_scope_resolver(
                     policy=self.policy(),
                     source_repository=_REPO,
-                    authorize=lambda policy: policy.base_branch == "main" or allow_release,
+                    authorize=lambda policy: (
+                        policy.base_branch == "main" or result != "unauthorized"
+                    ),
                     resolve_token=token_for,
                 )
                 with patch.object(
                     scope_module, "github_api_request", return_value={"default_branch": "release"}
                 ) as request:
-                    if allow_release:
+                    if result == "ok":
                         resolved = resolver("example/other")
                         self.assertEqual(
                             (resolved.base_branch, resolved.token, resolved.trusted_author_ids),
                             ("release", "token:release", (73,)),
                         )
                         self.assertEqual(tokens, ["main", "release"])
-                    else:
+                    elif result == "unauthorized":
                         with self.assertRaises(PlanningScopeReview):
                             resolver("example/other")
                         self.assertEqual(tokens, ["main"])
+                    elif result == "503":
+                        with self.assertRaises(click.ClickException) as failed:
+                            resolver("example/other")
+                        self.assertNotIsInstance(failed.exception, PlanningScopeReview)
+                        self.assertEqual(tokens, ["main", "release"])
+                    else:
+                        with self.assertRaises(PlanningScopeReview) as held:
+                            resolver("example/other")
+                        self.assertIsNotNone(held.exception.credential_failure)
+                        assert held.exception.credential_failure is not None
+                        self.assertEqual(held.exception.credential_failure.status_code, int(result))
+                        self.assertEqual(tokens, ["main", "release"])
                     request.assert_called_once_with(path="/repos/example/other", token="token:main")
 
     def test_missing_selected_token_or_unenrolled_default_never_tries_an_alternative(self) -> None:
