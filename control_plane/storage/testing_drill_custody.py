@@ -26,6 +26,197 @@ from control_plane.contracts.odoo_testing_drill import (
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.testing_rebuild import REBUILD_ROUTE, REBUILD_SCOPE
 from control_plane.storage.postgres import ORIGINAL_MUTATION_INTENT_ROUTE
+from control_plane.testing_rebuild_storage import REBUILD_CHECKPOINT_ROUTE, REBUILD_CHECKPOINT_SCOPE
+
+
+def _native_retirement_records() -> tuple[Any, Any, Any, Any]:
+    child = aliased(LaunchplaneIdempotencyRow)
+    intent = aliased(LaunchplaneIdempotencyRow)
+    spec = intent.payload["response_payload"]["original_intent"]["native_retirement"]
+    statement = (
+        select(child.payload, spec)
+        .join(
+            intent,
+            and_(
+                intent.scope == REBUILD_SCOPE,
+                intent.route_path == ORIGINAL_MUTATION_INTENT_ROUTE,
+                intent.idempotency_key == child.record_id,
+            ),
+        )
+        .where(child.scope == REBUILD_SCOPE, child.route_path == REBUILD_ROUTE + ":effect")
+    )
+    return child, intent, spec, statement
+
+
+def _resolved_native_retirement(child: Any, intent: Any, spec: Any) -> Any:
+    """Supported immutable original custody facts, evaluated in the caller's session.
+
+    A rollback preference or today's serving role cannot settle an original
+    effect. Only its completed inverse, reversed publication and terminal old
+    readiness make the positively sealed stop resolved without qualification.
+    """
+    identity = spec["identity"]
+    qualification = aliased(LaunchplaneIdempotencyRow)
+    stopped = and_(
+        child.state == "completed",
+        child.payload["response_payload"]["retirement"].as_string() == "stopped",
+        exists(
+            select(qualification.record_id).where(
+                qualification.scope == DRILL_SCOPE,
+                qualification.route_path == NATIVE_DRILL_QUALIFICATION_ROUTE,
+                qualification.idempotency_key == identity["namespace"].as_string(),
+                qualification.state == "completed",
+                qualification.payload["response_trace_id"].as_string()
+                == identity["retiring_operation_id"].as_string(),
+                qualification.payload["response_payload"]["identity_sha256"].as_string()
+                == spec["identity_sha256"].as_string(),
+            )
+        ),
+    )
+    closure = aliased(LaunchplaneIdempotencyRow)
+    loss = aliased(LaunchplaneIdempotencyRow)
+    checkpoint = aliased(LaunchplaneIdempotencyRow)
+    publication = aliased(LaunchplaneIdempotencyRow)
+    inverse = aliased(LaunchplaneIdempotencyRow)
+    inverse_intent = aliased(LaunchplaneIdempotencyRow)
+    admission = aliased(LaunchplaneIdempotencyRow)
+    receipt = checkpoint.payload["response_payload"]
+    plan = receipt["plan"]
+    proof = closure.payload["response_payload"]["proof"]
+    published = publication.payload["response_payload"]
+    execution = inverse_intent.payload["response_payload"]["original_intent"]["route_execution"]
+    family = and_(
+        admission.scope == child.scope,
+        admission.route_path == REBUILD_ROUTE + ":retirement-admission",
+        admission.payload["response_payload"]["effect_record_id"].as_string() == child.record_id,
+    )
+    rollback = exists(
+        select(checkpoint.record_id)
+        .select_from(checkpoint, closure, publication, inverse, inverse_intent)
+        .where(
+            child.state == "completed",
+            child.payload["response_payload"]["retirement"].as_string() == "preserved",
+            child.idempotency_key == identity["retiring_operation_id"].as_string() + ":retire-old",
+            intent.state == "completed",
+            intent.request_fingerprint == child.request_fingerprint,
+            intent.payload["response_payload"]["reservation_id"].as_string() == child.record_id,
+            closure.scope == child.scope,
+            closure.route_path == child.route_path + ":native-closure",
+            closure.idempotency_key == child.record_id,
+            closure.state == "completed",
+            closure.request_fingerprint == child.request_fingerprint,
+            proof["status"].as_string() == "preserved",
+            proof["no_stop_dispatched"].as_boolean().is_(True),
+            proof["identity_sha256"].as_string() == spec["identity_sha256"].as_string(),
+            func.coalesce(proof["namespace_sha256"].as_string(), "") != "",
+            exists(select(admission.record_id).where(family)),
+            ~exists(
+                select(admission.record_id).where(
+                    family,
+                    or_(
+                        admission.request_fingerprint != child.request_fingerprint,
+                        func.coalesce(
+                            admission.payload["response_payload"][
+                                "provider_target_key"
+                            ].as_string(),
+                            "",
+                        )
+                        != child.provider_target_key,
+                        func.coalesce(
+                            admission.payload["response_payload"]["namespace_sha256"].as_string(),
+                            "",
+                        )
+                        != proof["namespace_sha256"].as_string(),
+                    ),
+                )
+            ),
+            ~exists(
+                select(loss.record_id).where(
+                    loss.scope == child.scope,
+                    loss.route_path == child.route_path + ":native-custody-loss",
+                    loss.idempotency_key == child.record_id,
+                )
+            ),
+            checkpoint.scope == REBUILD_CHECKPOINT_SCOPE,
+            checkpoint.route_path == REBUILD_CHECKPOINT_ROUTE,
+            checkpoint.state == "completed",
+            plan["operation_id"].as_string() == identity["retiring_operation_id"].as_string(),
+            plan["product"].as_string() == identity["product"].as_string(),
+            plan["context"].as_string() == identity["context"].as_string(),
+            plan["authority_digest"].as_string() == identity["retiring_intent_sha256"].as_string(),
+            plan["old"]["copy_id"].as_string() == identity["namespace"].as_string(),
+            plan["old"]["target_id"].as_string() == identity["target_id"].as_string(),
+            plan["old"]["resource_binding"].as_string() == identity["physical_binding"].as_string(),
+            receipt["step"].as_string() == "failed",
+            receipt["error"].as_string() == "candidate_public_health_failed",
+            receipt["retirement_started"].as_boolean().is_(True),
+            receipt["rollback_started"].as_boolean().is_(True),
+            receipt["ended_at"].as_string().is_not(None),
+            receipt["retirement_recovery"]["healthy"].as_boolean().is_(True),
+            receipt["retirement_recovery"]["copy_id"].as_string()
+            == plan["old"]["copy_id"].as_string(),
+            receipt["retirement_recovery"]["runtime_identity"] == plan["old"]["runtime_identity"],
+            receipt["retirement_recovery"]["host"].as_string()
+            == receipt["route"]["host"].as_string(),
+            receipt["route"]["route_id"].as_string() == plan["route_id"].as_string(),
+            receipt["route"]["slot_id"].as_string() == plan["old"]["copy_id"].as_string(),
+            receipt["route"]["target_url"].as_string() == plan["old"]["private_url"].as_string(),
+            receipt["route"]["public_health"]["verified"].as_boolean().is_(True),
+            receipt["route"]["public_health"]["status"].as_string() == "pass",
+            publication.scope == PUBLICATION_SCOPE,
+            publication.route_path == PUBLICATION_ROUTE,
+            publication.idempotency_key == checkpoint.idempotency_key,
+            publication.state == "completed",
+            published["state"].as_string() == "reversed",
+            published["plan"]["candidate"]["operation_id"].as_string()
+            == plan["operation_id"].as_string(),
+            published["plan"]["candidate"]["namespace"].as_string()
+            == plan["new"]["copy_id"].as_string(),
+            published["plan"]["candidate"]["product"].as_string() == plan["product"].as_string(),
+            published["plan"]["candidate"]["context"].as_string() == plan["context"].as_string(),
+            published["plan"]["before"]["target_id"]["target_id"].as_string()
+            == plan["old"]["target_id"].as_string(),
+            inverse.scope == child.scope,
+            inverse.route_path == child.route_path,
+            inverse.idempotency_key
+            == plan["operation_id"].as_string() + ":route:" + plan["old"]["copy_id"].as_string(),
+            inverse.state == "completed",
+            func.coalesce(
+                inverse.payload["response_payload"]["not_dispatched"].as_boolean(), False
+            ).is_(False),
+            func.coalesce(
+                inverse.payload["response_payload"]["route_write_not_started"].as_boolean(), False
+            ).is_(False),
+            inverse_intent.scope == inverse.scope,
+            inverse_intent.route_path == ORIGINAL_MUTATION_INTENT_ROUTE,
+            inverse_intent.idempotency_key == inverse.record_id,
+            inverse_intent.state == "completed",
+            inverse_intent.request_fingerprint == inverse.request_fingerprint,
+            inverse_intent.payload["response_payload"]["reservation_id"].as_string()
+            == inverse.record_id,
+            execution["operation_id"].as_string() == plan["operation_id"].as_string(),
+            execution["server_id"].as_string() == identity["server_id"].as_string(),
+            execution["route_id"].as_string() == plan["route_id"].as_string(),
+            execution["backend"].as_string() == plan["old"]["private_url"].as_string(),
+        )
+    )
+    return func.coalesce(or_(stopped, rollback), False)
+
+
+def native_retirement_resolved(
+    store: PostgresRecordStore, child: LaunchplaneIdempotencyRecord, *, session: Any = None
+) -> bool:
+    """Read the same original-custody classification used by every allocation gate."""
+    original, intent, spec, statement = _native_retirement_records()
+    statement = statement.where(
+        original.record_id == child.record_id,
+        original.request_fingerprint == child.request_fingerprint,
+        _resolved_native_retirement(original, intent, spec),
+    ).limit(1)
+    if session is not None:
+        return session.execute(statement).first() is not None
+    with store._session_factory() as held:
+        return held.execute(statement).first() is not None
 
 
 def outstanding_native_retirements(
@@ -39,46 +230,15 @@ def outstanding_native_retirements(
     session: Any = None,
 ) -> tuple[tuple[LaunchplaneIdempotencyRecord, dict[str, Any]], ...]:
     """Original retirement custody, before any immediate-predecessor exemption."""
-    child = aliased(LaunchplaneIdempotencyRow)
-    intent = aliased(LaunchplaneIdempotencyRow)
-    spec = intent.payload["response_payload"]["original_intent"]["native_retirement"]
+    child, intent, spec, statement = _native_retirement_records()
     identity = spec["identity"]
-    qualification = aliased(LaunchplaneIdempotencyRow)
-    qualified = exists(
-        select(qualification.record_id).where(
-            qualification.scope == DRILL_SCOPE,
-            qualification.route_path == NATIVE_DRILL_QUALIFICATION_ROUTE,
-            qualification.idempotency_key == identity["namespace"].as_string(),
-            qualification.state == "completed",
-            qualification.payload["response_trace_id"].as_string()
-            == identity["retiring_operation_id"].as_string(),
-            qualification.payload["response_payload"]["identity_sha256"].as_string()
-            == spec["identity_sha256"].as_string(),
-        )
-    )
     statement = (
-        select(child.payload, spec)
-        .join(
-            intent,
-            and_(
-                intent.scope == REBUILD_SCOPE,
-                intent.route_path == ORIGINAL_MUTATION_INTENT_ROUTE,
-                intent.idempotency_key == child.record_id,
-            ),
-        )
-        .where(
-            child.scope == REBUILD_SCOPE,
-            child.route_path == REBUILD_ROUTE + ":effect",
+        statement.where(
             identity["product"].as_string() == product,
             identity["context"].as_string() == context,
             identity["namespace"].as_string().not_in(retained_namespaces),
             identity["copy_binding"].as_string().not_in(retained_bindings),
-            ~and_(
-                child.state == "completed",
-                func.coalesce(child.payload["response_payload"]["retirement"].as_string(), "")
-                == "stopped",
-                qualified,
-            ),
+            ~_resolved_native_retirement(child, intent, spec),
         )
         .order_by(child.created_at, child.record_id)
         .limit(limit)

@@ -42,6 +42,7 @@ from control_plane.storage.postgres import (
 from control_plane.storage.testing_drill_custody import (
     native_drill_maintenance_candidates,
     outstanding_native_retirements,
+    native_retirement_resolved,
 )
 from control_plane.storage.testing_native_disposal import (
     native_admission_family,
@@ -794,6 +795,8 @@ def observe_native_retirement_custody(
         raise DrillPrerequisite("native_testing_copy_retirement_unsettled")
     if native_custody_lost(store, child):
         return False
+    if native_retirement_resolved(store, child):
+        return True
 
     class OriginalObservation:
         def target_key(self) -> str:

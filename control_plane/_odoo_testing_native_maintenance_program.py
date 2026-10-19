@@ -105,20 +105,53 @@ class NativeMaintenanceHost:
         try:
             descriptor=os.open('namespace-id',os.O_RDONLY|os.O_NOFOLLOW,dir_fd=directory)
         except FileNotFoundError:
-            if expected:
+            if expected or any(name.startswith('native-') and name.endswith('.json') for name in os.listdir(directory)):
                 raise NativeReceiptUntrusted('Original receipt namespace marker is missing')
-            descriptor=os.open('namespace-id',os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=directory)
-            with os.fdopen(descriptor,'w') as handle:
-                handle.write(os.urandom(32).hex());handle.flush();os.fsync(handle.fileno())
-            os.fsync(directory)
+            name='.namespace-'+uuid.uuid4().hex+'.tmp'
+            created=False
+            try:
+                descriptor=os.open(name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=directory)
+                created=True
+                try:
+                    remaining=os.urandom(32).hex().encode('ascii')
+                    while remaining:
+                        written=os.write(descriptor,remaining)
+                        if written<=0:
+                            raise OSError('Native namespace write did not complete')
+                        remaining=remaining[written:]
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+                try:
+                    os.link(name,'namespace-id',src_dir_fd=directory,dst_dir_fd=directory,follow_symlinks=False)
+                except FileExistsError:
+                    pass
+            except OSError as error:
+                # No partial file is published under the final name. Failed
+                # initialization is availability, not positive custody loss.
+                raise RuntimeError('Native namespace initialization is unavailable') from error
+            finally:
+                if created:
+                    try:
+                        os.unlink(name,dir_fd=directory)
+                    except FileNotFoundError:
+                        pass
+                    except OSError as error:
+                        raise RuntimeError('Native namespace initialization is unavailable') from error
             descriptor=os.open('namespace-id',os.O_RDONLY|os.O_NOFOLLOW,dir_fd=directory)
         with os.fdopen(descriptor) as handle:
             metadata=os.fstat(handle.fileno())
             if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid!=os.geteuid() or metadata.st_mode&0o077:
                 raise NativeReceiptUntrusted('Native namespace marker is unsafe')
             nonce=handle.read(65)
-        if not re.fullmatch(r'[a-f0-9]{64}',nonce):
-            raise NativeReceiptUntrusted('Native namespace marker is malformed')
+            if not re.fullmatch(r'[a-f0-9]{64}',nonce):
+                raise NativeReceiptUntrusted('Native namespace marker is malformed')
+            try:
+                # A completed link whose barrier/reply was lost is adopted as
+                # the same immutable winner only after finishing durability.
+                os.fsync(handle.fileno());os.fsync(directory)
+            except OSError as error:
+                raise RuntimeError('Native namespace durability is unavailable') from error
         return nonce
 
     def private_state(self,containers=None):
