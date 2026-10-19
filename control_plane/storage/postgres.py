@@ -5439,6 +5439,195 @@ register_source_events(Base)
 
 
 class PostgresRecordStore(HumanSessionStore):
+    @staticmethod
+    def _runner_relabel_document_payload(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
+        from control_plane.contracts.runner_relabel import (
+            RunnerRelabelOperationClaim,
+            RunnerRelabelPolicyPlan,
+            RunnerRelabelReview,
+            RunnerRelabelTerminal,
+        )
+
+        models: dict[str, type[BaseModel]] = {
+            "review": RunnerRelabelReview,
+            "policy-review": RunnerRelabelPolicyPlan,
+            "review-operation": RunnerRelabelOperationClaim,
+            "terminal": RunnerRelabelTerminal,
+            "planned": RunnerLaneRegistrationAuditRecord,
+            "terminal-audit": RunnerLaneRegistrationAuditRecord,
+        }
+        model = models.get(kind)
+        if model is None:
+            raise ValueError("Unknown native runner custody kind.")
+        return model.model_validate(payload).model_dump(mode="json")
+
+    def read_runner_relabel_document(self, kind: str, key: str) -> dict[str, Any] | None:
+        from control_plane.contracts.canonical_json import canonical_json_sha256
+
+        row = self.read_idempotency_record(
+            scope="runner-relabel-custody", route_path=kind, idempotency_key=key
+        )
+        if row is None:
+            return None
+        if (
+            row.state != "completed"
+            or row.scope != "runner-relabel-custody"
+            or row.route_path != kind
+            or row.idempotency_key != key
+            or row.record_id != canonical_json_sha256(["runner-relabel-custody", kind, key])
+            or row.request_fingerprint != canonical_json_sha256(row.response_payload)
+        ):
+            raise ValueError("Native runner custody envelope is invalid.")
+        return self._runner_relabel_document_payload(kind, dict(row.response_payload))
+
+    def write_runner_relabel_document(
+        self,
+        kind: str,
+        key: str,
+        payload: dict[str, Any],
+        *,
+        reservation: LaunchplaneIdempotencyRecord | None = None,
+    ) -> None:
+        """Insert immutable native custody; legacy audit ingestion cannot select it."""
+        from control_plane.contracts.canonical_json import canonical_json_sha256
+
+        fingerprint = canonical_json_sha256(payload)
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            if reservation is not None:
+                self.require_current_provider_execution(session, reservation)
+            payload = self._runner_relabel_document_payload(kind, payload)
+            fingerprint = canonical_json_sha256(payload)
+            existing = session.scalar(
+                self._idempotency_statement(
+                    scope="runner-relabel-custody",
+                    route_path=kind,
+                    idempotency_key=key,
+                    for_update=True,
+                )
+            )
+            if existing is not None:
+                record = LaunchplaneIdempotencyRecord.model_validate(existing.payload)
+                if (
+                    record.request_fingerprint != fingerprint
+                    or record.response_payload != payload
+                    or record.state != "completed"
+                    or record.scope != "runner-relabel-custody"
+                    or record.route_path != kind
+                    or record.idempotency_key != key
+                    or record.record_id
+                    != canonical_json_sha256(["runner-relabel-custody", kind, key])
+                ):
+                    raise ValueError("Native runner evidence is immutable.")
+                return
+            now = self._database_mutation_timestamp(session)
+            record = LaunchplaneIdempotencyRecord(
+                record_id=canonical_json_sha256(["runner-relabel-custody", kind, key]),
+                scope="runner-relabel-custody",
+                route_path=kind,
+                idempotency_key=key,
+                request_fingerprint=fingerprint,
+                response_status_code=202,
+                response_trace_id="runner-relabel-custody",
+                recorded_at=now,
+                response_payload=payload,
+            )
+            session.add(self._idempotency_row(record))
+            session.commit()
+
+    @contextmanager
+    def runner_relabel_policy_guard(self, policy_id: str) -> Iterator[Session]:
+        """Serialize policy CAS and the final checked provider dispatch."""
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            if self.database_dialect_name == "postgresql":
+                session.execute(
+                    text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+                    {"key": f"runner-relabel-policy:{policy_id}"},
+                )
+            yield session
+            session.commit()
+
+    def read_runner_relabel_policy(
+        self, policy_id: str, *, session: Session | None = None
+    ) -> dict[str, Any] | None:
+        def read(active: Session) -> dict[str, Any] | None:
+            from control_plane.contracts.canonical_json import canonical_json_sha256
+
+            statement = (
+                select(LaunchplaneIdempotencyRow)
+                .where(
+                    LaunchplaneIdempotencyRow.scope == "runner-relabel-policy",
+                    LaunchplaneIdempotencyRow.route_path == policy_id,
+                )
+                .order_by(LaunchplaneIdempotencyRow.attempt.desc())
+                .limit(1)
+            )
+            row = active.scalar(statement)
+            if row is None:
+                return None
+            record = LaunchplaneIdempotencyRecord.model_validate(row.payload)
+            payload = record.response_payload
+            revision = payload.get("revision")
+            digest = canonical_json_sha256(
+                {key: value for key, value in payload.items() if key != "policy_sha256"}
+            )
+            if (
+                type(revision) is not int
+                or revision < 1
+                or record.attempt != revision
+                or row.attempt != revision
+                or record.state != "completed"
+                or record.scope != "runner-relabel-policy"
+                or record.route_path != policy_id
+                or record.idempotency_key != str(revision)
+                or record.record_id
+                != canonical_json_sha256(["runner-relabel-policy", policy_id, revision])
+                or record.request_fingerprint != digest
+                or payload.get("policy_sha256") != digest
+                or payload.get("previous_sha256") != payload.get("expected_policy_sha256")
+            ):
+                raise ValueError("Runner policy custody envelope is invalid.")
+            from control_plane.contracts.runner_relabel import RunnerRelabelPolicyRecord
+
+            return RunnerRelabelPolicyRecord.model_validate(payload).model_dump(mode="json")
+
+        if session is not None:
+            return read(session)
+        with self._session_factory() as active:
+            return read(active)
+
+    def compare_and_write_runner_relabel_policy(
+        self, policy_id: str, payload: dict[str, Any], *, expected_sha256: str
+    ) -> dict[str, Any]:
+        from control_plane.contracts.canonical_json import canonical_json_sha256
+
+        with self.runner_relabel_policy_guard(policy_id) as session:
+            current = self.read_runner_relabel_policy(policy_id, session=session)
+            if (current["policy_sha256"] if current else "") != expected_sha256:
+                raise ValueError("Runner policy changed since review.")
+            revision = int(current["revision"]) + 1 if current else 1
+            saved = {**payload, "revision": revision, "previous_sha256": expected_sha256}
+            saved["policy_sha256"] = canonical_json_sha256(saved)
+            from control_plane.contracts.runner_relabel import RunnerRelabelPolicyRecord
+
+            saved = RunnerRelabelPolicyRecord.model_validate(saved).model_dump(mode="json")
+            now = self._database_mutation_timestamp(session)
+            record = LaunchplaneIdempotencyRecord(
+                record_id=canonical_json_sha256(["runner-relabel-policy", policy_id, revision]),
+                scope="runner-relabel-policy",
+                route_path=policy_id,
+                idempotency_key=str(revision),
+                attempt=revision,
+                request_fingerprint=saved["policy_sha256"],
+                response_status_code=202,
+                response_trace_id="runner-relabel-policy",
+                recorded_at=now,
+                response_payload=saved,
+            )
+            session.add(self._idempotency_row(record))
+            return saved
+
     @contextmanager
     def delivery_evidence_index(self) -> Iterator[DeliveryEvidenceIndex]:
         yield DeliveryEvidenceIndex(self._engine)

@@ -44,6 +44,7 @@ LOCAL_RUN_RECORD_TYPE = "unittest_local_shard_run"
 LOCAL_PROCESS_POLL_SECONDS = 0.05
 LOCAL_PROCESS_TERMINATE_SECONDS = 5.0
 POSTGRES_INTEGRATION_MODULES = (
+    "tests.test_runner_relabel_postgres",
     "tests.test_postgres_integration",
     "tests.test_testing_private_ingress_postgres",
     "tests.test_testing_override_sanitization_postgres",

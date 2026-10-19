@@ -102,6 +102,7 @@ __all__ = [
     "mint_delivery_installation_token",
     "resolve_advisory_github_app_identity",
     "mint_repository_installation_token",
+    "mint_runner_relabel_installation_token",
     "mint_merge_train_installation_token",
     "mint_pull_request_feedback_installation_token",
     "ordinary_agent_effect_permissions",
@@ -183,6 +184,38 @@ def mint_repository_installation_token(
         permission_boundary_label="advisory check projection",
         api_request=api_request,
         now=now,
+    )
+
+
+def mint_runner_relabel_installation_token(
+    *,
+    identity: GitHubAppIdentity,
+    installation_id: int,
+    repository: str,
+    repository_id: str,
+    write: bool,
+    api_request: GitHubApiRequest = github_api_request,
+) -> GitHubAppInstallationToken:
+    """Use only the explicitly accepted runner-purpose installation."""
+    permissions = {"administration": "write" if write else "read", "metadata": "read"}
+
+    def accepted_installation(app_id: int, observed_installation_id: int) -> None:
+        if app_id != identity.app_id or observed_installation_id != installation_id:
+            raise GitHubAppIdentityError("Runner capability installation does not match.")
+
+    return _mint_repository_installation_token(
+        identity=identity,
+        repository=repository,
+        repository_id=repository_id,
+        requested_permissions={"administration": permissions["administration"]},
+        required_installation_permissions=permissions,
+        allowed_installation_permissions=None,
+        allowed_token_permissions=permissions,
+        identity_label="Runner-purpose GitHub App",
+        permission_boundary_label="exact runner relabel",
+        before_token_mint=accepted_installation,
+        api_request=api_request,
+        now=None,
     )
 
 

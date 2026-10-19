@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import unittest
 
 from cryptography.hazmat.primitives import serialization
@@ -13,6 +13,7 @@ from control_plane.github_app_identity import (
     GitHubAppIdentityError,
     GitHubAppInstallationToken,
     mint_repository_installation_token,
+    mint_runner_relabel_installation_token,
     mint_source_control_read_installation_token,
     revoke_installation_token,
 )
@@ -29,6 +30,71 @@ class GitHubAppIdentityTests(unittest.TestCase):
             format=serialization.PrivateFormat.PKCS8,
             encryption_algorithm=serialization.NoEncryption(),
         ).decode()
+
+    def test_runner_capability_rejects_changed_installation_before_token_issue(self) -> None:
+        issued: list[object] = []
+
+        def api_request(**kwargs: object) -> object:
+            if kwargs["path"] == "/app":
+                return {"id": 42}
+            if kwargs["path"] == "/repos/example/repo/installation":
+                return {
+                    "id": 77,
+                    "app_id": 42,
+                    "permissions": {"administration": "write", "metadata": "read"},
+                }
+            issued.append(kwargs)
+            self.fail("An unaccepted installation must not issue a token.")
+
+        with self.assertRaises(GitHubAppIdentityError):
+            mint_runner_relabel_installation_token(
+                identity=GitHubAppIdentity(app_id=42, private_key=self.private_key),
+                installation_id=78,
+                repository="example/repo",
+                repository_id="123",
+                write=True,
+                api_request=api_request,
+            )
+        self.assertEqual(issued, [])
+
+    def test_runner_review_token_is_read_only_and_apply_is_exactly_scoped(self) -> None:
+        for write in (False, True):
+            with self.subTest(write=write):
+                expected_access = "write" if write else "read"
+
+                def api_request(**kwargs: object) -> object:
+                    if kwargs["path"] == "/app":
+                        return {"id": 42}
+                    if kwargs["path"] == "/repos/example/repo/installation":
+                        return {
+                            "id": 77,
+                            "app_id": 42,
+                            "permissions": {"administration": "write", "metadata": "read"},
+                        }
+                    self.assertEqual(kwargs["path"], "/app/installations/77/access_tokens")
+                    self.assertEqual(
+                        kwargs["body"],
+                        {
+                            "repository_ids": [123],
+                            "permissions": {"administration": expected_access},
+                        },
+                    )
+                    return {
+                        "token": "fictional-runner-token",
+                        "expires_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+                        "permissions": {"administration": expected_access, "metadata": "read"},
+                        "repositories": [{"id": 123, "full_name": "example/repo"}],
+                    }
+
+                token = mint_runner_relabel_installation_token(
+                    identity=GitHubAppIdentity(app_id=42, private_key=self.private_key),
+                    installation_id=77,
+                    repository="example/repo",
+                    repository_id="123",
+                    write=write,
+                    api_request=api_request,
+                )
+                self.assertNotIn("fictional-runner-token", repr(token))
 
     def test_mints_exact_repository_scoped_checks_token(self) -> None:
         observed_jwts: list[str] = []

@@ -30634,6 +30634,15 @@ def create_launchplane_fastapi_app(
         run_provider_operation_http=run_provider_operation_http,
     )
 
+    from control_plane.http_routes.runner_relabel import register_runner_relabel_routes
+
+    register_runner_relabel_routes(
+        app,
+        dependencies=read_route_dependencies,
+        mutation_identity=read_browser_mutation_identity,
+        run_provider_operation_http=run_provider_operation_http,
+    )
+
     register_testing_separation_resource_routes(
         app,
         dependencies=read_route_dependencies,

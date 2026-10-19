@@ -31,6 +31,10 @@ class ActionDeclaration:
 ACTION_DECLARATIONS: Mapping[str, ActionDeclaration] = MappingProxyType(
     {
         AGENT_READ_ROLE_ACTION: ActionDeclaration("read", "service"),
+        "runner_relabel.read": ActionDeclaration("read", "service"),
+        "runner_relabel.plan": ActionDeclaration("plan", "service"),
+        "runner_relabel.apply": ActionDeclaration("write", "service"),
+        "runner_relabel.recover": ActionDeclaration("write", "service"),
         "launchplane_service.metadata.read": ActionDeclaration("read", "service"),
         "agent_write_intent.plan": ActionDeclaration("plan"),
         "product_profile.preview_tls.plan": ActionDeclaration("plan"),

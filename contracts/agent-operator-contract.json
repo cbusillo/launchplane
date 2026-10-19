@@ -46,6 +46,141 @@
     },
     "operations": [
       {
+        "idempotency": "none",
+        "identity_dependencies": [
+          "read_identity"
+        ],
+        "method": "GET",
+        "modes": [],
+        "operation_id": "read_runner_relabel_policy",
+        "path": "/v1/runner-relabel/{policy_id}/policy",
+        "purpose": "Read a service-owned exact-runner policy without provider effects.",
+        "response_statuses": [
+          "202",
+          "400",
+          "401",
+          "403",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [],
+        "schema_fingerprint_sha256": "3b250db5628d404353ba3b88b095635ac6c39853e02a377a366524c0f8e016d0",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
+        "idempotency": "none",
+        "identity_dependencies": [
+          "read_browser_mutation_identity"
+        ],
+        "method": "POST",
+        "modes": [
+          "dry-run",
+          "apply"
+        ],
+        "operation_id": "review_runner_relabel_policy",
+        "path": "/v1/runner-relabel/{policy_id}/policy",
+        "purpose": "Save an inert policy candidate; applying an exact saved CAS review requires its own immutable-ID administrator.",
+        "response_statuses": [
+          "202",
+          "400",
+          "401",
+          "403",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [
+          "expected_plan_sha256",
+          "expected_policy_sha256"
+        ],
+        "schema_fingerprint_sha256": "1217ad5b15c86282b2a92c33a245f9448b09cf41ae79662b63de8dfd04805d39",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
+        "idempotency": "none",
+        "identity_dependencies": [
+          "read_identity"
+        ],
+        "method": "GET",
+        "modes": [],
+        "operation_id": "read_runner_relabel_review",
+        "path": "/v1/runner-relabel/{policy_id}/reviews/{review_id}",
+        "purpose": "Read the authenticated actor's own stored runner review and original operation receipt without provider calls.",
+        "response_statuses": [
+          "202",
+          "400",
+          "401",
+          "403",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [],
+        "schema_fingerprint_sha256": "39dbfd1f5b97d4befffae1641a8e6d6c7c80fd6ff9fe1f14efae2ac36694cf36",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
+        "idempotency": "none",
+        "identity_dependencies": [
+          "read_browser_mutation_identity"
+        ],
+        "method": "POST",
+        "modes": [
+          "dry-run"
+        ],
+        "operation_id": "review_runner_relabel",
+        "path": "/v1/runner-relabel/{policy_id}/reviews",
+        "purpose": "Review one exact existing runner label replacement under the authenticated actor and stored service policy; no runner mutation.",
+        "response_statuses": [
+          "202",
+          "400",
+          "401",
+          "403",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [],
+        "schema_fingerprint_sha256": "ec23122c35158d43a8b55e41a9d20fa9ac018177c3108be3524a6e4e0a2a7311",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
+        "idempotency": "required",
+        "identity_dependencies": [
+          "read_browser_mutation_identity"
+        ],
+        "method": "POST",
+        "modes": [
+          "apply",
+          "reconcile",
+          "recover-evidence"
+        ],
+        "operation_id": "apply_runner_relabel",
+        "path": "/v1/runner-relabel/{policy_id}/operations",
+        "purpose": "Apply an actor-bound stored runner review once, or reconcile the original operation without repeating a label write.",
+        "response_statuses": [
+          "202",
+          "400",
+          "401",
+          "403",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [
+          "review_id",
+          "expected_review_sha256"
+        ],
+        "schema_fingerprint_sha256": "c6b5731ebd856a9eb81addce950658c4af643926d94a7d4309217751d05c6c92",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
         "idempotency": "apply",
         "identity_dependencies": [
           "read_browser_mutation_identity"
@@ -836,8 +971,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "dc1cff356c561ac36a0fe60a9bc536a2ca16d073"
+    "source_commit_sha": "7554d0b83e390f4b0e28fc29b12328eaa87284af"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "cb9d41b602370f4b71be25aa4fd11ef88328479aeb7d046c76a19e297b9657d0"
+  "semantic_digest_sha256": "746e626b684b94382859866a18e2e4ad52ff8974c85c8f7181bfb3ffc37621d9"
 }

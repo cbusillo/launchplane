@@ -3072,6 +3072,18 @@ preflights.
   `register` from `retire` through the typed operation field. Records preserve
   dry-run or apply evidence without storing GitHub runner registration tokens or
   other credentials.
+- Native runner relabel policy revisions and immutable review/planned/terminal
+  custody use dedicated `runner-relabel-policy` and `runner-relabel-custody`
+  namespaces in the existing idempotency table. Frozen contracts in
+  `control_plane.contracts.runner_relabel` bind the original immutable actor,
+  exact repository/runner identity, reviewed host/root and protected routing,
+  before/desired labels and policy/review digests. Insert-only custody never
+  reads legacy audit upserts as authority. Numeric revisions and policy CAS
+  serialize under the same transaction lock used for checked dispatch; explicit
+  same-transaction lease validation fences planned/terminal evidence. Existing
+  durable provider reservations fence the repository numeric ID/runner ID across
+  actors and keys. Unknown outcomes retain that fence. Records have no automatic
+  expiry or purge; source adds no table or held-schema activation.
 - Scoped agent write-intent evaluation is exposed at
   `POST /v1/agent/write-intents/evaluate`. It validates intent shape, maps the
   intent to an exact existing policy action, evaluates authorization, and returns
