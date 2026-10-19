@@ -44,6 +44,7 @@ from typing import (
 from pydantic import BaseModel, JsonValue
 
 if TYPE_CHECKING:
+    from control_plane.merge_train_wake import MergeTrainEventReceipt
     from control_plane.testing_replacement_resources import TestingReplacementResourcesRequest
     from control_plane.testing_verification import TestingVerification
 from control_plane.lane_movement import source_read_retry_ready
@@ -23930,20 +23931,29 @@ class PostgresRecordStore(HumanSessionStore):
             limit=limit,
         )
 
-    def notify_merge_train(self, target_keys: tuple[str, ...] = ()) -> None:
+    def notify_merge_train(
+        self,
+        target_keys: tuple[str, ...] = (),
+        *,
+        receipt: MergeTrainEventReceipt | None = None,
+    ) -> None:
         """Publish a wake hint through the existing pool, separate from record writes.
 
         Each payload names one train's controller key; an empty payload wakes them all.
         """
         from control_plane.merge_train_events import MERGE_TRAIN_EVENT_CHANNEL
+        from control_plane.merge_train_wake import encode_merge_train_hint
 
         if self.database_dialect_name != "postgresql":
             raise ValueError("Merge train notifications require PostgreSQL.")
+        payloads: list[str] = []
+        for target_key in target_keys or ("",):
+            payloads.append(encode_merge_train_hint(target_key, receipt) or target_key)
         with self._engine.begin() as connection:
-            for target_key in target_keys or ("",):
+            for payload in payloads:
                 connection.execute(
                     text("SELECT pg_notify(:channel, :payload)"),
-                    {"channel": MERGE_TRAIN_EVENT_CHANNEL, "payload": target_key},
+                    {"channel": MERGE_TRAIN_EVENT_CHANNEL, "payload": payload},
                 )
 
     def record_github_app_webhook_delivery(

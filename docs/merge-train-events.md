@@ -54,6 +54,55 @@ managed webhook secret. This source change adds no App subscription, grant or
 credential; enabling missing subscriptions is a separate administrator action.
 Deployment and live delivery are separate from the local notification rehearsal.
 
+## Wake observations
+
+After signature and JSON validation, the receiver captures the delivery header,
+its request trace and receipt time, normalized event/action, and bounded optional
+head and event identifiers. These are correlation fields from a signature-verified
+request; the delivery/event headers are not themselves covered by the payload
+signature. Redelivery may reuse a delivery ID, so the request trace distinguishes
+observations. The fields never replace fresh merge evidence.
+
+Each notification carries one advisory controller key and its bounded receipt
+in a single versioned envelope. PostgreSQL exposes the complete notification,
+so separate client reads cannot detach the receipt from its routing hint.
+Invalid or oversized optional metadata falls back to the original raw key.
+The new listener also accepts raw keys from older publishers. An older worker
+cannot select an envelope's target during a mixed rollout; its independent timed
+sweep remains available. Qualify event latency only after both receiver and
+worker run the new source. No independently pinned old-worker mode or
+compatibility service is introduced. A failed notification relies on the sweep.
+
+The listener fully drains queued hints while retaining the newest bounded set of
+receipts. `receipts_truncated` reports lost attribution, not an exact count of
+unique deliveries. Missing, malformed or legacy metadata remains unattributed;
+an envelope's routing key remains a hint, independent of its optional receipt.
+Unreadable envelopes with no routing hint fall back to a full sweep. A due sweep
+still consumes queued hints and rereads all targets, retaining observed receipts.
+
+Worker stdout keeps its existing result list. Every loop pass also emits one
+structured `merge_train_pass` record on stderr. It contains the actual wake
+reason, loop-pass start, hint observation time, target-keyed receipts and any
+whole-pass error code, alongside the actual target/result status, controller
+action trace and record identifiers from that pass. This binds observations
+without joining by nearby timestamps or repeating receipts on continuation rows.
+Startup, event hints, timed sweeps, empty hints and listener fallback remain
+distinguishable. A timer sweep can also observe receipts, and a later pass does
+not reuse them as a new cause. The loop-pass start is not every action's start;
+use each controller's times and trace for its bounded continuations.
+
+A target disabled or skipped during shutdown can have a receipt with no result
+binding. That establishes no action or particular skip reason. Receipts remain
+bounded independently of the result bindings, whose size follows the actual
+actions in the pass; no fixed byte limit for the whole log record is claimed.
+Read both stdout and stderr. A receipt alone establishes neither an action nor
+a landing. Join the actual trace and record identifiers through existing
+admission/landing reads; immutable
+landing outcomes bind their `source` to `service:merge-landing-outcome:{trace_id}`.
+No additional proof store, grant or reader credential is introduced. Retain raw
+timestamps and clock uncertainty when measuring latency; local rehearsals and
+nearby timestamps do not prove a natural event-to-landing chain or saved idle time.
+
 See [merge-train policy](merge-train-policy.md) for admission, leases, policy
 records and the service-worker sweeps and manual GitHub entrypoint.
 

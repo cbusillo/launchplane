@@ -24,6 +24,11 @@ from control_plane.contracts.merge_train_policy import (
 )
 from control_plane.merge_train_controller_run_once import MergeTrainControllerRunOnceResult
 from control_plane.merge_train_policy_source import MergeTrainPolicyStoreMissingError
+from control_plane.merge_train_wake import (
+    MergeTrainWake,
+    MergeTrainEventReceipt,
+    MergeTrainTargetReceipt,
+)
 from control_plane.merge_train_scheduler import (
     MergeTrainScheduledTargetResult,
     run_merge_train_scheduler_loop,
@@ -617,10 +622,43 @@ class MergeTrainSchedulerPassTests(TestCase):
 
 
 class MergeTrainSchedulerLoopTests(TestCase):
+    def test_due_clock_keeps_event_observations_but_does_not_reuse_them_later(self) -> None:
+        receipt = MergeTrainEventReceipt(
+            delivery_id="completion",
+            request_trace_id="receiver-request",
+            received_at="2026-10-19T09:00:00Z",
+            event="check_run",
+        )
+        key = "merge-train-controller:cbusillo:alpha:main"
+        event = MergeTrainWake(
+            frozenset({key}), "event_hints", receipts=(MergeTrainTargetReceipt(key, receipt),)
+        )
+        clock = iter((0.0, 0.0, 300.0, 300.0, 600.0))
+        observations: list[MergeTrainWake] = []
+        with patch.object(
+            merge_train_scheduler, "run_merge_train_scheduler_pass", return_value=()
+        ) as run:
+            run_merge_train_scheduler_loop(
+                record_store=object(),
+                control_plane_root=_ROOT,
+                max_passes=3,
+                monotonic=lambda: next(clock),
+                pass_callback=lambda results, wake: observations.append(wake),
+                wait_for_event=MagicMock(side_effect=(event, MergeTrainWake(None, "timer_sweep"))),
+            )
+        startup, coincident, later = [call.kwargs for call in run.call_args_list]
+        self.assertEqual(observations[0].reason, "startup")
+        self.assertIsNone(coincident["target_keys"])
+        self.assertEqual(observations[1].reason, "timer_sweep")
+        self.assertEqual(observations[1].receipts, event.receipts)
+        self.assertEqual(observations[2].receipts, ())
+        self.assertIsNone(startup["target_keys"])
+        self.assertIsNone(later["target_keys"])
+
     def test_event_wait_starts_a_fresh_pass_without_waiting_for_the_sweep(self) -> None:
         stop_event = MagicMock(spec=Event)
         stop_event.is_set.return_value = False
-        event_wait = MagicMock(return_value=None)
+        event_wait = MagicMock(return_value=MergeTrainWake(None, "timer_sweep"))
         with patch.object(
             merge_train_scheduler, "run_merge_train_scheduler_pass", return_value=()
         ) as run:
@@ -643,6 +681,13 @@ class MergeTrainSchedulerLoopTests(TestCase):
         stop_event.is_set.return_value = False
         stop_event.wait.side_effect = lambda timeout: waits.append(timeout)
         passes: list[tuple[MergeTrainScheduledTargetResult, ...]] = []
+        observations: list[MergeTrainWake] = []
+
+        def record_pass(
+            results: tuple[MergeTrainScheduledTargetResult, ...], wake: MergeTrainWake
+        ) -> None:
+            passes.append(results)
+            observations.append(wake)
 
         with patch.object(
             merge_train_scheduler,
@@ -655,12 +700,14 @@ class MergeTrainSchedulerLoopTests(TestCase):
                 interval_seconds=300,
                 stop_event=stop_event,
                 max_passes=2,
-                pass_callback=passes.append,
+                pass_callback=record_pass,
                 monotonic=lambda: next(clock),
             )
 
         self.assertEqual(count, 2)
         self.assertEqual(passes, [(), ()])
+        self.assertEqual(observations[0].pass_error_code, RuntimeError.__name__)
+        self.assertEqual(observations[1].pass_error_code, "")
         # The first pass took 40 seconds, so the next one starts 260 seconds later.
         self.assertEqual(waits, [260.0])
 
@@ -674,7 +721,12 @@ class MergeTrainSteadyArrivalTests(TestCase):
             ("cbusillo/beta", MergeTrainSchedulerPolicy(enabled=True, mutate=True)),
         )
         hinted: list[str] = []
-        store = SimpleNamespace(notify_merge_train=hinted.extend)
+
+        def notify(keys: tuple[str, ...], *, receipt: MergeTrainEventReceipt | None = None) -> None:
+            del receipt
+            hinted.extend(keys)
+
+        store = SimpleNamespace(notify_merge_train=notify)
         inventory = SimpleNamespace(
             current_record=SimpleNamespace(inventory_state="tracked", repository="cbusillo/alpha")
         )
@@ -694,11 +746,13 @@ class MergeTrainSteadyArrivalTests(TestCase):
             assert isinstance(repository_policy, MergeTrainRepositoryPolicy)
             return merge_train_scheduler._target_result(repository_policy, status="ran")
 
-        def record_pass(results: tuple[MergeTrainScheduledTargetResult, ...]) -> None:
+        def record_pass(
+            results: tuple[MergeTrainScheduledTargetResult, ...], _wake: MergeTrainWake
+        ) -> None:
             passes.append((started[-1], tuple(result.repository for result in results)))
             clock[0] += 5
 
-        def wait(timeout: float, _stop: Event) -> frozenset[str] | None:
+        def wait(timeout: float, _stop: Event) -> MergeTrainWake:
             deadline = clock[0] + timeout
             while arrivals and arrivals[0] <= deadline:
                 clock[0] = max(clock[0], arrivals.pop(0))
@@ -711,9 +765,9 @@ class MergeTrainSteadyArrivalTests(TestCase):
                 if hinted:
                     woken = frozenset(hinted)
                     hinted.clear()
-                    return woken
+                    return MergeTrainWake(woken, "event_hints")
             clock[0] = deadline
-            return None
+            return MergeTrainWake(None, "timer_sweep")
 
         with (
             patch.object(
