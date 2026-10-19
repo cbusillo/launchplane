@@ -11,7 +11,11 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane import runtime_platform_credentials
 from control_plane import secrets as control_plane_secrets
-from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    is_exclusive_product_context,
+    product_context_owner_map,
+)
 from control_plane.contracts.runtime_identity import COMPOSE_IMAGE_REFERENCE_ENV_KEYS
 from control_plane.disposable_lanes import (
     DisposableLaneStore,
@@ -183,10 +187,14 @@ def retained_database_password_changed(
     )
 
 
-def _unused_testing_pointer_omissions(
-    record_store: object, *, product_name: str, context_name: str, instance_name: str
+def _unused_testing_override_pointers(
+    record_store: object,
+    *,
+    retired_keys: set[str],
+    product_name: str,
+    context_name: str,
+    instance_name: str,
 ) -> set[str]:
-    from control_plane.odoo_testing_restore import read_current_testing_generation
     from control_plane.odoo_instance_overrides import (
         addon_setting_secret_env_key,
         config_parameter_secret_env_key,
@@ -195,31 +203,42 @@ def _unused_testing_pointer_omissions(
     if instance_name != "testing":
         return set()
     try:
+        profiles = getattr(record_store, "list_product_profile_records")()
+        owners = product_context_owner_map(profiles)
         if not product_name:
-            profiles = [
-                profile
-                for profile in getattr(record_store, "list_product_profile_records")()
-                if any(
-                    (lane.context, lane.instance) == (context_name, instance_name)
-                    for lane in profile.lanes
-                )
-            ]
-            if len(profiles) != 1:
+            context_owners = owners.get(context_name, frozenset())
+            if len(context_owners) != 1:
                 return set()
-            product_name = profiles[0].product
-        generation = read_current_testing_generation(
-            record_store, product=product_name, context=context_name, instance=instance_name
-        )
-        if generation is None or (generation.product, generation.context, generation.instance) != (
-            product_name,
-            context_name,
-            instance_name,
+            product_name = next(iter(context_owners))
+        if not is_exclusive_product_context(
+            context=context_name, product=product_name, owners=owners
         ):
             return set()
         profile = getattr(record_store, "read_product_profile_record")(product_name)
+        if not any(
+            (lane.context, lane.instance) == (context_name, instance_name) for lane in profile.lanes
+        ):
+            return set()
         required = declared_runtime_keys(
             profile=profile, context_name=context_name, instance_name=instance_name
         )
+        # Read only names from persisted consumers, never resolved credential values.
+        for record in getattr(record_store, "list_runtime_environment_records")():
+            if record.context == context_name and (
+                record.scope == "context"
+                or (record.scope == "instance" and record.instance == instance_name)
+            ):
+                required.update(record.env)
+        try:
+            target = getattr(record_store, "read_dokploy_target_record")(
+                context_name=context_name, instance_name=instance_name
+            )
+        except FileNotFoundError:
+            target = None
+        if target is not None:
+            if (target.context, target.instance) != (context_name, instance_name):
+                return set()
+            required.update(target.env)
         try:
             overrides = getattr(record_store, "read_odoo_instance_override_record")(
                 context_name=context_name, instance_name=instance_name
@@ -227,6 +246,8 @@ def _unused_testing_pointer_omissions(
         except FileNotFoundError:
             overrides = None
         if overrides is not None:
+            if (overrides.context, overrides.instance) != (context_name, instance_name):
+                return set()
             # Protect pointers used by any phase, including restore-only intent.
             required.update(
                 config_parameter_secret_env_key(item.key)
@@ -240,11 +261,11 @@ def _unused_testing_pointer_omissions(
             )
         return {
             key
-            for key in generation.omitted_runtime_keys
-            if key.startswith(ODOO_OVERRIDE_SECRET_ENV_PREFIX) and key not in required
+            for key in retired_keys - required
+            if key.startswith(ODOO_OVERRIDE_SECRET_ENV_PREFIX)
         }
     except (AttributeError, FileNotFoundError, ValueError, click.ClickException):
-        # Unavailable generation/intent authority never permits a protected retirement.
+        # Missing ownership or consumer authority never permits a protected retirement.
         return set()
 
 
@@ -258,13 +279,14 @@ def validate_provider_key_retirement(
     instance_name: str = "",
     database_url: str | None = None,
 ) -> None:
-    omitted: set[str] = set()
+    unused: set[str] = set()
     if instance_name == "testing" and any(
         key.startswith(ODOO_OVERRIDE_SECRET_ENV_PREFIX) for key in retired_keys
     ):
         if record_store is not None:
-            omitted = _unused_testing_pointer_omissions(
+            unused = _unused_testing_override_pointers(
                 record_store,
+                retired_keys=retired_keys,
                 product_name=product_name,
                 context_name=context_name,
                 instance_name=instance_name,
@@ -272,8 +294,9 @@ def validate_provider_key_retirement(
         elif resolved_url := resolve_database_url(database_url):
             store = PostgresRecordStore(database_url=resolved_url)
             try:
-                omitted = _unused_testing_pointer_omissions(
+                unused = _unused_testing_override_pointers(
                     store,
+                    retired_keys=retired_keys,
                     product_name=product_name,
                     context_name=context_name,
                     instance_name=instance_name,
@@ -282,7 +305,7 @@ def validate_provider_key_retirement(
                 store.close()
     if any(
         provider_key_retirement_blocked(key, application_keys)
-        for key in retired_keys - (omitted - application_keys)
+        for key in retired_keys - (unused - application_keys)
     ):
         raise LiveTargetRuntimeError(
             "Provider key retirement conflicts with declared application or driver settings.",

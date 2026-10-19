@@ -218,6 +218,9 @@ class _Store:
             raise FileNotFoundError(record_id)
         return self.backup_records[record_id]
 
+    def list_product_profile_records(self) -> tuple[LaunchplaneProductProfileRecord, ...]:
+        return (self.profile,)
+
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord:
         if product != self.profile.product:
             raise FileNotFoundError(product)
@@ -3402,12 +3405,6 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             persisted_env = env_text
             store.last_provider_env = control_plane_dokploy.parse_dokploy_env_text(env_text)
 
-        self.enterContext(
-            patch(
-                "control_plane.odoo_testing_restore.read_current_testing_generation",
-                return_value=fresh_generation,
-            )
-        )
         with (
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.read_current_testing_generation",
@@ -3688,7 +3685,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             finally:
                 records.close()
 
-    def test_fresh_restore_retires_only_its_unused_omitted_secret_pointers(self) -> None:
+    def test_fresh_restore_retires_unused_secret_pointers(self) -> None:
         from tests.test_odoo_testing_restore import generation
 
         key = "ODOO_OVERRIDE_SECRET__ADDON__SHOPIFY__API_TOKEN"
@@ -3704,8 +3701,8 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         override = _opw_website_override_record().model_copy(update={"instance": "testing"})
         original_plan = build_odoo_stable_target_replacement_plan
 
-        for selected in (None, fresh.model_copy(update={"omitted_runtime_keys": ()}), fresh):
-            with self.subTest(qualified_omission=selected == fresh):
+        for selected in (fresh.model_copy(update={"omitted_runtime_keys": ()}), fresh):
+            with self.subTest(omitted=bool(selected.omitted_runtime_keys)):
 
                 def seed_retirement(**kwargs: Any) -> OdooStableTargetReplacementPlan:
                     store = kwargs["record_store"]
@@ -3723,18 +3720,6 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     "control_plane.workflows.odoo_stable_target_replacement.build_odoo_stable_target_replacement_plan",
                     side_effect=seed_retirement,
                 ):
-                    if selected != fresh:
-                        with self.assertRaises(OdooTargetReplacementStageError) as caught:
-                            self._apply_upstream_restore(
-                                override_record=override,
-                                post_deploy_results=(),
-                                test_instance="testing",
-                                fresh_generation=selected,
-                            )
-                        self.assertEqual(
-                            caught.exception.code, "plan_not_ready.live_runtime_keys_invalid"
-                        )
-                        continue
                     result, post_deploy, _, store = self._apply_upstream_restore(
                         override_record=override,
                         post_deploy_results=(
