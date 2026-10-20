@@ -16,6 +16,10 @@ from control_plane.contracts.authz_policy_record import (
 )
 from control_plane.contracts.promotion_record import DeploymentEvidence
 from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.service_auth import (
+    AuthorizationTarget,
+    configured_local_operator_identity,
+)
 from control_plane.product_reconcile import (
     TESTING_DEPLOY_MAX_FAILED_ATTEMPTS,
     TESTING_DEPLOY_MAX_ATTEMPT_CHAIN,
@@ -48,7 +52,9 @@ from tests.http_app_test_support import (
     _github_human_identity,
     _github_human_product_config_policy,
     _github_oauth_config,
+    _local_operator_bearer_config,
 )
+from tests.support.auth import scoped_agent_transport
 
 ROUTE = TESTING_RETRY_ROUTE.format(product="site")
 
@@ -62,6 +68,8 @@ class TestingRetryTests(reconcile_fixtures.ProductReconcileTestCase):
             config=_github_oauth_config(), session_store=InMemoryHumanSessionStore()
         )
         self.session = self.sessions.issue(_github_human_identity())
+        self.use_browser = False
+        self.config = _local_operator_bearer_config()
         policy = _github_human_product_config_policy(
             actions=("odoo_target_replacement_apply.execute", "product_environment.read"),
             product="site",
@@ -91,6 +99,7 @@ class TestingRetryTests(reconcile_fixtures.ProductReconcileTestCase):
             verifier=_RejectingVerifier(),
             authz_policy=policy,
             human_session_manager=self.sessions,
+            bearer_identity_config=self.config,
             record_store_factory=lambda: self.store,
         )
         self.running_release(10, reconcile_fixtures.OLDER)
@@ -131,7 +140,11 @@ class TestingRetryTests(reconcile_fixtures.ProductReconcileTestCase):
                 "POST",
                 ROUTE,
                 headers={
-                    **_browser_mutation_headers(self.sessions, self.session),
+                    **(
+                        _browser_mutation_headers(self.sessions, self.session)
+                        if self.use_browser
+                        else {"Authorization": "Bearer local-operator-token"}
+                    ),
                     "Idempotency-Key": key,
                 },
                 payload=body,
@@ -292,10 +305,41 @@ class TestingRetryTests(reconcile_fixtures.ProductReconcileTestCase):
                 email="unprivileged@example.invalid",
             )
         )
+        self.use_browser = True
         denied = self.post(body, "reader-apply")
         self.assertEqual(denied.status_code, 403, denied.text)
         self.assertEqual(denied.json()["error"]["code"], "authorization_denied")
         self.assertEqual(self.store.read_product_reconcile_request("site:testing").state, "failed")
+
+    def test_standing_retry_does_not_grant_general_apply_or_untrusted_agent_access(self) -> None:
+        identity = configured_local_operator_identity(self.config)
+        assert identity is not None
+        policy = self.store.list_authz_policy_records(status="active", limit=2)[0].policy
+        for instance in ("testing", "prod"):
+            with self.subTest(instance=instance):
+                self.assertFalse(
+                    policy.allows(
+                        identity=identity,
+                        action="odoo_target_replacement_apply.execute",
+                        product="site",
+                        context="cm",
+                        target=AuthorizationTarget(scope="instance", instances=(instance,)),
+                    )
+                )
+        body = self.reviewed()
+        queue = self.store.read_product_reconcile_request("site:testing")
+        with scoped_agent_transport():
+            for request in (self.draft, body):
+                refused = self.post(request, "untrusted-agent")
+                self.assertEqual(refused.status_code, 403, refused.text)
+                self.assertEqual(refused.json()["error"]["code"], "authorization_denied")
+        self.assertEqual(self.store.read_product_reconcile_request("site:testing"), queue)
+
+    def test_existing_browser_authority_can_still_rearm_testing(self) -> None:
+        self.use_browser = True
+        applied = self.post(self.reviewed(), "browser-retry")
+        self.assertEqual(applied.status_code, 202, applied.text)
+        self.assertTrue(applied.json()["result"]["reconcile_requested"])
 
     def test_read_only_review_needs_no_csrf_or_deploy_grant(self) -> None:
         self.session = self.sessions.issue(

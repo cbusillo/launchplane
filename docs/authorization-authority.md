@@ -117,6 +117,15 @@ restrictions remain. Exact product/lane/check and private endpoint validation,
 reviewed plan digest, idempotency, concurrent-profile checks and readback still
 govern apply. Other machine identities retain their existing scoped policy.
 
+The existing testing-retry route also admits an authenticated Director agent
+under the standing permission. This is a testing-only reconciler wakeup, not
+inherited authority for `odoo_target_replacement_apply.execute`, whose mixed
+production/testing scope keeps its policy checks. Other callers still require
+that action on the exact testing lane. Mutation authentication and browser CSRF,
+reviewed digests, original-key replay, generation and custody fences, staff
+holds, active/unknown-operation refusal and the worker's safety checks remain
+in force. See [testing retry](testing-deploy-retry.md).
+
 Projection sync requires executable proof of zero provider writes and no access
 or policy change. Every declared projection action must run its invariant proof
 in `tests/test_projection_sync.py`; an action without that proof stays `write`.
