@@ -292,6 +292,59 @@ class TestingResourceScheduleTests(unittest.TestCase):
             # The executed artifact carries the actual provider project identity.
             script = run.call_args.kwargs["schedule_payload"]["script"]
             self.assertEqual(script, resources.script("readback", compose_project=project))
+            # A qualified continuation still owns its earlier effects if this
+            # sibling renderer refuses locally before the next schedule write.
+            from tempfile import TemporaryDirectory
+            from tests.test_provider_operations import _StoreFixture, _FakeAdapter
+            from control_plane.provider_operations import ProviderObservation
+            from control_plane.provider_operations import ProviderOperationLease
+            from control_plane.contracts.provider_schedule import ScheduleMaterializationTooLarge
+            from control_plane.dokploy import api
+
+            with TemporaryDirectory() as directory:
+                fixture = _StoreFixture(directory)
+                with self.assertRaises(RuntimeError):
+                    fixture.run(_FakeAdapter(apply_error=RuntimeError("earlier effect")))
+                original = fixture.stored()
+                recovery = _FakeAdapter(
+                    observation=ProviderObservation(
+                        "absent",
+                        retry_safe=True,
+                        preserve_effect_checkpoint=True,
+                    )
+                )
+
+                def resume(_key: str, lease: ProviderOperationLease) -> object:
+                    return run_resource_schedule(
+                        root=Path("."),
+                        store=store,
+                        resources=resources,
+                        mode="prepare",
+                        checkpoint=lambda: None,
+                        before_provider_mutation=lambda _phase: lease.checkpoint_effect(
+                            "prepare_fresh_storage"
+                        ),
+                    )
+
+                with (
+                    patch.object(recovery, "apply", side_effect=resume),
+                    patch.object(
+                        OdooTestingResources,
+                        "script",
+                        return_value="x" * api.DOKPLOY_SCHEDULE_MATERIALIZATION_LIMIT_BYTES,
+                    ),
+                    self.assertRaises(ScheduleMaterializationTooLarge),
+                ):
+                    fixture.run(recovery)
+                retained = fixture.stored()
+                self.assertEqual(retained.provider_effect_phase, original.provider_effect_phase)
+                self.assertEqual(
+                    retained.provider_effect_started_at, original.provider_effect_started_at
+                )
+                self.assertEqual(retained.state, "reconcile_required")
+                self.assertEqual(
+                    fixture.run(_FakeAdapter(), idempotency_key="replacement").status, "target_busy"
+                )
             from control_plane.dokploy.source import DokployTargetDefinition
 
             candidate = DokployTargetDefinition(
@@ -422,6 +475,9 @@ class TestingResourceCaptureRecoveryTests(unittest.TestCase):
                 assert observation is not None
                 self.assertEqual(observation.outcome, expected)
                 self.assertEqual(observation.retry_safe, expected == "absent")
+                self.assertEqual(
+                    observation.preserve_effect_checkpoint, expected == "absent" and bool(phase)
+                )
 
     def test_provider_inventory_accepts_its_relation_names_and_refuses_ambiguity(self) -> None:
         from unittest.mock import Mock

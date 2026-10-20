@@ -555,6 +555,8 @@ def execute_odoo_post_deploy(
 
             remove_completed_native_capture_cache(native_capture)
     except (click.ClickException, OSError) as error:
+        from control_plane.contracts.provider_schedule import ScheduleMaterializationTooLarge
+
         determinate_failure = isinstance(
             error,
             (
@@ -562,6 +564,7 @@ def execute_odoo_post_deploy(
                 OdooProviderSafetyRefusedError,
                 DurableOperationAuthorizationDeniedError,
                 dokploy_post_deploy.OdooPostDeployReadbackFailure,
+                ScheduleMaterializationTooLarge,
             ),
         ) or (
             isinstance(error, dokploy_api.DokployScheduleExecutionFailed)
@@ -588,7 +591,12 @@ def execute_odoo_post_deploy(
                 else None,
             )
         if isinstance(
-            error, (OdooProviderSafetyRefusedError, DurableOperationAuthorizationDeniedError)
+            error,
+            (
+                OdooProviderSafetyRefusedError,
+                DurableOperationAuthorizationDeniedError,
+                ScheduleMaterializationTooLarge,
+            ),
         ):
             raise
         if uncertain:

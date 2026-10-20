@@ -1871,6 +1871,18 @@ recovery without the private cache. Missing original bytes in both places,
 without a database witness, are held for recovery, never silently replaced with
 a newer production snapshot.
 
+Fresh restore sends its host program and input through compressed Python stdin.
+Only the capture identity and artifact receipts cross the host boundary; the
+full persisted source observation stays in the service. Before native capture
+or delivery, the real rendered schedule must fit the shared materialization
+bound with a reserved, bounded capture descriptor. The final exact schedule is
+validated again before upsert. `schedule_materialization_too_large` is a typed,
+value-free local refusal, including after earlier acknowledged provider effects;
+it does not erase those effects or establish that the whole attempt was unused.
+Resource preparation likewise renders and validates before advancing its effect
+checkpoint. Qualified original-key continuations retain their prior effect
+phase and timestamp if rendering refuses before the next provider write.
+
 The receiver verifies whole artifacts and rejects archive traversal, symlinks,
 hardlinks and special files. Only content-addressed Odoo attachment files enter
 the testing filestore. The custom database dump goes through the existing

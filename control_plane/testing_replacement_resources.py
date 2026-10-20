@@ -320,6 +320,7 @@ def run_resource_schedule(
     resources: OdooTestingResources,
     mode: Literal["prepare", "readback"],
     checkpoint: Callable[[], None],
+    before_provider_mutation: Callable[[str], None] | None = None,
     allowed_domain_hosts: tuple[str, ...] = (),
     candidate_target: source.DokployTargetDefinition | None = None,
     candidate_server_id: str = "",
@@ -402,7 +403,27 @@ def run_resource_schedule(
     )
     if post_deploy._has_running_schedule_deployment(existing):
         raise ValueError("Replacement resource inspection is already running.")
+    schedule_payload: api.JsonObject = {
+        "name": name,
+        "cronExpression": post_deploy.DOKPLOY_MANUAL_ONLY_CRON_EXPRESSION,
+        "appName": schedule_app_name,
+        "shellType": "bash",
+        "scheduleType": schedule_type,
+        "command": "control-plane testing replacement resources",
+        "script": resources.script(mode, compose_project=app_name),
+        "serverId": server_id,
+        "userId": lookup_id if schedule_type == "dokploy-server" else None,
+        "enabled": False,
+        "timezone": "UTC",
+    }
+    api.validate_dokploy_schedule_script(schedule_payload)
     checkpoint()
+
+    def before_mutation(phase: str) -> None:
+        checkpoint()
+        if before_provider_mutation is not None:
+            before_provider_mutation(phase)
+
     try:
         evidence = post_deploy.run_manual_data_schedule(
             host=host,
@@ -412,21 +433,9 @@ def run_resource_schedule(
             schedule_type=schedule_type,
             schedule_name=name,
             schedule_app_name=schedule_app_name,
-            schedule_payload={
-                "name": name,
-                "cronExpression": post_deploy.DOKPLOY_MANUAL_ONLY_CRON_EXPRESSION,
-                "appName": schedule_app_name,
-                "shellType": "bash",
-                "scheduleType": schedule_type,
-                "command": "control-plane testing replacement resources",
-                "script": resources.script(mode, compose_project=app_name),
-                "serverId": server_id,
-                "userId": lookup_id if schedule_type == "dokploy-server" else None,
-                "enabled": False,
-                "timezone": "UTC",
-            },
+            schedule_payload=schedule_payload,
             resolved_schedule_execution_timeout_seconds=300,
-            before_provider_mutation=lambda _phase: checkpoint(),
+            before_provider_mutation=before_mutation,
         )
     except post_deploy.OdooPostDeployReadbackFailure as error:
         if mode == "readback" and error.evidence.get(TESTING_RESOURCES_INCOMPLETE_MARKER) == "true":
@@ -499,7 +508,9 @@ class TestingReplacementResourceAdapter:
                     and bool(environment_id)
                 )
                 return (
-                    ProviderObservation("absent", retry_safe=True)
+                    ProviderObservation(
+                        "absent", retry_safe=True, preserve_effect_checkpoint=bool(phase)
+                    )
                     if terminal
                     else ProviderObservation("unknown")
                 )
@@ -775,7 +786,9 @@ class TestingReplacementResourceAdapter:
                 # empty compose. Apply cannot create another target. Every
                 # existing volume must match labels, backing, emptiness and
                 # non-use; an active remote schedule refused before this proof.
-                return ProviderObservation("absent", retry_safe=True)
+                return ProviderObservation(
+                    "absent", retry_safe=True, preserve_effect_checkpoint=True
+                )
             return ProviderObservation("unknown")
         except (ValueError, FileNotFoundError, click.ClickException, RuntimeError, OSError):
             return ProviderObservation("unknown")
@@ -982,13 +995,15 @@ class TestingReplacementResourceAdapter:
                 namespace=preparation.resource_namespace,
             )
             check()
-            lease.checkpoint_effect("prepare_fresh_storage")
             evidence = run_resource_schedule(
                 root=self.root,
                 store=self.store,
                 resources=resources,
                 mode="prepare",
                 checkpoint=check,
+                before_provider_mutation=lambda _phase: lease.checkpoint_effect(
+                    "prepare_fresh_storage"
+                ),
             )
             with self.store.serialize_disposable_testing_resources():
                 check()

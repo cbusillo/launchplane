@@ -922,6 +922,20 @@ def run_compose_post_deploy_update(
             data_workflow_lock_path=data_workflow_lock_path,
         )
         native_capture = None
+        from control_plane.odoo_testing_restore import NATIVE_CAPTURE_SCRIPT_RESERVE_BYTES
+
+        preflight_script = build_fresh_testing_restore_script(**fresh_arguments)
+        api.validate_dokploy_schedule_script(
+            {
+                "script": preflight_script
+                + (
+                    " " * NATIVE_CAPTURE_SCRIPT_RESERVE_BYTES
+                    if fresh_testing_generation.source_mode == "container-export"
+                    else ""
+                ),
+                "appName": schedule_app_name,
+            }
+        )
         if fresh_testing_generation.source_mode == "container-export":
             if prepare_native_source is None or schedule_server_id is None:
                 raise ValueError("Native testing copy requires its service capture adapter.")
