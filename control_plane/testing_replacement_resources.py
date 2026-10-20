@@ -34,6 +34,7 @@ from control_plane.disposable_lanes import (
     disposable_lane_configuration,
 )
 from control_plane.dokploy import api, post_deploy, source
+from control_plane.dokploy.network_capacity import BridgeNetworkCapacityRefused
 from control_plane.dokploy.target_source_setup import require_empty_compose_source
 from control_plane.dokploy_target_setup_http import (
     DokployTargetSetupEnvelope,
@@ -933,30 +934,38 @@ class TestingReplacementResourceAdapter:
                     lease.assert_current()
                     self.capture_checkpoint(old_check)
 
-                with self.store.capture_disposable_resource_adoption(
-                    preparation, checkpoint=capture_check
-                ):
-                    execute_dokploy_target_setup(
-                        control_plane_root_path=self.root,
-                        record_store=self.store,
-                        request=DokployTargetSetupEnvelope(
-                            mode="apply",
-                            operation="create-compose",
-                            context=self.request.context,
-                            instance="testing",
-                            target_name=preparation.resource_namespace,
-                            project_name=preparation.resource_namespace,
-                            environment_name=preparation.resource_namespace,
-                            server_id=server_id,
-                            expected_current_provider_target=provider.to_deployed_target_reference(),
-                            replaces_operation_id=operation.operation_id,
-                            reason=self.request.reason,
-                        ),
-                        required_context_owner=(self.product, self.request.context),
-                        disposable_checkpoint=capture_check,
-                        disposable_before_create=lease.checkpoint_effect,
-                        disposable_placement=placement[:2],
-                    )
+                try:
+                    with self.store.capture_disposable_resource_adoption(
+                        preparation, checkpoint=capture_check
+                    ):
+                        execute_dokploy_target_setup(
+                            control_plane_root_path=self.root,
+                            record_store=self.store,
+                            request=DokployTargetSetupEnvelope(
+                                mode="apply",
+                                operation="create-compose",
+                                context=self.request.context,
+                                instance="testing",
+                                target_name=preparation.resource_namespace,
+                                project_name=preparation.resource_namespace,
+                                environment_name=preparation.resource_namespace,
+                                server_id=server_id,
+                                expected_current_provider_target=provider.to_deployed_target_reference(),
+                                replaces_operation_id=operation.operation_id,
+                                reason=self.request.reason,
+                            ),
+                            required_context_owner=(self.product, self.request.context),
+                            disposable_checkpoint=capture_check,
+                            disposable_before_create=lease.checkpoint_effect,
+                            disposable_placement=placement[:2],
+                        )
+                except (
+                    BridgeNetworkCapacityRefused,
+                    DurableOperationAuthorizationDeniedError,
+                ) as error:
+                    # The runner releases only if no provider checkpoint exists;
+                    # earlier uncertain effects retain their original custody.
+                    raise ProviderMutationRejectedError(error) from error
                 captured = self.store.read_disposable_resource_preparation(operation.operation_id)
                 if captured is None or not captured.replacement_target_id:
                     raise ValueError("Atomic replacement target capture is unavailable.")

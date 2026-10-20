@@ -372,9 +372,10 @@ export function readProductEnvironment(
   product: string,
   environment: string,
   signal?: AbortSignal,
+  includeHostNetworkCapacity = false,
 ): Promise<ProductEnvironmentResponse> {
   return requestJson<ProductEnvironmentResponse>(
-    `/v1/products/${encodeURIComponent(product)}/environments/${encodeURIComponent(environment)}`,
+    `/v1/products/${encodeURIComponent(product)}/environments/${encodeURIComponent(environment)}${includeHostNetworkCapacity ? "?include_host_network_capacity=true" : ""}`,
     "GET",
     undefined,
     signal,

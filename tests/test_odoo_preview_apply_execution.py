@@ -113,6 +113,54 @@ def _issued_plan(apply_request: OdooPreviewApplyEnvelope) -> OdooPreviewApplyInp
 
 
 class RunOdooPreviewApplyOperationTests(unittest.TestCase):
+    def test_capacity_or_provider_denial_releases_unused_preview_key(self) -> None:
+        from control_plane.dokploy.network_capacity import BridgeNetworkCapacityRefused
+        from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = PostgresRecordStore(database_url=_sqlite_database_url(root / "state.sqlite3"))
+            self.addCleanup(store.close)
+            store.ensure_schema()
+            profile = LaunchplaneProductProfileRecord.model_validate(
+                _odoo_preview_profile_payload()
+            )
+            request = OdooPreviewApplyEnvelope.model_validate(_refresh_payload())
+            issued = _issued_plan(request)
+            request = validate_odoo_preview_issued_plan(
+                plan_id=_PLAN_ID, issued_plan=issued, request=request
+            )
+            observe = Mock()
+            failures = (
+                BridgeNetworkCapacityRefused("host_bridge_network_capacity_short"),
+                NativeSourceAuthorizationDenied("fixture denial"),
+            )
+            for error in failures:
+                with self.subTest(error=type(error)), self.assertRaises(type(error)) as refused:
+                    run_odoo_preview_apply_operation(
+                        store=store,
+                        control_plane_root=root,
+                        record_store=store,
+                        profile=profile,
+                        apply_request=request,
+                        issued_plan=issued,
+                        reservation_scope=_WORKER_SCOPE,
+                        idempotency_key=_PLAN_ID,
+                        request_fingerprint="capacity-refusal",
+                        trace_id="test",
+                        execute_apply=Mock(side_effect=error),
+                        observe_apply=observe,
+                    )
+                self.assertIs(refused.exception, error)
+                row = store.read_idempotency_record(
+                    scope=_WORKER_SCOPE,
+                    route_path=ODOO_PREVIEW_APPLY_ROUTE,
+                    idempotency_key=_PLAN_ID,
+                )
+                self.assertIsNone(row)
+            self.assertEqual(store.list_preview_records(), ())
+            observe.assert_not_called()
+
     def test_source_outage_can_retry_the_same_preview_key_and_keeps_each_refusal(self) -> None:
         from control_plane.lane_movement import LaneMovementRefused
 

@@ -5096,6 +5096,24 @@ class _MinuteClock(datetime):
 
 
 class ProductReconcilePreviewTests(ProductReconcileTestCase):
+    def test_preview_capacity_refusal_keeps_typed_reason_without_provider_effects(self) -> None:
+        from control_plane.dokploy.network_capacity import BridgeNetworkCapacityRefused
+
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+        with patch.object(
+            self.provider,
+            "execute_apply",
+            side_effect=BridgeNetworkCapacityRefused("host_bridge_network_capacity_short"),
+        ):
+            failed = self.run_once()
+        self.assertEqual(failed.state, "failed")
+        self.assertEqual(
+            failed.last_plan["last_failed_error_code"], "host_bridge_network_capacity_short"
+        )
+        self.assertEqual(self.provider.applied, [])
+        self.assertFalse(self.store.list_preview_records())
+
     def test_reset_preview_head_cannot_replace_the_serving_newer_build(self) -> None:
         self.github.add_run(50, PR_HEAD, event="pull_request")
         self.request("preview", 5)

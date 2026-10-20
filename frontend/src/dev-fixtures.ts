@@ -64,6 +64,16 @@ export function ownerSecretInputsForFixture(fixture: DataFixtureMode, product: s
   };
 }
 
+export function hostNetworkCapacityForFixture(mode: string): import("./generated/openapi.ts").HostNetworkCapacityObservation {
+  return {
+    server_id: "fixture-host", observed_at: new Date().toISOString(),
+    status: mode === "denied" ? "denied" : mode === "error" ? "unavailable" : "available",
+    capacity: mode === "denied" || mode === "error" ? null : { total_slots: 256, free_slots: 200 },
+    required_networks: 1, safety_margin: 2,
+    reason: mode === "denied" ? "The provider denied the capacity read." : mode === "error" ? "Host capacity could not be verified." : "",
+  };
+}
+
 export const fixtureIdentity: GitHubHumanIdentityResponse = {
   provider: "github",
   login: "operator-demo",

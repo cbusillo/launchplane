@@ -4369,6 +4369,27 @@
         "title": "BootstrapEvidence",
         "type": "object"
       },
+      "BridgeNetworkCapacity": {
+        "additionalProperties": false,
+        "properties": {
+          "free_slots": {
+            "minimum": 0.0,
+            "title": "Free Slots",
+            "type": "integer"
+          },
+          "total_slots": {
+            "minimum": 0.0,
+            "title": "Total Slots",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total_slots",
+          "free_slots"
+        ],
+        "title": "BridgeNetworkCapacity",
+        "type": "object"
+      },
       "BrowserRouteRepairRequest": {
         "additionalProperties": false,
         "properties": {
@@ -14674,6 +14695,63 @@
           "historical_completion_preflight"
         ],
         "title": "HistoricalCompletionPreflightResult",
+        "type": "object"
+      },
+      "HostNetworkCapacityObservation": {
+        "additionalProperties": false,
+        "properties": {
+          "capacity": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BridgeNetworkCapacity"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "observed_at": {
+            "title": "Observed At",
+            "type": "string"
+          },
+          "reason": {
+            "default": "",
+            "title": "Reason",
+            "type": "string"
+          },
+          "required_networks": {
+            "minimum": 1.0,
+            "title": "Required Networks",
+            "type": "integer"
+          },
+          "safety_margin": {
+            "minimum": 0.0,
+            "title": "Safety Margin",
+            "type": "integer"
+          },
+          "server_id": {
+            "default": "",
+            "title": "Server Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "available",
+              "short",
+              "unavailable",
+              "denied"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "observed_at",
+          "status",
+          "required_networks",
+          "safety_margin"
+        ],
+        "title": "HostNetworkCapacityObservation",
         "type": "object"
       },
       "ImportDiagnosticResult": {
@@ -33858,6 +33936,21 @@
         "properties": {
           "environment": {
             "$ref": "#/components/schemas/ProductEnvironmentDetail"
+          },
+          "host_network_capacity": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HostNetworkCapacityObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "host_network_capacity_available": {
+            "default": false,
+            "title": "Host Network Capacity Available",
+            "type": "boolean"
           },
           "status": {
             "const": "ok",
@@ -91112,6 +91205,16 @@
               "pattern": "^\\S+$",
               "title": "Environment",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_host_network_capacity",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Host Network Capacity",
+              "type": "boolean"
             }
           },
           {

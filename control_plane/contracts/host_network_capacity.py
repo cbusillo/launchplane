@@ -1,6 +1,7 @@
 """Value-free bridge capacity observations and clean pre-create refusals."""
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from typing import Literal
 
 
 HOST_BRIDGE_NETWORK_FAILURE_MESSAGES = {
@@ -20,3 +21,15 @@ class BridgeNetworkCapacity(BaseModel):
         if self.free_slots > self.total_slots:
             raise ValueError("Free bridge capacity exceeds the pool capacity.")
         return self
+
+
+class HostNetworkCapacityObservation(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    server_id: str = ""
+    observed_at: str
+    status: Literal["available", "short", "unavailable", "denied"]
+    capacity: BridgeNetworkCapacity | None = None
+    required_networks: int = Field(ge=1)
+    safety_margin: int = Field(ge=0)
+    reason: str = ""

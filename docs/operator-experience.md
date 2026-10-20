@@ -761,6 +761,25 @@ bodies, and worker hostnames before response serialization.
 
 ## UI Rebuild
 
+### Host network capacity
+
+The existing environment overview's **Placement and runtime** panel shows free
+and total bridge-network slots for its current Dokploy host, the admission need
+and spare margin, and the observation time. Its **Refresh host capacity** control
+replaces the snapshot. Short capacity is visibly warned; unavailable or denied
+reads carry no invented count and never retain a prior successful count as new
+evidence. This snapshot does not change the lane's runtime identity or health
+status, reserve capacity, or authorize cleanup.
+
+The normal environment read stays record-backed and advertises capacity-read
+availability. The panel reads separately through the same authorized
+`GET /v1/products/{product}/environments/{environment}` with
+`include_host_network_capacity=true`. Authorization precedes provider reads.
+The service resolves the selected host from that lane's stored target and fresh
+provider placement, then uses the shared bounded capacity reader. Changed target
+or host placement during observation returns unavailable. No fleet inventory,
+new grant, provider mutation, host configuration or cleanup is involved.
+
 When the API contract is ready, rebuild the UI around:
 
 - product list and product overview

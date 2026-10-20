@@ -88,6 +88,23 @@ placement takes precedence, and partial candidates continue under their original
 custody without repeating capacity admission. This read observes headroom; it
 does not reserve capacity against concurrent actors.
 
+Fresh ordinary Compose lanes and Odoo previews use the same admission check
+before their first provider create, including the project's and environment's
+creation. Generic-web testing activation and independent production recipients
+check before recording fresh placement custody or dispatching resource work.
+Their known Compose source reserves the default bridge and all declared private
+networks. Explicit partial-placement recovery and an existing preview continue
+under their original custody; they do not repeat fresh admission. An unused
+durable reservation is released on refusal, and the original key can continue
+after capacity is restored. A provider authorization denial remains denied.
+
+Application targets use Dokploy's existing Swarm network rather than allocating
+a per-target Compose bridge; this admission does not pretend to measure overlay
+address capacity. Missing, local-only or unverified remote-host evidence for a
+new Compose allocation refuses without guessing another host. Host daemon pool
+configuration remains an infrastructure responsibility. See
+[host capacity in the environment view](operator-experience.md#host-network-capacity).
+
 Use a compatible controller/adapter for continuation and preserve unresolved
 provider effects, rather than deleting checkpoints or replaying a legacy
 bootstrap against that copy. Terminal checkpoint reads return their historical
