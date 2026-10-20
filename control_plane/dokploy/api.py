@@ -1129,6 +1129,7 @@ class ScheduleExecutionOptions(TypedDict, total=False):
 class ScheduleMutationGuardOptions(ScheduleExecutionOptions, total=False):
     provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None
     before_trigger: Callable[[], None] | None
+    on_observation: Callable[[str, str], None] | None
 
 
 class ScheduleTriggerGuardOptions(ScheduleMutationGuardOptions, total=False):
@@ -1165,6 +1166,7 @@ def trigger_dokploy_schedule_and_wait(
     provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
     before_trigger: Callable[[], None] | None = None,
     execution_observer: ScheduleExecutionObserver | None = None,
+    on_observation: Callable[[str, str], None] | None = None,
 ) -> str:
     """Trigger a schedule exactly once and wait for the provider job it started.
 
@@ -1251,6 +1253,7 @@ def trigger_dokploy_schedule_and_wait(
             timeout_seconds=max(1, int(remaining_seconds)),
             interval_seconds=observation_interval_seconds,
             trigger_detail=_bounded_provider_detail(str(error)),
+            on_observation=on_observation,
         )
     if execution_observer is not None:
         history = tuple(_read_schedule_deployments(host=host, token=token, schedule_id=schedule_id))
@@ -1288,6 +1291,7 @@ def trigger_dokploy_schedule_and_wait(
         deployment_id=deployment_key(deployment),
         timeout_seconds=max(1, int(remaining_seconds)),
         interval_seconds=observation_interval_seconds,
+        on_observation=on_observation,
     )
 
 
@@ -1300,6 +1304,7 @@ def wait_for_exact_dokploy_schedule_deployment(
     timeout_seconds: int,
     interval_seconds: float = _DOKPLOY_SCHEDULE_OBSERVATION_INTERVAL_SECONDS,
     trigger_detail: str = "",
+    on_observation: Callable[[str, str], None] | None = None,
 ) -> str:
     """Observe one known schedule deployment until it is terminal or the budget ends."""
     normalized_deployment_id = deployment_id.strip()
@@ -1309,6 +1314,8 @@ def wait_for_exact_dokploy_schedule_deployment(
     start_time = time.monotonic()
     last_status = ""
     while True:
+        if on_observation is not None:
+            on_observation(schedule_id, normalized_deployment_id)
         try:
             deployment = _schedule_deployment_by_key(
                 host=host,
@@ -1486,6 +1493,7 @@ def run_dokploy_schedule(
     provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
     before_trigger: Callable[[], None] | None = None,
     execution_observer: ScheduleExecutionObserver | None = None,
+    on_observation: Callable[[str, str], None] | None = None,
 ) -> str:
     baseline = read_dokploy_schedule_baseline(
         host=host,
@@ -1508,6 +1516,8 @@ def run_dokploy_schedule(
             "before_trigger": admit_trigger,
             "trigger_timeout_seconds": 10,
         }
+    if on_observation is not None:
+        dispatch["on_observation"] = on_observation
     if execution_observer is not None:
         dispatch["execution_observer"] = execution_observer
     try:

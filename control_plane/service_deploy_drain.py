@@ -563,4 +563,7 @@ def read_status(store: Any) -> dict[str, object]:
         result["operation_details_truncated"] = len(observations) > 100
         result["drain_timeout_seconds"] = SERVICE_DEPLOY_DRAIN_TIMEOUT_SECONDS
         result["admission_paused"] = not admission_allowed(session, now)
+        from control_plane.rehearsal_deploy_resume import checkpoint_status
+
+        result["rehearsal_checkpoints"] = checkpoint_status(session)
         return result

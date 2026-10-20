@@ -51,6 +51,231 @@ def python_heredoc(script: str) -> str:
 class RehearsalScenario(unittest.TestCase):
     database_url = ""
 
+    def test_deploy_checkpoints_exact_remote_execute_and_worker_resumes_without_replay(
+        self,
+    ) -> None:
+        from control_plane.rehearsal_deploy_resume import resume_rehearsals
+        from control_plane.service_deploy_drain import confirm_startup
+        from tests.test_client_release_redeploy import _prepare, _replacement_env
+
+        prepared = self.record.model_copy(update={"state": "prepared", "compose_id": "own-compose"})
+        self.store.compare_and_write_odoo_upgrade_rehearsal(self.record, prepared)
+        adapter = self.adapter("execute")
+
+        def remote_apply(operation_key: str, lease: Any) -> Any:
+            lease.checkpoint_effect("execute")
+            _, blockers, dispatch = _prepare(self.store)
+            self.assertTrue(blockers)
+            self.assertFalse(dispatch)
+            adapter.checkpoint_remote_job("original-schedule", "original-job")
+            self.fail("A draining execute must hand off its independently running job")
+
+        with patch.object(adapter, "apply", side_effect=remote_apply) as effect:
+            paused = self.run_operation(adapter, "checkpoint-execute")
+        self.assertEqual(paused.status, "checkpointed")
+        assert paused.record is not None
+        self.assertEqual(paused.record.state, "reconcile_required")
+        self.assertEqual(effect.call_count, 1)
+        _, blockers, dispatch = _prepare(self.store)
+        self.assertFalse(blockers)
+        self.assertTrue(dispatch)
+        # The old instance cannot take the continuation before matching startup.
+        with patch.object(OdooRehearsalAdapter, "observe") as observe:
+            self.assertEqual(resume_rehearsals(self.store, self.root), ())
+            observe.assert_not_called()
+        from control_plane.storage.postgres import PostgresRecordStore
+
+        replacement = PostgresRecordStore(database_url=self.store.database_url)
+        self.addCleanup(replacement.close)
+        completed = {
+            "completed": True,
+            "state": "upgraded",
+            "copies": [],
+            "elapsed_seconds": {"execute": 1.0},
+        }
+        with (
+            patch.dict(os.environ, _replacement_env()),
+            patch(
+                "control_plane.rehearsal_deploy_resume.remote_job_status", return_value="running"
+            ),
+            patch("control_plane.odoo_upgrade_rehearsal.require_unaliased_rehearsal"),
+            patch.object(OdooRehearsalAdapter, "host", return_value=completed) as observe,
+            patch.object(OdooRehearsalAdapter, "apply") as replay,
+        ):
+            confirm_startup(replacement)
+            with patch.dict(os.environ, {"LAUNCHPLANE_DEPLOYMENT_MARKER": "old-marker"}):
+                self.assertEqual(resume_rehearsals(replacement, self.root), ())
+            self.assertEqual(resume_rehearsals(replacement, self.root), ())
+            observe.assert_not_called()
+            with patch(
+                "control_plane.rehearsal_deploy_resume.remote_job_status", return_value="terminal"
+            ):
+                # The native result can publish just before a process is lost.
+                # Restart must settle the same operation even across this boundary.
+                with patch.object(
+                    replacement, "adopt_reconciled_mutation", side_effect=RuntimeError("restart")
+                ):
+                    self.assertEqual(resume_rehearsals(replacement, self.root), ())
+                published = replacement.read_odoo_upgrade_rehearsal(self.identifier)
+                assert published is not None
+                self.assertEqual(published.state, "upgraded")
+                self.assertEqual(
+                    resume_rehearsals(replacement, self.root), (paused.record.record_id,)
+                )
+                self.assertEqual(resume_rehearsals(replacement, self.root), ())
+            replay.assert_not_called()
+            self.assertTrue(all(call.args[1] == "observe" for call in observe.call_args_list))
+        settled = self.store.read_idempotency_record(
+            scope=paused.record.scope,
+            route_path=paused.record.route_path,
+            idempotency_key=paused.record.idempotency_key,
+        )
+        assert settled is not None
+        self.assertEqual(settled.state, "completed")
+        self.assertEqual(settled.record_id, paused.record.record_id)
+
+    def test_rehearsal_checkpoint_preserves_live_executor_and_original_binding(self) -> None:
+        from control_plane.rehearsal_deploy_resume import resume_rehearsals
+        from control_plane.service_deploy_drain import confirm_startup
+        from tests.test_client_release_redeploy import _prepare, _replacement_env
+
+        prepared = self.record.model_copy(update={"state": "prepared", "compose_id": "own-compose"})
+        self.store.compare_and_write_odoo_upgrade_rehearsal(self.record, prepared)
+        adapter = self.adapter("execute")
+        # Normal traffic never detaches, and an unbound job is never checkpointed.
+        adapter.checkpoint_remote_job("original-schedule", "original-job")
+
+        def remote_apply(operation_key: str, lease: Any) -> Any:
+            lease.checkpoint_effect("execute")
+            _prepare(self.store)
+            adapter.checkpoint_remote_job("original-schedule", "original-job")
+
+        with patch.object(adapter, "apply", side_effect=remote_apply):
+            paused = self.run_operation(adapter, "checkpoint-bound")
+        assert paused.record is not None
+        _prepare(self.store)
+        with (
+            patch.dict(os.environ, _replacement_env()),
+            patch(
+                "control_plane.rehearsal_deploy_resume.remote_job_status", return_value="terminal"
+            ),
+            patch.object(OdooRehearsalAdapter, "observe") as observe,
+        ):
+            confirm_startup(self.store)
+            # A live original executor still excludes continuation on another instance.
+            with self.store.testing_replacement_execution_lock(self.identifier) as check:
+                assert check is not None
+                self.assertEqual(resume_rehearsals(self.store, self.root), ())
+                observe.assert_not_called()
+            # Changed intent cannot borrow the checkpoint's authority.
+            changed = prepared.model_copy(update={"compose_id": "different-compose"})
+            self.store.compare_and_write_odoo_upgrade_rehearsal(prepared, changed)
+            self.assertEqual(resume_rehearsals(self.store, self.root), ())
+            observe.assert_not_called()
+
+    def test_expired_drain_observation_unknown_parks_once_for_original_recovery(self) -> None:
+        from datetime import timedelta
+        from control_plane.contracts.idempotency_record import parse_launchplane_mutation_timestamp
+        from control_plane.provider_operations import ProviderObservation
+        from control_plane.rehearsal_deploy_resume import resume_rehearsals
+        from control_plane.service_deploy_drain import read_status
+        from tests.test_client_release_redeploy import _prepare
+
+        prepared = self.record.model_copy(update={"state": "prepared", "compose_id": "own-compose"})
+        self.store.compare_and_write_odoo_upgrade_rehearsal(self.record, prepared)
+        adapter = self.adapter("execute")
+
+        def remote_apply(operation_key: str, lease: Any) -> Any:
+            lease.checkpoint_effect("execute")
+            _prepare(self.store)
+            adapter.checkpoint_remote_job("original-schedule", "original-job")
+
+        with patch.object(adapter, "apply", side_effect=remote_apply):
+            paused = self.run_operation(adapter, "checkpoint-unavailable")
+        assert paused.record is not None
+        expiry = parse_launchplane_mutation_timestamp(
+            str(read_status(self.store)["expires_at"]), field_name="expires_at"
+        ) + timedelta(seconds=1)
+        with (
+            patch.object(
+                self.store, "_database_mutation_timestamp", return_value=expiry.isoformat()
+            ),
+            patch(
+                "control_plane.rehearsal_deploy_resume.remote_job_status", return_value="terminal"
+            ) as job,
+            patch.object(
+                OdooRehearsalAdapter, "observe", return_value=ProviderObservation("unknown")
+            ) as observe,
+        ):
+            self.assertEqual(resume_rehearsals(self.store, self.root), ())
+            self.assertEqual(resume_rehearsals(self.store, self.root), ())
+            job.assert_called_once()
+            observe.assert_called_once()
+            self.assertEqual(
+                read_status(self.store)["rehearsal_checkpoints"],
+                ({"operation_id": paused.record.record_id, "state": "recovery_required"},),
+            )
+        # Supported original-key recovery settles the same journal independently
+        # of the stopped automatic observer. Runtime must stop asking for recovery.
+        recovered = self.store.adopt_reconciled_mutation(
+            reservation=paused.record,
+            response_status_code=202,
+            response_trace_id="original-recovery",
+            response_payload={"status": "accepted", "result": {"completed": True}},
+        )
+        self.assertEqual(recovered.status, "adopted")
+        self.assertEqual(read_status(self.store)["rehearsal_checkpoints"], ())
+
+    def test_failed_checkpoint_storage_keeps_original_journal_recoverable(self) -> None:
+        from control_plane.service_deploy_drain import read_status
+        from tests.test_client_release_redeploy import _prepare
+        from control_plane.rehearsal_deploy_resume import REHEARSAL_CHECKPOINT_PREFIX
+        from control_plane.storage.postgres import LaunchplaneServiceDeployDrainRow
+        from sqlalchemy.orm import Session
+
+        prepared = self.record.model_copy(update={"state": "prepared", "compose_id": "own-compose"})
+        self.store.compare_and_write_odoo_upgrade_rehearsal(self.record, prepared)
+        adapter = self.adapter("execute")
+
+        def remote_apply(operation_key: str, lease: Any) -> Any:
+            lease.checkpoint_effect("execute")
+            _prepare(self.store)
+            adapter.checkpoint_remote_job("original-schedule", "original-job")
+
+        commit = Session.commit
+
+        def interrupt_checkpoint(session: Session) -> None:
+            if any(
+                isinstance(row, LaunchplaneServiceDeployDrainRow)
+                and row.record_id.startswith(REHEARSAL_CHECKPOINT_PREFIX)
+                for row in session.new
+            ):
+                raise RuntimeError("Checkpoint storage interrupted before commit")
+            commit(session)
+
+        with (
+            patch.object(adapter, "apply", side_effect=remote_apply),
+            patch.object(Session, "commit", autospec=True, side_effect=interrupt_checkpoint),
+        ):
+            held = self.run_operation(adapter, "checkpoint-refused")
+        self.assertEqual(held.status, "reconcile_required")
+        assert held.record is not None
+        self.assertEqual(held.record.state, "reconcile_required")
+        self.assertTrue(held.record.provider_effect_started_at)
+        self.assertEqual(read_status(self.store)["rehearsal_checkpoints"], ())
+        with self.store._session_factory() as session:
+            session.add(
+                LaunchplaneServiceDeployDrainRow(
+                    record_id=REHEARSAL_CHECKPOINT_PREFIX + held.record.record_id,
+                    payload={"newer-format": "unreadable"},
+                )
+            )
+            session.commit()
+        self.assertEqual(
+            read_status(self.store)["rehearsal_checkpoints"],
+            ({"operation_id": held.record.record_id, "state": "unreadable"},),
+        )
+
     def test_network_capacity_refusal_precedes_credentials_and_provider_creation(self) -> None:
         from control_plane.dokploy import network_capacity
         from control_plane.provider_operations import (
