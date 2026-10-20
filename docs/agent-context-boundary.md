@@ -110,9 +110,8 @@ surface:
 - `GET /v1/work-graph/tenant-admission/evaluation`
 
 See the [service boundary](service-boundary.md) for repository-mapping
-ownership and awareness semantics. The unused Work graph chooser and Issue
-inbox are removed. Existing merge-train and
-tenant-admission APIs retain their `/v1/work-graph/` operational paths.
+ownership and awareness semantics. Existing merge-train and tenant-admission
+APIs retain their `/v1/work-graph/` operational paths.
 
 ## Scoped Intents
 
