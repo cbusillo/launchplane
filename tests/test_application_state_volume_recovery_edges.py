@@ -1,4 +1,3 @@
-import unittest
 from unittest.mock import patch
 
 from control_plane.application_state_volume_retention import (
@@ -11,14 +10,9 @@ from control_plane.workflows.dokploy_target_adoption import PROJECT_CREATE_PATH
 from tests import test_application_state_volume as volume_fixtures
 
 
-class ApplicationStateVolumeRecoveryEdgeTests(unittest.IsolatedAsyncioTestCase):
-    def setUp(self) -> None:
-        self.fixture = volume_fixtures.ApplicationStateVolumeTests()
-        self.fixture.setUp()
-        self.addCleanup(self.fixture.doCleanups)
-
+class ApplicationStateVolumeRecoveryEdgeTests(volume_fixtures._ApplicationStateVolumeFixture):
     async def test_progress_accepts_heartbeat_renewal_but_fences_identity_and_expiry(self) -> None:
-        fixture = self.fixture
+        fixture = self
         plan = await fixture.plan()
         persisted_phase = ""
 
@@ -86,7 +80,7 @@ class ApplicationStateVolumeRecoveryEdgeTests(unittest.IsolatedAsyncioTestCase):
         fixture.assert_production_unchanged()
 
     async def test_readback_without_application_identity_is_unavailable(self) -> None:
-        fixture = self.fixture
+        fixture = self
         await fixture.plan()
         fixture.fail_before = PROJECT_CREATE_PATH
         interrupted = await fixture.post()
@@ -104,7 +98,7 @@ class ApplicationStateVolumeRecoveryEdgeTests(unittest.IsolatedAsyncioTestCase):
         fixture.assert_production_unchanged()
 
     async def test_changed_provider_host_is_unavailable_without_contacting_it(self) -> None:
-        fixture = self.fixture
+        fixture = self
         await fixture.plan()
         result = await fixture.post()
         self.assertEqual(result.status_code, 202, result.text)
