@@ -8506,7 +8506,7 @@ class PostgresRecordStore(HumanSessionStore):
         from control_plane.service_deploy_drain import ServiceDeployDraining, admit_reservation
 
         try:
-            admit_reservation(self, session, scope)
+            admit_reservation(self, session, scope, route_path)
         except ServiceDeployDraining:
             # Keep replay, expiry reconciliation and provider observation usable
             # under the fence. None of these paths admits a fresh effect owner.
@@ -9382,7 +9382,7 @@ class PostgresRecordStore(HumanSessionStore):
                 self._begin_serialized_write(session)
                 from control_plane.service_deploy_drain import admit_reservation
 
-                admit_reservation(self, session, scope)
+                admit_reservation(self, session, scope, route_path)
                 row = session.scalar(
                     self._idempotency_statement(
                         scope=reservation.scope,
@@ -9541,7 +9541,7 @@ class PostgresRecordStore(HumanSessionStore):
             self._begin_serialized_write(session)
             from control_plane.service_deploy_drain import admit_reservation
 
-            admit_reservation(self, session, reservation.scope)
+            admit_reservation(self, session, reservation.scope, reservation.route_path)
             row = session.scalar(
                 self._idempotency_statement(
                     scope=reservation.scope,

@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 import requests
 
 from control_plane.notifications import post_discord_webhook, public_discord_url_error
+from control_plane.contracts.service_deploy_drain import OPERATION_REFERENCE_PATTERN
 
 
 REPLACEMENT_TIMEOUT_SECONDS = 120
@@ -88,6 +89,22 @@ def send_failure_alert() -> bool:
         response = None
     error = response.get("error") if isinstance(response, dict) else None
     drain_timeout = isinstance(error, dict) and error.get("code") == "self_deploy_drain_timeout"
+    operation_refs: list[str] = []
+    if drain_timeout and isinstance(error, dict):
+        records = response.get("records")
+        raw_refs = records.get("blocking_operation_refs") if isinstance(records, dict) else None
+        try:
+            refs = json.loads(raw_refs) if isinstance(raw_refs, str) else None
+        except ValueError:
+            refs = None
+        if isinstance(refs, list):
+            operation_refs = list(
+                dict.fromkeys(
+                    item
+                    for item in refs
+                    if isinstance(item, str) and OPERATION_REFERENCE_PATTERN.fullmatch(item)
+                )
+            )
     if not drain_timeout and not replacement_may_have_dispatched(response_file):
         return False
     sender = validate_sender()
@@ -150,7 +167,9 @@ def send_failure_alert() -> bool:
                     else "Launchplane replacement failed verification",
                     "description": (
                         "Held provider operations prevented replacement. No replacement was dispatched. "
-                        "Inspect the held reservations; manual break-glass remains gated by approval."
+                        "Match the references in runtime.release_drain "
+                        "operation_details.operation_ref. Let the operations finish or use their supported "
+                        "recovery, then submit a fresh normal deploy with a new key and marker."
                         if drain_timeout
                         else "Manual break-glass may be needed. Dispatch recovery, then approve the protected job."
                     ),
@@ -163,7 +182,25 @@ def send_failure_alert() -> bool:
                         ),
                         {"name": "Health result", "value": health[:1000]},
                         {"name": "Deploy run", "value": run_url},
-                        {"name": "Manual break-glass", "value": break_glass_url},
+                        *(
+                            [
+                                {
+                                    "name": "Blocking operation references",
+                                    "value": "\n".join(operation_refs[:15])
+                                    + (
+                                        f"\n(+{len(operation_refs) - 15} more)"
+                                        if len(operation_refs) > 15
+                                        else ""
+                                    ),
+                                }
+                            ]
+                            if operation_refs
+                            else []
+                        ),
+                        {
+                            "name": "Deploy workflow" if drain_timeout else "Manual break-glass",
+                            "value": break_glass_url,
+                        },
                     ],
                 }
             ],

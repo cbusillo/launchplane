@@ -3876,6 +3876,70 @@ class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
 
+    async def test_deploy_drain_has_a_typed_retry_refusal_without_releasing_custody(self) -> None:
+        from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
+        from control_plane.contracts.odoo_upgrade_rehearsal import ODOO_UPGRADE_REHEARSAL_ROUTE
+        from control_plane.service_deploy_drain import ServiceDeployDraining
+        from control_plane.service_auth import LaunchplaneAuthzPolicy
+        from control_plane.storage.postgres import PostgresRecordStore
+        from tests.support.http import request
+
+        from control_plane.http_routes.mutation_support import idempotency_scope
+        from control_plane.service_auth import configured_local_operator_identity
+        from tests.http_app_test_support import _local_operator_bearer_config
+
+        identity = configured_local_operator_identity(
+            _local_operator_bearer_config(token_label="local-owner-write")
+        )
+        assert identity is not None
+        updated = self.fixture.record.model_copy(update={"principal": idempotency_scope(identity)})
+        self.fixture.store.compare_and_write_odoo_upgrade_rehearsal(self.fixture.record, updated)
+        self.fixture.record = updated
+
+        self.fixture.store.seed_authz_policy_if_absent(
+            LaunchplaneAuthzPolicyRecord(
+                record_id="fixture-drain-policy",
+                source="test",
+                updated_at=self.fixture.record.updated_at.isoformat(),
+                policy=LaunchplaneAuthzPolicy(schema_version=2),
+            )
+        )
+        for action in ("prepare", "execute", "retire-incomplete"):
+            with (
+                self.subTest(action=action),
+                patch.object(
+                    PostgresRecordStore,
+                    "database_dialect_name",
+                    new_callable=PropertyMock,
+                    return_value="postgresql",
+                ),
+                patch(
+                    "control_plane.http_app.run_durable_provider_operation",
+                    side_effect=ServiceDeployDraining("private detail"),
+                ),
+            ):
+                response = await request(
+                    self.fixture.app,
+                    "POST",
+                    ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=self.fixture.product),
+                    payload=self.fixture.request.model_copy(
+                        update={
+                            "mode": "apply",
+                            "action": action,
+                            "reviewed_plan_sha256": self.fixture.record.binding_sha256,
+                        }
+                    ).model_dump(mode="json"),
+                    headers={
+                        "Authorization": "Bearer local-operator-token",
+                        "Idempotency-Key": "original-execute",
+                    },
+                )
+                self.assertEqual(response.status_code, 409, response.text)
+                self.assertEqual(response.json()["error"]["code"], "service_deploy_draining")
+                self.assertIn("Retry-After", response.headers)
+                self.assertNotIn("X-Launchplane-Mutation-Reservation", response.headers)
+                self.assertNotIn("private detail", response.text)
+
     async def test_client_only_treats_provider_read_refusal_as_clean_after_real_release(
         self,
     ) -> None:
