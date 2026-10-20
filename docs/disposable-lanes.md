@@ -948,6 +948,8 @@ records and target aliases. An authority change can make a refresh conflict for 
 later fresh run. Freshness-only changes preserve publication, rebuild guards and
 the original inverse: their comparisons retain the publication key, route digest
 and all serving authority, while excluding the observation clock and digest.
+Publication and inverse retain the current ingress and TLS evidence when that
+authority agrees, so a renewed ingress audit is not replaced with its preimage.
 
 Native observations run in the service thread pool, one lane immediately before
 its own write. They do not block the HTTP event loop or expire earlier lanes'

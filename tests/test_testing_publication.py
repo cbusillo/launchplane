@@ -171,6 +171,61 @@ class TestingPublicationTests(unittest.TestCase):
             )
         )
 
+    def test_publication_and_inverse_preserve_current_ingress_evidence(self) -> None:
+        from control_plane.testing_serving_copy import published_testing_copy
+
+        binding = self.plan.after.binding
+        assert binding is not None
+        legacy = binding.model_copy(
+            update={
+                "provider_target": binding.provider_target.model_copy(
+                    update={"target_name": self.before.target.target_name}
+                ),
+                "source": binding.source.model_copy(
+                    update={"source_label": "legacy-route", "source_versions": {}}
+                ),
+            }
+        )
+        self.store.write_route_binding_record(legacy)
+        self.before = self.current()
+        self.plan = plan_testing_publication(
+            self.store,
+            candidate=self.candidate,
+            before=self.before,
+            route=self.route,
+            reservation=self.reservation,
+            now=self.now,
+        )
+        self.prepare()
+        for inverse in (False, True):
+            with self.subTest(inverse=inverse):
+                current = self.current().binding
+                assert current is not None
+                refreshed = current.model_copy(
+                    update={
+                        "ingress": current.ingress.model_copy(
+                            update={"provider_evidence": {"audit_record": "fresh-" + str(inverse)}}
+                        ),
+                        "tls": current.tls.model_copy(
+                            update={"provider_evidence": {"certificate": "current-" + str(inverse)}}
+                        ),
+                    }
+                )
+                self.store.write_route_binding_record(refreshed)
+                self.publish(inverse=inverse)
+                after = self.current().binding
+                assert after is not None
+                self.assertEqual(after.ingress, refreshed.ingress)
+                self.assertEqual(after.tls, refreshed.tls)
+                if not inverse:
+                    self.assertIsNotNone(
+                        published_testing_copy(
+                            self.store,
+                            product=self.candidate.product,
+                            context=self.candidate.context,
+                        )
+                    )
+
     def test_canonical_local_database_matches_the_prepared_copy(self) -> None:
         self.prepare()
         self.publish()

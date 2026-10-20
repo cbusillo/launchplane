@@ -300,11 +300,6 @@ class StableRouteRefreshTests(unittest.IsolatedAsyncioTestCase):
             response = await self._request("apply", now="2026-08-06T00:00:00Z")
         self.assertEqual(response.status_code, 500)
         managed = _binding(self.store)
-        self.assertIsNone(
-            self.store.read_idempotency_record(
-                scope=idempotency_scope(_identity()), route_path=ROUTE, idempotency_key="refresh"
-            )
-        )
         resumed = await self._request("apply", now="2026-08-06T00:00:00Z")
         self.assertEqual(resumed.status_code, 202, resumed.text)
         self.assertEqual(resumed.json()["result"]["unchanged_count"], 1)

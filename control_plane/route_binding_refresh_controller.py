@@ -23,7 +23,6 @@ from control_plane.route_binding_external_reconcile import (
     ExternalRouteBindingReconcileStore,
     plan_external_route_binding_reconcile,
 )
-from control_plane.contracts.testing_route_refresh import is_native_testing_binding
 
 
 class RouteBindingRefreshControllerStore(RouteBindingReconcileStore, Protocol):
@@ -216,19 +215,7 @@ def _plan_refresh(
             state="present", record_sha256=target.current_record_sha256
         )
         reconcile_plan: RouteBindingReconcilePlan | ExternalRouteBindingReconcilePlan
-        if is_native_testing_binding(target.record):
-            reconcile_plan = RouteBindingReconcilePlan(
-                status="blocked",
-                current_record=target.record,
-                current_record_sha256=target.current_record_sha256,
-                findings=(
-                    RouteBindingReconcileFinding(
-                        code="native_testing_route_observation_required",
-                        detail="Native testing routes require a fresh managed-proxy observation.",
-                    ),
-                ),
-            )
-        elif target.record.ingress.provider == "external" and external_store is not None:
+        if target.record.ingress.provider == "external" and external_store is not None:
             reconcile_plan = plan_external_route_binding_reconcile(
                 record_store=external_store,
                 request=ExternalRouteBindingReconcileRequest(

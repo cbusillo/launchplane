@@ -15,6 +15,8 @@ from control_plane.contracts.route_binding_record import EnvironmentRouteBinding
 from control_plane.contracts.route_binding_record import route_binding_record_sha256
 from control_plane.contracts.product_profile_record import ProductLaneProfile
 from control_plane.route_binding_reconcile import (
+    _EVIDENCE_FRESHNESS_WINDOW,
+    _EVIDENCE_REFRESH_THRESHOLD,
     NATIVE_TESTING_ROUTE_REQUIRES_CONTROLLER,
     RouteBindingReconcilePlan,
     RouteBindingReconcileRequest,
@@ -28,7 +30,7 @@ from control_plane.dokploy.native_copy_stream import (
     NativeSourceAuthorizationDenied,
     NativeSourceUnavailable,
 )
-from control_plane.http_app import create_launchplane_fastapi_app, idempotency_scope
+from control_plane.http_app import create_launchplane_fastapi_app, _DB_ONLY_MUTATION_LEASE
 from control_plane.storage import postgres as db
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from tests.http_app_test_support import _asgi_request
@@ -149,7 +151,7 @@ class NativeTestingRouteRefreshTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(datetime.fromisoformat(after.source.stale_after), self.now)
         self.read.assert_called()
         self.read.reset_mock()
-        self.now += timedelta(hours=13)
+        self.now += _EVIDENCE_FRESHNESS_WINDOW - _EVIDENCE_REFRESH_THRESHOLD + timedelta(seconds=1)
         response = await self.refresh("second-refresh")
         self.assertEqual(response.json()["result"]["refreshed_count"], 1, response.text)
         self.assertEqual(self.binding().domains, before.domains)
@@ -375,6 +377,7 @@ class NativeTestingRouteRefreshTests(unittest.IsolatedAsyncioTestCase):
         events: list[tuple[str, str]] = []
         reconcile = self.store.reconcile_route_binding_record
         observations = 0
+        self.batch_receipts: list[tuple[db.DbOnlyMutationRequest, object]] = []
 
         def planned(
             _store: Any, *, current: EnvironmentRouteBindingRecord, **kwargs: Any
@@ -382,7 +385,11 @@ class NativeTestingRouteRefreshTests(unittest.IsolatedAsyncioTestCase):
             nonlocal observations
             observations += 1
             events.append(("observe", current.context))
-            self.now += timedelta(seconds=301 if expire else 90)
+            self.now += (
+                _DB_ONLY_MUTATION_LEASE + timedelta(seconds=1)
+                if expire
+                else _DB_ONLY_MUTATION_LEASE / (len(products) - 1)
+            )
             if observations == deny_at:
                 raise NativeSourceAuthorizationDenied("fixture later-lane refusal")
             replacement = current.model_copy(update={"updated_at": self.now.isoformat()})
@@ -397,7 +404,16 @@ class NativeTestingRouteRefreshTests(unittest.IsolatedAsyncioTestCase):
 
         def written(**kwargs: Any) -> Any:
             events.append(("write", kwargs["replacement_record"].context))
-            return reconcile(**kwargs)
+            result = reconcile(**kwargs)
+            mutation = kwargs["mutation"]
+            receipt = self.store.read_idempotency_record(
+                scope=mutation.scope,
+                route_path=mutation.route_path,
+                idempotency_key=mutation.idempotency_key,
+            )
+            self.assertIsNotNone(receipt)
+            self.batch_receipts.append((mutation, receipt))
+            return result
 
         app = create_launchplane_fastapi_app(
             verifier=_StubVerifier(_identity()),
@@ -420,6 +436,7 @@ class NativeTestingRouteRefreshTests(unittest.IsolatedAsyncioTestCase):
                 headers={"Authorization": "Bearer valid-token", "Idempotency-Key": "batch-order"},
                 payload=_refresh_payload(mode="apply"),
             )
+        self.batch_app = app
         return response, events
 
     async def test_each_native_lane_is_written_before_the_next_and_long_batch_renews(self) -> None:
@@ -430,14 +447,20 @@ class NativeTestingRouteRefreshTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(observed[0], "observe")
             self.assertEqual(written, ("write", observed[1]))
 
-    def assert_parent_released(self) -> None:
-        self.assertIsNone(
-            self.store.read_idempotency_record(
-                scope=idempotency_scope(_identity()),
-                route_path="/v1/route-bindings/odoo-testing/controller/run-once",
-                idempotency_key="batch-order",
+    async def assert_parent_retryable(self) -> None:
+        with patch(
+            "control_plane.http_app.plan_native_testing_route_refresh",
+            side_effect=NativeSourceAuthorizationDenied("fixture retry refusal"),
+        ):
+            retry = await _asgi_request(
+                self.batch_app,
+                "POST",
+                "/v1/route-bindings/odoo-testing/controller/run-once",
+                headers={"Authorization": "Bearer valid-token", "Idempotency-Key": "batch-order"},
+                payload=_refresh_payload(mode="apply"),
             )
-        )
+        self.assertEqual(retry.status_code, 403, retry.text)
+        self.assertEqual(retry.json()["error"]["code"], "authorization_denied")
 
     async def test_expired_parent_stops_before_child_write_and_releases_only_parent(self) -> None:
         response, events = await self.run_native_batch(expire=True)
@@ -445,20 +468,21 @@ class NativeTestingRouteRefreshTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["error"]["code"], "mutation_reservation_lost")
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0][0], "observe")
-        self.assert_parent_released()
+        await self.assert_parent_retryable()
 
     async def test_later_lane_denial_releases_parent_and_preserves_committed_child(self) -> None:
         response, events = await self.run_native_batch(deny_at=2)
         self.assertEqual(response.status_code, 403, response.text)
         self.assertEqual([phase for phase, _ in events], ["observe", "write", "observe"])
-        self.assert_parent_released()
-        context = events[0][1]
-        with self.store._session_factory() as session:
-            receipts = session.query(db.LaunchplaneIdempotencyRow).all()
-        children = [row for row in receipts if row.idempotency_key.startswith("batch-order:")]
-        self.assertEqual(len(children), 1)
-        self.assertEqual(children[0].payload["state"], "completed")
-        self.assertEqual(children[0].payload["response_payload"]["records"]["context"], context)
+        await self.assert_parent_retryable()
+        self.assertEqual(len(self.batch_receipts), 1)
+        mutation, before_denial = self.batch_receipts[0]
+        after_denial = self.store.read_idempotency_record(
+            scope=mutation.scope,
+            route_path=mutation.route_path,
+            idempotency_key=mutation.idempotency_key,
+        )
+        self.assertEqual(after_denial, before_denial)
 
     async def test_manual_reconcile_identifies_the_native_refresh_path(self) -> None:
         current = self.binding()

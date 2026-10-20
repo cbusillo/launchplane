@@ -24,6 +24,7 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.secret_record import SecretRecord, SecretBinding
 from control_plane.storage import postgres as db
+from control_plane.contracts.route_binding_record import EnvironmentRouteBindingRecord
 from control_plane.route_binding_reconcile import route_binding_authority_projection
 from control_plane.testing_candidate_runtime import (
     testing_profile_binding,
@@ -44,6 +45,21 @@ def _same(left: object, right: object) -> bool:
     return canonical_json_sha256(left) == canonical_json_sha256(right)
 
 
+def testing_binding_authority(
+    binding: EnvironmentRouteBindingRecord | None,
+) -> tuple[object, ...] | None:
+    """Share route ownership and publication custody across serving-copy checks."""
+    if binding is None:
+        return None
+    return (
+        route_binding_authority_projection(binding),
+        binding.source.source_kind,
+        binding.source.source_label,
+        binding.source.source_versions.get("testing_publication"),
+        binding.source.source_versions.get("testing_route"),
+    )
+
+
 def serving_snapshot_matches(
     actual: TestingServingSnapshot, expected: TestingServingSnapshot
 ) -> bool:
@@ -52,18 +68,7 @@ def serving_snapshot_matches(
     for snapshot in (actual, expected):
         payload = snapshot.model_dump(mode="json")
         payload["target"] = testing_serving_target_authority(snapshot.target)
-        binding = snapshot.binding
-        payload["binding"] = (
-            (
-                route_binding_authority_projection(binding),
-                binding.source.source_kind,
-                binding.source.source_label,
-                binding.source.source_versions.get("testing_publication"),
-                binding.source.source_versions.get("testing_route"),
-            )
-            if binding is not None
-            else None
-        )
+        payload["binding"] = testing_binding_authority(snapshot.binding)
         values.append(payload)
     return _same(*values)
 
@@ -427,6 +432,17 @@ def publish(
                 )
             }
         )
+        if replacement.binding is not None and current.binding is not None:
+            replacement = replacement.model_copy(
+                update={
+                    "binding": replacement.binding.model_copy(
+                        update={
+                            "ingress": current.binding.ingress,
+                            "tls": current.binding.tls,
+                        }
+                    )
+                }
+            )
         if (
             session.scalar(
                 select(db.LaunchplaneDokployTargetIdRow)
