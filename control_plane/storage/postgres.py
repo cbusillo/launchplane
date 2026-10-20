@@ -7665,6 +7665,11 @@ class PostgresRecordStore(HumanSessionStore):
                 parsed = parsed.replace(tzinfo=timezone.utc)
         return format_launchplane_mutation_timestamp(parsed)
 
+    def mutation_observation_timestamp(self) -> str:
+        """Use the reservation database's clock for read-only lease qualification."""
+        with self._session_factory() as session:
+            return self._database_mutation_timestamp(session)
+
     def _owner_control_shadow_timestamp(self, session: Any) -> str:
         return self._database_mutation_timestamp(session).replace("Z", "+00:00")
 
@@ -8501,7 +8506,7 @@ class PostgresRecordStore(HumanSessionStore):
         from control_plane.service_deploy_drain import ServiceDeployDraining, admit_reservation
 
         try:
-            admit_reservation(self, session, scope)
+            admit_reservation(self, session, scope, route_path)
         except ServiceDeployDraining:
             # Keep replay, expiry reconciliation and provider observation usable
             # under the fence. None of these paths admits a fresh effect owner.
@@ -9377,7 +9382,7 @@ class PostgresRecordStore(HumanSessionStore):
                 self._begin_serialized_write(session)
                 from control_plane.service_deploy_drain import admit_reservation
 
-                admit_reservation(self, session, scope)
+                admit_reservation(self, session, scope, route_path)
                 row = session.scalar(
                     self._idempotency_statement(
                         scope=reservation.scope,
@@ -9536,7 +9541,7 @@ class PostgresRecordStore(HumanSessionStore):
             self._begin_serialized_write(session)
             from control_plane.service_deploy_drain import admit_reservation
 
-            admit_reservation(self, session, reservation.scope)
+            admit_reservation(self, session, reservation.scope, reservation.route_path)
             row = session.scalar(
                 self._idempotency_statement(
                     scope=reservation.scope,
@@ -11322,7 +11327,7 @@ class PostgresRecordStore(HumanSessionStore):
                 update={"state": expected.state, "updated_at": expected.updated_at}
             )
             != expected
-            or original.state != "reconcile_required"
+            or original.state not in {"running", "reconcile_required"}
             or original.provider_effect_phase != "execute"
             or not original.provider_effect_started_at
             or original.scope != expected.principal
@@ -11360,6 +11365,10 @@ class PostgresRecordStore(HumanSessionStore):
                 )
             require_unaliased_rehearsal(self, expected)
             now = self._database_mutation_timestamp(session)
+            if original.state == "running" and parse_launchplane_mutation_timestamp(
+                original.lease_expires_at, field_name="lease_expires_at"
+            ) > parse_launchplane_mutation_timestamp(now, field_name="observed_at"):
+                raise ValueError("The original rehearsal executor lease is still active.")
             completed = self._updated_idempotency_record(
                 original,
                 state="completed",

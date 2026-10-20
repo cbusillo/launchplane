@@ -12,12 +12,14 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 import os
 from pathlib import Path
+import re
 from typing import Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select, text
 from control_plane.contracts.product_reconcile import RECONCILE_SOURCE
 from control_plane.contracts.idempotency_record import parse_launchplane_mutation_timestamp
+from control_plane.contracts.odoo_upgrade_rehearsal import ODOO_UPGRADE_REHEARSAL_ROUTE
 
 
 SERVICE_DEPLOY_DRAIN_TIMEOUT_SECONDS = 10 * 60
@@ -170,13 +172,22 @@ def admission_allowed(session: Any, now: str) -> bool:
     )
 
 
-def reservation_requires_admission(scope: str) -> bool:
-    return scope.strip() == "client-release" or scope.strip().startswith(f"{RECONCILE_SOURCE}:")
+def rehearsal_route(route_path: str) -> bool:
+    pattern = re.escape(ODOO_UPGRADE_REHEARSAL_ROUTE).replace(re.escape("{product}"), r"[^/]+")
+    return re.fullmatch(pattern, route_path.strip()) is not None
 
 
-def admit_reservation(store: Any, session: Any, scope: str) -> None:
+def reservation_requires_admission(scope: str, route_path: str = "") -> bool:
+    return (
+        scope.strip() == "client-release"
+        or scope.strip().startswith(f"{RECONCILE_SOURCE}:")
+        or rehearsal_route(route_path)
+    )
+
+
+def admit_reservation(store: Any, session: Any, scope: str, route_path: str = "") -> None:
     """Order every fresh/retried event effect against the self-deploy fence."""
-    if not reservation_requires_admission(scope):
+    if not reservation_requires_admission(scope, route_path):
         return
     if not store.database_url.startswith("sqlite"):
         lock(store, session)
@@ -227,6 +238,9 @@ def _operation_observations(store: Any, session: Any, now: str) -> tuple[dict[st
             (
                 (LaunchplaneIdempotencyRow.scope == "client-release")
                 | LaunchplaneIdempotencyRow.scope.startswith(f"{RECONCILE_SOURCE}:")
+                | LaunchplaneIdempotencyRow.route_path.like(
+                    ODOO_UPGRADE_REHEARSAL_ROUTE.format(product="%")
+                )
             ),
             LaunchplaneIdempotencyRow.state.in_(("running", "reconcile_required")),
         )
@@ -246,7 +260,7 @@ def _operation_observations(store: Any, session: Any, now: str) -> tuple[dict[st
         execution_lock_name = ""
         if (
             not lease_active
-            and row.scope.startswith(f"{RECONCILE_SOURCE}:")
+            and (row.scope.startswith(f"{RECONCILE_SOURCE}:") or rehearsal_route(row.route_path))
             and row.provider_target_key
         ):
             if row.route_path == GENERIC_WEB_DEPLOY_ROUTE and row.state == "reconcile_required":
@@ -256,6 +270,8 @@ def _operation_observations(store: Any, session: Any, now: str) -> tuple[dict[st
                 # their persisted state or missing original intent, proves that
                 # replacement will not interrupt an executor. Keep the row held.
                 execution_lock_name = preview_execution_lock_name(row.provider_target_key)
+            elif rehearsal_route(row.route_path) and row.lease_expires_at:
+                execution_lock_name = row.provider_target_key.removesuffix(":incomplete-retirement")
         if execution_lock_name:
             with store.testing_replacement_execution_lock(execution_lock_name) as check:
                 if check is not None:

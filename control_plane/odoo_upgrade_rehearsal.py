@@ -840,7 +840,7 @@ class OdooRehearsalAdapter:
                     if error.code == RehearsalPrerequisite.OPERATION_UNAVAILABLE
                     else "unbound"
                 )
-            if journal.get("operation_state") == "reconcile_required" and journal.get(
+            if journal.get("operation_state") in {"running", "reconcile_required"} and journal.get(
                 "provider_effect_started_at"
             ):
                 try:
@@ -868,7 +868,7 @@ class OdooRehearsalAdapter:
                 operation_key=operation_key,
                 inspect_capture=(
                     journal_status == "bound"
-                    and journal.get("operation_state") == "reconcile_required"
+                    and journal.get("operation_state") in {"running", "reconcile_required"}
                     and journal.get("provider_effect_phase") == self.request.action
                     and bool(journal.get("provider_effect_started_at"))
                 ),
