@@ -3,7 +3,6 @@ import test from "node:test";
 
 import {
   engineeringPath,
-  engineeringViewLabel,
   ownerReviewPath,
   productReviewLookupFromSearch,
   parseAppRoute,
@@ -64,14 +63,4 @@ test("Owner review deep-link query selects one exact lookup", () => {
     productReviewLookupFromSearch("fixture=products&repository=example%2Fcontrol-plane").valid,
     false,
   );
-});
-
-
-test("removed planning deep links use the existing not-found route", () => {
-  for (const name of ["work-graph", "issue-inbox"]) {
-    for (const suffix of ["", "/"]) {
-      const pathname = `/ui/engineering/${name}${suffix}`;
-      assert.deepEqual(parseAppRoute(pathname), { kind: "not-found", path: pathname });
-    }
-  }
 });

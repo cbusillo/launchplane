@@ -109,11 +109,9 @@ surface:
 - `GET /v1/previews/readiness`
 - `GET /v1/work-graph/tenant-admission/evaluation`
 
-Repository mapping keeps product-profile ownership separate from awareness-only
-work requests. Profiles supply product, driver, stable environments and preview
-context; a work request supplies `active_awareness` only when no active profile
-owns that repository. Awareness alone enables no runtime operation. The unused
-Work graph chooser and Issue inbox are removed. Existing merge-train and
+See the [service boundary](service-boundary.md) for repository-mapping
+ownership and awareness semantics. The unused Work graph chooser and Issue
+inbox are removed. Existing merge-train and
 tenant-admission APIs retain their `/v1/work-graph/` operational paths.
 
 ## Scoped Intents
