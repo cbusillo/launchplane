@@ -419,10 +419,14 @@ def run_resource_schedule(
     api.validate_dokploy_schedule_script(schedule_payload)
     checkpoint()
 
+    effect_checkpointed = False
+
     def before_mutation(phase: str) -> None:
+        nonlocal effect_checkpointed
         checkpoint()
-        if before_provider_mutation is not None:
+        if before_provider_mutation is not None and not effect_checkpointed:
             before_provider_mutation(phase)
+            effect_checkpointed = True
 
     try:
         evidence = post_deploy.run_manual_data_schedule(

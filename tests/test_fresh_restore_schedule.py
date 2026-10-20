@@ -32,13 +32,29 @@ class FreshRestoreScheduleTests(unittest.TestCase):
                     api,
                     "fetch_dokploy_target_payload",
                     return_value={
-                        "env": api.serialize_dokploy_env_text(environment),
+                        "env": api.serialize_dokploy_env_text(
+                            {
+                                **environment,
+                                **(
+                                    {post_deploy.ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: ""}
+                                    if not delivered
+                                    else {}
+                                ),
+                            }
+                        ),
                         "appName": record.namespace,
                         "serverId": "registered-server",
                     },
                 ),
                 patch.object(api, "find_matching_dokploy_schedule", return_value=None),
                 patch.object(api, "upsert_dokploy_schedule") as upsert,
+                patch.object(
+                    api,
+                    "update_dokploy_target_env",
+                    side_effect=AssertionError(
+                        "Schedule validation must precede environment delivery"
+                    ),
+                ) as update,
                 patch.object(
                     post_deploy, "build_fresh_testing_restore_script", side_effect=rendered
                 ),
@@ -56,3 +72,4 @@ class FreshRestoreScheduleTests(unittest.TestCase):
                     )
                 self.assertEqual(native.called, delivered)
                 upsert.assert_not_called()
+                update.assert_not_called()

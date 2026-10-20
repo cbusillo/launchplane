@@ -292,59 +292,6 @@ class TestingResourceScheduleTests(unittest.TestCase):
             # The executed artifact carries the actual provider project identity.
             script = run.call_args.kwargs["schedule_payload"]["script"]
             self.assertEqual(script, resources.script("readback", compose_project=project))
-            # A qualified continuation still owns its earlier effects if this
-            # sibling renderer refuses locally before the next schedule write.
-            from tempfile import TemporaryDirectory
-            from tests.test_provider_operations import _StoreFixture, _FakeAdapter
-            from control_plane.provider_operations import ProviderObservation
-            from control_plane.provider_operations import ProviderOperationLease
-            from control_plane.contracts.provider_schedule import ScheduleMaterializationTooLarge
-            from control_plane.dokploy import api
-
-            with TemporaryDirectory() as directory:
-                fixture = _StoreFixture(directory)
-                with self.assertRaises(RuntimeError):
-                    fixture.run(_FakeAdapter(apply_error=RuntimeError("earlier effect")))
-                original = fixture.stored()
-                recovery = _FakeAdapter(
-                    observation=ProviderObservation(
-                        "absent",
-                        retry_safe=True,
-                        preserve_effect_checkpoint=True,
-                    )
-                )
-
-                def resume(_key: str, lease: ProviderOperationLease) -> object:
-                    return run_resource_schedule(
-                        root=Path("."),
-                        store=store,
-                        resources=resources,
-                        mode="prepare",
-                        checkpoint=lambda: None,
-                        before_provider_mutation=lambda _phase: lease.checkpoint_effect(
-                            "prepare_fresh_storage"
-                        ),
-                    )
-
-                with (
-                    patch.object(recovery, "apply", side_effect=resume),
-                    patch.object(
-                        OdooTestingResources,
-                        "script",
-                        return_value="x" * api.DOKPLOY_SCHEDULE_MATERIALIZATION_LIMIT_BYTES,
-                    ),
-                    self.assertRaises(ScheduleMaterializationTooLarge),
-                ):
-                    fixture.run(recovery)
-                retained = fixture.stored()
-                self.assertEqual(retained.provider_effect_phase, original.provider_effect_phase)
-                self.assertEqual(
-                    retained.provider_effect_started_at, original.provider_effect_started_at
-                )
-                self.assertEqual(retained.state, "reconcile_required")
-                self.assertEqual(
-                    fixture.run(_FakeAdapter(), idempotency_key="replacement").status, "target_busy"
-                )
             from control_plane.dokploy.source import DokployTargetDefinition
 
             candidate = DokployTargetDefinition(
@@ -531,3 +478,122 @@ class TestingResourceCaptureRecoveryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestingResourceCheckpointTests(unittest.TestCase):
+    def test_real_adapter_retains_original_checkpoint_when_next_render_refuses(self) -> None:
+        from contextlib import nullcontext
+        from datetime import datetime, UTC
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from control_plane import testing_replacement_resources as resources_module
+        from control_plane.contracts.disposable_lane import DisposableTestingResourcePreparation
+        from control_plane.contracts.provider_schedule import ScheduleMaterializationTooLarge
+        from control_plane.provider_operations import (
+            run_durable_provider_operation,
+            ProviderOperationLease,
+        )
+
+        preparation = DisposableTestingResourcePreparation(
+            operation_id="retained",
+            product="example",
+            context="example",
+            retained_target_id="old",
+            prepared_by="service",
+            recorded_at=datetime.now(UTC),
+            resource_namespace="lp-testing-" + "a" * 32,
+            replacement_target_id="new",
+            reviewed_plan_sha256="b" * 64,
+        )
+        domain_store = Mock()
+        domain_store.read_disposable_resource_preparation.return_value = preparation
+        domain_store.testing_replacement_execution_lock.side_effect = lambda *_: nullcontext(
+            lambda: None
+        )
+        domain_store.serialize_disposable_testing_resources.side_effect = nullcontext
+        adapter = resources_module.TestingReplacementResourceAdapter(
+            Path("."),
+            domain_store,
+            "example",
+            TestingReplacementResourcesRequest(
+                context="example",
+                operation_id="retained",
+                reason="Continue original resources",
+                reviewed_plan_sha256=preparation.reviewed_plan_sha256,
+            ),
+            "fixture-trace",
+        )
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url=f"sqlite+pysqlite:///{Path(directory) / 'state.db'}"
+            )
+            self.addCleanup(store.close)
+            store.ensure_schema()
+
+            def run(key: str = "original") -> Any:
+                return run_durable_provider_operation(
+                    store=store,
+                    scope="resource-test",
+                    route_path="/resource-test",
+                    idempotency_key=key,
+                    request_fingerprint="original-input",
+                    lease_owner="worker",
+                    response_trace_id="fixture-trace",
+                    adapter=adapter,
+                )
+
+            def stored() -> Any:
+                return store.read_idempotency_record(
+                    scope="resource-test", route_path="/resource-test", idempotency_key="original"
+                )
+
+            def interrupted(_key: str, lease: ProviderOperationLease) -> None:
+                lease.checkpoint_effect("captured-placement")
+                raise RuntimeError("Earlier provider interruption")
+
+            with (
+                patch.object(adapter, "apply", side_effect=interrupted),
+                self.assertRaises(RuntimeError),
+            ):
+                run()
+            original = stored()
+            assert original is not None
+            with (
+                patch.object(
+                    adapter, "readback", side_effect=resources_module.IncompleteTestingResources()
+                ),
+                patch.object(adapter, "configuration_sha256", return_value="configuration"),
+                patch.object(adapter, "authority_sha256", return_value="authority"),
+                patch.object(adapter, "checkpoint"),
+                patch.object(
+                    resources_module,
+                    "resource_context",
+                    return_value=(
+                        None,
+                        SimpleNamespace(operation_id="retained"),
+                        preparation,
+                        None,
+                        SimpleNamespace(target_id="old"),
+                        None,
+                    ),
+                ),
+                patch.object(
+                    resources_module,
+                    "resource_plan",
+                    return_value={"plan_sha256": preparation.reviewed_plan_sha256},
+                ),
+                patch.object(
+                    resources_module,
+                    "run_resource_schedule",
+                    side_effect=ScheduleMaterializationTooLarge(),
+                ),
+                self.assertRaises(ScheduleMaterializationTooLarge),
+            ):
+                run()
+            retained = stored()
+            self.assertEqual(retained.provider_effect_phase, original.provider_effect_phase)
+            self.assertEqual(
+                retained.provider_effect_started_at, original.provider_effect_started_at
+            )
+            self.assertEqual(retained.state, "reconcile_required")
+            self.assertEqual(run("competing").status, "target_busy")

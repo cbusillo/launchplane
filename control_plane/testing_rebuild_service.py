@@ -13,6 +13,7 @@ import click
 from pydantic import Field
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
+from control_plane.contracts.provider_schedule import ScheduleMaterializationTooLarge
 from control_plane.durable_operation_authorization import (
     DurableOperationAuthorizationDeniedError,
 )
@@ -428,7 +429,7 @@ class NativeTestingRebuildAdapter:
         with self.store.testing_replacement_execution_lock(self.operation.operation_id) as check:
             if check is None:
                 return ProviderObservation("unknown")
-            return ProviderObservation("absent", retry_safe=True)
+            return ProviderObservation("absent", retry_safe=True, preserve_effect_checkpoint=True)
 
     def apply(
         self, provider_operation_key: str, lease: ProviderOperationLease
@@ -1781,6 +1782,8 @@ def execute_native_testing_rebuild(
         # The worker already preserves timeout uncertainty on the same operation.
         raise
     except NativeTestingRebuildPending:
+        raise
+    except ScheduleMaterializationTooLarge:
         raise
     except Exception as error:
         if native_rebuild_effects_started(store, operation):

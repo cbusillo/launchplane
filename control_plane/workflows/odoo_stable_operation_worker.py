@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.provider_schedule import ScheduleMaterializationTooLarge
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
 from control_plane.contracts.odoo_cutover import OdooCutoverPlan
 from control_plane.workflows.odoo_cutover import OdooCutoverProvider
@@ -2412,11 +2413,15 @@ def _execute_target_replacement_with_checkpoint(
             isinstance(error, DrillPrerequisite)
             and error.code == "testing_storage_reconciliation_pending"
         )
-        rebuild_pending = operation.is_native_testing_rebuild and (
-            isinstance(error, (NativeTestingRebuildPending, TimeoutError))
-            or (
-                isinstance(record_store, PostgresRecordStore)
-                and native_rebuild_effects_started(record_store, operation)
+        rebuild_pending = (
+            operation.is_native_testing_rebuild
+            and not isinstance(error, ScheduleMaterializationTooLarge)
+            and (
+                isinstance(error, (NativeTestingRebuildPending, TimeoutError))
+                or (
+                    isinstance(record_store, PostgresRecordStore)
+                    and native_rebuild_effects_started(record_store, operation)
+                )
             )
         )
         rebuild_message = (

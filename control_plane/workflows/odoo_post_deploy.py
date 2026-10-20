@@ -564,7 +564,6 @@ def execute_odoo_post_deploy(
                 OdooProviderSafetyRefusedError,
                 DurableOperationAuthorizationDeniedError,
                 dokploy_post_deploy.OdooPostDeployReadbackFailure,
-                ScheduleMaterializationTooLarge,
             ),
         ) or (
             isinstance(error, dokploy_api.DokployScheduleExecutionFailed)

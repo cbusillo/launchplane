@@ -498,7 +498,9 @@ def render_fresh_testing_restore_spec(spec: dict[str, object]) -> str:
             )
         }
         if len(repr(capture).encode()) > NATIVE_CAPTURE_SCRIPT_RESERVE_BYTES:
-            raise ValueError("Native capture input exceeds its script reservation.")
+            from control_plane.contracts.provider_schedule import ScheduleMaterializationTooLarge
+
+            raise ScheduleMaterializationTooLarge()
     encoded = base64.b64encode(
         gzip.compress(json.dumps(spec, sort_keys=True).encode(), mtime=0)
     ).decode()

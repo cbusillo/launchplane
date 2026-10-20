@@ -51,6 +51,43 @@ from tests.test_testing_rebuild_service import exercise_published_copy_maintenan
 class NativeTestingWorkerTests(unittest.TestCase):
     database_url = ""
 
+    def test_schedule_refusal_keeps_typed_cause_and_original_native_custody(self) -> None:
+        from control_plane.contracts.provider_schedule import ScheduleMaterializationTooLarge
+
+        refusal = ScheduleMaterializationTooLarge()
+
+        def interrupted(executor: service.NativeTestingRebuildExecution) -> None:
+            executor.lease.checkpoint_effect("candidate_allocated")
+            raise refusal
+
+        with (
+            patch.object(
+                service.NativeTestingRebuildExecution, "run", autospec=True, side_effect=interrupted
+            ),
+            self.assertRaises(ScheduleMaterializationTooLarge),
+        ):
+            self.execute()
+        original = self.store.read_idempotency_record(
+            scope=REBUILD_SCOPE,
+            route_path=REBUILD_ROUTE,
+            idempotency_key=self.operation.operation_id,
+        )
+        assert original is not None
+        with (
+            patch.object(service.NativeTestingRebuildExecution, "run", side_effect=refusal),
+            self.assertRaises(ScheduleMaterializationTooLarge),
+        ):
+            self.execute()
+        retained = self.store.read_idempotency_record(
+            scope=REBUILD_SCOPE,
+            route_path=REBUILD_ROUTE,
+            idempotency_key=self.operation.operation_id,
+        )
+        assert retained is not None
+        self.assertEqual(retained.provider_effect_phase, original.provider_effect_phase)
+        self.assertEqual(retained.provider_effect_started_at, original.provider_effect_started_at)
+        self.assertEqual(retained.state, "reconcile_required")
+
     def setUp(self) -> None:
         self.fixture = publication_tests.TestingPublicationTests()
         self.fixture.database_url = self.database_url
@@ -2174,6 +2211,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
     ) -> None:
         import logging
         from contextlib import nullcontext
+        from control_plane.contracts.provider_schedule import ScheduleMaterializationTooLarge
         from control_plane.contracts.durable_operation_authorization import (
             DurableOperationAuthorization,
         )
@@ -2213,6 +2251,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
             service.NativeTestingRebuildPending("fixture observation pending"),
             RuntimeError("Fixture execution lock lost after dispatch"),
             KeyError("Fixture malformed frame after dispatch"),
+            ScheduleMaterializationTooLarge(),
         ):
             with (
                 self.subTest(pending=isinstance(response, Exception)),
@@ -2255,6 +2294,11 @@ class NativeTestingWorkerTests(unittest.TestCase):
             execute.assert_called_once()
             legacy.assert_not_called()
             terminal = complete.call_args.kwargs["record"]
+            if isinstance(response, ScheduleMaterializationTooLarge):
+                self.assertEqual(terminal.status, "fail")
+                self.assertEqual(terminal.error_code, response.code)
+                self.assertTrue(terminal.finished_at)
+                continue
             self.assertEqual(
                 terminal.status, "pending" if isinstance(response, Exception) else "pass"
             )

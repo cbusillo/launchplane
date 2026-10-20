@@ -151,6 +151,11 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         from control_plane.dokploy.api import validate_dokploy_schedule_script
         from control_plane.integration_readback import INTEGRATION_READBACK_PROGRAM
         from tests.test_odoo_stable_target_replacement import _UPSTREAM_RESTORE_ENV
+        from control_plane.odoo_testing_restore import (
+            FreshRestoreScriptArguments,
+            NATIVE_CAPTURE_SCRIPT_RESERVE_BYTES,
+        )
+        from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_COPY_ARTIFACT_BYTES
 
         for native in (False, True):
             with self.subTest(native=native):
@@ -160,7 +165,7 @@ class FreshTestingHostProgramTests(unittest.TestCase):
                         "source_binding_sha256": "e" * 64 if native else "",
                     }
                 )
-                script = build_fresh_testing_restore_script(
+                arguments = FreshRestoreScriptArguments(
                     generation=record,
                     compose_project=record.namespace,
                     image_reference="registry.invalid/odoo@sha256:" + "f" * 64,
@@ -172,17 +177,37 @@ class FreshTestingHostProgramTests(unittest.TestCase):
                     runtime_environment={},
                     clear_stale_lock=False,
                     data_workflow_lock_path="/volumes/data/.fixture_workflow_lock",
+                )
+                script = build_fresh_testing_restore_script(
+                    **arguments,
                     native_capture={
                         "capture_id": "a" * 32,
                         "generation_binding_sha256": generation_binding(record),
                         "source_binding_sha256": record.source_binding_sha256,
-                        "database": {"sha256": "b" * 64, "size": 123456789},
-                        "filestore": {"sha256": "c" * 64, "size": 123456789},
+                        "database": {
+                            "sha256": "b" * 64,
+                            "size": NATIVE_TESTING_COPY_ARTIFACT_BYTES,
+                        },
+                        "filestore": {
+                            "sha256": "c" * 64,
+                            "size": NATIVE_TESTING_COPY_ARTIFACT_BYTES,
+                        },
                     }
                     if native
                     else None,
                 )
-                validate_dokploy_schedule_script({"script": script, "appName": record.namespace})
+                materialized = validate_dokploy_schedule_script(
+                    {"script": script, "appName": record.namespace}
+                )
+                if native:
+                    reserved = validate_dokploy_schedule_script(
+                        {
+                            "script": build_fresh_testing_restore_script(**arguments)
+                            + " " * NATIVE_CAPTURE_SCRIPT_RESERVE_BYTES,
+                            "appName": record.namespace,
+                        }
+                    )
+                    self.assertLessEqual(materialized, reserved)
 
     def setUp(self) -> None:
         self.temporary = TemporaryDirectory()
