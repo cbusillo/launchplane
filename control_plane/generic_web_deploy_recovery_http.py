@@ -873,6 +873,7 @@ async def _inspect_generic_web_deploy_recovery(
                 provider_observation_payload.update(
                     testing_input_authority=current_input_authority,
                     testing_pre_image_settlement=adapter.testing_settlement_pending,
+                    testing_settlement_disposition=adapter.testing_settlement_disposition,
                 )
             if provider_outcome == "present":
                 proposed_action = "adopt_observed"

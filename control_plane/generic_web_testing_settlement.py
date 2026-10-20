@@ -1,4 +1,4 @@
-"""Settle obsolete testing inputs only while their original image is untouched."""
+"""Settle testing attempts proved pre-image or refused before dispatch."""
 
 from collections.abc import Callable
 from pathlib import Path
@@ -12,6 +12,7 @@ from control_plane.contracts.product_profile_record import (
 )
 from control_plane.generic_web_testing_inputs import (
     TestingInputStore,
+    TESTING_DISPATCH_REFUSED_PHASE,
     testing_input_authority,
     require_testing_application_target_authority,
 )
@@ -40,6 +41,7 @@ from control_plane.workflows.ship import build_deployment_record, utc_now_timest
 
 TESTING_PRE_IMAGE_SETTLEMENT_PHASE = "testing_pre_image_settlement"
 TESTING_PRE_IMAGE_SETTLED = "testing_deploy_pre_image_settled"
+TESTING_DISPATCH_REFUSED_SETTLED = "testing_deploy_dispatch_refused_settled"
 
 
 class _SettlementStore(TestingInputStore, Protocol):
@@ -53,7 +55,8 @@ def testing_attempt_was_settled(record: LaunchplaneIdempotencyRecord) -> bool:
     return (
         record.state == "completed"
         and isinstance(result, dict)
-        and result.get("error_code") == TESTING_PRE_IMAGE_SETTLED
+        and result.get("error_code")
+        in {TESTING_PRE_IMAGE_SETTLED, TESTING_DISPATCH_REFUSED_SETTLED}
     )
 
 
@@ -143,6 +146,11 @@ def testing_pre_image_settlement_required(
         and not (no_effect_checkpoint and not phase)
     ):
         return False
+    if phase == TESTING_DISPATCH_REFUSED_PHASE:
+        # Only the running provider can write this after its image-save reply
+        # and before any trigger checkpoint. No current input grant is needed
+        # to fail this original attempt without dispatching its saved image.
+        return True
     pre_image = phase in {
         "",
         "application_lifecycle_prepared",
@@ -196,6 +204,29 @@ def settle_testing_pre_image_attempt(
     ):
         check_execution()
         lease.assert_current()
+        refused_dispatch = phase == TESTING_DISPATCH_REFUSED_PHASE
+
+        def require_refusal_evidence() -> None:
+            if not refused_dispatch:
+                return
+            if not isinstance(lease, ProviderEvidenceLease):
+                raise ProviderMutationUnknownError(
+                    "Original dispatch-refusal lease is unavailable."
+                )
+            reservation = lease.evidence_reservation()
+            if reservation.provider_effect_phase != TESTING_DISPATCH_REFUSED_PHASE or (
+                build_provider_operation_key(
+                    scope=reservation.scope,
+                    route_path=reservation.route_path,
+                    idempotency_key=reservation.idempotency_key,
+                    request_fingerprint=reservation.request_fingerprint,
+                    reconciliation_key=reservation.reconciliation_key,
+                )
+                != operation_key
+            ):
+                raise ProviderMutationUnknownError("Original dispatch-refusal proof changed.")
+
+        require_refusal_evidence()
 
         def require_no_effect_evidence() -> None:
             if not isinstance(lease, ProviderEvidenceLease):
@@ -248,6 +279,7 @@ def settle_testing_pre_image_attempt(
             check_execution()
             lease.assert_current()
             _require_target(store, profile, lane, target)
+            require_refusal_evidence()
             # This durable controller stage never invokes image save or deploy.
             # Retain it through restoration so a crash cannot lose pre-image proof.
             if settlement_without_effects:
@@ -255,7 +287,11 @@ def settle_testing_pre_image_attempt(
                 # authoritative no-effect evidence intact for the next retry.
                 require_no_effect_evidence()
             else:
-                lease.checkpoint_effect(TESTING_PRE_IMAGE_SETTLEMENT_PHASE)
+                lease.checkpoint_effect(
+                    TESTING_DISPATCH_REFUSED_PHASE
+                    if refused_dispatch
+                    else TESTING_PRE_IMAGE_SETTLEMENT_PHASE
+                )
 
         checkpoint()
         if receipt is not None and settlement_without_effects:
@@ -274,7 +310,7 @@ def settle_testing_pre_image_attempt(
                 effect_started=lambda: None,
             )
             assert lifecycle is not None
-            if receipt.resume_from_hold or receipt.state == "held":
+            if refused_dispatch or receipt.resume_from_hold or receipt.state == "held":
                 lifecycle.hold()
                 receipt.state = "held"
             else:
@@ -303,7 +339,11 @@ def settle_testing_pre_image_attempt(
                 if (receipt is not None and not settlement_without_effects)
                 or record.post_deploy_update.attempted
                 else "skipped",
-                "detail": "Obsolete testing attempt settled before image mutation.",
+                "detail": (
+                    "Testing dispatch refused after image save; schedules remain held."
+                    if refused_dispatch
+                    else "Obsolete testing attempt settled before image mutation."
+                ),
                 "evidence": {
                     **record.post_deploy_update.evidence,
                     **(receipt.evidence() if receipt is not None else {}),
@@ -325,7 +365,12 @@ def settle_testing_pre_image_attempt(
             response_payload=provider_operation_response_payload(
                 trace_id=trace_id,
                 records={"deployment_record_id": record.record_id},
-                result={"deploy_status": "fail", "error_code": TESTING_PRE_IMAGE_SETTLED},
+                result={
+                    "deploy_status": "fail",
+                    "error_code": TESTING_DISPATCH_REFUSED_SETTLED
+                    if refused_dispatch
+                    else TESTING_PRE_IMAGE_SETTLED,
+                },
             ),
             provider_effect_performed=not settlement_without_effects,
         )

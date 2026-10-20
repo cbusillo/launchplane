@@ -274,9 +274,7 @@ def prepare_generic_web_testing_runtime(
         )
 
         try:
-            environment = prepare_testing_inputs(
-                store, profile, lane, target.testing_runtime_digest
-            )
+            envelope = prepare_testing_inputs(store, profile, lane, target.testing_runtime_digest)
         except LiveTargetRuntimeError as error:
             raise TestingInputSafetyRefused(runtime_key_safety_error_message(error)) from error
         except click.ClickException as error:
@@ -292,6 +290,7 @@ def prepare_generic_web_testing_runtime(
             raise TestingInputSafetyRefused(
                 "Application testing input target changed before delivery."
             )
+        environment = envelope.environment
         require_dokploy_testing_environment_representable(environment.values)
         target.testing_runtime_values = environment.values
         target.testing_runtime_retired_keys = environment.retired_keys
@@ -310,6 +309,8 @@ def prepare_generic_web_testing_runtime(
                     if require_unchanged_inputs
                     else target.testing_runtime_digest
                 )
+            except TestingInputSafetyRefused:
+                raise
             except (FileNotFoundError, ValueError, click.ClickException) as error:
                 raise TestingInputSafetyRefused(
                     "Application testing runtime input authority is unavailable."
@@ -321,11 +322,11 @@ def prepare_generic_web_testing_runtime(
             try:
                 require_testing_input_key_safety(
                     store,
-                    profile,
                     lane,
-                    environment.values,
-                    captured_secret_keys=environment.secret_keys,
+                    envelope,
                 )
+            except TestingInputSafetyRefused:
+                raise
             except LiveTargetRuntimeError as error:
                 raise TestingInputSafetyRefused(runtime_key_safety_error_message(error)) from error
             except (FileNotFoundError, ValueError, click.ClickException) as error:
@@ -816,11 +817,23 @@ class DokployGenericWebDeployProvider:
             before_provider_mutation("provider_dispatch_prepared")
 
         def checked_mutation(phase: str) -> None:
+            from control_plane.generic_web_testing_inputs import (
+                TESTING_DISPATCH_REFUSED_PHASE,
+                TestingInputSafetyRefused,
+            )
+
             if resolved_deploy_target._testing_runtime_check is not None:
                 # The trigger is reached only after image save returns. Finish
                 # those captured inputs while current target/key safety still
                 # governs dispatch; a crash has no such continuation authority.
-                resolved_deploy_target._testing_runtime_check(phase != "deploy_trigger")
+                try:
+                    resolved_deploy_target._testing_runtime_check(phase != "deploy_trigger")
+                except TestingInputSafetyRefused:
+                    if phase == "deploy_trigger":
+                        # This callback is reached only after saveDockerProvider
+                        # returns. A crash/uncertain save never earns this proof.
+                        before_provider_mutation(TESTING_DISPATCH_REFUSED_PHASE)
+                    raise
             before_provider_mutation(phase)
 
         def runtime_verified() -> None:

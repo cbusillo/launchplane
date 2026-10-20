@@ -171,6 +171,15 @@ reservation. The webhook request never waits on a deploy.
     original retains its input evidence; a fresh candidate earns its own
     readback receipt. Unknown image effects remain fenced. A return to a
     settled predecessor's exact inputs receives a deterministic successor key.
+    A typed safety refusal after a successful image-save reply and before the
+    deploy trigger has its own durable phase. With current target authority,
+    exact original-lease evidence and fresh deployment absence, the same
+    controller settles it failed while preserving the original receipt and
+    holding schedules. It never restores schedules or dispatches the saved
+    image. Revoked bindings need not be regranted; a fresh canonical operation
+    uses valid current inputs and explicit provider-key retirement where needed.
+    Retirement or target repointing remains an authority stop, with no cleanup
+    writes to the old target. An uncertain save or crash earns no refusal proof.
     Otherwise a running attempt defers it, and an unknown or expired attempt
     requires generic-web deploy recovery first, even after a provider-binding
     repair moves the lane to another application.

@@ -1158,6 +1158,20 @@ def _generic_web_testing_outcome(
         plan["deferred"] = "lane_busy"
         return ReconcileOutcome(plan, deferred=True)
     if result.status in {"target_busy", "reconcile_required"}:
+        from control_plane.generic_web_testing_inputs import TESTING_DISPATCH_REFUSED_PHASE
+
+        if (
+            result.record is not None
+            and result.record.provider_effect_phase == TESTING_DISPATCH_REFUSED_PHASE
+        ):
+            return ReconcileOutcome(
+                plan,
+                error=(
+                    "Testing dispatch was refused after image save, before deployment. "
+                    "The original operation stays held until recovery proves current "
+                    "target authority and deployment absence."
+                ),
+            )
         return ReconcileOutcome(
             plan,
             error=(

@@ -7,8 +7,13 @@ import click
 from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane.contracts.deployment_record import DeploymentRecord
-from control_plane.generic_web_testing_inputs import testing_input_authority
+from control_plane.generic_web_testing_inputs import (
+    TESTING_DISPATCH_REFUSED_PHASE,
+    testing_input_authority,
+)
 from control_plane.generic_web_testing_settlement import (
+    TESTING_DISPATCH_REFUSED_SETTLED,
+    TESTING_PRE_IMAGE_SETTLED,
     settle_testing_pre_image_attempt,
     testing_pre_image_settlement_required,
 )
@@ -145,6 +150,16 @@ class GenericWebDeployProviderMutationAdapter:
     @property
     def testing_settlement_pending(self) -> bool:
         return bool(self._settlement_operation)
+
+    @property
+    def testing_settlement_disposition(self) -> str:
+        if not self.testing_settlement_pending:
+            return ""
+        return (
+            TESTING_DISPATCH_REFUSED_SETTLED
+            if self._settlement_phase == TESTING_DISPATCH_REFUSED_PHASE
+            else TESTING_PRE_IMAGE_SETTLED
+        )
 
     def _resolve_deploy_target(self) -> GenericWebResolvedDeployTarget:
         if self._resolved_deploy_target is None:
@@ -892,19 +907,22 @@ class GenericWebDeployProviderMutationAdapter:
                     and previous.generic_web_cutover.step != "blocked"
                 )
 
+        known_dispatch_refusal = False
+
         def checkpoint(phase: str) -> None:
-            nonlocal effect_started
+            nonlocal effect_started, known_dispatch_refusal
             try:
                 self.execution_check()
             except (RuntimeError, SQLAlchemyError) as error:
                 # The runner releases only when no earlier effect checkpoint
                 # exists; after an effect it preserves the reconciliation fence.
                 raise ProviderMutationRejectedError(error) from error
-            if phase == "provider_dispatch_prepared":
+            if phase == "provider_dispatch_prepared" or known_dispatch_refusal:
                 lease.assert_current()
             else:
                 lease.checkpoint_effect(phase)
                 effect_started = True
+                known_dispatch_refusal = phase == TESTING_DISPATCH_REFUSED_PHASE
 
         proved_pre_image_retry = self._proved_pre_image_operation == provider_operation_key
         self._proved_pre_image_operation = ""

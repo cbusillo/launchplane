@@ -750,15 +750,19 @@ def _execute_generic_web_deploy_unserialized(
     provider_effect_attempted = False
     image_effect_attempted = False
     last_provider_phase = ""
+    dispatch_refused = False
     provider_deployment_observation: GenericWebProviderDeploymentObservation | None = None
     key_readback: IntegrationKeyReadbackEvidence | None = None
     application_lifecycle: GenericWebApplicationLifecycle | None = None
 
     def checkpoint_provider(phase: str) -> None:
-        nonlocal post_deploy_update, last_provider_phase
+        nonlocal post_deploy_update, last_provider_phase, dispatch_refused
         if provider_effect_checkpoint is not None:
             provider_effect_checkpoint(phase)
         last_provider_phase = phase
+        from control_plane.generic_web_testing_inputs import TESTING_DISPATCH_REFUSED_PHASE
+
+        dispatch_refused = dispatch_refused or phase == TESTING_DISPATCH_REFUSED_PHASE
         if phase in {"provider_dispatch_prepared", "runtime_inputs_verified"}:
             from control_plane.generic_web_testing_inputs import DELIVERY_RECEIPT_KEY
 
@@ -800,6 +804,26 @@ def _execute_generic_web_deploy_unserialized(
     def mark_provider_effect_started() -> None:
         nonlocal provider_effect_attempted
         provider_effect_attempted = True
+
+    def require_cleanup_authority() -> None:
+        if prepared_deploy_target.testing_runtime_digest:
+            from control_plane.generic_web_testing_inputs import (
+                require_testing_application_target_authority,
+            )
+
+            require_testing_application_target_authority(
+                record_store,
+                resolved_profile,
+                resolved_lane,
+                target_id=resolved_target.target_id,
+                provider_id=resolved_deploy_provider.provider_id,
+            )
+
+    def lifecycle_checkpoint(phase: str) -> None:
+        if dispatch_refused:
+            require_cleanup_authority()
+        if provider_effect_checkpoint is not None:
+            provider_effect_checkpoint(phase)
 
     def mark_image_effect_started() -> None:
         nonlocal image_effect_attempted
@@ -913,7 +937,7 @@ def _execute_generic_web_deploy_unserialized(
             provider=resolved_deploy_provider,
             target_type=resolved_target.target_type,
             target_id=resolved_target.target_id,
-            checkpoint=provider_effect_checkpoint or (lambda _phase: None),
+            checkpoint=lifecycle_checkpoint,
             effect_started=mark_provider_effect_started,
         )
         if application_lifecycle is not None:
@@ -1036,6 +1060,7 @@ def _execute_generic_web_deploy_unserialized(
             provider_deployment_observation = exc.observation
         if application_lifecycle is not None:
             try:
+                require_cleanup_authority()
                 if (
                     image_effect_attempted
                     or application_lifecycle.snapshot.resume_from_hold
@@ -1050,7 +1075,13 @@ def _execute_generic_web_deploy_unserialized(
                     application_lifecycle.snapshot.state = "restore_failed"
                     application_lifecycle.restore()
                     application_lifecycle.snapshot.state = "restored"
-            except click.ClickException as restore_error:
+            except (
+                click.ClickException,
+                TestingInputSafetyRefused,
+                FileNotFoundError,
+            ) as restore_error:
+                if dispatch_refused:
+                    application_lifecycle.snapshot.state = "held"
                 exc = click.ClickException(f"{exc}\n{restore_error}")
             post_deploy_update = PostDeployUpdateEvidence(
                 attempted=application_lifecycle.effect_attempted,

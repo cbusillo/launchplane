@@ -157,10 +157,26 @@ deployment. Before image save, an in-flight attempt refuses changed input
 authority. Once image save returns successfully in that same execution, the
 trigger finishes only the captured values and earns only their original receipt;
 the next sweep repairs any newer inputs. Current product activity, lane/target
-binding and active key safety for every captured secret key still govern the
-trigger. Revoked bindings or policy, changed targets and inactive products
-remain refusals. A crash or uncertain image-save outcome does not gain this
-continuation and remains fenced for exact recovery.
+binding and active key safety for the captured safety requirement set still
+govern the trigger. Preparation retains original binding and secret identities
+without plaintext persistence. A later declaration or binding on a captured
+plain setting does not expand that set. Original bindings must remain active
+and bound to the same secrets and routes; deleting and recreating a binding
+under its old key cannot authorize the captured payload. Version rotation may
+finish the already captured version before the next sweep repairs it.
+
+A typed safety refusal after the synchronous image-save reply and before the
+trigger checkpoint records `testing_dispatch_refused`. Cleanup preserves this
+proof and the original receipt. With current target authority, the renewed
+original lease, exclusive product lock and fresh deployment absence, original
+operation recovery settles it failed with schedules held. It never restores
+schedules, saves an image or triggers a deployment. A fresh canonical operation
+can replace the saved image using current inputs; a revoked key already saved
+in provider env still needs explicit retirement, never a regrant. Failed cleanup
+or record publication can resume this held settlement. Retirement and target
+repointing keep the authority stop and permit no old-target cleanup writes.
+A crash or uncertain image-save outcome earns no refusal proof and remains
+fenced for exact recovery.
 
 ### Health probes with public wildcard DNS
 
