@@ -712,6 +712,7 @@ def execute_odoo_prod_backup_restore_apply(
         desired_env["PLATFORM_INSTANCE"] = plan.instance
         desired_env["DOCKER_IMAGE_REFERENCE"] = plan.image_reference
         desired_env.update(runtime_identity_env(runtime_identity))
+        env_text = dokploy_api.serialize_dokploy_env_text(desired_env)
         provider_effect_checkpoint("target_env_update_started", "target_env_update")
         dokploy_api.update_dokploy_target_env(
             host=host,
@@ -719,7 +720,7 @@ def execute_odoo_prod_backup_restore_apply(
             target_type="compose",
             target_id=target_id_record.target_id,
             target_payload=target_payload,
-            env_text=dokploy_api.serialize_dokploy_env_text(desired_env),
+            env_text=env_text,
         )
         refreshed_payload = dokploy_api.fetch_dokploy_target_payload(
             host=host,

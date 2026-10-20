@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import unittest
+from collections.abc import Callable
 from contextlib import closing
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -83,7 +84,11 @@ class _LaneFixture:
         )
 
     def sync(
-        self, *, provider_env: str, apply_changes: bool = True
+        self,
+        *,
+        provider_env: str,
+        apply_changes: bool = True,
+        before_provider_mutation: Callable[[], None] | None = None,
     ) -> tuple[dict[str, object], list[dict[str, object]]]:
         updates: list[dict[str, object]] = []
 
@@ -118,11 +123,23 @@ class _LaneFixture:
                 no_cache=False,
                 deploy_timeout_seconds=None,
                 deploy_trigger=Mock(),
+                before_provider_mutation=before_provider_mutation,
             )
         return result, updates
 
 
 class StableLaneSyncRefusalTests(unittest.TestCase):
+    def test_unencodable_value_refuses_before_mutation_checkpoint_or_write(self) -> None:
+        lane = _LaneFixture(self, _instance_record({"APP_MODE": "fixture\x00value"}))
+        checkpoint = Mock()
+        with (
+            patch.object(dokploy_api, "update_dokploy_target_env") as update,
+            self.assertRaises(dokploy_api.DokployEnvironmentEncodingError),
+        ):
+            lane.sync(provider_env="APP_MODE=off", before_provider_mutation=checkpoint)
+        checkpoint.assert_not_called()
+        update.assert_not_called()
+
     def test_instance_record_platform_credential_refuses_the_sync(self) -> None:
         lane = _LaneFixture(
             self, _instance_record({"APP_MODE": "on", "GITHUB_TOKEN": "record-token-value"})

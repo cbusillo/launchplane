@@ -823,6 +823,8 @@ async def _inspect_generic_web_deploy_recovery(
                 reconciliation_key=reservation.reconciliation_key,
                 expected_provider_target_key=reservation.provider_target_key,
                 legacy_provider_effect_started_at=legacy_provider_effect_started_at,
+                no_effect_checkpoint=not reservation.provider_effect_phase
+                and not reservation.provider_effect_started_at,
             )
             if not provider_inspection.identity_matches:
                 raise dependencies.http_error(
@@ -848,6 +850,31 @@ async def _inspect_generic_web_deploy_recovery(
                     "outcome": provider_outcome,
                     "deployment_status": provider_status,
                 }
+            if (
+                provider_inspection.resolved_deploy_target is not None
+                and provider_inspection.resolved_deploy_target.testing_runtime_digest
+            ):
+                from control_plane.generic_web_testing_inputs import testing_input_authority
+
+                # Retrying resumes the original controller, including its safe
+                # failed settlement. Review binds which disposition and current
+                # input authority it inspected without exposing input values.
+                try:
+                    current_input_authority = testing_input_authority(
+                        record_store, profile, authoritative_lane
+                    )
+                except (FileNotFoundError, ValueError, click.ClickException) as error:
+                    raise dependencies.http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="hold_unknown",
+                        message="Current testing input authority is unavailable for recovery review.",
+                    ) from error
+                provider_observation_payload.update(
+                    testing_input_authority=current_input_authority,
+                    testing_pre_image_settlement=adapter.testing_settlement_pending,
+                    testing_settlement_disposition=adapter.testing_settlement_disposition,
+                )
             if provider_outcome == "present":
                 proposed_action = "adopt_observed"
             elif provider_outcome == "absent" and retry_safe:
@@ -1120,6 +1147,14 @@ def build_generic_web_deploy_recovery_apply_handler(
         retry = record_store.retry_reconciled_mutation(
             reservation=action_inspection.reservation,
             lease_owner=trace_id,
+            preserve_effect_checkpoint=(
+                inspection.adapter.provider_observation_from_inspection(
+                    provider_operation_key=inspection.provider_operation_key,
+                    inspection=action_inspection.provider_inspection,
+                ).preserve_effect_checkpoint
+                if action_inspection.provider_inspection is not None
+                else False
+            ),
         )
         if retry.status == "replayed" and retry.record is not None:
             return _apply_response(

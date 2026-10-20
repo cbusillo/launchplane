@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
@@ -151,7 +151,7 @@ def site_delivered_secret_bindings_from_store(
 class SiteRuntimeEnvironment:
     """A site lane's environment after retirement and the platform-credential policy."""
 
-    values: dict[str, str]
+    values: dict[str, str] = field(repr=False)
     secret_keys: frozenset[str]
     retired_keys: frozenset[str] = frozenset()
     site_keys: frozenset[str] = frozenset()
@@ -200,16 +200,11 @@ def resolve_site_runtime_environment(
         control_plane_root=control_plane_root,
         database_url=database_url,
     )
-    context_definition = definition.contexts.get(context_name)
-    if context_definition is None:
+    if context_name not in definition.contexts:
         raise MissingRuntimeContextDefinitionError(
             f"Runtime environments file has no context definition for {context_name!r}."
         )
-    values = _normalize_scalar_map(context_definition.shared_env)
-    instance_definition = context_definition.instances.get(instance_name)
-    if instance_definition is not None:
-        values.update(_normalize_scalar_map(instance_definition.env))
-    values.update(
+    target_environment = (
         target_environment_override
         if target_environment_override is not None
         else resolve_tracked_target_environment_values(
@@ -226,16 +221,13 @@ def resolve_site_runtime_environment(
         database_url=database_url,
         binding_keys=secret_binding_keys,
     )
-    setting_keys = frozenset(values)
-    values.update(secret_values)
-    site_keys = frozenset(values)
     retired_keys = retired_provider_keys_for_lane(
         context_name=context_name, instance_name=instance_name, database_url=database_url
     )
-    values = {key: value for key, value in values.items() if key not in retired_keys}
-    if runtime_platform_credentials.find_platform_credentials(values):
+    secret_sources: dict[str, _RuntimeValueSource] = {}
+    if runtime_platform_credentials.find_platform_credentials(secret_values):
         try:
-            sources = _runtime_value_sources(
+            secret_sources = _runtime_value_sources(
                 control_plane_root=control_plane_root,
                 context_name=context_name,
                 instance_name=instance_name,
@@ -245,15 +237,127 @@ def resolve_site_runtime_environment(
                 secret_binding_keys=secret_binding_keys,
             )
         except click.ClickException:
-            # The refusal still names each key, without its source.
-            sources = {}
-        _refuse_platform_credentials(
-            values=values, sources=sources, target=f"{context_name}/{instance_name}"
+            pass
+    return _site_runtime_environment(
+        definition=definition,
+        context_name=context_name,
+        instance_name=instance_name,
+        target_environment=target_environment,
+        secret_values=secret_values,
+        retired_keys=retired_keys,
+        secret_sources=secret_sources,
+    )
+
+
+class SiteRuntimeEnvironmentStore(
+    control_plane_secrets.SecretReadStore, RuntimeEnvironmentRecordStore, Protocol
+):
+    pass
+
+
+def resolve_site_runtime_environment_from_store(
+    *,
+    record_store: SiteRuntimeEnvironmentStore,
+    context_name: str,
+    instance_name: str,
+    target_environment: dict[str, str],
+) -> SiteRuntimeEnvironment:
+    """The canonical site render using the executing operation's record store."""
+    definition = load_optional_runtime_environment_definition_from_store(record_store=record_store)
+    if definition is None:
+        definition = RuntimeEnvironmentDefinition(schema_version=1, shared_env={}, contexts={})
+    if context_name not in definition.contexts:
+        definition = RuntimeEnvironmentDefinition(
+            schema_version=definition.schema_version,
+            shared_env=definition.shared_env,
+            contexts={
+                **definition.contexts,
+                context_name: RuntimeEnvironmentContextDefinition(shared_env={}, instances={}),
+            },
         )
+    scoped_secret_values = (
+        control_plane_secrets.resolve_scoped_secret_values_for_integration_from_store(
+            record_store=record_store,
+            integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+            context_name=context_name,
+            instance_name=instance_name,
+            scopes=site_secret_scopes(instance_name),
+        )
+    )
+    secret_values = {key: value for key, (value, _scope) in scoped_secret_values.items()}
+    scope_labels = {
+        "global": "a global",
+        "context": f"a {context_name} context",
+        "context_instance": f"a {context_name}/{instance_name} instance",
+    }
+    return _site_runtime_environment(
+        definition=definition,
+        context_name=context_name,
+        instance_name=instance_name,
+        target_environment=target_environment,
+        secret_values=secret_values,
+        secret_sources={
+            key: _RuntimeValueSource(f"{scope_labels[scope]} runtime-environment managed secret")
+            for key, (_value, scope) in scoped_secret_values.items()
+        },
+        retired_keys=retired_provider_keys_from_store(
+            record_store=record_store,
+            context_name=context_name,
+            instance_name=instance_name,
+        ),
+    )
+
+
+def _site_runtime_environment(
+    *,
+    definition: RuntimeEnvironmentDefinition,
+    context_name: str,
+    instance_name: str,
+    target_environment: dict[str, str],
+    secret_values: dict[str, str],
+    retired_keys: frozenset[str] | set[str],
+    secret_sources: dict[str, _RuntimeValueSource] | None = None,
+) -> SiteRuntimeEnvironment:
+    context_definition = definition.contexts.get(context_name)
+    if context_definition is None:
+        raise MissingRuntimeContextDefinitionError(
+            f"Runtime environments file has no context definition for {context_name!r}."
+        )
+    values = _normalize_scalar_map(context_definition.shared_env)
+    instance_definition = context_definition.instances.get(instance_name)
+    if instance_definition is not None:
+        values.update(_normalize_scalar_map(instance_definition.env))
+    values.update(target_environment)
+    setting_keys = frozenset(values)
+    values.update(secret_values)
+    site_keys = frozenset(values)
+    values = {key: value for key, value in values.items() if key not in retired_keys}
+    sources = {
+        key: source
+        for layer, source in _record_layers(
+            definition=definition,
+            context_name=context_name,
+            instance_name=instance_name,
+            target_env=target_environment,
+            include_global=False,
+        )
+        for key in layer
+    }
+    sources.update(
+        {
+            key: (secret_sources or {}).get(
+                key, _RuntimeValueSource("a site runtime-environment managed secret")
+            )
+            for key in secret_values
+        }
+    )
+    _refuse_platform_credentials(
+        values=values, sources=sources, target=f"{context_name}/{instance_name}"
+    )
     return SiteRuntimeEnvironment(
         values=values,
         secret_keys=frozenset(key for key in secret_values if key in values),
-        retired_keys=retired_keys,
+        retired_keys=frozenset(retired_keys),
         site_keys=site_keys,
         setting_keys=setting_keys,
     )

@@ -472,6 +472,43 @@ class ActivationTests(unittest.TestCase):
             adapter=self.adapter,
         )
 
+    def test_unencodable_input_retains_allocation_fences_without_configure_checkpoint(self) -> None:
+        from control_plane.dokploy import api
+
+        effects: list[str] = []
+        checkpoint = self.store.checkpoint_mutation_provider_effect
+
+        def record_checkpoint(**kwargs: Any) -> Any:
+            effects.append(kwargs["effect_phase"])
+            return checkpoint(**kwargs)
+
+        def values(*args: Any) -> dict[str, str]:
+            return {**self.values(*args), "APP_SETTING": "fixture\x00value"}
+
+        with (
+            patch("control_plane.testing_activation.runtime_values", side_effect=values),
+            patch.object(
+                self.store, "checkpoint_mutation_provider_effect", side_effect=record_checkpoint
+            ),
+            patch.object(
+                api, "serialize_dokploy_env_text", wraps=api.serialize_dokploy_env_text
+            ) as render,
+        ):
+            result = self.run_activation()
+        self.assertEqual(result.response_status_code, 409)
+        self.assertTrue(
+            any(
+                call.args[0].get("APP_SETTING") == "fixture\x00value"
+                for call in render.call_args_list
+            )
+        )
+        self.assertNotIn("configure_new_recipient", effects)
+        self.assertTrue(effects)
+        self.assertTrue(self.writes)
+        self.assertFalse(any(path == "/api/compose.update" for path, _ in self.writes))
+        self.assertTrue(self.store.list_held_provider_target_reservations())
+        self.preparation.assert_retained()
+
     def test_generated_local_credentials_reach_recipient_and_survive_replay(self) -> None:
         from control_plane import secrets
         import os

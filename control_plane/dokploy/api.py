@@ -18,6 +18,11 @@ import hashlib
 
 from control_plane import runtime_platform_credentials
 from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_COPY_CHUNK_BYTES
+from control_plane.dokploy.environment import (
+    DokployEnvironmentEncodingError as DokployEnvironmentEncodingError,
+    parse_dokploy_env_text as parse_dokploy_env_text,
+    serialize_dokploy_env_text as serialize_dokploy_env_text,
+)
 
 
 DEFAULT_DOKPLOY_LOG_LINE_COUNT = 200
@@ -821,21 +826,6 @@ def _compose_log_container_name_is_web(container_name: str) -> bool:
     return service_part == "web"
 
 
-def parse_dokploy_env_text(raw_env_text: str) -> dict[str, str]:
-    env_map: dict[str, str] = {}
-    for raw_line in raw_env_text.splitlines():
-        stripped_line = raw_line.strip()
-        if not stripped_line or stripped_line.startswith("#"):
-            continue
-        if stripped_line.startswith("export "):
-            stripped_line = stripped_line[7:].strip()
-        if "=" not in stripped_line:
-            continue
-        key_part, value_part = stripped_line.split("=", 1)
-        env_map[key_part.strip()] = value_part
-    return env_map
-
-
 def render_dokploy_env_text_with_overrides(
     raw_env_text: str,
     *,
@@ -849,13 +839,6 @@ def render_dokploy_env_text_with_overrides(
         for env_key, env_value in updates.items():
             env_map[env_key] = env_value
     return serialize_dokploy_env_text(env_map)
-
-
-def serialize_dokploy_env_text(env_map: dict[str, str]) -> str:
-    if not env_map:
-        return ""
-    rendered_lines = [f"{env_key}={env_value}" for env_key, env_value in env_map.items()]
-    return "\n".join(rendered_lines)
 
 
 def refuse_app_runtime_env_write(*, env_text: str, current_env_text: str, target: str) -> None:
@@ -1994,6 +1977,8 @@ def _dokploy_request(
                 status_code=error.code,
                 detail="response read timed out",
             ) from read_error
+        finally:
+            error.close()
         redacted_error_body = redact_dokploy_log_line(error_body).strip()
         raise DokployRequestFailed(
             method=method,

@@ -96,6 +96,116 @@ through the existing deployment gates. Standalone runtime sync remains subject
 to its normal qualification; do not bypass a refusal. Actual runtime identity,
 health, monitor cadence and Chris's authenticated receiver proof remain separate.
 
+For a generic-web application testing target, that ordinary deployment resolves
+the site's context, exact lane and target settings with its site-scoped managed
+secrets. Global settings, other lanes and Launchplane worker credentials do not
+reach the application. Declared inputs, managed-secret provenance, key safety and
+explicit provider-key retirements are checked before writing. The existing
+provider operation writes the environment, verifies its readback, then installs
+and deploys the verified image. Platform credentials left in provider-only keys
+must be explicitly retired through product configuration before delivery.
+Input preparation reads the provider environment and checks the complete merged
+environment for platform credentials and provider-format fidelity before
+schedules are quiesced. The same checks run again immediately before writing.
+Dokploy environment text uses its consumer's dotenv grammar. Quoted multiline
+values, literal hashes and quotes, surrounding whitespace, backslashes and
+ordinary dollar signs are preserved, including provider-only keys retained by
+the merge. Quoting does not disable Dokploy's own `${{...}}` substitutions;
+literal managed inputs containing those references are refused before effects.
+Supply the effective value through the site's managed inputs instead of a
+provider template reference, or explicitly retire an unused provider key.
+NUL and values with no lossless dotenv representation are also refused without
+a write or a value in the error. For example, dotenv does not unescape quote
+delimiters, so a multiline value containing all three quote delimiters may not
+be representable. This is the shared provider storage codec. It qualifies
+application delivery, where Dokploy passes the parsed values to the container.
+It does not qualify Compose's later environment-file processing: provider
+versions that write parsed values as raw assignments can change them again.
+Odoo Compose target replacement retains its single-line, no-trailing-whitespace
+preflight; the application codec fix does not widen that boundary. Compose
+consumer compatibility is tracked separately in [#4174](https://github.com/cbusillo/launchplane/issues/4174).
+The application consumer follows Dokploy's
+[dotenv parsing and service substitution](https://github.com/Dokploy/dokploy/blob/1c4414165d4aedbf6e28afab7a94c8fb7c053373/packages/server/src/utils/docker/utils.ts)
+and the [dotenv value grammar](https://github.com/motdotla/dotenv/blob/v16.4.5/lib/main.js).
+A later refusal restores or holds schedules using the original lifecycle
+receipt and records the failed attempt. Failure publication retains the last
+provider-effect phase. An interruption after input readback remains retryable
+under the original operation once provider observation proves no deployment.
+If its captured inputs have changed, or a newer verified image supersedes it,
+the original lease settles the obsolete attempt as failed only with exact
+pre-image proof on the original target. It restores its captured schedule
+baseline through verified provider writes, or preserves an inherited hold on
+an earlier unqualified image. A proved retry also retains that inherited hold;
+only successful qualification or proved rollback may reactivate its schedules.
+Settlement retains the old input receipt as
+failed-attempt evidence. A durable settlement phase resumes cleanup after a
+lost reply, even if inputs subsequently revert. The current image and inputs
+then use a fresh operation. Returning to a settled operation's input identity
+uses a deterministic successor bound to that terminal predecessor.
+An ambiguous image-save phase, unknown provider observation, changed target,
+missing baseline or lost lease keeps the original operation fenced. Environment
+and registry preparation are journaled separately from image save and deploy;
+an environment-only failure can restore schedules without treating it as an
+unqualified image.
+The existing generic-web deploy-recovery service supports application targets.
+Its `retry_original_operation` action resumes the original controller, which
+may restore and settle an obsolete pre-image attempt as failed instead of
+deploying it. The reviewed recovery digest binds current input authority and
+that disposition; changes between dry-run and apply require a fresh review.
+The ordinary testing reconciler uses the same settlement automatically.
+An exact original reservation with no effect checkpoint may settle before any
+lifecycle receipt was captured. Its renewed lease verifies that no-effect
+evidence again; it restores nothing and keeps the effect journal empty, even
+if writing the failed record must retry. A missing baseline after an effect
+remains fenced.
+
+A successful deployment retains a keyed, value-free receipt for those captured
+inputs. Missing legacy evidence or changed site inputs makes the same verified
+image eligible for one normal testing deployment; an unchanged receipt settles
+without another deployment. Staff/staging holds and unresolved operations still
+prevent dispatch. Recovery preserves only the original readback-verified receipt
+and never credits current inputs to an earlier attempt. An old operation without
+that receipt can settle, then the next normal sweep repairs its inputs. Removing
+a declaration or binding alone does not delete provider-only values; explicit
+retirement remains the deletion contract. Production, preview and Compose
+delivery paths are unchanged.
+Rotating Launchplane's active master encryption key changes the delivery
+fingerprint, so each managed-input testing lane receives one normal repair
+deployment. Before image save, an in-flight attempt refuses changed input
+authority. Once image save returns successfully in that same execution, the
+trigger finishes only the captured values and earns only their original receipt;
+the next sweep repairs any newer inputs. Current product activity, lane/target
+binding and active key safety for the captured safety requirement set still
+govern the trigger. Preparation uses the canonical site-delivery selection and
+retains each actual supplier's binding identity and secret-record identity,
+integration, scope, context, instance and configured status, without version or
+audit timestamps or plaintext persistence. Unused global and shadowed bindings
+do not become captured suppliers. Current policy checks those actual suppliers
+during preparation and before dispatch; an unrelated higher-ranked binding
+cannot supply their safety classification. Frozen safety requirements without
+a delivered secret still receive their existing fail-closed policy check.
+A later declaration or binding on a captured
+plain setting does not expand that set. Original bindings must remain active
+and bound to the same secrets and routes; deleting and recreating a binding
+under its old key cannot authorize the captured payload. Version rotation may
+finish the already captured version before the next sweep repairs it. Explicit
+provider-key retirement added after image save likewise finishes the captured
+dispatch and removes the key on the next operation; current retirement does
+not change the saved operation's captured supplier set.
+
+A typed safety refusal after the synchronous image-save reply and before the
+trigger checkpoint records `testing_dispatch_refused`. Cleanup preserves this
+proof and the original receipt. With current target authority, the renewed
+original lease, exclusive product lock and fresh deployment absence, original
+operation recovery settles it failed with schedules held. It never restores
+schedules, saves an image or triggers a deployment. A fresh canonical operation
+can replace the saved image using current inputs; a revoked key already saved
+in provider env still needs explicit retirement, never a regrant. Failed cleanup
+or record publication can resume this held settlement. Retirement and target
+repointing keep the authority stop and permit no old-target cleanup writes.
+A crash or uncertain image-save outcome earns no refusal proof and remains
+fenced for exact recovery.
+
 ### Health probes with public wildcard DNS
 
 An application testing endpoint may retain the existing public wildcard DNS.

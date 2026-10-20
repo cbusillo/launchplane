@@ -2572,6 +2572,10 @@ class GenericWebDeployTests(unittest.TestCase):
 
         self.assertEqual(resolved.resolved_target.target_id, "target-123")
 
+    @patch.dict(
+        "os.environ",
+        {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
+    )
     def test_dokploy_provider_uses_db_runtime_environment_ship_mode_override(
         self,
     ) -> None:
