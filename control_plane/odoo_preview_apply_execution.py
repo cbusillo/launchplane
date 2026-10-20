@@ -256,23 +256,22 @@ class OdooPreviewProviderMutationAdapter:
             anchor_pr_number=self._issued_plan.plan_request.pr_number,
         )
         provenance = self._issued_plan.plan_provenance
-        if (
-            preview is not None
-            and preview.state == "destroyed"
-            and (
-                provenance is None
-                or _odoo_preview_operation_is_stale(
-                    record_store=cast(LaunchplaneMutationStore, self._record_store),
-                    preview=preview,
-                    issued_at=format_launchplane_mutation_timestamp(provenance.issued_at),
-                    product=self._profile.product,
-                )
+        if preview is not None and (
+            provenance is None
+            or _odoo_preview_operation_is_stale(
+                record_store=cast(LaunchplaneMutationStore, self._record_store),
+                preview=preview,
+                issued_at=format_launchplane_mutation_timestamp(provenance.issued_at),
+                product=self._profile.product,
             )
         ):
             raise ProviderMutationRejectedError(
                 OdooPreviewPlanProvenanceError(
                     code="odoo_preview_plan_stale",
-                    message="Preview retirement supersedes this issued plan; request a fresh plan.",
+                    message=(
+                        "Existing preview lifecycle authority does not admit this issued plan; "
+                        "inspect its original lifecycle before requesting a fresh plan."
+                    ),
                 )
             )
         if self._pre_mutation_guard is not None:

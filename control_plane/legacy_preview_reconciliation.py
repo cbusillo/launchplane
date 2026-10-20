@@ -279,6 +279,16 @@ def _bind_legacy_preview(
         profile.repository.partition("/")[2],
     }:
         raise ValueError("Preview does not belong to the requested product.")
+    if odoo and (
+        preview.anchor_repo != profile.repository.partition("/")[2]
+        or preview.preview_id
+        != generate_preview_id(
+            context_name=profile.preview.context,
+            anchor_repo=profile.repository.partition("/")[2],
+            anchor_pr_number=preview.anchor_pr_number,
+        )
+    ):
+        raise ValueError("Odoo preview identity does not match its lifecycle producer.")
     profiles = store.list_product_profile_records()
     if any(
         other.product != profile.product
@@ -453,13 +463,24 @@ def _bind_legacy_preview(
         and sum(p.anchor_pr_number == other.anchor_pr_number for p in previews) == 1
     }
     other_scopes = lane_scopes | sibling_scopes
-    other_target_ids = frozenset(
-        t.target_id for t in physical_targets if (t.context, t.instance) in other_scopes
-    )
-    for target_id in other_target_ids:
-        owners = {(t.context, t.instance) for t in physical_targets if t.target_id == target_id}
-        if len(owners) != 1 or not owners <= other_scopes:
-            raise ValueError("Provider target ownership is shared.")
+
+    def other_ids(target_category: str) -> frozenset[str]:
+        category_targets = tuple(
+            t for t in all_physical_targets if t.target_category == target_category
+        )
+        identifiers = frozenset(
+            t.target_id for t in category_targets if (t.context, t.instance) in other_scopes
+        )
+        for identifier in identifiers:
+            owners = {
+                (t.context, t.instance) for t in category_targets if t.target_id == identifier
+            }
+            if len(owners) != 1 or not owners <= other_scopes:
+                raise ValueError("Provider target ownership is shared.")
+        return identifiers
+
+    other_target_ids = other_ids(category)
+    other_application_ids = other_ids("application") if odoo else other_target_ids
     digest = canonical_sha256(
         {
             "profile": profile.model_dump(mode="json"),
@@ -493,11 +514,7 @@ def _bind_legacy_preview(
         digest,
         other_target_ids,
         frozenset(preview_target_ids),
-        frozenset(
-            t.target_id
-            for t in all_physical_targets
-            if t.target_category == "application" and (t.context, t.instance) in other_scopes
-        ),
+        other_application_ids,
     )
 
 

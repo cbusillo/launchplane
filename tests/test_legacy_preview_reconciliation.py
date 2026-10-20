@@ -61,7 +61,9 @@ class LegacyPreviewReconciliationFixture(unittest.IsolatedAsyncioTestCase):
         self.store.write_product_profile_record(self.profile)
         self.preview = PreviewRecord(
             preview_id=generate_preview_id(
-                context_name=self.profile.preview.context, anchor_repo="example-site", anchor_pr_number=1
+                context_name=self.profile.preview.context,
+                anchor_repo="example-site",
+                anchor_pr_number=1,
             ),
             context=self.profile.preview.context,
             anchor_repo="example-site",

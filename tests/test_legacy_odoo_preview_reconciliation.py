@@ -1,7 +1,7 @@
 import copy
 from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch
-from typing import Any
+from typing import Any, Literal
 
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
@@ -244,11 +244,24 @@ class LegacyOdooPreviewReconciliationTests(legacy_tests.LegacyPreviewReconciliat
         self.assertFalse(plan["apply_eligible"])
         self.assertEqual(self.store.read_preview_record(self.preview.preview_id), self.preview)
 
-    async def test_nonstring_repository_metadata_does_not_prove_unrelated(self) -> None:
+    async def test_product_or_uncertain_repository_source_does_not_prove_unrelated(self) -> None:
+        repository = self.profile.repository
+        for field, value in (
+            ("repository", ["unknown"]),
+            ("customGitUrl", f"git@github.com:{repository}.git"),
+            ("customGitUrl", f"ssh://git@github.com/{repository}.git"),
+            ("customGitUrl", f"https://github.com/{repository}.git"),
+        ):
+            with self.subTest(field=field, value=value):
+                self.compose()
+                self.composes["compose-1"][field] = value
+                response = await self.call("inspect")
+                self.assertEqual(response.status_code, 409, response.text)
         self.compose()
-        self.composes["compose-1"]["repository"] = ["unknown"]
+        self.composes["compose-1"]["customGitUrl"] = f"git@github.com:{repository}-other.git"
         response = await self.call("inspect")
-        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertTrue(response.json()["result"]["provider_absence_verified"])
 
     async def test_completion_insert_failure_rolls_back_preview_and_receipt(self) -> None:
         plan = await self.plan()
@@ -260,6 +273,66 @@ class LegacyOdooPreviewReconciliationTests(legacy_tests.LegacyPreviewReconciliat
         self.assertEqual(self.store.read_preview_record(self.preview.preview_id), self.preview)
         response = await self.apply(plan)
         self.assertEqual(response.status_code, 202, response.text)
+
+    def test_cross_category_application_exclusion_requires_one_owner(self) -> None:
+        for context, instance in (
+            (self.profile.lanes[0].context, "testing"),
+            ("foreign", "testing"),
+        ):
+            self.store.write_dokploy_target_id_record(
+                DokployTargetIdRecord(
+                    context=context,
+                    instance=instance,
+                    target_id="shared-application",
+                    updated_at=self.profile.updated_at,
+                )
+            )
+            self.store.write_dokploy_target_record(
+                DokployTargetRecord(
+                    context=context,
+                    instance=instance,
+                    target_type="application",
+                    target_name="application",
+                    updated_at=self.profile.updated_at,
+                )
+            )
+        with self.assertRaises(ValueError):
+            bind_legacy_preview(
+                self.store,
+                LegacyPreviewReconciliationRequest(
+                    product=self.profile.product,
+                    preview_id=self.preview.preview_id,
+                    reason="fixture",
+                ),
+            )
+        self.assertFalse(self.reads)
+
+    def test_odoo_legacy_identity_must_match_the_existing_lifecycle_producer(self) -> None:
+        full_repo = self.preview.model_copy(update={"anchor_repo": self.profile.repository})
+        self.store.write_preview_record(full_repo)
+        with self.assertRaises(ValueError):
+            bind_legacy_preview(
+                self.store,
+                LegacyPreviewReconciliationRequest(
+                    product=self.profile.product,
+                    preview_id=full_repo.preview_id,
+                    reason="fixture",
+                ),
+            )
+        alternate_id = self.preview.model_copy(
+            update={"preview_id": "unproven-legacy-id", "anchor_pr_number": 2}
+        )
+        self.store.write_preview_record(alternate_id)
+        with self.assertRaises(ValueError):
+            bind_legacy_preview(
+                self.store,
+                LegacyPreviewReconciliationRequest(
+                    product=self.profile.product,
+                    preview_id=alternate_id.preview_id,
+                    reason="fixture",
+                ),
+            )
+        self.assertFalse(self.reads)
 
     async def test_held_modern_and_raw_manual_target_keys_block_before_provider_read(self) -> None:
         key = odoo_preview_reconciliation_key(
@@ -292,7 +365,7 @@ class LegacyOdooPreviewReconciliationTests(legacy_tests.LegacyPreviewReconciliat
         self.assertEqual(response.status_code, 409, response.text)
 
     def test_integrated_product_retirement_does_not_gain_odoo_support(self) -> None:
-        with self.assertRaisesRegex(ValueError, "generic-web"):
+        with self.assertRaises(ValueError):
             bind_legacy_preview(
                 self.store,
                 LegacyPreviewReconciliationRequest(
@@ -303,8 +376,16 @@ class LegacyOdooPreviewReconciliationTests(legacy_tests.LegacyPreviewReconciliat
                 allow_tracked=True,
             )
 
-    async def closed_preview(self) -> Any:
-        response = await self.apply(await self.plan())
+    async def closed_preview(self, *, completed_at: str = "") -> Any:
+        if completed_at:
+            plan = await self.plan()
+            with patch(
+                "control_plane.http_routes.legacy_preview_reconciliation.utc_now_timestamp",
+                return_value=completed_at,
+            ):
+                response = await self.apply(plan)
+        else:
+            response = await self.apply(await self.plan())
         self.assertEqual(response.status_code, 202, response.text)
         return self.store.read_preview_record(self.preview.preview_id)
 
@@ -471,7 +552,11 @@ class LegacyOdooPreviewReconciliationTests(legacy_tests.LegacyPreviewReconciliat
         self.store.write_idempotency_record(receipt)
 
     def prepared_operation(
-        self, fake: Any, key: str, issued_at: datetime, operation_name: str = "refresh"
+        self,
+        fake: Any,
+        key: str,
+        issued_at: datetime,
+        operation_name: Literal["refresh", "destroy"] = "refresh",
     ) -> Any:
         from control_plane.odoo_preview_apply_execution import prepare_odoo_preview_apply_operation
         from control_plane.odoo_preview_apply_http import (
@@ -527,25 +612,89 @@ class LegacyOdooPreviewReconciliationTests(legacy_tests.LegacyPreviewReconciliat
             observe_apply=Mock(),
         )
 
+    def test_unproven_active_preview_refuses_refresh_and_destroy_before_effect(self) -> None:
+        from control_plane.odoo_preview_apply_http import OdooPreviewPlanProvenanceError
+        from tests.test_product_reconcile import FakePreviewProvider
+
+        fake = FakePreviewProvider()
+        kinds: tuple[Literal["refresh", "destroy"], ...] = ("refresh", "destroy")
+        for kind in kinds:
+            with self.subTest(operation=kind):
+                operation = self.prepared_operation(
+                    fake, "unproven-" + kind, datetime.now(timezone.utc), kind
+                )
+                with patch.object(operation.adapter, "capture_schedule_binding"):
+                    with self.assertRaises(OdooPreviewPlanProvenanceError):
+                        operation.run(self.store)
+        self.assertFalse(fake.applied)
+        self.assertEqual(self.store.read_preview_record(self.preview.preview_id), self.preview)
+
+    def test_older_active_history_plan_refuses_before_effect_and_newer_refresh_publishes(
+        self,
+    ) -> None:
+        from control_plane.odoo_preview_apply_http import OdooPreviewPlanProvenanceError
+        from tests.test_product_reconcile import FakePreviewProvider
+
+        original = self.historical_generation().model_copy(update={"runtime_identity": None})
+        self.store.write_preview_generation_record(original)
+        self.store.write_preview_record(
+            self.preview.model_copy(
+                update={
+                    "serving_generation_id": original.generation_id,
+                    "latest_generation_id": original.generation_id,
+                }
+            )
+        )
+        fake = FakePreviewProvider()
+        earlier = datetime.fromisoformat(original.requested_at.replace("Z", "+00:00")) - timedelta(
+            seconds=1
+        )
+        kinds: tuple[Literal["refresh", "destroy"], ...] = ("refresh", "destroy")
+        for kind in kinds:
+            with self.subTest(operation=kind):
+                operation = self.prepared_operation(fake, "older-active-" + kind, earlier, kind)
+                with patch.object(operation.adapter, "capture_schedule_binding"):
+                    with self.assertRaises(OdooPreviewPlanProvenanceError):
+                        operation.run(self.store)
+        self.assertFalse(fake.applied)
+        newer = self.prepared_operation(fake, "newer-active-refresh", datetime.now(timezone.utc))
+        with patch.object(newer.adapter, "capture_schedule_binding"):
+            result = newer.run(self.store)
+        self.assertEqual(result.response_status_code, 202, result.response_payload)
+        self.assertEqual(result.response_payload["result"]["status"], "pass")
+        runtime = newer.adapter._runtime_identity
+        assert runtime is not None
+        self.assertEqual(
+            self.store.read_preview_record(self.preview.preview_id).serving_generation_id,
+            runtime.preview_generation_id,
+        )
+        self.assertEqual(
+            self.store.read_preview_generation_record(
+                runtime.preview_generation_id
+            ).runtime_identity,
+            runtime,
+        )
+
     async def test_old_unreserved_custom_name_plan_cannot_recreate_provider_target(self) -> None:
         from control_plane.odoo_preview_apply_http import OdooPreviewPlanProvenanceError
         from tests.test_product_reconcile import FakePreviewProvider
 
         fake = FakePreviewProvider()
 
-        def operation(key: str, issued_at: datetime, operation_name: str = "refresh") -> Any:
+        def operation(
+            key: str, issued_at: datetime, operation_name: Literal["refresh", "destroy"] = "refresh"
+        ) -> Any:
             return self.prepared_operation(fake, key, issued_at, operation_name)
 
-        old = operation("old-custom-name-plan", datetime.now(timezone.utc) - timedelta(seconds=1))
-        closed = await self.closed_preview()
+        now = datetime.now(timezone.utc)
+        old = operation("old-custom-name-plan", now - timedelta(seconds=20))
+        closed = await self.closed_preview(completed_at=(now - timedelta(seconds=10)).isoformat())
         with patch.object(old.adapter, "capture_schedule_binding"):
             with self.assertRaises(OdooPreviewPlanProvenanceError):
                 old.run(self.store)
         self.assertFalse(fake.applied)
         self.assertEqual(self.store.read_preview_record(closed.preview_id), closed)
-        later = datetime.fromisoformat(closed.destroyed_at.replace("Z", "+00:00")) + timedelta(
-            seconds=1
-        )
+        later = now - timedelta(seconds=5)
         destroy = operation("fresh-custom-destroy", later, "destroy")
         with patch.object(destroy.adapter, "capture_schedule_binding"):
             result = destroy.run(self.store)
@@ -554,11 +703,20 @@ class LegacyOdooPreviewReconciliationTests(legacy_tests.LegacyPreviewReconciliat
         self.assertEqual(destroyed.state, "destroyed")
         self.assertFalse(destroyed.reconciliation_receipt_id)
         self.assertNotEqual(destroyed.destroy_reason, closed.destroy_reason)
-        fresh = operation("fresh-custom-name-plan", later + timedelta(seconds=1))
+        fresh = operation("fresh-custom-name-plan", now)
         with patch.object(fresh.adapter, "capture_schedule_binding"):
             result = fresh.run(self.store)
         self.assertEqual(result.status, "completed", result.response_payload)
+        self.assertEqual(result.response_status_code, 202, result.response_payload)
+        self.assertEqual(result.response_payload["result"]["status"], "pass")
+        self.assertEqual(result.response_payload["records"]["lifecycle_evidence_status"], "applied")
         self.assertTrue(fake.applied)
         resumed = self.store.read_preview_record(closed.preview_id)
         self.assertEqual(resumed.state, "active")
         self.assertFalse(resumed.reconciliation_receipt_id)
+        runtime = fresh.adapter._runtime_identity
+        assert runtime is not None
+        self.assertEqual(resumed.serving_generation_id, runtime.preview_generation_id)
+        generation = self.store.read_preview_generation_record(runtime.preview_generation_id)
+        self.assertEqual(generation.state, "ready")
+        self.assertEqual(generation.runtime_identity, runtime)

@@ -15285,17 +15285,31 @@ class RealPostgresLegacyOdooPreviewReconciliationTests(
 
     async def test_custom_physical_executor_shares_logical_preview_fence(self) -> None:
         from tests.test_product_reconcile import FakePreviewProvider
-        from datetime import datetime, timezone
+        from datetime import datetime, timedelta, timezone
+        from control_plane.workflows.launchplane import generate_preview_id
 
+        now = datetime.now(timezone.utc)
+        await self.closed_preview(completed_at=(now - timedelta(seconds=3)).isoformat())
+        self.reads.clear()
         fake = FakePreviewProvider()
-        operation = self.prepared_operation(
-            fake, "actual-custom-executor", datetime.now(timezone.utc)
-        )
+        operation = self.prepared_operation(fake, "actual-custom-executor", now)
         entered = threading.Event()
         release = threading.Event()
         execute = fake.execute_apply
+        logical = generate_preview_id(
+            context_name=self.profile.preview.context,
+            anchor_repo=self.preview.anchor_repo,
+            anchor_pr_number=self.preview.anchor_pr_number,
+        )
+        owner_pid: list[int] = []
 
         def blocked_execute(**kwargs: Any) -> dict[str, object]:
+            entry = next(
+                item
+                for item in self.store._preview_execution_context.held
+                if item[0] == logical and not item[1]
+            )
+            owner_pid.append(entry[2].scalar(text("SELECT pg_backend_pid()")))
             entered.set()
             if not release.wait(10):
                 raise RuntimeError("Test provider release was not delivered.")
@@ -15315,10 +15329,14 @@ class RealPostgresLegacyOdooPreviewReconciliationTests(
                         waiting = bool(
                             connection.scalar(
                                 text(
-                                    "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' "
-                                    "AND NOT granted AND database = "
-                                    "(SELECT oid FROM pg_database WHERE datname = current_database())"
-                                )
+                                    "SELECT count(*) FROM pg_locks owner JOIN pg_locks waiter "
+                                    "ON waiter.locktype = owner.locktype AND waiter.database = owner.database "
+                                    "AND waiter.classid = owner.classid AND waiter.objid = owner.objid "
+                                    "AND waiter.objsubid = owner.objsubid "
+                                    "WHERE owner.locktype = 'advisory' AND owner.granted "
+                                    "AND owner.pid = :owner_pid AND NOT waiter.granted"
+                                ),
+                                {"owner_pid": owner_pid[0]},
                             )
                         )
                     if waiting:
@@ -15330,12 +15348,31 @@ class RealPostgresLegacyOdooPreviewReconciliationTests(
                 self.assertFalse(self.reads)
             finally:
                 release.set()
-                result = await asyncio.wait_for(asyncio.shield(execution), 10)
-                if inspection is not None:
-                    response = await asyncio.wait_for(asyncio.shield(inspection), 10)
-            self.assertEqual(result.status, "completed", result.response_payload)
-            # The new custom-name generation is now present and cannot be reconciled absent.
+                tasks = [execution] + ([inspection] if inspection is not None else [])
+                outcomes = await asyncio.wait_for(
+                    asyncio.gather(*tasks, return_exceptions=True), 10
+                )
+            result = outcomes[0]
+            if isinstance(result, BaseException):
+                raise result
+            self.assertEqual(result.response_status_code, 202, result.response_payload)
+            self.assertEqual(result.response_payload["result"]["status"], "pass")
+            self.assertEqual(
+                result.response_payload["records"]["lifecycle_evidence_status"], "applied"
+            )
+            runtime = operation.adapter._runtime_identity
+            assert runtime is not None
+            preview = self.store.read_preview_record(self.preview.preview_id)
+            self.assertEqual(preview.state, "active")
+            self.assertEqual(preview.serving_generation_id, runtime.preview_generation_id)
+            generation = self.store.read_preview_generation_record(runtime.preview_generation_id)
+            self.assertEqual(generation.state, "ready")
+            self.assertEqual(generation.runtime_identity, runtime)
+            response = outcomes[1]
+            if isinstance(response, BaseException):
+                raise response
             self.assertEqual(response.status_code, 409, response.text)
+            self.assertFalse(self.reads)
 
     def test_lost_logical_transaction_cannot_reacquire_proof_after_autobegin(self) -> None:
         from control_plane.workflows.launchplane import generate_preview_id

@@ -30,8 +30,8 @@ def _images(payload: Mapping[str, object]) -> tuple[str, ...]:
         raise ValueError("Unowned compose source is unavailable.")
     try:
         document = yaml.safe_load(raw)
-    except yaml.YAMLError as error:
-        raise ValueError("Unowned compose source is malformed.") from error
+    except yaml.YAMLError:
+        raise ValueError("Unowned compose source is malformed.") from None
     services = document.get("services") if isinstance(document, dict) else None
     if not isinstance(services, dict) or not services:
         raise ValueError("Unowned compose services are unavailable.")
@@ -77,7 +77,7 @@ def _repository_matches(payload: Mapping[str, object], repository: str) -> bool:
         values.append(value.strip().casefold().rstrip("/").removesuffix(".git"))
     return any(
         value == repository
-        or value.endswith("/" + repository)
+        or value.endswith(("/" + repository, ":" + repository))
         or value == repository.partition("/")[2]
         for value in values
     )

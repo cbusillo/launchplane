@@ -81,6 +81,10 @@ compose source or environment values. Unresolved image expressions, malformed
 joins or uncertain source cannot prove absence. Historical compose names that
 disagree with the current profile's name remain uncertain and refuse.
 
+Odoo records must use the canonical repository basename and preview ID produced
+by the existing Odoo lifecycle. A different legacy identity needs investigation
+before reconciliation can establish a safe ordering barrier.
+
 Odoo inspection holds the actual physical executor lock, then the stable logical
 preview lock, then the existing preview serialization lock through completion.
 The logical key uses the preview context, repository and PR, so a service-issued
@@ -95,6 +99,8 @@ nonterminal state, including current pointers, when those executor fences exclud
 current work and complete absence is established. Its history is retained unchanged.
 The atomic Odoo completion stores an exact receipt pointer on the destroyed preview.
 Old issued Odoo plans are rejected before provider effects under the same fences.
+The same pre-provider check protects existing active histories: a missing or newer
+ordering record cannot be bypassed by executing first and publishing evidence later.
 Bare preview evidence cannot erase that terminal proof. Generation evidence can
 resume the preview only with a fresh generation requested strictly after completion;
 changing an old generation's timestamps does not qualify. Stale evidence returns
