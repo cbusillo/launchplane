@@ -679,15 +679,19 @@ caller-supplied causal assertion, rerun-forcing commit, grant or direct merge.
 After release, obtain fresh checked Ready and normal train admission/candidate
 validation. Admission requires a trusted current-head Ready comment newer than
 the saved floor even when an enqueue label remains present. Supervisor owns
-operational continuation when assigned by the brief.
+operational continuation when assigned by the brief. An exhausted allowance stays
+held. Fix the owning CI defect first; a genuine later source change can use the
+existing new-head recovery path. Do not invent a commit, reset the allowance or
+remove the label by hand to obtain another attempt.
 
 The optional Actions evidence capability is never a grant prerequisite: a
 known missing permission skips the read; denied or unavailable evidence leaves
 that PR held while unrelated queue work continues. Storage-download failures
 are evidence failures, never GitHub authentication failures.
 The reservation uses the existing feedback envelope; older binaries can still
-read the candidate and feedback records. Never delete a reservation to reset
-its allowance.
+read the candidate and feedback records. They do not enforce the new reservation
+or fresh-Ready gate, so recovery and subsequent admission require this controller
+version or newer. Never delete a reservation to reset its allowance.
 
 Both recovery paths refuse pending, failing or unreadable current-head evidence, conflicting
 or unknown mergeability, stale/missing/unweighed review, a renewed review request,

@@ -28,7 +28,6 @@ from control_plane.merge_train_github import (
     GitHubMergeTrainSnapshotReader,
     MergeTrainGitHubError,
 )
-from control_plane.merge_train_handoff import MergeTrainReadyHandoff
 from control_plane.merge_train_setup_recovery_receipt import read_setup_recovery_receipt
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
@@ -311,39 +310,6 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
                 )
                 self.assertEqual(self.mutations, [])
 
-    def test_recovered_head_requires_new_ready_with_or_without_enqueue_label(self) -> None:
-        self.setup_missing_store_failure()
-        self.advance(mutate=True)
-        reader = GitHubMergeTrainSnapshotReader(
-            transport=self.transport, branch_refresh_store=self.store
-        )
-        floor = reader._recovery_ready_floor(
-            self.target.repository, self.current.number, self.current.head_sha
-        )
-        self.assertGreater(floor, 0)
-        for labels in ((), (self.target.enqueue_label,)):
-            for comment_id, admitted in ((floor, False), (floor + 1, True)):
-                with self.subTest(labels=labels, comment_id=comment_id):
-                    pr = self.current.model_copy(
-                        update={
-                            "labels": labels,
-                            "recovery_ready_comment_floor": floor,
-                            "ready_handoff": MergeTrainReadyHandoff(
-                                status="ready",
-                                head_sha=self.current.head_sha,
-                                actor_id=42,
-                                comment_id=comment_id,
-                            ),
-                        }
-                    )
-                    result = build_merge_train_dry_run_result(
-                        policy=self.policy,
-                        snapshot=self.snapshot.model_copy(update={"pull_requests": (pr,)}),
-                        batch_landing=True,
-                        new_candidate=True,
-                    )
-                    self.assertEqual(bool(result.queue_order), admitted)
-
     def test_snapshot_reader_enforces_recovery_gate_and_refreshes_exact_receipt(self) -> None:
         from tests.test_merge_train_github import _github_pull_request
         from control_plane.merge_train import MergeTrainLabelActor
@@ -432,15 +398,72 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
                 )
                 self.assertEqual(bool(result.queue_order), fresh)
 
-    def test_green_rerun_preserves_original_attempt_attribution(self) -> None:
+    def test_green_rerun_preserves_original_attempt_attribution_across_pages(self) -> None:
         self.setup_missing_store_failure()
-        key = f"/repos/{self.target.repository}/commits/{self.record.candidate.candidate_sha}/check-runs?per_page=100&page=1&filter=all"
-        rows = self.setup_responses[key]["check_runs"]
-        rows.extend(
-            [{**row, "id": int(row["id"]) + 100, "conclusion": "success"} for row in tuple(rows)]
-        )
-        self.setup_responses[key]["total_count"] = len(rows)
+        prefix = f"/repos/{self.target.repository}"
+        checks = f"{prefix}/commits/{self.record.candidate.candidate_sha}/check-runs"
+        key = f"{checks}?per_page=100&page=1&filter=all"
+        original = self.setup_responses[key]["check_runs"]
+        rows = [
+            {**original[0], "id": 1000 + index, "conclusion": "success"} for index in range(100)
+        ] + original
+        self.setup_responses[key] = {"total_count": len(rows), "check_runs": rows[:100]}
+        self.setup_responses[f"{checks}?per_page=100&page=2&filter=all"] = {
+            "total_count": len(rows),
+            "check_runs": rows[100:],
+        }
+        jobs = f"{prefix}/actions/runs/81/attempts/1/jobs"
+        key = f"{jobs}?per_page=100&page=1"
+        original_jobs = self.setup_responses[key]["jobs"]
+        rows = [
+            {**original_jobs[1], "id": 2000 + index, "name": "other_success"}
+            for index in range(100)
+        ] + original_jobs
+        self.setup_responses[key] = {"total_count": len(rows), "jobs": rows[:100]}
+        self.setup_responses[f"{jobs}?per_page=100&page=2"] = {
+            "total_count": len(rows),
+            "jobs": rows[100:],
+        }
         self.assertEqual(self.advance(mutate=True)["controller_action"], "recover_candidate_block")
+
+    def test_legacy_reservation_resumes_after_newer_feedback(self) -> None:
+        self.setup_missing_store_failure()
+        self.record = self.record.model_copy(update={"block_intent": None})
+        self.store.write_merge_train_batch_candidate_record(self.record)
+        request = self.request
+
+        def failed_delete(**kwargs: Any) -> object:
+            if kwargs["method"] == "DELETE":
+                raise MergeTrainGitHubError("reply unavailable before effect")
+            return request(**kwargs)
+
+        with patch(
+            "control_plane.merge_train_batch_pull_request.bound_closed_batch_pull_request",
+            return_value={"closed_at": "2026-10-18T00:01:00Z"},
+        ):
+            self.transport.request.side_effect = failed_delete
+            with self.assertRaises(MergeTrainGitHubError):
+                self.advance(mutate=True)
+            self.assertIsNotNone(
+                read_setup_recovery_receipt(
+                    self.store, self.target.repository, self.current.number, self.current.head_sha
+                )
+            )
+            self.store.write_merge_train_pr_feedback_record(
+                self.feedback.model_copy(
+                    update={
+                        "feedback_id": "newer-waiting",
+                        "event": "waiting",
+                        "controller_action": "wait",
+                        "recorded_at": "2026-10-18T00:05:00Z",
+                    }
+                )
+            )
+            self.transport.request.side_effect = request
+            self.assertEqual(
+                self.advance(mutate=True)["controller_action"], "recover_candidate_block"
+            )
+            self.assertEqual(len(self.mutations), 1)
 
     def test_optional_setup_evidence_denial_preserves_hold_and_other_train_work(self) -> None:
         self.setup_missing_store_failure()

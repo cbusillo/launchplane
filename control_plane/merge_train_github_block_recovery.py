@@ -299,27 +299,11 @@ def recover_candidate_block(
             legacy_writer_app_id=legacy_writer_app_id,
         )
 
-    def qualified() -> bool:
+    def qualified(*, recheck_setup: bool = False) -> bool:
         pr = client.read_pull_request_snapshot(repository=repository, pull_request_number=number)
         reader = GitHubMergeTrainSnapshotReader(transport=client.transport)
         same_head = pr.head_sha == candidate.candidate.entries[0].head_sha
-        if same_head:
-            if setup_failure_evidence is None:
-                return False
-            from control_plane.merge_train_github_setup_failure_recovery import (
-                read_setup_failure_recovery,
-            )
-
-            fresh = read_setup_failure_recovery(client, candidate=candidate.candidate)
-            if (
-                fresh is None
-                or fresh.model_copy(
-                    update={"ready_comment_floor": setup_failure_evidence.ready_comment_floor}
-                )
-                != setup_failure_evidence
-            ):
-                return False
-        return (
+        eligible = (
             pr.head_sha == expected_head_sha
             and pr.state == "open"
             and not pr.is_draft
@@ -343,13 +327,35 @@ def recover_candidate_block(
             )
         )
 
+        if not eligible:
+            return False
+        if same_head:
+            if setup_failure_evidence is None:
+                return False
+            if not recheck_setup:
+                return True
+            from control_plane.merge_train_github_setup_failure_recovery import (
+                read_setup_failure_recovery,
+            )
+
+            fresh = read_setup_failure_recovery(client, candidate=candidate.candidate)
+            if (
+                fresh is None
+                or fresh.model_copy(
+                    update={"ready_comment_floor": setup_failure_evidence.ready_comment_floor}
+                )
+                != setup_failure_evidence
+            ):
+                return False
+        return True
+
     try:
         if (event := label_event()) is None or not qualified():
             return False
         if not mutate:
             return True
         before_remove()
-        if label_event() != event or not qualified():
+        if label_event() != event or not qualified(recheck_setup=True):
             return False
     except MergeTrainGitHubError as error:
         if error.rate_limited or error.status_code in {401, 403}:

@@ -66,28 +66,43 @@ def read_setup_failure_recovery(
         return None
     prefix = f"/repos/{candidate.repository}"
 
-    def rows(path: str, key: str) -> list[dict[str, object]] | None:
-        payload = client.transport.request(method="GET", path=path)
-        if not isinstance(payload, dict):
-            return None
-        values = payload.get(key)
-        if (
-            not isinstance(values, list)
-            or len(values) >= 100
-            or type(payload.get("total_count")) is not int
-            or payload["total_count"] != len(values)
-            or any(not isinstance(value, dict) for value in values)
-        ):
-            return None
-        return cast(list[dict[str, object]], values)
+    def rows(
+        path: str, key: str, *, actions: bool = False, all_checks: bool = False
+    ) -> list[dict[str, object]] | None:
+        combined: list[dict[str, object]] = []
+        total: int | None = None
+        # Bound optional recovery reads while accepting complete rerun history.
+        for page in range(1, 6):
+            query = f"{path}?per_page=100&page={page}" + ("&filter=all" if all_checks else "")
+            payload = (
+                optional_action(query)
+                if actions
+                else client.transport.request(method="GET", path=query)
+            )
+            if not isinstance(payload, dict):
+                return None
+            values, count = payload.get(key), payload.get("total_count")
+            if (
+                not isinstance(values, list)
+                or len(values) > 100
+                or type(count) is not int
+                or count < 0
+                or (total is not None and count != total)
+                or any(not isinstance(value, dict) for value in values)
+            ):
+                return None
+            total = count
+            combined.extend(cast(list[dict[str, object]], values))
+            if len(combined) == total:
+                return combined
+            if len(combined) > total or len(values) < 100:
+                return None
+        return None
 
     runs = rows(
-        f"{prefix}/commits/{candidate.candidate_sha}/check-runs?per_page=100&page=1&filter=all",
-        "check_runs",
+        f"{prefix}/commits/{candidate.candidate_sha}/check-runs", "check_runs", all_checks=True
     )
-    statuses = rows(
-        f"{prefix}/commits/{candidate.candidate_sha}/status?per_page=100&page=1", "statuses"
-    )
+    statuses = rows(f"{prefix}/commits/{candidate.candidate_sha}/status", "statuses")
     if runs is None or statuses is None:
         return None
     # Commit-status failures, pending work and unfamiliar failures have no causal
@@ -152,21 +167,9 @@ def read_setup_failure_recovery(
         return None
     # The provider's complete same-attempt job set must include independent
     # successful frontend work, not just green aggregate/tree-reuse evidence.
-    jobs_payload = optional_action(
-        f"{prefix}/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100&page=1"
-    )
-    if not isinstance(jobs_payload, dict):
+    jobs = rows(f"{prefix}/actions/runs/{run_id}/attempts/{attempt}/jobs", "jobs", actions=True)
+    if jobs is None:
         return None
-    jobs = jobs_payload.get("jobs")
-    if (
-        not isinstance(jobs, list)
-        or len(jobs) >= 100
-        or jobs_payload.get("total_count") != len(jobs)
-    ):
-        return None
-    if any(not isinstance(row, dict) for row in jobs):
-        return None
-    jobs = cast(list[dict[str, object]], jobs)
     siblings = [
         row
         for row in jobs
