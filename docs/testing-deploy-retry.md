@@ -7,8 +7,14 @@ desired artifact. Completed generations retain existing data. An unfinished
 qualified fresh generation continues its original `upstream_restore` mode on
 the same recipient, allocation and source-copy custody. It does not rebuild the product.
 Use the current service contract's `rearm_testing_retry` operation with an
-authenticated caller that already has `odoo_target_replacement_apply.execute`
-for that product's testing lane. No new grant is part of this operation.
+authenticated Director agent through its existing `local_operator` bearer
+transport under the standing permission, or another caller
+that already has `odoo_target_replacement_apply.execute` for that product's
+testing lane. The standing permission applies only to this testing-only route;
+the mixed production/testing replacement action keeps its existing policy.
+No new grant is part of this operation. All lane, custody, artifact, generation,
+review and worker safeguards still apply.
+Terminal-agent credentials retain their existing read-only transport boundary.
 
 1. Read the product's reconcile requests and take `desired_artifact_id` and
    `desired_commit` from its testing plan. Fix the underlying failure first.
