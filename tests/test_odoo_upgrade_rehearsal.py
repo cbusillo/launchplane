@@ -1735,6 +1735,91 @@ class RehearsalScenario(unittest.TestCase):
 
 
 class RehearsalHostSafetyTests(unittest.TestCase):
+    def test_upgrade_exception_reaches_the_bound_child_diagnostic(self) -> None:
+        import ast
+        import sys
+        from control_plane.odoo_testing_restore import rehearsal_copy_runner
+        from control_plane._odoo_rehearsal_diagnostics import REHEARSAL_DIAGNOSTIC_TEXT_LIMIT
+
+        spec, root, _ = self.storage_fixture(
+            {"database_bytes": 40, "filestore_bytes": 80, "staging_bytes": 20, "reserve_bytes": 10}
+        )
+        spec["action"] = "execute"
+        (root / "execute.started").touch()
+        spec["workflow"] = {"ODOO_DB_PASSWORD": "synthetic-private-value"}
+        # Real child logging starts with a silent config. The emitted rehearsal
+        # subclass must make its error reach the original-operation receipt.
+        program = ast.parse(rehearsal_copy_runner(sanitize_source_only=False))
+        runner_class = next(
+            node
+            for node in program.body
+            if isinstance(node, ast.ClassDef) and node.name == "CopyRunner"
+        )
+        child = self.fixture.root / "synthetic-odoo.py"
+        child.write_text("""import argparse, logging, os
+parser = argparse.ArgumentParser()
+parser.add_argument('--logfile', default=os.devnull)
+parser.add_argument('--log-level', default='critical')
+options, _ = parser.parse_known_args()
+logging.basicConfig(filename=options.logfile, level=options.log_level.upper())
+logging.error('RuntimeError: synthetic upgrade failed PASSWORD=synthetic-private-value')
+raise SystemExit(255)
+""")
+        database_marker = "lp_rehearsal_fixture_upgrade"
+        upgrade_command = f"/odoo/odoo-bin --stop-after-init --update all --upgrade-path /opt/openupgrade_scripts/scripts,/opt/project/openupgrade,/opt/extra_addons/openupgrade --addons-path /opt/launchplane/addons,/opt/project/addons,/opt/extra_addons,/odoo/addons,/odoo/odoo/addons --db_host database --db_port 5432 --db_user odoo --database {database_marker} --config /volumes/config/_generated.conf"
+        harness = f"""import shlex, subprocess, sys
+expected_copy_instance = 'rehearsal'
+class OdooRestorerError(Exception):
+    pass
+class OdooDataWorkflowRunner:
+    def run_command(self, command):
+        try:
+            subprocess.run([sys.executable, {str(child)!r}, *shlex.split(command)[1:]], check=True)
+        except subprocess.CalledProcessError as error:
+            raise OdooRestorerError(f'Command failed: {{command}}\\nError: {{error}}') from error
+    def _odoo_shell_command(self):
+        return ['/odoo/odoo-bin', 'shell', '--config', '/volumes/config/_generated.conf']
+    def _run_odoo_shell(self, script, label):
+        try:
+            if label == 'preflight':
+                raise subprocess.CalledProcessError(2, ['fixture', 'shell', '--help'], stderr=b'unrecognized parameters: shell')
+            subprocess.run([sys.executable, {str(child)!r}, *self._odoo_shell_command()[1:]], check=True)
+        except subprocess.CalledProcessError as error:
+            if label == 'preflight':
+                raise OdooRestorerError('Fixture CLI contract unavailable') from error
+            raise OdooRestorerError(f'Failed to execute Odoo shell for {{label}}') from error
+{ast.unparse(runner_class)}
+print('testing_copy_pre_registry_sanitized=true', flush=True)
+if sys.argv[1] == 'upgrade':
+    CopyRunner().run_command(sys.argv[2])
+else:
+    CopyRunner()._run_odoo_shell('fixture', sys.argv[1])
+"""
+        for phase in ("upgrade", "shell", "preflight"):
+            with self.subTest(phase=phase):
+                custody = root / phase
+                custody.mkdir()
+                (custody / "execute.started").touch()
+                with self.assertRaises(self.host["RehearsalCommandFailure"]):
+                    with self.host["command_failure_scope"](spec, custody):
+                        self.host["command"](
+                            [sys.executable, "-c", harness, phase, upgrade_command]
+                        )
+                failure = self.host["read_command_failure"](spec, custody)
+                self.assertIn(
+                    "Fixture CLI contract unavailable"
+                    if phase == "preflight"
+                    else "RuntimeError: synthetic upgrade failed",
+                    failure["error_text"],
+                )
+                self.assertNotIn("synthetic-private-value", str(failure))
+                self.assertNotIn(database_marker, failure["error_text"])
+                self.assertLessEqual(
+                    len(failure["error_text"].encode()), REHEARSAL_DIAGNOSTIC_TEXT_LIMIT
+                )
+                self.assertEqual(failure["attempt_sha256"], spec["attempt_sha256"])
+                self.assertEqual(failure["record_binding_sha256"], spec["record_binding_sha256"])
+
     def test_persistence_refusals_keep_bound_child_in_existing_job_output(self) -> None:
         import errno
         import io
@@ -1871,6 +1956,7 @@ class RehearsalHostSafetyTests(unittest.TestCase):
                 self.assertFalse(observed["completed"])
 
     def test_diagnostic_bounds_redact_known_secrets_and_credential_forms(self) -> None:
+        import subprocess
         from control_plane._odoo_rehearsal_diagnostics import REHEARSAL_DIAGNOSTIC_TEXT_LIMIT
 
         error = "ValueError: missing legacy field"
@@ -1903,6 +1989,17 @@ class RehearsalHostSafetyTests(unittest.TestCase):
                 "DETAIL: Key (login)=(client@example.invalid) already exists"
             ),
         )
+        short = "copy phase stopped\n"
+        long = "FixtureDatabaseError: " + "é" * (REHEARSAL_DIAGNOSTIC_TEXT_LIMIT // 3)
+        for stdout, stderr in ((short, long), (long, short)):
+            diagnostic = self.host["command_diagnostic"](
+                [], subprocess.CompletedProcess([], 1, stdout.encode(), stderr.encode()), {}
+            )
+            self.assertIn(long, diagnostic["error_text"])
+            self.assertIn(short, diagnostic["error_text"])
+            self.assertLessEqual(
+                len(diagnostic["error_text"].encode()), REHEARSAL_DIAGNOSTIC_TEXT_LIMIT
+            )
 
     def test_retained_logs_are_bounded_read_only_and_exclude_symlinks(self) -> None:
         from control_plane._odoo_rehearsal_diagnostics import REHEARSAL_DIAGNOSTIC_TEXT_LIMIT
