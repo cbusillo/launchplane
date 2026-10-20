@@ -1,5 +1,7 @@
 from tests.support.auth import scoped_agent_test
 import base64
+from dataclasses import replace
+from datetime import timedelta
 import json
 import unittest
 from pathlib import Path
@@ -10,9 +12,13 @@ from unittest.mock import Mock, patch
 from click import ClickException
 
 from control_plane.contracts.deployment_record import ResolvedTargetEvidence
-from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+from control_plane.contracts.idempotency_record import (
+    LaunchplaneIdempotencyRecord,
+    parse_launchplane_mutation_timestamp,
+)
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
-from control_plane.contracts.promotion_record import HealthcheckEvidence
+from control_plane.contracts.promotion_record import HealthcheckEvidence, PostDeployUpdateEvidence
+from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.http_app import idempotency_request_fingerprint
 from control_plane.generic_web_deploy_http import GenericWebDeployEnvelope
@@ -30,6 +36,12 @@ from control_plane.storage.postgres import (
     PostgresRecordStore,
 )
 from control_plane.workflows.generic_web_deploy import GenericWebDeployResult
+from control_plane.workflows.ship import build_deployment_record
+from control_plane.workflows.generic_web_application_snapshot import (
+    ApplicationLifecycleSnapshot,
+    generic_web_provider_deployment_record_id,
+    recorded_application_lifecycle,
+)
 from control_plane.workflows.generic_web_deploy_provider import (
     GenericWebLegacyDeploymentCorrelation,
     GenericWebLegacyDeploymentCorrelationEvidence,
@@ -40,7 +52,10 @@ from control_plane.workflows.generic_web_deploy_provider import (
 )
 from tests.support.auth import StubVerifier, identity, local_operator_policy
 from tests.support.profiles import product_profile_payload as _product_profile_payload
-from tests.support.stores import sqlite_database_url as _sqlite_database_url
+from tests.support.stores import (
+    sqlite_database_url as _sqlite_database_url,
+    _seed_generic_web_deploy_target_records,
+)
 from tests.test_service import _invoke_app, create_launchplane_fastapi_test_app
 from control_plane.dokploy.application_runtime import ApplicationRuntimeObservation
 from tests.support.application_runtime import recovered_application_runtime
@@ -479,6 +494,218 @@ class GenericWebQualificationRecoveryKeyTests(unittest.TestCase):
 
 
 class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
+    def test_original_database_deadline_settles_only_known_original_service_spec(self) -> None:
+        for name, phase, timeout_offset, changes, expected in (
+            ("before deadline", "deploy_trigger", -1, {}, "hold_unknown"),
+            ("at deadline", "deploy_trigger", 0, {}, "adopt_observed"),
+            (
+                "reaped history",
+                "deploy_trigger",
+                1,
+                {"task_evidence_complete": False},
+                "adopt_observed",
+            ),
+            ("updating", "deploy_trigger", 1, {"rollout_state": "updating"}, "hold_unknown"),
+            (
+                "foreign spec",
+                "deploy_trigger",
+                1,
+                {"service_deployment_record_id": "foreign"},
+                "hold_unknown",
+            ),
+            ("pre-trigger", "runtime_environment_update", 1, {}, "hold_unknown"),
+            ("completed hold", "application_schedule_hold", 1, {}, "adopt_observed"),
+            ("legacy hold", "application_schedule_hold", 1, {}, "hold_unknown"),
+            ("missing failed record", "records_commit", 1, {}, "hold_unknown"),
+            ("failed record", "records_commit", 1, {}, "adopt_observed"),
+            ("completed hold record", "records_commit", 1, {}, "adopt_observed"),
+            ("legacy hold record", "records_commit", 1, {}, "hold_unknown"),
+        ):
+            with self.subTest(name=name), TemporaryDirectory() as temporary_directory_name:
+                root = Path(temporary_directory_name)
+                store = PostgresRecordStore(
+                    database_url=_sqlite_database_url(root / "state.sqlite3")
+                )
+                self.addCleanup(store.close)
+                store.ensure_schema()
+                store.write_product_profile_record(
+                    LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+                )
+                target = _generic_web_recovery_target()
+                _seed_generic_web_deploy_target_records(
+                    store=store,
+                    context=target.ship_request.context,
+                    instance=target.ship_request.instance,
+                    target_id=target.resolved_target.target_id,
+                    target_name=target.resolved_target.target_name,
+                )
+                original = _generic_web_recovery_original_deploy()
+                reservation = _write_generic_web_recovery_reservation(
+                    store,
+                    _generic_web_recovery_reservation(
+                        original_deploy=original,
+                        idempotency_key="original",
+                        provider_effect_phase=phase,
+                    ),
+                )
+                provider = _RecoveryObservationProvider(
+                    GenericWebProviderDeploymentObservation(
+                        outcome="present",
+                        deployment_status="done",
+                        deployment_id="provider-job",
+                        started_at="2026-08-15T12:00:00Z",
+                        finished_at="2026-08-15T12:00:01Z",
+                    ),
+                    reservation=reservation,
+                )
+                receipt = None
+                if name in {
+                    "completed hold",
+                    "legacy hold",
+                    "failed record",
+                    "completed hold record",
+                    "legacy hold record",
+                }:
+                    if "hold" in name:
+                        receipt = ApplicationLifecycleSnapshot(
+                            product="sellyouroutboard",
+                            context=target.ship_request.context,
+                            instance=target.ship_request.instance,
+                            provider_id="dokploy",
+                            target_id=target.resolved_target.target_id,
+                            artifact_id=target.ship_request.artifact_id,
+                            source_git_ref=target.ship_request.source_git_ref,
+                            extensions=GenericWebLaneExtensions(),
+                            state="held",
+                            qualification_failure_hold_completed=name.startswith("completed"),
+                        )
+                    store.write_deployment_record(
+                        build_deployment_record(
+                            request=target.ship_request,
+                            record_id=generic_web_provider_deployment_record_id(
+                                provider.original_operation_key,
+                                context=target.ship_request.context,
+                                instance=target.ship_request.instance,
+                            ),
+                            deployment_id="provider-job",
+                            deployment_status="fail",
+                            started_at="2026-08-15T12:00:00Z",
+                            finished_at="2026-08-15T12:00:01Z",
+                            resolved_target=target.resolved_target,
+                            post_deploy_update=PostDeployUpdateEvidence(
+                                attempted=receipt is not None,
+                                status="fail" if receipt is not None else "skipped",
+                                evidence=receipt.evidence() if receipt else {},
+                            ),
+                        )
+                    )
+
+                def runtime(**_kwargs: object) -> ApplicationRuntimeObservation:
+                    assert provider.application_runtime is not None
+                    return replace(
+                        provider.application_runtime,
+                        running_container_images=(),
+                        running_container_deployment_record_ids=(),
+                        running_container_health=(),
+                        pending_task_count=1,
+                        **changes,
+                    )
+
+                observed_at = parse_launchplane_mutation_timestamp(
+                    reservation.provider_effect_started_at, field_name="checkpoint"
+                ) + timedelta(seconds=target.deploy_timeout_seconds + timeout_offset)
+                lookup = ExistingMutationReservationLookupResult(
+                    status="found", record=reservation, observed_at=observed_at.isoformat()
+                )
+                app = _create_recovery_app(root=root, store=store)
+                with (
+                    patch.object(
+                        store, "lookup_existing_mutation_reservation", return_value=lookup
+                    ),
+                    patch.object(
+                        provider, "observe_testing_application_runtime", side_effect=runtime
+                    ),
+                    patch(
+                        "control_plane.generic_web_deploy_provider_adapter.default_generic_web_deploy_provider",
+                        return_value=provider,
+                    ),
+                ):
+                    status, dry = _invoke_recovery(
+                        app,
+                        original_deploy=original,
+                        idempotency_key=reservation.idempotency_key,
+                        reason="Review original bounded qualification.",
+                    )
+                    self.assertEqual(status, 200)
+                    self.assertEqual(dry["proposed_action"], expected)
+                    applied_status, _applied = _invoke_recovery_apply(
+                        app,
+                        original_deploy=original,
+                        idempotency_key=reservation.idempotency_key,
+                        reason="Review original bounded qualification.",
+                        expected_recovery_digest=dry["recovery_digest"],
+                    )
+                if expected == "hold_unknown":
+                    self.assertEqual(applied_status, 409)
+                    self.assertTrue(store.list_held_provider_target_reservations())
+                    with patch(
+                        "control_plane.generic_web_deploy_http.execute_generic_web_deploy"
+                    ) as deploy:
+                        retry_status, _retry = _invoke_app(
+                            app,
+                            method="POST",
+                            path=reservation.route_path,
+                            authorization=f"Bearer {_OPERATOR_TOKEN}",
+                            payload=original,
+                            headers={"Idempotency-Key": "deliberate-retry"},
+                        )
+                    self.assertEqual(retry_status, 409, _retry)
+                    deploy.assert_not_called()
+                    continue
+                self.assertEqual(applied_status, 202)
+                completed = store.read_idempotency_record(
+                    scope=reservation.scope,
+                    route_path=reservation.route_path,
+                    idempotency_key=reservation.idempotency_key,
+                )
+                assert completed is not None
+                self.assertEqual(completed.response_status_code, 502)
+                self.assertEqual(completed.response_payload["result"]["deploy_status"], "fail")
+                if receipt is not None:
+                    self.assertEqual(
+                        recorded_application_lifecycle(
+                            store.read_deployment_record(
+                                generic_web_provider_deployment_record_id(
+                                    provider.original_operation_key,
+                                    context=target.ship_request.context,
+                                    instance=target.ship_request.instance,
+                                )
+                            )
+                        ),
+                        receipt,
+                    )
+                self.assertFalse(store.list_held_provider_target_reservations())
+                self.assertFalse(store.list_environment_inventory())
+                result = _generic_web_deploy_result()
+
+                def execute(**kwargs: Any) -> GenericWebDeployResult:
+                    kwargs["provider_effect_checkpoint"]("deploy_trigger")
+                    return result
+
+                with patch(
+                    "control_plane.generic_web_deploy_http.execute_generic_web_deploy",
+                    side_effect=execute,
+                ):
+                    retry_status, _retry = _invoke_app(
+                        app,
+                        method="POST",
+                        path=reservation.route_path,
+                        authorization=f"Bearer {_OPERATOR_TOKEN}",
+                        payload=original,
+                        headers={"Idempotency-Key": "deliberate-retry"},
+                    )
+                self.assertEqual(retry_status, 202, _retry)
+
     def test_generic_web_deploy_recovery_dry_run_replays_without_writes(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)

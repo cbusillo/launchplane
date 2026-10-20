@@ -544,7 +544,7 @@ def reconcile_testing_target(
                 and provider_target.provider_target_type == "application"
             ):
                 plan.update(action="wait", reason="testing_runtime_unverified")
-                return ReconcileOutcome(plan, deferred=True)
+                return ReconcileOutcome(plan)
         if target is not None and target.target_type == "application":
             hold = read_staff_testing_hold(record_store=record_store, context=lane.context)
             if hold is not None:
@@ -626,7 +626,7 @@ def reconcile_testing_target(
                 if not matches:
                     if not drift:
                         plan.update(action="wait", reason="testing_runtime_unverified")
-                        return ReconcileOutcome(plan, deferred=True)
+                        return ReconcileOutcome(plan)
                     plan.update(
                         action="deploy",
                         reason="testing_runtime_drift",

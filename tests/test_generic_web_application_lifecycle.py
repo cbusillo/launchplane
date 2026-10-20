@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from dataclasses import replace
 from contextlib import nullcontext
 from pathlib import Path
 from typing import cast
@@ -23,6 +24,7 @@ from control_plane.workflows.generic_web_application_snapshot import (
     ApplicationLifecycleSnapshot,
     application_snapshot_for_deploy,
     recorded_application_lifecycle,
+    generic_web_provider_deployment_record_id,
 )
 from control_plane.workflows.generic_web_application_lifecycle import (
     DokployApplicationLifecycle,
@@ -170,6 +172,131 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
         receipt = recorded_application_lifecycle(record)
         assert receipt is not None
         self.assertEqual(receipt.state, "restored")
+
+    def test_qualification_timeout_settles_only_after_completed_hold_and_resumes_baseline(
+        self,
+    ) -> None:
+        self._api_context()
+        profile = _profile()
+        lane = profile.lanes[0].model_copy(update={"generic_web_extensions": self.extensions})
+        profile = profile.model_copy(update={"lanes": (lane,)})
+        operation = "qualification-timeout"
+        record_id = generic_web_provider_deployment_record_id(
+            operation, context=lane.context, instance=lane.instance
+        )
+        for hold_fails in (False, True):
+            with self.subTest(hold_fails=hold_fails):
+                self.schedules = {"billing-recovery": dict(self.original)}
+                store = _GenericWebDeployStore(profile)
+                provider = _LifecycleDeployProvider(
+                    target_id="app-123",
+                    original_operation_key=operation,
+                    observation=GenericWebProviderDeploymentObservation(
+                        outcome="present",
+                        deployment_status="done",
+                        deployment_id="provider-job",
+                        started_at=utc_now_timestamp(),
+                        finished_at=utc_now_timestamp(),
+                    ),
+                )
+                execute = provider.execute_artifact_deploy
+
+                def pending_runtime(**kwargs: object) -> None:
+                    execute(**kwargs)  # type: ignore[arg-type]
+                    assert provider.application_runtime is not None
+                    provider.application_runtime = replace(
+                        provider.application_runtime,
+                        running_container_images=(),
+                        running_container_deployment_record_ids=(),
+                        running_container_health=(),
+                        pending_task_count=1,
+                        task_evidence_complete=False,
+                    )
+                    self.schedules["billing-recovery"]["enabled"] = True
+
+                with (
+                    patch.object(provider, "execute_artifact_deploy", side_effect=pending_runtime),
+                    patch(
+                        "control_plane.workflows.generic_web_deploy_provider.monotonic",
+                        return_value=1e30,
+                    ),
+                    patch.object(
+                        DokployApplicationLifecycle,
+                        "hold",
+                        side_effect=click.ClickException("hold interrupted"),
+                    )
+                    if hold_fails
+                    else nullcontext(),
+                ):
+                    result = execute_generic_web_deploy(
+                        control_plane_root=Path("."),
+                        record_store=store,
+                        request=_request(),
+                        profile=profile,
+                        lane=lane,
+                        deploy_provider=provider,
+                        deployment_record_id=record_id,
+                    )
+                self.assertEqual(result.deploy_status, "fail")
+                self.assertEqual(result.provider_failure_proved, not hold_fails)
+                receipt = recorded_application_lifecycle(store.read_deployment_record(record_id))
+                assert receipt is not None
+                self.assertEqual(receipt.qualification_failure_hold_completed, not hold_fails)
+                legacy = ApplicationLifecycleSnapshot.model_validate_json(
+                    receipt.model_dump_json(exclude={"qualification_failure_hold_completed"})
+                )
+                self.assertFalse(legacy.qualification_failure_hold_completed)
+                self.assertEqual(
+                    ApplicationLifecycleSnapshot.model_validate_json(receipt.model_dump_json()),
+                    receipt,
+                )
+                adapter = GenericWebDeployProviderMutationAdapter(
+                    control_plane_root=Path("."),
+                    record_store=store,
+                    deploy_request=GenericWebDeployEnvelope(
+                        product=profile.product, deploy=_request()
+                    ),
+                    profile=profile,
+                    lane=lane,
+                    trace_id="qualification-recovery",
+                    deploy_provider=provider,
+                )
+                inspection = adapter.inspect(
+                    provider_operation_key=operation,
+                    provider_effect_phase="application_schedule_hold",
+                    reconciliation_key=adapter.reconciliation_key(),
+                    original_deadline_expired=True,
+                )
+                if hold_fails:
+                    self.assertEqual(inspection.observation.outcome, "unknown")
+                    continue
+                self.assertEqual(inspection.observation.deployment_status, "unhealthy")
+                adopted = adapter.provider_observation_from_inspection(
+                    provider_operation_key=operation, inspection=inspection
+                )
+                self.assertEqual(adopted.response_status_code, 502)
+                self.assertEqual(
+                    recorded_application_lifecycle(store.read_deployment_record(record_id)), receipt
+                )
+                self.assertFalse(self.schedules["billing-recovery"]["enabled"])
+                resumed = execute_generic_web_deploy(
+                    control_plane_root=Path("."),
+                    record_store=store,
+                    request=_request(),
+                    profile=profile,
+                    lane=lane,
+                    deploy_provider=provider,
+                    deployment_record_id="deliberate-next-deployment",
+                )
+                self.assertEqual(resumed.deploy_status, "pass")
+                next_receipt = recorded_application_lifecycle(
+                    store.read_deployment_record(resumed.deployment_record_id)
+                )
+                assert next_receipt is not None
+                self.assertTrue(next_receipt.resume_from_hold)
+                self.assertEqual(next_receipt.originals, receipt.originals)
+                self.assertFalse(next_receipt.qualification_failure_hold_completed)
+                self.assertTrue(self.schedules["billing-recovery"]["enabled"])
 
     def test_testing_reset_is_explicit_and_uses_the_disposable_lane_guard(self) -> None:
         reset_command = GenericWebMaintenanceCommand(

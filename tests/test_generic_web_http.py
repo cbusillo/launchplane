@@ -35,6 +35,7 @@ from control_plane.drivers.generic_web_preview_dispatch import (
     GenericWebPreviewVerificationRequest,
 )
 from control_plane.generic_web_promotion_http import GenericWebProdPromotionResponse
+from control_plane.generic_web_deploy_http import GENERIC_WEB_DEPLOY_ROUTE
 from control_plane.generic_web_preview_http import _destroy_result_with_record_outcome
 from control_plane.http_app import (
     LaunchplaneAuthzPolicyRuntime,
@@ -422,7 +423,7 @@ class GenericWebHttpTests(unittest.TestCase):
                         status, _response = _invoke_app(
                             app,
                             method="POST",
-                            path="/v1/drivers/generic-web/deploy",
+                            path=GENERIC_WEB_DEPLOY_ROUTE,
                             authorization="Bearer fixture-operator",
                             payload=payload,
                             headers={"Idempotency-Key": key},

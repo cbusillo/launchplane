@@ -51,7 +51,7 @@ from control_plane.dokploy.application_runtime import (
     ApplicationRuntimeObservation,
     application_runtime_attempt_observed,
     application_runtime_matches,
-    application_runtime_tasks_failed,
+    application_runtime_settled_spec_matches,
     fetch_application_runtime,
 )
 
@@ -635,6 +635,7 @@ def qualify_testing_application_observation(
     deployment_record_id: str,
     wait: bool = False,
     deadline: float | None = None,
+    original_deadline_expired: bool = False,
 ) -> GenericWebProviderDeploymentObservation:
     """A provider job is insufficient proof of application testing convergence."""
     if (
@@ -702,9 +703,9 @@ def qualify_testing_application_observation(
         remaining = deadline - monotonic() if deadline is not None else 0
         if not wait or remaining <= 0:
             if (
-                wait
-                and runtime is not None
-                and application_runtime_tasks_failed(
+                runtime is not None
+                and (wait or original_deadline_expired)
+                and application_runtime_settled_spec_matches(
                     runtime,
                     artifact_reference=target.ship_request.artifact_id,
                     provider_reference=dokploy_deploy_artifact_reference(
@@ -717,7 +718,7 @@ def qualify_testing_application_observation(
                     update={
                         "deployment_status": "unhealthy",
                         "error_message": (
-                            "Application testing current-attempt tasks failed at the original "
+                            "Application testing runtime did not qualify at the original "
                             f"deployment deadline; provider job status={observation.deployment_status}."
                         ),
                     }

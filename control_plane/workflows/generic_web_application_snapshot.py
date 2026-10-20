@@ -39,6 +39,9 @@ class ApplicationLifecycleSnapshot(BaseModel):
     restore_current_on_pre_image_failure: bool = False
     resume_from_hold: bool = False
     restore_declared: bool = False
+    qualification_failure_hold_completed: bool = Field(
+        default=False, exclude_if=lambda value: not value
+    )
 
     def evidence(self) -> dict[str, str]:
         return {APPLICATION_LIFECYCLE_EVIDENCE_KEY: self.model_dump_json()}

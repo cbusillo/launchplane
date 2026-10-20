@@ -71,6 +71,7 @@ from control_plane.contracts.product_reconcile import (
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.repository_inventory import RepositoryInventoryRecord
 from control_plane.contracts.runtime_identity import RuntimeIdentity
+from control_plane.contracts.deploy_reference import provider_image_reference
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeKeySafetyPolicyRecord,
@@ -1844,7 +1845,7 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
                 application_id="target-123",
                 app_name="site-testing-app",
                 service_id="fixture-service",
-                service_image=f"{IMAGE_REPOSITORY}:sha-{source}",
+                service_image=provider_image_reference(artifact_id=artifact),
                 service_deployment_record_id=record_id,
                 desired_replicas=1,
                 rollout_state="completed",
@@ -2031,9 +2032,19 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
             self.request()
             pending = self.run_once()
         self.assertEqual(pending.last_plan["reason"], "testing_runtime_unverified")
+        self.assertEqual(pending.state, "done")
         self.assertEqual(len(triggered), 1)
 
     def test_failed_runtime_repair_replays_even_when_its_service_spec_remains(self) -> None:
+        self.assert_failed_runtime_repair_replays("completed")
+
+    def test_paused_failed_runtime_repair_replays_without_another_deploy(self) -> None:
+        self.assert_failed_runtime_repair_replays("paused")
+
+    def test_paused_rollback_repair_replays_without_another_deploy(self) -> None:
+        self.assert_failed_runtime_repair_replays("rollback_paused")
+
+    def assert_failed_runtime_repair_replays(self, rollout_state: str) -> None:
         triggered = self.prepare_application_runtime_test()
         self.request()
         self.reconcile()
@@ -2045,6 +2056,7 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
             current = self.application_runtime()
             return replace(
                 current,
+                rollout_state=rollout_state,
                 running_container_images=(),
                 running_container_deployment_record_ids=(),
                 running_container_health=(),
@@ -2098,6 +2110,7 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
             pending = self.run_once()
         self.assertEqual(pending.last_plan["reason"], "testing_runtime_unverified")
         self.assertEqual(pending.last_plan["action"], "wait")
+        self.assertEqual(pending.state, "done")
         observe.assert_not_called()
         self.assertEqual(len(triggered), 1)
 

@@ -113,37 +113,6 @@ def _service_image_matches(image: str, artifact_reference: str, provider_referen
     return image == provider_reference
 
 
-def application_runtime_tasks_failed(
-    observed: ApplicationRuntimeObservation,
-    *,
-    artifact_reference: str,
-    provider_reference: str,
-    deployment_record_id: str,
-) -> bool:
-    """Positive current-attempt task failure; a caller must also prove deadline expiry."""
-    current = [task for task in observed.tasks if task.deployment_record_id == deployment_record_id]
-    return (
-        observed.task_evidence_complete
-        and observed.desired_replicas > 0
-        and observed.rollout_state in {"", "completed"}
-        and observed.service_deployment_record_id == deployment_record_id
-        and _service_image_matches(observed.service_image, artifact_reference, provider_reference)
-        and not observed.running_container_images
-        and bool(current)
-        and all(
-            task.state in {"failed", "rejected"}
-            and _service_image_matches(task.image, artifact_reference, provider_reference)
-            for task in current
-        )
-        and all(
-            task.deployment_record_id
-            and task.image
-            and task.state in {"complete", "shutdown", "failed", "rejected", "remove", "orphaned"}
-            for task in observed.tasks
-        )
-    )
-
-
 def application_runtime_attempt_observed(
     observed: ApplicationRuntimeObservation,
     *,
@@ -159,6 +128,22 @@ def application_runtime_attempt_observed(
     )
 
 
+def application_runtime_settled_spec_matches(
+    observed: ApplicationRuntimeObservation,
+    *,
+    artifact_reference: str,
+    provider_reference: str,
+    deployment_record_id: str,
+) -> bool:
+    """The original service update settled, independently of replacement task health."""
+    return (
+        observed.desired_replicas > 0
+        and observed.rollout_state in {"", "completed"}
+        and observed.service_deployment_record_id == deployment_record_id
+        and _service_image_matches(observed.service_image, artifact_reference, provider_reference)
+    )
+
+
 def application_runtime_drift_fingerprint(
     observed: ApplicationRuntimeObservation,
     *,
@@ -167,7 +152,13 @@ def application_runtime_drift_fingerprint(
     deployment_record_id: str,
 ) -> str:
     """Only a stable, positively different service permits a deterministic repair."""
-    if observed.rollout_state not in {"", "completed", "rollback_completed"}:
+    if observed.rollout_state not in {
+        "",
+        "completed",
+        "paused",
+        "rollback_completed",
+        "rollback_paused",
+    }:
         return ""
     if (
         _service_image_matches(observed.service_image, artifact_reference, provider_reference)

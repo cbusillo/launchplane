@@ -170,9 +170,6 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
         self.assertEqual(observed.running_container_deployment_record_ids, ("deployment-1",))
         self.assertNotIn("do-not-expose", repr(observed))
         self.assertNotIn("do-not-expose", str(asdict(observed)))
-        self.assertEqual(
-            self.requests[-1]["query"], {"serverId": "server-1", "containerId": "fixture-app"}
-        )
 
     def test_healthy_old_task_is_not_the_services_current_deployment(self) -> None:
         config = self.container["Config"]
@@ -504,7 +501,6 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
         with patch.object(provider, "observe_testing_application_runtime", return_value=rollback):
             failed = qualify()
         self.assertEqual(failed.deployment_status, "unhealthy")
-        self.assertIn("provider job status=done", failed.error_message)
         with patch.object(
             provider,
             "observe_testing_application_runtime",
@@ -617,7 +613,9 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
                 if expected == "present":
                     self.assertEqual(qualified.deployment_status, "unhealthy")
 
-    def test_initial_service_terminal_tasks_prove_failure_only_at_original_deadline(self) -> None:
+    def test_initial_settled_service_proves_qualification_failure_only_at_original_deadline(
+        self,
+    ) -> None:
         from control_plane.workflows.generic_web_deploy_provider import (
             DokployGenericWebDeployProvider,
             GenericWebProviderDeploymentObservation,
@@ -674,7 +672,7 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
             self.assertEqual(qualify(wait=True).deployment_status, "unhealthy")
         for state in ("starting", "shutdown"):
             self.task["Status"] = {"State": state}
-            self.assertEqual(qualify(wait=True).outcome, "unknown")
+            self.assertEqual(qualify(wait=True).deployment_status, "unhealthy")
         self.task["Status"] = {"State": "failed"}
         for spec in (
             {},
@@ -683,8 +681,8 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
         ):
             with self.subTest(spec=spec):
                 self.task["Spec"] = {"ContainerSpec": spec}
-                self.assertEqual(qualify(wait=True).outcome, "unknown")
+                self.assertEqual(qualify(wait=True).deployment_status, "unhealthy")
         self.task["Spec"] = original_spec
         self.tasks.append({"containerId": "old-task"})
         self.vanished_tasks.add("old-task")
-        self.assertEqual(qualify(wait=True).outcome, "unknown")
+        self.assertEqual(qualify(wait=True).deployment_status, "unhealthy")

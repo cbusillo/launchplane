@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -817,6 +818,21 @@ async def _inspect_generic_web_deploy_recovery(
                 recorded_artifact=True,
                 retain_event_request=retain_event_request,
             )
+            original_deadline_expired = False
+            if reservation.provider_effect_phase in {
+                "deploy_trigger",
+                "application_schedule_hold",
+                "records_commit",
+            }:
+                try:
+                    original_deadline_expired = parse_launchplane_mutation_timestamp(
+                        lookup.observed_at, field_name="observed_at"
+                    ) >= parse_launchplane_mutation_timestamp(
+                        reservation.provider_effect_started_at,
+                        field_name="provider_effect_started_at",
+                    ) + timedelta(seconds=stored_target.deploy_timeout_seconds)
+                except ValueError:
+                    pass
             provider_inspection = adapter.inspect(
                 provider_operation_key=provider_operation_key,
                 provider_effect_phase=reservation.provider_effect_phase,
@@ -825,6 +841,7 @@ async def _inspect_generic_web_deploy_recovery(
                 legacy_provider_effect_started_at=legacy_provider_effect_started_at,
                 no_effect_checkpoint=not reservation.provider_effect_phase
                 and not reservation.provider_effect_started_at,
+                original_deadline_expired=original_deadline_expired,
             )
             if not provider_inspection.identity_matches:
                 raise dependencies.http_error(

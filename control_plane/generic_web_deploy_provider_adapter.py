@@ -330,6 +330,7 @@ class GenericWebDeployProviderMutationAdapter:
         expected_provider_target_key: str = "",
         legacy_provider_effect_started_at: str = "",
         no_effect_checkpoint: bool = False,
+        original_deadline_expired: bool = False,
     ) -> _GenericWebDeployProviderInspection:
         self._proved_pre_image_operation = ""
         self._settlement_operation = ""
@@ -477,6 +478,12 @@ class GenericWebDeployProviderMutationAdapter:
             target=resolved_target,
             observation=observation,
             deployment_record_id=self._deployment_record_id(provider_operation_key),
+            original_deadline_expired=(
+                original_deadline_expired
+                and self._settled_spec_timeout_allowed(
+                    provider_operation_key, resolved_target, provider_effect_phase
+                )
+            ),
         )
         if observation.outcome == "unknown":
             return _GenericWebDeployProviderInspection(
@@ -530,6 +537,73 @@ class GenericWebDeployProviderMutationAdapter:
             provider_evidence=evidence.provider_evidence,
             provider_read_error_class=evidence.provider_read_error_class,
             legacy_correlation_digest_evidence=evidence.legacy_correlation_digest_evidence,
+        )
+
+    def _settled_spec_timeout_allowed(
+        self, operation: str, target: GenericWebResolvedDeployTarget, phase: str
+    ) -> bool:
+        if (
+            target.ship_request.instance != "testing"
+            or target.resolved_target.target_type != "application"
+        ):
+            return False
+        try:
+            record = cast(_DeploymentRecordReader, self._record_store).read_deployment_record(
+                self._deployment_record_id(operation)
+            )
+        except FileNotFoundError:
+            record = None
+        receipt = recorded_application_lifecycle(record) if record is not None else None
+        if phase == "records_commit" and (
+            record is None
+            or record.deploy.status != "fail"
+            or record.artifact_identity is None
+            or record.resolved_target is None
+            or (
+                record.context,
+                record.instance,
+                record.artifact_identity.artifact_id,
+                record.source_git_ref,
+                record.resolved_target.target_id,
+            )
+            != (
+                self._lane.context,
+                self._lane.instance,
+                target.ship_request.artifact_id,
+                target.ship_request.source_git_ref,
+                target.resolved_target.target_id,
+            )
+        ):
+            return False
+        if receipt is not None:
+            return (
+                receipt.state == "held"
+                and receipt.qualification_failure_hold_completed
+                and (
+                    receipt.product,
+                    receipt.context,
+                    receipt.instance,
+                    receipt.provider_id,
+                    receipt.target_id,
+                    receipt.artifact_id,
+                    receipt.source_git_ref,
+                )
+                == (
+                    self._profile.product,
+                    self._lane.context,
+                    self._lane.instance,
+                    self._deploy_provider.provider_id,
+                    target.resolved_target.target_id,
+                    target.ship_request.artifact_id,
+                    target.ship_request.source_git_ref,
+                )
+            )
+        return (
+            phase in {"deploy_trigger", "records_commit"}
+            and not self._lane.generic_web_extensions.configured
+            and not has_recorded_application_lifecycle(
+                self._record_store, context=self._lane.context, instance=self._lane.instance
+            )
         )
 
     def _inspect_legacy_artifact_deploy(

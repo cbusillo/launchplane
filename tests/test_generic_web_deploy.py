@@ -625,9 +625,59 @@ class GenericWebDeployTests(unittest.TestCase):
                 deploy_provider=provider,
             )
         self.assertEqual(result.deploy_status, "fail")
+        self.assertFalse(result.provider_failure_proved)
         self.assertFalse(store.inventories)
         reader.assert_called_once()
         sleeper.assert_not_called()
+
+    def test_settled_application_spec_times_out_truthfully_despite_replacement_tasks(self) -> None:
+        from dataclasses import replace
+
+        for rollout_state, complete in (("completed", True), ("", False)):
+            with self.subTest(rollout_state=rollout_state, history_complete=complete):
+                store = _GenericWebDeployStore(_profile())
+                provider = _FakeGenericWebDeployProvider()
+                clock = [100.0]
+                execute = provider.execute_artifact_deploy
+
+                def finish_at_deadline(**kwargs: object) -> None:
+                    execute(**kwargs)  # type: ignore[arg-type]
+                    assert provider.application_runtime is not None
+                    provider.application_runtime = replace(
+                        provider.application_runtime,
+                        rollout_state=rollout_state,
+                        running_container_images=(),
+                        running_container_deployment_record_ids=(),
+                        running_container_health=(),
+                        pending_task_count=1,
+                        task_evidence_complete=complete,
+                    )
+                    clock[0] = 110.0
+
+                with (
+                    patch.object(
+                        provider, "execute_artifact_deploy", side_effect=finish_at_deadline
+                    ),
+                    patch(
+                        "control_plane.workflows.generic_web_deploy.monotonic",
+                        side_effect=lambda: clock[0],
+                    ),
+                    patch(
+                        "control_plane.workflows.generic_web_deploy_provider.monotonic",
+                        side_effect=lambda: clock[0],
+                    ),
+                    patch("control_plane.workflows.generic_web_deploy_provider.sleep") as sleeper,
+                ):
+                    result = execute_generic_web_deploy(
+                        control_plane_root=Path("."),
+                        record_store=store,
+                        request=_request(timeout_seconds=10),
+                        deploy_provider=provider,
+                    )
+                self.assertEqual(result.deploy_status, "fail")
+                self.assertTrue(result.provider_failure_proved)
+                self.assertFalse(store.inventories)
+                sleeper.assert_not_called()
 
     def test_lost_publication_authority_writes_no_deployment_or_inventory(self) -> None:
         for provider_error in (None, click.ClickException("provider wait failed")):
@@ -679,40 +729,25 @@ class GenericWebDeployTests(unittest.TestCase):
                 def deploy(
                     commit: str, number: int, rollback: bool = False
                 ) -> GenericWebDeployResult:
-                    return execute_generic_web_deploy(
-                        control_plane_root=Path("."),
-                        record_store=store,
-                        request=GenericWebDeployRequest(
-                            product=profile.product,
-                            instance="testing",
-                            artifact_id=f"{profile.image.repository}@{github.digests[commit]}",
-                            source_git_ref=commit,
-                        ),
-                        deploy_provider=provider,
-                        rollback=rollback,
-                        deployment_record_id=f"deploy-{number}",
-                    )
-
-                with (
-                    patch("control_plane.lane_movement._source_transport", return_value=github),
-                    patch(
+                    with patch(
                         "control_plane.workflows.generic_web_deploy.utc_now_timestamp",
-                        side_effect=[
-                            "2026-10-01T10:00:00Z",
-                            "2026-10-01T10:00:30Z",
-                            "2026-10-01T10:01:00Z",
-                            "2026-10-02T10:00:00Z",
-                            "2026-10-02T10:00:30Z",
-                            "2026-10-02T10:01:00Z",
-                            "2026-10-03T10:00:00Z",
-                            "2026-10-03T10:00:30Z",
-                            "2026-10-03T10:01:00Z",
-                            "2026-10-04T10:00:00Z",
-                            "2026-10-04T10:00:30Z",
-                            "2026-10-04T10:01:00Z",
-                        ],
-                    ),
-                ):
+                        return_value=f"2026-10-{number:02d}T10:00:00Z",
+                    ):
+                        return execute_generic_web_deploy(
+                            control_plane_root=Path("."),
+                            record_store=store,
+                            request=GenericWebDeployRequest(
+                                product=profile.product,
+                                instance="testing",
+                                artifact_id=f"{profile.image.repository}@{github.digests[commit]}",
+                                source_git_ref=commit,
+                            ),
+                            deploy_provider=provider,
+                            rollback=rollback,
+                            deployment_record_id=f"deploy-{number}",
+                        )
+
+                with patch("control_plane.lane_movement._source_transport", return_value=github):
                     self.assertEqual(deploy(old, 1).deploy_status, "pass")
                     self.assertEqual(deploy(new, 2).deploy_status, "pass")
                     with patch.object(

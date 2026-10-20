@@ -1104,7 +1104,14 @@ def _execute_generic_web_deploy_unserialized(
                     )
                 ):
                     application_lifecycle.snapshot.state = "held"
+                    application_lifecycle.snapshot.qualification_failure_hold_completed = False
                     application_lifecycle.hold()
+                    if (
+                        isinstance(exc, GenericWebProviderDeploymentFailed)
+                        and resolved_lane.instance == "testing"
+                        and resolved_target.target_type == "application"
+                    ):
+                        application_lifecycle.snapshot.qualification_failure_hold_completed = True
                 else:
                     application_lifecycle.snapshot.state = "restore_failed"
                     application_lifecycle.restore()
@@ -1214,7 +1221,10 @@ def _execute_generic_web_deploy_unserialized(
             provider_effect_attempted=provider_effect_attempted,
             provider_failure_proved=(
                 isinstance(exc, GenericWebProviderDeploymentFailed)
-                and application_lifecycle is None
+                and (
+                    application_lifecycle is None
+                    or application_lifecycle.snapshot.qualification_failure_hold_completed
+                )
                 and not deploy_completed
             ),
             image_effect_attempted=image_effect_attempted,

@@ -181,13 +181,27 @@ assuming that the asynchronous Swarm updater and provider job share a clock.
 Ambiguous or pending effects
 retain the original operation's recovery fence. Recovery uses the same runtime
 qualification before crediting a provider job, without enabling production adoption.
-At the original normal-deploy deadline, an unchanged current service with only
-failed or rejected tasks bound to that attempt's image and deployment identity
-proves unsuccessful qualification, even on initial creation without rollout status.
-This requires stopped attempts, such as a finite restart policy; unlimited restart
-replacement tasks that are still progressing remain unknown. Missing lineage or
-task reads also remain unknown. Recovery without
-proof of the original deadline does not infer that failure or release lifecycle holds.
+At the original normal-deploy deadline, the original service image and deployment
+identity with a settled update
+(completed or initial creation without update status) prove a qualification
+timeout at that deadline. Replacement tasks and reaped task history do not erase
+that settled service proof. An updater still running, an unreadable service or a
+foreign service specification remains unknown.
+
+The supported generic-web recovery dry-run/apply can establish that same timeout
+once the original lease is inactive. It compares the database observation time with
+the database `deploy_trigger` checkpoint plus the original timeout saved in the
+reservation, rather than current target settings or provider clocks. A later
+`application_schedule_hold` checkpoint requires the exact original held receipt
+with proved cleanup completion. A later `records_commit` checkpoint also requires
+the exact original failed deployment record. Automatic
+observation without that deadline proof retains the fence; use the reviewed native
+recovery operation. An application lifecycle qualification failure becomes durable
+only after its hold actions complete. The original artifact-bound receipt records
+that completion; absent legacy proof or failed cleanup retains the operation fence.
+Recovery preserves the held receipt and original schedule baseline. The next
+deliberate deployment uses the existing resume-from-hold path and qualifies before
+activating schedules. Settling the failed operation never releases the lifecycle hold.
 
 An ordinary sweep also checks every application testing runtime before skipping
 saved deployment evidence, including legacy false inventory and lanes without inputs.
@@ -198,7 +212,9 @@ new operation identity: a failed repair replays its original result even when it
 own service specification remains installed. A successful repair advances inventory,
 so later drift can receive its own repair. Changed builds, inputs or authority also
 form new intents. Changing task IDs, timestamps or replica churn never mint another repair. Unavailable or pending
-observations wait instead. Staff/staging holds and unresolved operations still
+observations wait for the ordinary periodic sweep instead of requesting an immediate
+reconcile loop. Paused or rollback-paused stable drift replays the same repair intent.
+Staff/staging holds and unresolved operations still
 prevent dispatch. Recovery preserves only the original readback-verified receipt
 and never credits current inputs to an earlier attempt. An old operation without
 that receipt can settle, then the next normal sweep repairs its inputs. Removing
