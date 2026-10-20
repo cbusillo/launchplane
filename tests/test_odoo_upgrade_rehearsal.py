@@ -1921,12 +1921,12 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         )
         logs = Path(self.fixture.volumes[mount["Name"]]["Mountpoint"])
         mount["Source"] = str(logs)
-        secret = "known-runtime-password"
-        containers["script-runner"][1]["Config"]["Env"].append("ODOO_DB_PASSWORD=" + secret)
+        fixture_value = "synthetic-log-redaction-sentinel"
+        containers["script-runner"][1]["Config"]["Env"].append("ODOO_DB_PASSWORD=" + fixture_value)
         path = logs / "odoo.log"
         content = (
             b"old output\n" * REHEARSAL_DIAGNOSTIC_TEXT_LIMIT
-            + ("RuntimeError: unknown upgrade module\n" + secret).encode()
+            + ("RuntimeError: unknown upgrade module\n" + fixture_value).encode()
         )
         path.write_bytes(content)
         before = path.stat()
@@ -1941,7 +1941,7 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         self.assertTrue(all(log["available"] for log in result["runtime"]))
         self.assertEqual(len(result["files"]), 1)
         self.assertIn("RuntimeError: unknown upgrade module", result["files"][0]["tail"])
-        self.assertNotIn(secret, str(result))
+        self.assertNotIn(fixture_value, str(result))
         self.assertNotIn("must never be read", str(result))
         self.assertEqual(path.read_bytes(), content)
         self.assertEqual(path.stat().st_mtime_ns, before.st_mtime_ns)
