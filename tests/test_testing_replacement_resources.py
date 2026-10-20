@@ -524,10 +524,6 @@ class TestingResourceCaptureRecoveryTests(unittest.TestCase):
                     adapter.created_placement(namespace)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestingResourceCheckpointTests(unittest.TestCase):
     def test_real_adapter_retains_original_checkpoint_when_next_render_refuses(self) -> None:
         from contextlib import nullcontext
@@ -645,3 +641,7 @@ class TestingResourceCheckpointTests(unittest.TestCase):
             )
             self.assertEqual(retained.state, "reconcile_required")
             self.assertEqual(run("competing").status, "target_busy")
+
+
+if __name__ == "__main__":
+    unittest.main()
