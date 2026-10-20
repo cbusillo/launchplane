@@ -1,14 +1,34 @@
-from contextlib import closing
+from contextlib import closing, ExitStack
 from datetime import UTC, datetime
 from pathlib import Path
 import os
+import io
+from email.message import Message
 from tempfile import TemporaryDirectory
 import unittest
 from typing import Any, cast
 from unittest.mock import patch
+import click
+from urllib.error import HTTPError, URLError
 
 from control_plane.dokploy import api
+from control_plane.http_app import idempotency_request_fingerprint
 from control_plane.generic_web_deploy_http import GenericWebDeployEnvelope
+from control_plane.generic_web_source_qualification import (
+    GenericWebSourceUnqualified,
+    GenericWebPromotionSourceRefused,
+    qualified_generic_web_source_inventory,
+)
+from control_plane.release_review import release_version, ReleaseEvidenceUnavailable
+from control_plane.workflows.generic_web_promotion import (
+    GenericWebProdPromotionRequest,
+    resolve_generic_web_promotion_inputs,
+)
+from control_plane.workflows.verireel_app_maintenance import (
+    _request_internal_smoke_maintenance_api,
+    VeriReelAppMaintenanceRequest,
+)
+from tests.test_generic_web_promotion import _store_with_production
 from control_plane.generic_web_deploy_provider_adapter import (
     GenericWebDeployProviderMutationAdapter,
 )
@@ -81,6 +101,216 @@ from control_plane.generic_web_testing_settlement import settle_testing_pre_imag
 
 
 class OriginalExecutionTests(unittest.TestCase):
+    def test_real_post_image_transport_errors_keep_current_source_unqualified(self) -> None:
+        for failure in ("product_transport", "product_server", "canary_server"):
+            with (
+                self.subTest(failure=failure),
+                TemporaryDirectory() as directory,
+                closing(
+                    PostgresRecordStore(database_url=f"sqlite+pysqlite:///{directory}/records.db")
+                ) as store,
+                ExitStack() as patches,
+            ):
+                fixture = _store_with_production()
+                profile = fixture.profile
+                lane = profile.lanes[0]
+                if failure == "canary_server":
+                    lane = lane.model_copy(
+                        update={
+                            "generic_web_extensions": _extensions().model_copy(
+                                update={"maintenance": ()}
+                            )
+                        }
+                    )
+                    profile = profile.model_copy(update={"lanes": (lane, *profile.lanes[1:])})
+                fixture.profile = profile
+                prior = fixture.read_environment_inventory(
+                    context_name=lane.context, instance_name="testing"
+                )
+                assert prior.runtime_identity is not None
+                fixture.write_qualified_testing_inventory(
+                    prior.model_copy(
+                        update={
+                            "source_git_ref": "b" * 40,
+                            "runtime_identity": prior.runtime_identity.model_copy(
+                                update={"source_git_ref": "b" * 40}
+                            ),
+                        }
+                    )
+                )
+                store.ensure_schema()
+                store.write_product_profile_record(profile)
+                for record in fixture.deployments.values():
+                    store.write_deployment_record(record)
+                for inventory in fixture.inventories.values():
+                    store.write_environment_inventory(inventory)
+                release_version(store=store, profile=profile, instance="testing")
+                provider_type = (
+                    _LifecycleDeployProvider
+                    if failure == "canary_server"
+                    else _FakeGenericWebDeployProvider
+                )
+                provider = provider_type(
+                    target_id="fixture-target",
+                    observation=GenericWebProviderDeploymentObservation(
+                        outcome="present",
+                        deployment_status="success",
+                        deployment_id="new-image",
+                        started_at="2026-10-20T20:00:00Z",
+                        finished_at="2026-10-20T20:01:00Z",
+                    ),
+                )
+                adapter = GenericWebDeployProviderMutationAdapter(
+                    control_plane_root=Path(directory),
+                    record_store=store,
+                    deploy_request=GenericWebDeployEnvelope(
+                        product=profile.product,
+                        deploy=_request().model_copy(update={"source_git_ref": "b" * 40}),
+                    ),
+                    profile=profile,
+                    lane=lane,
+                    trace_id="source-uncertainty",
+                    deploy_provider=provider,
+                )
+                target = adapter._resolve_deploy_target()
+                store.write_dokploy_target_record(
+                    DokployTargetRecord(
+                        context=lane.context,
+                        instance="testing",
+                        target_type="application",
+                        target_name=target.resolved_target.target_name,
+                        updated_at=provider.observation.started_at,
+                    )
+                )
+                store.write_dokploy_target_id_record(
+                    DokployTargetIdRecord(
+                        context=lane.context,
+                        instance="testing",
+                        target_id=target.resolved_target.target_id,
+                        updated_at=provider.observation.started_at,
+                    )
+                )
+                store.write_provider_target_record(
+                    ProviderTargetRecord(
+                        context=lane.context,
+                        instance="testing",
+                        target_id=target.resolved_target.target_id,
+                        provider_id=provider.provider_id,
+                        target_category="application",
+                        provider_target_type="application",
+                        display_name="fixture",
+                        updated_at=provider.observation.started_at,
+                    )
+                )
+                calls: list[str] = []
+
+                def response_lost(*_args: object, **_kwargs: object) -> Any:
+                    current = store.read_environment_inventory(
+                        context_name=lane.context, instance_name="testing"
+                    )
+                    self.assertEqual(current.post_deploy_update.status, "pending")
+                    calls.append(failure)
+                    if failure == "product_transport":
+                        raise URLError("Response lost after dispatch.")
+                    error = HTTPError(
+                        "https://fixture.invalid",
+                        500,
+                        "Remote error",
+                        Message(),
+                        io.BytesIO(b"failed"),
+                    )
+                    self.addCleanup(error.close)
+                    raise error
+
+                if failure.startswith("product"):
+
+                    def executor(
+                        root: Path, records: object, context: Any, guard: Any
+                    ) -> PostDeployUpdateEvidence:
+                        _request_internal_smoke_maintenance_api(
+                            base_url="https://fixture.invalid",
+                            secret="fixture-only",
+                            request=VeriReelAppMaintenanceRequest(
+                                action="grant-sponsored",
+                                intent="stable-testing-remote-e2e-grant-sponsored",
+                                email="fixture@example.com",
+                            ),
+                            execution_guard=guard,
+                        )
+                        return PostDeployUpdateEvidence(attempted=True, status="pass")
+
+                    patches.enter_context(
+                        patch(
+                            "control_plane.generic_web_deploy_http._generic_web_post_deploy_executor_for_profile",
+                            return_value=executor,
+                        )
+                    )
+                    patches.enter_context(
+                        patch(
+                            "control_plane.workflows.verireel_app_maintenance.urlopen",
+                            side_effect=response_lost,
+                        )
+                    )
+                else:
+                    schedules: dict[str, api.JsonObject] = {}
+
+                    def upsert(**kwargs: Any) -> api.JsonObject:
+                        payload = dict(kwargs["schedule_payload"])
+                        schedules[str(payload["name"])] = payload
+                        return {**payload, "scheduleId": payload["name"]}
+
+                    patches.enter_context(
+                        patch(
+                            "control_plane.dokploy.source.read_dokploy_config",
+                            return_value=("https://fixture.invalid", "fixture-only"),
+                        )
+                    )
+                    patches.enter_context(
+                        patch.object(
+                            api,
+                            "read_dokploy_application_schedule",
+                            side_effect=lambda **kwargs: schedules.get(kwargs["schedule_name"]),
+                        )
+                    )
+                    patches.enter_context(
+                        patch.object(api, "upsert_dokploy_application_schedule", side_effect=upsert)
+                    )
+                    patches.enter_context(
+                        patch.object(api, "_read_schedule_deployments", return_value=[])
+                    )
+                    patches.enter_context(patch.object(api, "urlopen", side_effect=response_lost))
+                outcome = run_durable_provider_operation(
+                    store=store,
+                    scope="fixture",
+                    route_path="/v1/drivers/generic-web/deploy",
+                    request_fingerprint=failure,
+                    idempotency_key=failure,
+                    lease_owner="fixture",
+                    response_trace_id="fixture",
+                    adapter=adapter,
+                )
+                self.assertEqual(outcome.status, "reconcile_required")
+                self.assertTrue(calls)
+                current = store.read_environment_inventory(
+                    context_name=lane.context, instance_name="testing"
+                )
+                held = store.read_deployment_record(current.deployment_record_id)
+                self.assertTrue(
+                    any(
+                        not entry.terminal
+                        for entry in ExecutionReceipt.model_validate_json(
+                            held.post_deploy_update.evidence[EXECUTION_EVIDENCE_KEY]
+                        ).entries
+                    )
+                )
+                with self.assertRaises(ReleaseEvidenceUnavailable):
+                    release_version(store=store, profile=profile, instance="testing")
+                with self.assertRaises(GenericWebPromotionSourceRefused):
+                    resolve_generic_web_promotion_inputs(
+                        record_store=store,
+                        request=GenericWebProdPromotionRequest(product=profile.product),
+                    )
+
     def test_durable_terminal_run_does_not_reobserve_later_cron_history(self) -> None:
         entry = ExecutionEntry(
             kind="schedule_run",
@@ -720,11 +950,402 @@ class ExecutionRecoveryTests(unittest.TestCase):
             scope="normal-fixture",
             route_path="/v1/drivers/generic-web/deploy",
             idempotency_key=key,
-            request_fingerprint=key,
+            request_fingerprint=idempotency_request_fingerprint(
+                route_path="/v1/drivers/generic-web/deploy",
+                payload=self.request,
+            ),
             lease_owner="normal-worker",
             response_trace_id="normal-result",
             adapter=adapter,
         )
+
+    def normal_record(self, outcome: DurableProviderOperationResult) -> DeploymentRecord:
+        assert outcome.record is not None
+        operation = build_provider_operation_key(
+            scope=outcome.record.scope,
+            route_path=outcome.record.route_path,
+            idempotency_key=outcome.record.idempotency_key,
+            request_fingerprint=outcome.record.request_fingerprint,
+            reconciliation_key=outcome.record.reconciliation_key,
+        )
+        return self.store.read_deployment_record(
+            self.normal_adapter()._deployment_record_id(operation)
+        )
+
+    def test_answered_executor_result_lost_before_publication_settles_without_replay(self) -> None:
+        self.profile = _profile()
+        self.store.write_product_profile_record(self.profile)
+        executions: list[str] = []
+        for verdict in ("fail", "pass", "exception"):
+            with self.subTest(verdict=verdict):
+
+                def executor(*_args: object) -> PostDeployUpdateEvidence:
+                    executions.append(verdict)
+                    if verdict == "exception":
+                        raise click.ClickException("Answered product assertion failed.")
+                    return PostDeployUpdateEvidence(attempted=True, status=cast(Any, verdict))
+
+                publish = self.store.publish_generic_web_testing_result
+
+                def interrupt_final(**kwargs: Any) -> None:
+                    if (
+                        kwargs["deployment"].deploy.status == "pass"
+                        and kwargs["deployment"].post_deploy_update.status != "pending"
+                    ):
+                        raise ValueError("Final publication interrupted.")
+                    publish(**kwargs)
+
+                key = f"unpublished-{verdict}"
+                with (
+                    patch(
+                        "control_plane.generic_web_deploy_http._generic_web_post_deploy_executor_for_profile",
+                        return_value=executor,
+                    ),
+                    patch.object(
+                        self.store,
+                        "publish_generic_web_testing_result",
+                        side_effect=interrupt_final,
+                    ),
+                ):
+                    outcome = self.run_normal(self.normal_adapter(), key)
+                self.assertEqual(outcome.status, "reconcile_required")
+                pending = self.normal_record(outcome)
+                inventory = self.store.read_environment_inventory(
+                    context_name=pending.context, instance_name="testing"
+                )
+                self.assertEqual(inventory.deployment_record_id, pending.record_id)
+                self.assertEqual(pending.post_deploy_update.status, "pending")
+                with self.assertRaises(GenericWebSourceUnqualified):
+                    qualified_generic_web_source_inventory(
+                        store=self.store, profile=self.profile, lane=self.profile.lanes[0]
+                    )
+                status, result = self.complete_original(key, action="settle_testing_failure")
+                self.assertEqual((status, result["reservation_state"]), (202, "completed"))
+                self.assertEqual(
+                    self.store.read_deployment_record(pending.record_id).post_deploy_update.status,
+                    "fail",
+                )
+                self.assertEqual(
+                    self.store.read_environment_inventory(
+                        context_name=pending.context, instance_name="testing"
+                    ),
+                    inventory,
+                )
+                replay = self.run_normal(self.normal_adapter(), key)
+                self.assertEqual(replay.status, "replayed")
+        self.assertEqual(executions, ["fail", "pass", "exception"])
+        successor = self.run_normal(self.normal_adapter(), "ordinary-successor")
+        self.assertEqual(successor.status, "completed")
+        qualified = qualified_generic_web_source_inventory(
+            store=self.store, profile=self.profile, lane=self.profile.lanes[0]
+        )
+        self.assertEqual(qualified.deployment_record_id, self.normal_record(successor).record_id)
+
+    def test_durable_normal_pass_recovery_preserves_corrected_inventory(self) -> None:
+        self.profile = _profile()
+        self.store.write_product_profile_record(self.profile)
+        publish = self.store.publish_generic_web_testing_result
+        executions: list[str] = []
+
+        def executor(*_args: object) -> PostDeployUpdateEvidence:
+            executions.append("executed")
+            return PostDeployUpdateEvidence(attempted=True, status="pass")
+
+        def lose_completion(**kwargs: Any) -> None:
+            publish(**kwargs)
+            if kwargs["deployment"].post_deploy_update.status == "pass":
+                raise ValueError("Publication committed before worker stopped.")
+
+        with (
+            patch(
+                "control_plane.generic_web_deploy_http._generic_web_post_deploy_executor_for_profile",
+                return_value=executor,
+            ),
+            patch.object(
+                self.store, "publish_generic_web_testing_result", side_effect=lose_completion
+            ),
+        ):
+            outcome = self.run_normal(self.normal_adapter(), "durable-pass")
+        self.assertEqual(outcome.status, "reconcile_required")
+        saved = self.normal_record(outcome)
+        inventory = self.store.read_environment_inventory(
+            context_name=saved.context, instance_name="testing"
+        ).model_copy(update={"bootstrap_record_id": "supported-correction"})
+        self.store.write_environment_inventory(inventory)
+        status, result = self.complete_original("durable-pass")
+        self.assertEqual((status, result["reservation_state"]), (202, "completed"))
+        self.assertEqual(self.store.read_deployment_record(saved.record_id), saved)
+        self.assertEqual(
+            self.store.read_environment_inventory(
+                context_name=saved.context, instance_name="testing"
+            ),
+            inventory,
+        )
+        self.assertEqual(self.run_normal(self.normal_adapter(), "durable-pass").status, "replayed")
+        self.assertEqual(executions, ["executed"])
+
+    def test_exact_original_image_failure_disqualifies_saved_normal_pass(self) -> None:
+        self.profile = _profile()
+        self.store.write_product_profile_record(self.profile)
+        publish = self.store.publish_generic_web_testing_result
+
+        def lose_completion(**kwargs: Any) -> None:
+            publish(**kwargs)
+            if kwargs["deployment"].deploy.status == "pass":
+                raise ValueError("Final result committed before worker stopped.")
+
+        for newer in (False, True):
+            with self.subTest(newer=newer):
+                key = f"contradicted-image-{newer}"
+                self.provider.observation = self.provider.observation.model_copy(
+                    update={"deployment_status": "success"}
+                )
+                with patch.object(
+                    self.store, "publish_generic_web_testing_result", side_effect=lose_completion
+                ):
+                    outcome = self.run_normal(self.normal_adapter(), key)
+                self.assertEqual(outcome.status, "reconcile_required")
+                saved = self.normal_record(outcome)
+                self.assertEqual(
+                    qualified_generic_web_source_inventory(
+                        store=self.store, profile=self.profile, lane=self.profile.lanes[0]
+                    ).deployment_record_id,
+                    saved.record_id,
+                )
+                if newer:
+                    apply_deployment_evidence(
+                        record_store=self.store,
+                        deployment_record=saved.model_copy(
+                            update={
+                                "record_id": "independent-newer-failed-result",
+                                "post_deploy_update": PostDeployUpdateEvidence(
+                                    attempted=True,
+                                    status="fail",
+                                    detail="Independent later result.",
+                                ),
+                            }
+                        ),
+                    )
+                inventory = self.store.read_environment_inventory(
+                    context_name=saved.context, instance_name="testing"
+                )
+                self.provider.observation = self.provider.observation.model_copy(
+                    update={"deployment_status": "error"}
+                )
+                if not newer:
+                    exact = self.provider.observation
+                    self.provider.observation = exact.model_copy(
+                        update={"deployment_id": "foreign-image"}
+                    )
+                    status, _rejected = self.complete_original(key, action="settle_testing_failure")
+                    self.assertEqual(status, 409)
+                    self.assertEqual(self.store.read_deployment_record(saved.record_id), saved)
+                    self.assertEqual(
+                        self.store.read_environment_inventory(
+                            context_name=saved.context, instance_name="testing"
+                        ),
+                        inventory,
+                    )
+                    self.provider.observation = exact
+                status, result = self.complete_original(key, action="settle_testing_failure")
+                self.assertEqual((status, result["reservation_state"]), (202, "completed"))
+                settled = self.store.read_deployment_record(saved.record_id)
+                self.assertEqual(settled.post_deploy_update.status, "fail")
+                self.assertEqual(settled.destination_health, saved.destination_health)
+                self.assertEqual(
+                    self.store.read_environment_inventory(
+                        context_name=saved.context, instance_name="testing"
+                    ),
+                    inventory,
+                )
+                with self.assertRaises(GenericWebSourceUnqualified):
+                    qualified_generic_web_source_inventory(
+                        store=self.store, profile=self.profile, lane=self.profile.lanes[0]
+                    )
+                self.assertEqual(self.run_normal(self.normal_adapter(), key).status, "replayed")
+
+    def test_progress_refuses_supported_correction_before_any_executor_dispatch(self) -> None:
+        self.profile = _profile()
+        self.store.write_product_profile_record(self.profile)
+        publish = self.store.publish_generic_web_testing_result
+        corrected: list[DeploymentRecord] = []
+
+        def correct_before_progress(**kwargs: Any) -> None:
+            if kwargs["deployment"].post_deploy_update.status == "pending":
+                with closing(
+                    PostgresRecordStore(
+                        database_url=f"sqlite+pysqlite:///{self.root / 'records.db'}"
+                    )
+                ) as writer:
+                    saved = writer.read_deployment_record(kwargs["deployment"].record_id)
+                    correction = saved.model_copy(
+                        update={
+                            "integration_key_readback": IntegrationKeyReadbackEvidence(
+                                status="pass"
+                            )
+                        }
+                    )
+                    apply_deployment_evidence(record_store=writer, deployment_record=correction)
+                    corrected.append(correction)
+            publish(**kwargs)
+
+        with (
+            patch(
+                "control_plane.generic_web_deploy_http._generic_web_post_deploy_executor_for_profile"
+            ) as selector,
+            patch.object(
+                self.store,
+                "publish_generic_web_testing_result",
+                side_effect=correct_before_progress,
+            ),
+        ):
+            executor = selector.return_value
+            executor.__name__ = "unused_executor"
+            outcome = self.run_normal(self.normal_adapter(), "progress-correction")
+            executor.assert_not_called()
+        self.assertEqual(outcome.status, "reconcile_required")
+        self.assertEqual(self.normal_record(outcome), corrected[0])
+        inventory = self.store.read_environment_inventory(
+            context_name=corrected[0].context, instance_name="testing"
+        )
+        status, result = self.complete_original(
+            "progress-correction", action="settle_testing_failure"
+        )
+        self.assertEqual((status, result["reservation_state"]), (202, "completed"))
+        settled = self.store.read_deployment_record(corrected[0].record_id)
+        self.assertEqual(settled.integration_key_readback, corrected[0].integration_key_readback)
+        self.assertEqual(
+            self.store.read_environment_inventory(
+                context_name=settled.context, instance_name="testing"
+            ),
+            inventory,
+        )
+
+    def test_normal_final_result_preserves_same_original_inventory_correction(self) -> None:
+        self.profile = _profile()
+        self.store.write_product_profile_record(self.profile)
+        for verdict in ("pass", "fail"):
+            with self.subTest(verdict=verdict):
+                corrected: list[object] = []
+
+                def executor(*_args: object) -> PostDeployUpdateEvidence:
+                    inventory = self.store.read_environment_inventory(
+                        context_name=self.profile.lanes[0].context, instance_name="testing"
+                    ).model_copy(update={"bootstrap_record_id": f"corrected-{verdict}"})
+                    self.store.write_environment_inventory(inventory)
+                    corrected.append(inventory)
+                    return PostDeployUpdateEvidence(attempted=True, status=cast(Any, verdict))
+
+                with patch(
+                    "control_plane.generic_web_deploy_http._generic_web_post_deploy_executor_for_profile",
+                    return_value=executor,
+                ):
+                    outcome = self.run_normal(self.normal_adapter(), f"same-original-{verdict}")
+                self.assertEqual(outcome.status, "completed")
+                saved = self.normal_record(outcome)
+                self.assertEqual(saved.post_deploy_update.status, verdict)
+                self.assertEqual(
+                    self.store.read_environment_inventory(
+                        context_name=saved.context, instance_name="testing"
+                    ),
+                    corrected[0],
+                )
+
+    def test_saved_aggregate_failure_keeps_original_health_evidence(self) -> None:
+        for health_status, post_status in (("pending", "fail"), ("fail", "skipped")):
+            with self.subTest(health=health_status):
+                key = f"saved-health-{health_status}"
+                record_id = self.prepare(
+                    "records_commit", ExecutionReceipt(), qualified=True, idempotency_key=key
+                )
+                saved = self.store.read_deployment_record(record_id)
+                failed = saved.model_copy(
+                    update={
+                        "post_deploy_update": saved.post_deploy_update.model_copy(
+                            update={
+                                "attempted": post_status != "skipped",
+                                "status": post_status,
+                            }
+                        ),
+                        "destination_health": saved.destination_health.model_copy(
+                            update={"status": health_status}
+                        ),
+                    }
+                )
+                self.store.write_deployment_record(failed)
+                status, result = self.complete_original(key)
+                self.assertEqual((status, result["reservation_state"]), (202, "completed"))
+                self.assertEqual(self.store.read_deployment_record(record_id), failed)
+                completed = self.store.read_idempotency_record(
+                    scope=self.reservation.scope,
+                    route_path=self.reservation.route_path,
+                    idempotency_key=key,
+                )
+                assert completed is not None
+                self.assertEqual(completed.response_status_code, 502)
+                self.assertEqual(completed.response_payload["result"]["deploy_status"], "fail")
+
+    def test_legacy_missing_record_with_required_executor_is_not_image_only(self) -> None:
+        self.profile = _profile()
+        self.store.write_product_profile_record(self.profile)
+        reservation = _write_generic_web_recovery_reservation(
+            self.store,
+            _generic_web_recovery_reservation(
+                original_deploy=self.request,
+                idempotency_key="missing-executor-proof",
+                provider_effect_phase="deploy_trigger",
+            ),
+        )
+
+        def executor(*_args: object) -> PostDeployUpdateEvidence:
+            raise AssertionError("Observation must not run the executor.")
+
+        with (
+            patch(
+                "control_plane.generic_web_deploy_provider_adapter.default_generic_web_deploy_provider",
+                return_value=self.provider,
+            ),
+            patch(
+                "control_plane.generic_web_deploy_provider_adapter.generic_web_post_deploy_executor_for_profile",
+                return_value=executor,
+            ),
+            patch(
+                "control_plane.workflows.generic_web_post_deploy.generic_web_post_deploy_executor_for_profile",
+                return_value=executor,
+            ),
+        ):
+            status, result = _invoke_recovery(
+                self.app,
+                original_deploy=self.request,
+                idempotency_key=reservation.idempotency_key,
+                reason="Inspect required executor with missing original evidence.",
+            )
+        self.assertEqual((status, result["proposed_action"]), (200, "hold_unknown"))
+
+    def test_new_image_only_interruption_settles_then_normal_successor_qualifies(self) -> None:
+        self.profile = _profile()
+        self.store.write_product_profile_record(self.profile)
+        with patch(
+            "control_plane.workflows.generic_web_deploy.integration_key_readback",
+            side_effect=ProviderMutationUnknownError("Worker interrupted after image observation."),
+        ):
+            outcome = self.run_normal(self.normal_adapter(), "image-only-interruption")
+        self.assertEqual(outcome.status, "reconcile_required")
+        original = self.normal_record(outcome)
+        receipt = ExecutionReceipt.model_validate_json(
+            original.post_deploy_update.evidence[EXECUTION_EVIDENCE_KEY]
+        )
+        self.assertFalse(any(entry.kind == "product_executor" for entry in receipt.entries))
+        status, result = self.complete_original(
+            "image-only-interruption", action="settle_testing_failure"
+        )
+        self.assertEqual((status, result["reservation_state"]), (202, "completed"))
+        successor = self.run_normal(self.normal_adapter(), "image-only-successor")
+        self.assertEqual(successor.status, "completed")
+        qualified = qualified_generic_web_source_inventory(
+            store=self.store, profile=self.profile, lane=self.profile.lanes[0]
+        )
+        self.assertEqual(qualified.post_deploy_update.status, "skipped")
 
     def test_normal_failed_qualification_updates_only_unchanged_inventory_baseline(self) -> None:
         self.profile = _profile()
@@ -832,10 +1453,18 @@ class ExecutionRecoveryTests(unittest.TestCase):
                     configure("changed-after-callback")
                 publisher(**kwargs)
 
-            with patch.object(
-                self.store, "publish_generic_web_testing_result", side_effect=changed_then_publish
+            with (
+                patch.object(
+                    self.store,
+                    "publish_generic_web_testing_result",
+                    side_effect=changed_then_publish,
+                ),
+                patch(
+                    "control_plane.generic_web_deploy_http._generic_web_post_deploy_executor_for_profile"
+                ) as selector,
             ):
                 outcome = self.run_normal(self.normal_adapter(), "normal-authority-race")
+                selector.return_value.assert_not_called()
         self.assertEqual(outcome.status, "reconcile_required")
         with self.assertRaises(FileNotFoundError):
             self.store.read_environment_inventory(

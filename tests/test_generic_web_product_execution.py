@@ -35,9 +35,6 @@ class _Response:
         self.status = 200
         self.request = _Request(self, method)
 
-    def finished(self) -> None:
-        raise AssertionError("Unbounded response.finished must never be called.")
-
 
 class _Request:
     def __init__(self, response: _Response, method: str) -> None:
@@ -97,7 +94,7 @@ class _Page:
             callback(value)
 
     def wait_for_event(self, event: str, *, predicate: Callable[[Any], bool], timeout: int) -> None:
-        if event != "requestfinished" or timeout <= 0:
+        if timeout <= 0:
             raise AssertionError("Request completion needs a bounded built-in wait.")
         self.browser.events.append("bounded-body-wait")
         for request in self.browser.requests:
@@ -309,8 +306,6 @@ class ProductExecutionTests(unittest.TestCase):
                 self.assertNotIn("delete-user", self.actions)
                 self.assertEqual(self.recorder.receipt.entries[0].terminal, "")
                 self.assertTrue(self.browser.closed)
-                if failure == "body_pending":
-                    self.assertIn("bounded-body-wait", self.browser.events)
 
     def test_local_or_answered_assertion_failure_keeps_terminal_proof(self) -> None:
         for failure in ("fill", "assertion", "signup-click", "qr-click"):

@@ -7,7 +7,10 @@ from pathlib import Path
 from typing import Callable, Literal, Protocol, cast
 
 import click
-from control_plane.generic_web_source_qualification import GenericWebPromotionSourceRefused
+from control_plane.generic_web_source_qualification import (
+    GenericWebPromotionSourceRefused,
+    GenericWebSourceQualificationStore,
+)
 from control_plane.generic_web_testing_inputs import TestingInputSafetyRefused
 from control_plane.provider_operations import ProviderMutationUnknownError
 from control_plane.workflows.generic_web_execution import (
@@ -79,6 +82,9 @@ from control_plane.workflows.ship import (
     generate_deployment_record_id,
     utc_now_timestamp,
 )
+
+
+GENERIC_WEB_UNOBSERVED_DEPLOYMENT_ID = "control-plane-dokploy"
 
 
 class GenericWebDeployStore(Protocol):
@@ -176,6 +182,7 @@ class GenericWebPostDeployContext(BaseModel):
     artifact_id: str
     source_git_ref: str
     authority_digest: str = ""
+    previous_inventory: EnvironmentInventory | None
 
     @model_validator(mode="after")
     def _validate_context(self) -> "GenericWebPostDeployContext":
@@ -364,6 +371,7 @@ def _build_post_deploy_context(
     resolved_deploy_target: GenericWebResolvedDeployTarget,
     artifact_id: str,
     source_git_ref: str,
+    previous_inventory: EnvironmentInventory | None,
     authority_digest: str = "",
 ) -> GenericWebPostDeployContext:
     resolved_target = resolved_deploy_target.resolved_target
@@ -389,6 +397,7 @@ def _build_post_deploy_context(
         artifact_id=artifact_id,
         source_git_ref=source_git_ref,
         authority_digest=authority_digest,
+        previous_inventory=previous_inventory,
     )
 
 
@@ -759,7 +768,7 @@ def _execute_generic_web_deploy_unserialized(
             build_deployment_record(
                 request=fallback_request,
                 record_id=record_id,
-                deployment_id="control-plane-dokploy",
+                deployment_id=GENERIC_WEB_UNOBSERVED_DEPLOYMENT_ID,
                 deployment_status="fail",
                 started_at=started_at,
                 finished_at=finished_at,
@@ -828,7 +837,7 @@ def _execute_generic_web_deploy_unserialized(
                 build_deployment_record(
                     request=ship_request,
                     record_id=record_id,
-                    deployment_id="control-plane-dokploy",
+                    deployment_id=GENERIC_WEB_UNOBSERVED_DEPLOYMENT_ID,
                     deployment_status="pending",
                     started_at=started_at,
                     finished_at="",
@@ -996,7 +1005,7 @@ def _execute_generic_web_deploy_unserialized(
                 build_deployment_record(
                     request=ship_request,
                     record_id=record_id,
-                    deployment_id="control-plane-dokploy",
+                    deployment_id=GENERIC_WEB_UNOBSERVED_DEPLOYMENT_ID,
                     deployment_status="pending",
                     started_at=started_at,
                     finished_at="",
@@ -1048,6 +1057,54 @@ def _execute_generic_web_deploy_unserialized(
                     "Generic web provider deployment did not return exact successful evidence."
                 )
         deploy_completed = True
+        previous_inventory = None
+        if post_deploy_executor is not None:
+            try:
+                previous_inventory = cast(
+                    GenericWebSourceQualificationStore, record_store
+                ).read_environment_inventory(
+                    context_name=resolved_lane.context, instance_name=resolved_lane.instance
+                )
+            except FileNotFoundError:
+                pass
+        if (
+            execution_recorder is not None
+            and publish_deployment is not None
+            and (application_lifecycle is not None or post_deploy_executor is not None)
+        ):
+            assert provider_deployment_observation is not None
+            progress = build_deployment_record(
+                request=ship_request,
+                record_id=record_id,
+                deployment_id=provider_deployment_observation.deployment_id,
+                deployment_status="pass",
+                started_at=provider_deployment_observation.started_at,
+                finished_at=provider_deployment_observation.finished_at,
+                resolved_target=resolved_target,
+                deployed_target=prepared_deploy_target.deployed_target,
+                delegated_executor=resolved_deploy_provider.delegated_executor,
+                post_deploy_update=PostDeployUpdateEvidence(
+                    attempted=True,
+                    status="pending",
+                    evidence={**post_deploy_update.evidence, **execution_recorder.evidence()},
+                ),
+                runtime_identity=_build_runtime_identity(
+                    profile=resolved_profile,
+                    lane=resolved_lane,
+                    ship_request=ship_request,
+                    deployment_record_id=record_id,
+                    deployed_at=provider_deployment_observation.finished_at,
+                ),
+                runtime_source=verified_build_evidence,
+            )
+            publish_deployment(
+                progress,
+                build_environment_inventory(
+                    deployment_record=progress,
+                    updated_at=provider_deployment_observation.finished_at,
+                ),
+            )
+            post_deploy_update = progress.post_deploy_update
         key_readback = integration_key_readback(
             record_store=record_store,
             context_name=resolved_lane.context,
@@ -1074,6 +1131,7 @@ def _execute_generic_web_deploy_unserialized(
                     artifact_id=ship_request.artifact_id,
                     source_git_ref=ship_request.source_git_ref,
                     authority_digest=qualification_authority,
+                    previous_inventory=previous_inventory,
                 ),
                 post_deploy_executor=post_deploy_executor,
                 guard=GenericWebPostDeployGuard(
@@ -1154,7 +1212,7 @@ def _execute_generic_web_deploy_unserialized(
         recorded_deployment_id = (
             provider_deployment_observation.deployment_id
             if provider_deployment_observation is not None
-            else "control-plane-dokploy"
+            else GENERIC_WEB_UNOBSERVED_DEPLOYMENT_ID
         )
         recorded_started_at = (
             provider_deployment_observation.started_at
@@ -1166,7 +1224,7 @@ def _execute_generic_web_deploy_unserialized(
             if provider_deployment_observation is not None
             else finished_at
         )
-        if deploy_completed and post_deploy_update.status == "skipped":
+        if deploy_completed and post_deploy_update.status in {"skipped", "pending"}:
             post_deploy_update = PostDeployUpdateEvidence(
                 attempted=True,
                 status="fail",
@@ -1263,7 +1321,7 @@ def _execute_generic_web_deploy_unserialized(
     recorded_deployment_id = (
         provider_deployment_observation.deployment_id
         if provider_deployment_observation is not None
-        else "control-plane-dokploy"
+        else GENERIC_WEB_UNOBSERVED_DEPLOYMENT_ID
     )
     recorded_started_at = (
         provider_deployment_observation.started_at
@@ -1463,7 +1521,6 @@ def record_observed_generic_web_deploy(
     observation: GenericWebProviderDeploymentObservation,
     deployment_record_id: str,
     post_deploy_unobserved: bool,
-    publish: bool = True,
 ) -> tuple[dict[str, object], dict[str, object]]:
     record, records, result = build_observed_generic_web_deploy(
         record_store=record_store,
@@ -1474,15 +1531,14 @@ def record_observed_generic_web_deploy(
         deployment_record_id=deployment_record_id,
         post_deploy_unobserved=post_deploy_unobserved,
     )
-    if publish:
-        record_store.write_deployment_record(record)
-        if record.deploy.status == "pass":
-            record_store.write_environment_inventory(
-                build_environment_inventory(
-                    deployment_record=record,
-                    updated_at=record.deploy.finished_at or observation.finished_at,
-                )
+    record_store.write_deployment_record(record)
+    if record.deploy.status == "pass":
+        record_store.write_environment_inventory(
+            build_environment_inventory(
+                deployment_record=record,
+                updated_at=record.deploy.finished_at or observation.finished_at,
             )
+        )
     return records, result
 
 
@@ -1626,7 +1682,7 @@ def _run_post_deploy_extension(
     index = (
         recorder.begin(
             "product_executor",
-            post_deploy_executor.__name__,
+            getattr(post_deploy_executor, "__name__", type(post_deploy_executor).__name__),
             context.target_id,
             {"authority": context.authority_digest},
         )

@@ -688,15 +688,13 @@ class DokployGenericWebDeployProvider:
         history = tuple(
             dokploy_api._read_schedule_deployments(host=host, token=token, schedule_id=schedule_id)
         )
-        for row in history:
-            nested = dokploy_api.as_json_object(row.get("schedule"))
-            for identity in (row, nested or {}):
-                if identity.get("applicationId") and identity["applicationId"] != application_id:
-                    raise click.ClickException(
-                        "Original execution history has a foreign application."
-                    )
-                if identity.get("scheduleId") and identity["scheduleId"] != schedule_id:
-                    raise click.ClickException("Original execution history has a foreign schedule.")
+        from control_plane.workflows.generic_web_execution import require_schedule_history_binding
+
+        require_schedule_history_binding(
+            history,
+            schedule_id=schedule_id,
+            application_id=application_id,
+        )
         return history
 
     def _read_provider_config(self, *, control_plane_root: Path) -> tuple[str, str]:

@@ -862,8 +862,20 @@ the durable mutation store, then uses the existing exact-match adoption or retry
 methods. For in-place application testing, `adopt_observed` reacquires the
 original lease and rechecks the reviewed execution, captured authority, image
 and exact inventory before publication. It runs no deploy, maintenance,
-canary or activation. Missing current-lane publication can complete only against
-missing inventory or the exact pre-attempt inventory bound before dispatch.
+canary or activation. For receipt-bearing attempts, a provider observation never
+supplies a missing passing application-testing result. A saved final result
+completes as recorded unless exact original terminal image-failure evidence
+invalidates a saved pass. That contradiction uses failure settlement without
+repeating product work. Terminal work without a durable aggregate result also
+uses failure settlement, including an image-only attempt interrupted before its
+final write. A normal attempt's unobserved image marker is unfinished evidence:
+exact original terminal image proof permits failed settlement and an ordinary
+successor, while a conflicting real saved image ID remains fenced. Receiptless
+legacy image-only attempts retain guarded image adoption only
+when the inspected configuration, lifecycle and phase declare no post-deploy
+obligation; missing proof for required work remains unknown.
+Missing current-lane publication can complete only against missing inventory or
+the exact pre-attempt inventory bound before dispatch.
 Already final deployment evidence and independently corrected inventory are
 preserved. If another inventory is now current, recovery can complete the
 truthful historical original result while leaving that inventory unchanged.
@@ -876,11 +888,21 @@ recovery envelope preserves the original failed HTTP 502 result and replays
 without effects. An unqualified healthy image retains its separate image fact;
 settlement never creates a successful lane projection. Missing execution proof
 stays `hold_unknown` even if cleanup is the last saved phase.
+When current inventory already points at that original, restarted settlement
+preserves it exactly and writes the truthful failed deployment it references.
+Its copied fields can remain pending until an ordinary successor replaces it;
+the joined source qualifier rejects the failed referenced deployment. A final
+saved pass with corrected inventory is preserved without rebuilding either.
 An answered failed qualification after successful image execution updates the
 unchanged original inventory baseline to failed qualification, through the same
 locked publisher used by ordinary completion. A failed image creates no fresh
 inventory. Durable terminal execution facts are not re-derived from later cron
 history; only unresolved original entries require provider observation.
+When post-image maintenance, an executor or schedule activation is required, the
+ordinary application-testing producer first publishes image success with
+qualification pending under its current lease, target and input authority. A refused publication retains the fence and dispatches no
+post-image maintenance, executor or activation. Its supported continuation is
+the reviewed original recovery above, never another guessed provider call.
 `retry_original_operation` resumes
 the already-acquired reservation path and preserves `reconcile_required` for
 pre-effect rejection, lease loss, uncertain, or non-durable outcomes.

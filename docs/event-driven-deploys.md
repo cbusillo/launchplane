@@ -137,7 +137,9 @@ reservation. The webhook request never waits on a deploy.
     closed out from runtime evidence records none) fails the reconcile instead of
     being announced; the next verified build or an admin deploy records it. A deploy whose
     provider outcome is unknown stays reserved for generic-web deploy recovery
-    and fails the reconcile until it settles; one that failed with a recorded
+    and fails the reconcile until it settles, including when current inventory
+    points at an image whose referenced deployment still has pending qualification.
+    That image identity is not an already-qualified result. One that failed with a recorded
     result is not retried until a newer build or the lane changes. A complete,
     correlated terminal provider failure before any application/post-deploy
     executor runs commits a durable failed result (HTTP 502), including its

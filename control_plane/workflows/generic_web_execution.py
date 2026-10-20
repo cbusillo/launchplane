@@ -285,16 +285,11 @@ class RecordedScheduleExecution:
         payload = api.as_json_object(response)
         intended = api.as_json_object(self.payload) if isinstance(self.payload, dict) else None
         if payload is not None:
-            nested = api.as_json_object(payload.get("schedule"))
-            for identity in (payload, nested or {}):
-                if identity.get("scheduleId") and identity["scheduleId"] != self.schedule_id:
-                    raise ValueError("Original schedule acknowledgement has a foreign binding.")
-                if (
-                    intended is not None
-                    and identity.get("applicationId")
-                    and identity["applicationId"] != intended.get("applicationId")
-                ):
-                    raise ValueError("Original schedule acknowledgement has a foreign application.")
+            require_schedule_history_binding(
+                (payload,),
+                schedule_id=self.schedule_id,
+                application_id=intended.get("applicationId") if intended is not None else None,
+            )
         if (
             payload is not None
             and isinstance(payload.get("deploymentId"), str)
@@ -327,13 +322,6 @@ class RecordedScheduleExecution:
             self.recorder.update(self.index, terminal="done")
             return True
         return False
-
-
-def require_terminal_execution(observation: ExecutionObservation) -> None:
-    if observation.outcome != "terminal":
-        raise ProviderMutationUnknownError(
-            "Original application execution has no attributable terminal proof."
-        )
 
 
 def require_recorded_execution(receipt: ExecutionReceipt) -> None:

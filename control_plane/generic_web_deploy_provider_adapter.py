@@ -63,10 +63,11 @@ from control_plane.workflows.generic_web_execution import (
 from control_plane.dokploy.api import JsonObject
 from control_plane.workflows.generic_web_deploy import (
     GenericWebDeployStore,
+    GENERIC_WEB_UNOBSERVED_DEPLOYMENT_ID,
     normalize_generic_web_artifact_id,
     record_observed_generic_web_deploy,
-    generic_web_record_result,
     build_observed_generic_web_deploy,
+    generic_web_record_result,
 )
 from control_plane.workflows.inventory import build_environment_inventory
 from control_plane.workflows.generic_web_deploy_provider import (
@@ -138,8 +139,24 @@ class _GenericWebDeployProviderInspection:
     legacy_correlation_digest_evidence: dict[str, object] | None = None
     execution: ExecutionObservation | None = None
     execution_record: DeploymentRecord | None = None
-    terminal_unqualified: bool = False
     execution_inventory: EnvironmentInventory | None = None
+
+
+def _saved_testing_result_is_final(record: DeploymentRecord | None) -> bool:
+    return (
+        record is not None
+        and record.deploy.status in {"pass", "fail"}
+        and record.deploy.deployment_id != GENERIC_WEB_UNOBSERVED_DEPLOYMENT_ID
+        and (
+            record.deploy.status == "fail"
+            or record.post_deploy_update.status == "fail"
+            or record.destination_health.status == "fail"
+            or (
+                record.post_deploy_update.status in {"pass", "skipped"}
+                and record.destination_health.status in {"pass", "skipped"}
+            )
+        )
+    )
 
 
 class GenericWebDeployProviderMutationAdapter:
@@ -199,8 +216,6 @@ class GenericWebDeployProviderMutationAdapter:
         )
 
     def _execution_recorder(self, operation_key: str) -> ExecutionRecorder:
-        from control_plane.workflows.generic_web_execution import ExecutionReceipt
-
         record_id = self._deployment_record_id(operation_key)
         try:
             record = self._record_store.read_deployment_record(record_id)
@@ -479,7 +494,7 @@ class GenericWebDeployProviderMutationAdapter:
             saved_record = inspection.execution_record
             if (
                 (inspection.execution is not None and inspection.execution.outcome != "terminal")
-                or inspection.terminal_unqualified
+                or inspection.post_deploy_unobserved
                 or saved_record is None
             ):
                 return ProviderObservation(outcome="unknown")
@@ -581,17 +596,10 @@ class GenericWebDeployProviderMutationAdapter:
                         execution=execution,
                         execution_record=record,
                     )
-                lifecycle = recorded_application_lifecycle(record) if record else None
                 evidence = replace(
                     evidence,
                     execution=execution,
                     execution_record=record,
-                    terminal_unqualified=record is not None
-                    and (
-                        record.post_deploy_update.status not in {"pass", "skipped"}
-                        or record.destination_health.status == "fail"
-                        or (lifecycle is not None and lifecycle.state != "qualified")
-                    ),
                 )
             if evidence.resolved_deploy_target is not None and self._application_testing(
                 evidence.resolved_deploy_target
@@ -618,7 +626,6 @@ class GenericWebDeployProviderMutationAdapter:
                 return replace(
                     evidence, observation=GenericWebProviderDeploymentObservation(outcome="unknown")
                 )
-            evidence = replace(evidence, terminal_unqualified=evidence.execution is not None)
         resolved_target = evidence.resolved_deploy_target
         if observation.outcome != "present":
             if (
@@ -780,6 +787,16 @@ class GenericWebDeployProviderMutationAdapter:
                     provider_evidence=evidence.provider_evidence,
                 )
             post_deploy_unobserved = receipt is not None and receipt.state != "qualified"
+        if self._application_testing(resolved_target):
+            if evidence.execution is not None:
+                saved = evidence.execution_record
+                post_deploy_unobserved = not _saved_testing_result_is_final(saved) or (
+                    saved is not None
+                    and deployment_record_passed(saved)
+                    and not generic_web_provider_deployment_succeeded(observation.deployment_status)
+                )
+            elif post_deploy_unobserved:
+                observation = GenericWebProviderDeploymentObservation(outcome="unknown")
         return _GenericWebDeployProviderInspection(
             observation=observation,
             resolved_deploy_target=resolved_target,
@@ -789,7 +806,6 @@ class GenericWebDeployProviderMutationAdapter:
             legacy_correlation_digest_evidence=evidence.legacy_correlation_digest_evidence,
             execution=evidence.execution,
             execution_record=evidence.execution_record,
-            terminal_unqualified=evidence.terminal_unqualified,
             execution_inventory=evidence.execution_inventory,
         )
 
@@ -1389,43 +1405,59 @@ class GenericWebDeployProviderMutationAdapter:
                         )
                     }
                 )
-            elif not settle and reviewed.terminal_unqualified:
+            elif not settle and reviewed.post_deploy_unobserved:
                 raise ProviderMutationUnknownError(
                     "Unqualified testing work requires hold-only settlement."
                 )
             checkpoint("testing_failure_settlement" if settle else "records_commit")
-            same_final_image = (
-                record is not None
-                and record.deploy.status in {"pass", "fail"}
-                and record.deploy.deployment_id == observation.deployment_id
-            )
-            if same_final_image:
-                assert record is not None
-                published = record
-                records, result = generic_web_record_result(
-                    record=record,
-                    product=self._profile.product,
-                    target=target,
-                    observation=observation,
-                )
-            else:
-                published, records, result = build_observed_generic_web_deploy(
+            legacy_image_only = current is None and not fresh.post_deploy_unobserved and not settle
+            if legacy_image_only and not _saved_testing_result_is_final(record):
+                record, _legacy_records, _legacy_result = build_observed_generic_web_deploy(
                     record_store=self._record_store,
                     profile=self._profile,
                     lane=self._lane,
                     resolved_deploy_target=target,
                     observation=observation,
                     deployment_record_id=self._deployment_record_id(operation_key),
-                    post_deploy_unobserved=settle,
+                    post_deploy_unobserved=False,
                 )
-                if settle and record is not None:
-                    published = published.model_copy(
-                        update={"post_deploy_update": record.post_deploy_update}
-                    )
+            if record is None:
+                raise ProviderMutationUnknownError("The original testing result is unavailable.")
+            if (
+                record.deploy.status in {"pass", "fail"}
+                and record.deploy.deployment_id != GENERIC_WEB_UNOBSERVED_DEPLOYMENT_ID
+            ):
+                if record.deploy.deployment_id != observation.deployment_id:
+                    raise ProviderMutationUnknownError("The original image observation changed.")
+            elif settle:
+                record = record.model_copy(
+                    update={
+                        "deploy": record.deploy.model_copy(
+                            update={
+                                "status": "pass"
+                                if generic_web_provider_deployment_succeeded(
+                                    observation.deployment_status
+                                )
+                                else "fail",
+                                "deployment_id": observation.deployment_id,
+                                "started_at": observation.started_at,
+                                "finished_at": observation.finished_at,
+                            }
+                        ),
+                    }
+                )
+            else:
+                raise ProviderMutationUnknownError("The original testing result is unfinished.")
+            published = record
+            records, result = generic_web_record_result(
+                record=published,
+                product=self._profile.product,
+                target=target,
+                observation=observation,
+            )
             failed = (
                 settle
-                or published.deploy.status == "fail"
-                or published.post_deploy_update.status == "fail"
+                or not deployment_record_passed(published)
                 or not generic_web_provider_deployment_succeeded(observation.deployment_status)
             )
             if failed:
@@ -1440,19 +1472,6 @@ class GenericWebDeployProviderMutationAdapter:
                 inventory = build_environment_inventory(
                     deployment_record=published,
                     updated_at=published.deploy.finished_at or observation.finished_at,
-                )
-            elif (
-                settle
-                and already_published
-                and saved_inventory is not None
-                and published != expected_record
-            ):
-                inventory = saved_inventory.model_copy(
-                    update={
-                        "deploy": published.deploy,
-                        "post_deploy_update": published.post_deploy_update,
-                        "destination_health": published.destination_health,
-                    }
                 )
             cast(_TestingResultPublisher, self._record_store).publish_generic_web_testing_result(
                 reservation=lease.evidence_reservation(),
@@ -1547,12 +1566,25 @@ class GenericWebDeployProviderMutationAdapter:
             if self._application_testing(resolved_target)
             else None
         )
+        try:
+            expected_inventory = (
+                cast(_ExecutionInventoryReader, self._record_store).read_environment_inventory(
+                    context_name=self._lane.context, instance_name=self._lane.instance
+                )
+                if recorder is not None
+                else None
+            )
+        except FileNotFoundError:
+            expected_inventory = None
 
         def publish_deployment(
             record: DeploymentRecord, inventory: EnvironmentInventory | None
         ) -> None:
+            nonlocal expected_inventory
             assert recorder is not None
-            require_recorded_execution(recorder.receipt)
+            progress = record.post_deploy_update.status == "pending"
+            if not progress:
+                require_recorded_execution(recorder.receipt)
             try:
                 current_inventory = cast(
                     _ExecutionInventoryReader, self._record_store
@@ -1561,15 +1593,11 @@ class GenericWebDeployProviderMutationAdapter:
                 )
             except FileNotFoundError:
                 current_inventory = None
-            if (
-                inventory is not None
-                and recorder.receipt.inventory_baseline_digest
-                != evidence_digest(
-                    current_inventory.model_dump(mode="json")
-                    if current_inventory is not None
-                    else None
-                )
-            ):
+            if current_inventory != expected_inventory:
+                if progress:
+                    raise ProviderMutationUnknownError(
+                        "Testing inventory changed before qualification."
+                    )
                 inventory = None
             guard = getattr(self._record_store, "provider_evidence_guard", None)
             if guard is None or not isinstance(lease, ProviderEvidenceLease):
@@ -1581,7 +1609,8 @@ class GenericWebDeployProviderMutationAdapter:
                 self._require_testing_publication_authority(
                     resolved_target,
                     current_lane=inventory is not None,
-                    check_inputs=inventory is not None and deployment_record_passed(record),
+                    check_inputs=inventory is not None
+                    and (progress or deployment_record_passed(record)),
                 )
 
             with guard(lease.evidence_reservation, authority_checkpoint=authority):
@@ -1594,6 +1623,9 @@ class GenericWebDeployProviderMutationAdapter:
                     deployment=record,
                     inventory=inventory,
                 )
+            recorder.expected_record = record
+            if inventory is not None:
+                expected_inventory = inventory
 
         try:
             resolved_target = self._resolve_deploy_target()

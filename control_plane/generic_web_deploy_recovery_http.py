@@ -893,7 +893,7 @@ async def _inspect_generic_web_deploy_recovery(
             if provider_outcome == "present":
                 proposed_action = (
                     "settle_testing_failure"
-                    if provider_inspection.terminal_unqualified
+                    if provider_inspection.post_deploy_unobserved
                     else "adopt_observed"
                 )
             elif provider_outcome == "absent" and retry_safe:

@@ -1917,7 +1917,7 @@ class GenericWebDeployTests(unittest.TestCase):
         self.assertEqual(observation.outcome, "unknown")
         self.assertEqual(store.deployments, [])
 
-    def test_provider_adapter_legacy_correlation_is_adoption_only_and_marks_post_deploy(
+    def test_provider_adapter_legacy_correlation_with_required_post_work_stays_unknown(
         self,
     ) -> None:
         profile = _profile(driver_id="odoo")
@@ -1936,13 +1936,15 @@ class GenericWebDeployTests(unittest.TestCase):
             legacy_provider_effect_started_at="2026-08-15T12:00:00Z",
         )
 
-        self.assertEqual(inspection.observation.outcome, "present")
+        self.assertEqual(inspection.observation.outcome, "unknown")
         self.assertEqual(inspection.provider_evidence, "deployment_correlated_legacy")
         self.assertFalse(inspection.retry_safe)
         self.assertTrue(inspection.post_deploy_unobserved)
         self.assertIsNotNone(inspection.legacy_correlation_digest_evidence)
         self.assertEqual(len(provider.observed_target_ids), 1)
         self.assertEqual(provider.legacy_observation_calls, 1)
+        self.assertEqual(store.deployments, [])
+        self.assertEqual(store.inventories, [])
 
     def test_provider_adapter_observe_uses_effect_start_for_legacy_correlation(self) -> None:
         profile = _profile()

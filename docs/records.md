@@ -1944,7 +1944,12 @@ qualification remain separate: a healthy image with failed product assertions
 can retain its image fact while the original operation settles as failed.
 Receipt-only advances merge against the current row under the original lease
 and authority transaction, so a simultaneous supported evidence correction is
-retained. Final publication compares the producer's expected pending record;
+retained. When post-image maintenance, an executor or schedule activation is
+required, the original publishes exact image success with qualification pending
+before that work and makes it current. That projection contains no previous qualification
+verdict. The executor receives the prior inventory captured before publication,
+so bounded qualification retries retain their prior-attempt count.
+Final publication compares the producer's expected record and inventory;
 it does not adopt a correction as permission to overwrite it. Recorded terminal
 facts survive later cron activity and do not require another history read.
 

@@ -1656,6 +1656,16 @@ def _plan_testing_target(
     )
     if desired_artifact_id == current_artifact_id or desired_digest == current_digest:
         plan.update(action="none", reason="already_deployed", held=False)
+        if isinstance(desired, VerifiedGenericWebBuild):
+            try:
+                deployed = cast(GenericWebDeployStore, record_store).read_deployment_record(
+                    _current_testing_deployment_id(record_store=record_store, lane=lane)
+                )
+            except FileNotFoundError:
+                pass
+            else:
+                if deployed.post_deploy_update.status == "pending":
+                    plan.update(action="deploy", reason="testing_qualification_pending")
     else:
         if current_artifact_id and not current_commit:
             plan.update(action="none", reason="current_source_unverified", held=True)

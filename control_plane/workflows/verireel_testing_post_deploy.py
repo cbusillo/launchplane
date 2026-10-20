@@ -17,7 +17,6 @@ from urllib.parse import urljoin, urlparse
 from uuid import uuid4
 from typing import Literal
 from typing import cast
-from typing import Protocol
 
 import click
 from playwright.sync_api import (
@@ -31,7 +30,6 @@ from playwright.sync_api import (
 )
 
 from control_plane.contracts.promotion_record import PostDeployUpdateEvidence, ReleaseStatus
-from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.workflows.generic_web_deploy import (
     GenericWebDeployStore,
     GenericWebPostDeployContext,
@@ -59,18 +57,9 @@ class TestingProductCheckFailed(click.ClickException):
     pass
 
 
-class TestingQualificationInventoryStore(Protocol):
-    def read_environment_inventory(
-        self, *, context_name: str, instance_name: str
-    ) -> EnvironmentInventory: ...
-
-
-def previous_transient_attempts(store: object, context: GenericWebPostDeployContext) -> int:
-    try:
-        inventory = cast(TestingQualificationInventoryStore, store).read_environment_inventory(
-            context_name=context.context, instance_name=context.instance
-        )
-    except FileNotFoundError:
+def previous_transient_attempts(context: GenericWebPostDeployContext) -> int:
+    inventory = context.previous_inventory
+    if inventory is None:
         return 0
     if (
         inventory.artifact_identity is None
@@ -631,9 +620,7 @@ def execute_verireel_testing_post_deploy(
             else "transient"
         )
         if evidence["failure_kind"] == "transient":
-            evidence["transient_attempts"] = str(
-                previous_transient_attempts(record_store, context) + 1
-            )
+            evidence["transient_attempts"] = str(previous_transient_attempts(context) + 1)
         detail = f"Testing qualification failed in {phase}; no passing qualification is recorded."
     evidence["finished_at"] = utc_now_timestamp()
     return PostDeployUpdateEvidence(attempted=True, status=status, detail=detail, evidence=evidence)

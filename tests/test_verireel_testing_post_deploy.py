@@ -14,6 +14,8 @@ from unittest.mock import MagicMock, Mock, patch
 import click
 
 from control_plane.contracts.promotion_record import PostDeployUpdateEvidence
+from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.promotion_record import ArtifactIdentityReference, DeploymentEvidence
 from control_plane.workflows.generic_web_deploy import (
     GenericWebDeployStore,
     GenericWebPostDeployContext,
@@ -43,10 +45,56 @@ def context(instance: str = "testing") -> GenericWebPostDeployContext:
         target_type="application",
         artifact_id=f"ghcr.io/example/video@sha256:{'a' * 64}",
         source_git_ref="b" * 40,
+        previous_inventory=None,
     )
 
 
 class CapturedTestingAuthorityTests(unittest.TestCase):
+    def test_retry_count_uses_captured_prior_inventory_or_explicit_absence(self) -> None:
+        from control_plane.workflows.verireel_testing_post_deploy import previous_transient_attempts
+
+        captured = context()
+        previous_count = 2
+        prior = EnvironmentInventory(
+            context=captured.context,
+            instance=captured.instance,
+            source_git_ref=captured.source_git_ref,
+            artifact_identity=ArtifactIdentityReference(artifact_id=captured.artifact_id),
+            deployment_record_id="prior",
+            updated_at="2026-10-20T20:00:00Z",
+            deploy=DeploymentEvidence(
+                target_name=captured.target_name,
+                target_type="application",
+                deploy_mode="application",
+                status="pass",
+            ),
+            post_deploy_update=PostDeployUpdateEvidence(
+                attempted=True,
+                status="fail",
+                evidence={
+                    "failure_kind": "transient",
+                    "transient_attempts": str(previous_count),
+                },
+            ),
+        )
+        self.assertEqual(previous_transient_attempts(captured), 0)
+        self.assertEqual(
+            previous_transient_attempts(captured.model_copy(update={"previous_inventory": prior})),
+            previous_count,
+        )
+        self.assertEqual(
+            previous_transient_attempts(
+                captured.model_copy(
+                    update={
+                        "previous_inventory": prior.model_copy(
+                            update={"source_git_ref": "another-build"}
+                        )
+                    }
+                )
+            ),
+            0,
+        )
+
     def test_qualification_uses_captured_authority_without_rereading_changed_records(self) -> None:
         from control_plane.workflows.verireel_testing_post_deploy import (
             testing_qualification_authority,
