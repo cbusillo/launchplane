@@ -83,6 +83,10 @@ class ProductProfileConflictError(ValueError):
     """A product profile changed after it authorized a bundled write."""
 
 
+class ProductRepositoryOwnershipError(ValueError):
+    """A repository is already owned; repeating a dry run cannot resolve it."""
+
+
 def require_product_profile_writes(
     records: Iterable[LaunchplaneProductProfileRecord],
     current_profiles: Iterable[LaunchplaneProductProfileRecord],
@@ -112,7 +116,7 @@ def require_product_profile_writes(
                     bool(record.repository_id) and record.repository_id == other.repository_id
                 )
                 if same_repository or same_identity:
-                    raise ProductProfileConflictError(
+                    raise ProductRepositoryOwnershipError(
                         "Repository already belongs to another product."
                     )
         profiles[record.product] = record

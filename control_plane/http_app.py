@@ -906,6 +906,7 @@ from control_plane.storage.product_authority_bundle import (
     ProductAuthorityBundle,
     ProductContextOwnershipError,
     ProductProfileConflictError,
+    ProductRepositoryOwnershipError,
     RuntimeEnvironmentConflictError,
 )
 from control_plane.health_monitor_scheduler import HealthMonitorScheduler
@@ -18800,6 +18801,8 @@ def create_launchplane_fastapi_app(
                 record_store=database_store,
                 manifest=onboarding_manifest,
             )
+        except ProductRepositoryOwnershipError:
+            raise
         except ProductProfileConflictError as error:
             raise _launchplane_http_error(
                 status_code=409,
@@ -31411,6 +31414,21 @@ def create_launchplane_fastapi_app(
         )
 
     app.add_exception_handler(PublicHostAuthorityBusy, public_host_authority_busy_handler)
+
+    async def product_repository_ownership_handler(
+        request: Request, error: Exception
+    ) -> JSONResponse:
+        return await launchplane_http_exception_handler(
+            request,
+            _launchplane_http_error(
+                status_code=409,
+                trace_id=next_trace_id(),
+                code="repository_owned_by_other_product",
+                message=str(error),
+            ),
+        )
+
+    app.add_exception_handler(ProductRepositoryOwnershipError, product_repository_ownership_handler)
     app.add_exception_handler(HTTPException, launchplane_http_exception_handler)
     app.add_exception_handler(
         STARLETTE_HTTP_EXCEPTION,

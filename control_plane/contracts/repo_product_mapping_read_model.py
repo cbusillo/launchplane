@@ -11,10 +11,6 @@ from control_plane.contracts.product_profile_record import (
 )
 
 
-class RepoProductMappingAmbiguousError(RuntimeError):
-    """An authoritative repository mapping has more than one active product."""
-
-
 class RepoProductMappingProductStore(Protocol):
     def list_product_profile_records(
         self,
@@ -41,7 +37,11 @@ class RepoProductMappingEntry(BaseModel):
     classification: RepoProductClassification
     product: str = ""
     display_name: str = ""
-    driver_id: str = Field(default="", exclude_if=lambda value: value == "")
+    driver_id: str = Field(
+        default="",
+        exclude_if=lambda value: value == "",
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     contexts: tuple[str, ...] = ()
     environments: tuple[str, ...] = ()
     preview_context: str = ""
@@ -65,6 +65,11 @@ class RepoProductMapping(BaseModel):
     schema_version: int = Field(default=1, ge=1)
     generated_at: str
     repositories: tuple[RepoProductMappingEntry, ...]
+    ambiguous_repositories: tuple[str, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
     @model_validator(mode="after")
     def _validate_mapping(self) -> "RepoProductMapping":
@@ -83,18 +88,25 @@ def build_repo_product_mapping_from_records(
     work_requests: tuple[EveryCodeWorkRequestRecord, ...] = (),
 ) -> RepoProductMapping:
     entries: dict[str, RepoProductMappingEntry] = {}
+    ambiguous: set[str] = set()
     for profile in product_profiles:
         repository = profile.repository.strip()
         if not repository or "/" not in repository:
             continue
         key = repository.lower()
+        if key in ambiguous:
+            continue
         if key in entries and entries[key].product != profile.product:
-            raise RepoProductMappingAmbiguousError("Repository has multiple product profiles.")
+            ambiguous.add(key)
+            del entries[key]
+            continue
         entries[key] = _product_profile_entry(profile)
 
     for request in work_requests:
         repository = request.repository.strip()
         if not repository or "/" not in repository:
+            continue
+        if repository.lower() in ambiguous:
             continue
         entries.setdefault(
             repository.lower(),
@@ -109,6 +121,7 @@ def build_repo_product_mapping_from_records(
     return RepoProductMapping(
         generated_at=generated_at,
         repositories=tuple(sorted(entries.values(), key=lambda entry: entry.repository.lower())),
+        ambiguous_repositories=tuple(sorted(ambiguous)),
     )
 
 

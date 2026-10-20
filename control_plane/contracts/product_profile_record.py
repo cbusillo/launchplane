@@ -701,7 +701,9 @@ class LaunchplaneProductProfileRecord(BaseModel):
     schema_version: int = Field(default=CURRENT_PRODUCT_PROFILE_SCHEMA_VERSION, ge=1)
     lifecycle_state: ProductLifecycleState = "active"
     classification: RepoProductClassification = Field(
-        default="managed_runtime", exclude_if=lambda value: value == "managed_runtime"
+        default="managed_runtime",
+        exclude_if=lambda value: value == "managed_runtime",
+        json_schema_extra={"x-launchplane-optional-response": True},
     )
     # Unknown existing records require review; only explicit prelaunch records are exempt.
     production_use: Literal["unknown", "prelaunch", "live"] = "unknown"
@@ -728,7 +730,9 @@ class LaunchplaneProductProfileRecord(BaseModel):
     # product serializes exactly as before the switch existed, so digests over
     # profiles do not change.
     release_on_acceptance: ReleaseOnAcceptance = Field(
-        default="held", exclude_if=lambda value: value == "held"
+        default="held",
+        exclude_if=lambda value: value == "held",
+        json_schema_extra={"x-launchplane-optional-response": True},
     )
     product: str
     display_name: str

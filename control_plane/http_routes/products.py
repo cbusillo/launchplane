@@ -66,10 +66,7 @@ from control_plane.contracts.protected_artifacts import (
     ProtectedArtifactStore,
     build_protected_artifact_set,
 )
-from control_plane.contracts.repo_product_mapping_read_model import (
-    RepoProductMapping,
-    RepoProductMappingAmbiguousError,
-)
+from control_plane.contracts.repo_product_mapping_read_model import RepoProductMapping
 from control_plane.contracts.tenant_merge_eligibility import TenantMergeCandidate
 from control_plane.http_routes.support import (
     LAUNCHPLANE_SERVICE_CONTEXT,
@@ -954,19 +951,11 @@ def register_agent_context_read_routes(
             dependencies=common,
             trace_id=trace_id,
         )
-        try:
-            payload = build_repo_product_mapping_service_payload(
-                generated_at=utc_now_timestamp(),
-                product_store=mapping_store,
-                work_request_store=mapping_store,
-            )
-        except RepoProductMappingAmbiguousError as error:
-            raise common.http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="repo_product_mapping_ambiguous",
-                message=str(error),
-            ) from error
+        payload = build_repo_product_mapping_service_payload(
+            generated_at=utc_now_timestamp(),
+            product_store=mapping_store,
+            work_request_store=mapping_store,
+        )
         return RepoProductMappingResponse(
             trace_id=trace_id,
             mapping=RepoProductMapping.model_validate(payload["mapping"]),

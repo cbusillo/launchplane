@@ -16682,7 +16682,8 @@
               "out_of_scope"
             ],
             "title": "Classification",
-            "type": "string"
+            "type": "string",
+            "x-launchplane-optional-response": true
           },
           "default_branch": {
             "default": "main",
@@ -16798,7 +16799,8 @@
               "director_standing"
             ],
             "title": "Release On Acceptance",
-            "type": "string"
+            "type": "string",
+            "x-launchplane-optional-response": true
           },
           "repository": {
             "title": "Repository",
@@ -16837,7 +16839,6 @@
           }
         },
         "required": [
-          "classification",
           "default_branch",
           "display_name",
           "driver_id",
@@ -16852,7 +16853,6 @@
           "product",
           "production_use",
           "promotion_workflow",
-          "release_on_acceptance",
           "repository",
           "repository_id",
           "repository_owner_id",
@@ -38524,6 +38524,15 @@
       "RepoProductMapping": {
         "additionalProperties": false,
         "properties": {
+          "ambiguous_repositories": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Ambiguous Repositories",
+            "type": "array",
+            "x-launchplane-optional-response": true
+          },
           "generated_at": {
             "title": "Generated At",
             "type": "string"
@@ -38579,7 +38588,8 @@
           "driver_id": {
             "default": "",
             "title": "Driver Id",
-            "type": "string"
+            "type": "string",
+            "x-launchplane-optional-response": true
           },
           "environments": {
             "default": [],
@@ -38622,7 +38632,6 @@
           "classification",
           "contexts",
           "display_name",
-          "driver_id",
           "environments",
           "preview_context",
           "product",

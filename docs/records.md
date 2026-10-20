@@ -903,7 +903,8 @@ and keeps existing serialized profiles unchanged. A non-runtime profile has no
 driver, image, lanes, historical contexts, preview configuration, runtime config
 requirements or business-hours policy. Acceptance metadata does not grant runtime
 authority. Repository mappings retain its real product id and classification;
-ambiguous active repository owners make the mapping unavailable.
+ambiguous active repositories are named in `ambiguous_repositories` and omitted
+from the mapping, including its work-request fallback. Other entries stay available.
 
 Register a new non-runtime product through `POST /v1/product-onboarding/apply`
 using the existing `product_onboarding.apply` authorization. Send `product:

@@ -12,7 +12,6 @@ from control_plane.contracts.preview_readiness_read_model import (
     build_preview_readiness_read_model,
 )
 from control_plane.contracts.product_environment_read_model import ActionAllowed
-from control_plane.contracts.repo_product_mapping_read_model import RepoProductMappingAmbiguousError
 from control_plane.work_graph_service import (
     WorkGraphPlanningFactsProvider,
     WorkGraphWorkRequestStore,
@@ -64,10 +63,12 @@ def build_agent_context_service_payload(
 ) -> AgentContextPayload:
     normalized_repository = repository.strip()
     sections = {
-        "repo_product_mapping": _build_repo_product_mapping_section(
-            generated_at=generated_at,
-            product_store=product_store,
-            work_request_store=work_request_store,
+        "repo_product_mapping": _available_section(
+            build_repo_product_mapping_service_payload(
+                generated_at=generated_at,
+                product_store=product_store,  # type: ignore[arg-type]
+                work_request_store=work_request_store,
+            )
         ),
         "work_graph_snapshot": _build_work_graph_snapshot_section(
             generated_at=generated_at,
@@ -138,20 +139,3 @@ def _build_work_graph_snapshot_section(
 
 def _available_section(payload: dict[str, object]) -> AgentContextSection:
     return AgentContextSection(status="available", payload=payload)
-
-
-def _build_repo_product_mapping_section(
-    *, generated_at: str, product_store: object, work_request_store: WorkGraphWorkRequestStore
-) -> AgentContextSection:
-    try:
-        return _available_section(
-            build_repo_product_mapping_service_payload(
-                generated_at=generated_at,
-                product_store=product_store,  # type: ignore[arg-type]
-                work_request_store=work_request_store,
-            )
-        )
-    except RepoProductMappingAmbiguousError:
-        return AgentContextSection(
-            status="unavailable", reason_code="repo_product_mapping_ambiguous"
-        )

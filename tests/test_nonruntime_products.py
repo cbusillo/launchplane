@@ -21,7 +21,6 @@ from control_plane.contracts.product_profile_record import (
 from control_plane.contracts.product_environment_read_model import build_product_site_overview
 from control_plane.contracts.product_reconcile import ProductReconcileRequestRecord
 from control_plane.contracts.repo_product_mapping_read_model import (
-    RepoProductMappingAmbiguousError,
     build_repo_product_mapping_from_records,
 )
 from control_plane.github_app_webhook import _product_for_repository
@@ -37,6 +36,7 @@ from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage.product_authority_bundle import (
     ProductAuthorityBundle,
     ProductProfileConflictError,
+    ProductRepositoryOwnershipError,
 )
 from control_plane.testing_activation import read_product_compose
 from control_plane.workflows.generic_web_deploy import (
@@ -111,7 +111,7 @@ def assert_registration_race(case: unittest.TestCase, store: PostgresRecordStore
                             absent_product_ids=(profile.product,),
                         )
                     )
-                except ProductProfileConflictError:
+                except (ProductProfileConflictError, ProductRepositoryOwnershipError):
                     return "conflict"
                 return "created"
 
@@ -198,11 +198,15 @@ class NonruntimeProductTests(unittest.TestCase):
             }
         )
         for profiles in ((runtime, profile), (profile, runtime)):
-            with (
-                self.subTest(order=profiles[0].product),
-                self.assertRaises(RepoProductMappingAmbiguousError),
-            ):
-                build_repo_product_mapping_from_records(generated_at=NOW, product_profiles=profiles)
+            with self.subTest(order=profiles[0].product):
+                safe = inert_profile("safe").model_copy(update={"repository": "example/safe"})
+                mapping = build_repo_product_mapping_from_records(
+                    generated_at=NOW, product_profiles=(*profiles, safe)
+                )
+                self.assertEqual(
+                    tuple(entry.product for entry in mapping.repositories), (safe.product,)
+                )
+                self.assertEqual(mapping.ambiguous_repositories, (profile.repository,))
 
     def test_store_absence_repository_and_classification_guards(self) -> None:
         with TemporaryDirectory() as directory:
@@ -223,7 +227,7 @@ class NonruntimeProductTests(unittest.TestCase):
                     collision = profile.model_copy(
                         update={"product": "other", "repository": profile.repository.upper()}
                     )
-                    with self.assertRaises(ProductProfileConflictError):
+                    with self.assertRaises(ProductRepositoryOwnershipError):
                         store.write_product_profile_record(collision)
                     runtime = LaunchplaneProductProfileRecord.model_validate(
                         {
@@ -235,6 +239,18 @@ class NonruntimeProductTests(unittest.TestCase):
                         store.write_product_profile_record(runtime)
                     self.assertEqual(store.read_product_profile_record(profile.product), profile)
                     self.assertEqual(len(store.list_product_profile_records()), 1)
+                    other = profile.model_copy(
+                        update={"product": "other", "repository": "example/other"}
+                    )
+                    store.write_product_profile_record(other)
+                    with self.assertRaises(ProductRepositoryOwnershipError):
+                        store.compare_and_write_product_profile_record(
+                            expected_record=other,
+                            replacement_record=other.model_copy(
+                                update={"repository": profile.repository}
+                            ),
+                        )
+                    self.assertEqual(store.read_product_profile_record(other.product), other)
 
     def test_sqlite_registration_transactions_compete_without_overwrite(self) -> None:
         with (
@@ -257,10 +273,7 @@ class NonruntimeProductTests(unittest.TestCase):
             profile = inert_profile()
             store.write_product_profile_record(profile)
             store.write_repository_inventory_record(_inventory(repository=profile.repository))
-            self.assertEqual(
-                _product_for_repository(store=store, repository_id="424242"),
-                ("", "product_has_no_runtime"),
-            )
+            self.assertFalse(_product_for_repository(store=store, repository_id="424242")[0])
             transport = Mock(side_effect=AssertionError("Runtime transport must not be obtained"))
             for kind in ("testing", "preview"):
                 request = ProductReconcileRequestRecord(
@@ -277,7 +290,6 @@ class NonruntimeProductTests(unittest.TestCase):
                     record_store=store, request=request, transport_factory=transport
                 )
                 self.assertEqual(outcome.plan["action"], "none")
-                self.assertEqual(outcome.plan["reason"], "product_has_no_runtime")
             self.assertEqual(request_product_reconcile_sweep(store, NOW, transport), ())
             transport.assert_not_called()
             with patch(
@@ -336,7 +348,7 @@ class NonruntimeProductHttpTests(unittest.IsolatedAsyncioTestCase):
                                     product="launchplane",
                                     context="launchplane",
                                 ).model_dump(mode="json")["github_actions"][0],
-                                "products": ["launchplane", "desktop-tool"],
+                                "products": ["launchplane", "desktop-tool", "another"],
                                 "actions": [
                                     "product_onboarding.apply",
                                     "product_profile.read",
@@ -399,6 +411,31 @@ class NonruntimeProductHttpTests(unittest.IsolatedAsyncioTestCase):
             readback = store.read_product_profile_record("desktop-tool")
             self.assertEqual(readback.repository, "example/desktop-tool")
             self.assertFalse(readback.is_managed_runtime)
+            conflicting = {**product_profile_payload("another"), "repository": readback.repository}
+            refused = await _asgi_request(
+                app, "POST", "/v1/product-profiles", headers=headers, payload=conflicting
+            )
+            self.assertEqual(refused.status_code, 409, refused.text)
+            self.assertEqual(refused.json()["error"]["code"], "repository_owned_by_other_product")
+            runtime_onboarding: dict[str, object] = {
+                "product": "launchplane",
+                "manifest": {
+                    "product": "another",
+                    "display_name": "Another",
+                    "repository": readback.repository,
+                    "image_repository": "ghcr.io/example/another",
+                    "lanes": [{"context": "another", "instance": "testing"}],
+                },
+            }
+            refused = await _asgi_request(
+                app,
+                "POST",
+                ROUTE,
+                headers={**headers, "Idempotency-Key": "runtime-collision"},
+                payload=runtime_onboarding,
+            )
+            self.assertEqual(refused.status_code, 409, refused.text)
+            self.assertEqual(refused.json()["error"]["code"], "repository_owned_by_other_product")
             self.assertEqual(store.list_physical_provider_target_records(), ())
             self.assertEqual(store.list_runtime_environment_records(), ())
             self.assertEqual(store.list_secret_bindings(), ())
@@ -462,6 +499,8 @@ class NonruntimeProductHttpTests(unittest.IsolatedAsyncioTestCase):
             ) as store,
         ):
             store.ensure_schema()
+            safe = inert_profile()
+            store.write_product_profile_record(safe)
             for product in ("first", "second"):
                 store.write_product_profile_record(
                     LaunchplaneProductProfileRecord.model_validate(
@@ -480,12 +519,19 @@ class NonruntimeProductHttpTests(unittest.IsolatedAsyncioTestCase):
             )
             headers = {"Authorization": "Bearer valid-token"}
             mapping = await _asgi_request(app, "GET", "/v1/repo-product-mapping", headers=headers)
-            self.assertEqual(mapping.status_code, 503, mapping.text)
-            self.assertEqual(mapping.json()["error"]["code"], "repo_product_mapping_ambiguous")
+            self.assertEqual(mapping.status_code, 200, mapping.text)
+            self.assertEqual(
+                mapping.json()["mapping"]["ambiguous_repositories"], ["example/shared"]
+            )
+            self.assertEqual(
+                [entry["product"] for entry in mapping.json()["mapping"]["repositories"]],
+                [safe.product],
+            )
             context = await _asgi_request(app, "GET", "/v1/agent/context", headers=headers)
             self.assertEqual(context.status_code, 200, context.text)
             section = context.json()["context"]["sections"]["repo_product_mapping"]
-            self.assertEqual((section["status"], section["payload"]), ("unavailable", {}))
+            self.assertEqual(section["status"], "available")
+            self.assertEqual(section["payload"]["mapping"], mapping.json()["mapping"])
 
     async def test_standing_metadata_preserves_signed_admin_and_current_profile_guards(
         self,

@@ -4847,11 +4847,14 @@ class FilesystemRecordStore:
                 raise ProductProfileChangedError(
                     "Product profile changed before compare-and-write."
                 )
-            self._write_model_locked(
-                "launchplane_product_profiles",
-                replacement_record.product,
-                replacement_record,
-            )
+            try:
+                self._write_model_locked(
+                    "launchplane_product_profiles",
+                    replacement_record.product,
+                    replacement_record,
+                )
+            except ProductProfileConflictError as error:
+                raise ProductProfileChangedError(str(error)) from error
 
     def write_product_retirement_record(self, record: ProductRetirementRecord) -> Path:
         if not self._create_model_if_absent(
