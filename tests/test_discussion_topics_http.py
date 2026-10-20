@@ -88,7 +88,7 @@ class DiscussionTopicHttpTests(unittest.IsolatedAsyncioTestCase):
         app = create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),
             authz_policy=_github_human_product_config_policy(
-                actions=("product_profile.read",),
+                actions=("product_profile.read", "discussion_topic.write"),
                 product="site-a",
                 context="launchplane",
                 role="read_only",

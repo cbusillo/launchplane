@@ -66,7 +66,7 @@ def schema_migration_target(*, current_revision: str, target_revision: str) -> s
     # auto-join it. Explicitly requesting that branch remains the approved-host
     # application path; when preview has applied, join both on that request.
     if {current_revision, target_revision} == {retired_delivery.revision, retired_preview.revision}:
-        return retirement_join.revision
+        return EXPECTED_ALEMBIC_HEAD_REVISION
     if (
         current_revision in {retired_delivery.revision, retirement_join.revision}
         and target_revision == discussion_topics.revision

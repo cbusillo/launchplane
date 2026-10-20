@@ -1,7 +1,9 @@
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from pydantic import ValidationError
 
@@ -48,6 +50,14 @@ class DiscussionTopicTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.add_discussion_topic("site-a", "contact", other)
         self.assertEqual(self.store.list_discussion_topics("site-a"), (first,))
+
+    def test_added_order_crosses_whole_second_without_reordering_topics(self) -> None:
+        first_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        with patch("control_plane.storage.postgres.datetime") as clock:
+            clock.now.side_effect = [first_time, first_time + timedelta(microseconds=1)]
+            first = self.store.add_discussion_topic("site-a", "first", self.topic)
+            second = self.store.add_discussion_topic("site-a", "second", self.topic)
+        self.assertEqual(self.store.list_discussion_topics("site-a"), (first, second))
 
     def test_concurrent_retries_create_one_record_and_one_close_time(self) -> None:
         with ThreadPoolExecutor(max_workers=4) as pool:

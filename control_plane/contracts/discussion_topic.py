@@ -1,6 +1,7 @@
 """Client-safe discussion metadata. Private reasoning stays on its owning record."""
 
 import unicodedata
+from datetime import datetime
 from typing import Annotated
 from urllib.parse import urlsplit
 
@@ -54,4 +55,11 @@ class DiscussionTopicRecord(DiscussionTopicInput):
     @field_validator("added_at", "closed_at")
     @classmethod
     def utc_timestamp(cls, value: str | None) -> str | None:
-        return normalize_utc_timestamp(value, "topic timestamp") if value is not None else None
+        if value is None:
+            return None
+        normalized = normalize_utc_timestamp(value, "topic timestamp")
+        return (
+            datetime.fromisoformat(normalized.replace("Z", "+00:00"))
+            .isoformat(timespec="microseconds")
+            .replace("+00:00", "Z")
+        )

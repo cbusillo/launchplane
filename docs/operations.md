@@ -4957,6 +4957,8 @@ The candidate runtime accepts the common predecessor, either branch revision,
 their original empty merge revision, `e9e3a7b1c5d8`, the additive topics revision,
 or the new empty join `da72490fce13`, and retains expiry/key-retirement,
 activation/history/policy maintenance, custody evidence and native train fences.
+These are recognized revision paths; the HTTP service also requires the topics
+table and starts only after the release migration has added it.
 While this hold is active, schema initialization refuses a migration graph whose
 head has advanced beyond the reviewed topics/retirement join. A later schema change must
 reconcile the hold, runtime compatibility and supported migration targets in the
@@ -4968,8 +4970,8 @@ The release default never traverses the held branch. If a database has already
 applied the held drop or the original join, startup applies the missing preview
 and topic migrations and joins the paths at `da72490fce13`.
 After explicit approval, requesting the held revision on a database already at
-the preview revision applies the held drop and original empty join; from the
-topics revision it applies the held drop and joins at `da72490fce13`. These routes leave
+the preview or topics revision applies the held drop, adds topics if missing,
+and joins at `da72490fce13`. These routes leave
 one recorded Alembic revision; startup never mistakes incomparable branches for
 ordered versions. Do not substitute Alembic `head` for the release migration
 target: `head` includes the held drop and is reserved for disposable rehearsals
@@ -4981,6 +4983,10 @@ across that boundary requires the pre-deploy database backup or host snapshot
 and its matching image; restoring that recovery point also discards later writes.
 The preview migration does not create a backup, and its downgrade cannot recover
 the retired rows.
+
+Although the topics migration is additive, older images reject its revision.
+Rolling back across it requires a compatible image or the pre-deploy database
+backup and matching image; downgrade does not erase discussion history.
 
 Before application, obtain the Director's explicit shared-data/release approval
 on #2437. From the approved Launchplane host and exact reviewed image, verify

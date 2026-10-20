@@ -51,11 +51,6 @@ def assert_preview_enablement_drop(test: unittest.TestCase, database_url: str) -
             set(inspect(engine).get_table_names()), before_tables - {migration.RETIRED_TABLE}
         )
         test.assertEqual(history_snapshot(engine, preserved_tables), before)
-        store = PostgresRecordStore(database_url=database_url)
-        try:
-            store.verify_schema()
-        finally:
-            store.close()
         with test.assertRaises(RuntimeError):
             command.downgrade(config, migration.down_revision)
         with engine.connect() as connection:
@@ -63,6 +58,15 @@ def assert_preview_enablement_drop(test: unittest.TestCase, database_url: str) -
                 connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one(),
                 migration.revision,
             )
+        test.assertEqual(history_snapshot(engine, preserved_tables), before)
+        # Verify the intermediate drop above, then check the complete runtime
+        # schema after the additive release migrations, without applying held history.
+        command.upgrade(config, SCHEMA_MIGRATION_TARGET_REVISION)
+        store = PostgresRecordStore(database_url=database_url)
+        try:
+            store.verify_schema()
+        finally:
+            store.close()
         test.assertEqual(history_snapshot(engine, preserved_tables), before)
     finally:
         engine.dispose()
@@ -106,7 +110,9 @@ class RetiredPreviewEnablementMigrationTests(unittest.TestCase):
                 engine.dispose()
 
     def test_held_drop_requires_an_explicit_target_after_release_drop(self) -> None:
-        self.assertEqual(schema_migration_action(current_revision=migration.revision), "current")
+        self.assertEqual(
+            schema_migration_action(current_revision=SCHEMA_MIGRATION_TARGET_REVISION), "current"
+        )
         self.assertEqual(
             schema_migration_action(
                 current_revision=migration.revision, target_revision=held.revision
