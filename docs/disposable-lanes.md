@@ -63,7 +63,9 @@ ingress declaration is a record/capability prerequisite; repairing or starting
 the old application is not an admission step. Forward checkpoints retain the
 normalized web-ingress declaration and listener witnesses. Unrelated application
 environment, image or Compose formatting changes do not change that declaration
-witness. Candidate preparation, generated
+witness. Listener witnesses cover the entrypoints and certificate resolvers used
+by this lane; unrelated proxy logging and other listeners do not change them.
+Candidate preparation, generated
 local credentials, sanitation, immutable build, private identity and public
 health checks use the ordinary lifecycle.
 Transient provider-inventory reads keep the original operation pending; provider
@@ -71,7 +73,9 @@ authorization denials keep their denial boundary. Incomplete inventory never
 proves that placement changed or that an old copy is absent.
 
 Failure restores the captured route file's exact bytes or original absence and
-the original metadata. The same physical writer lock, generation, CAS and durable
+reverses metadata this publication actually adopted. A planned publication proves
+no adoption and preserves later administrative edits when it is marked reversed.
+The same physical writer lock, generation, CAS and durable
 receipt cover restoration, including removal of only that lane's newly created
 file; a lost response is settled through its original writer. An unavailable
 route preimage covers its public listeners and middleware dependencies, excluding
@@ -84,20 +88,25 @@ present process state separately; a reappeared process has unverified health.
 After successful publication, automatic
 deployment of the old target is disabled and its stop is recorded as undispatched
 because it was already unavailable. That success receipt does not itself request
-rollback after a checkpoint interruption. Its data is never deleted here.
+rollback after a checkpoint interruption. Forward publication and retirement
+require complete, quiescent old-target deployment and data-workflow observations,
+including before disabling automatic deploys and after that disable. Those jobs
+cannot trap the inverse of our route artifact. Its data is never deleted here.
 
 Stopped custody binds member identities, ownership labels and storage, separately
 from current stopped/absent state. Incidental Docker lifecycle timestamps do not
 invalidate an unchanged stopped copy. A changed predecessor before cutover can
-end admission once the original file/metadata and terminal candidate custody are
-proved. After possible cutover, the worker first persists its abort decision and
+end admission once original artifact custody, no metadata adoption and terminal
+candidate custody are proved. After possible cutover, the worker first persists
+the original admission refusal and
 settles or excludes the original physical writer. That settlement never allocates
 another initializer or sends another forward write, including after a busy call.
 Unknown or busy execution stays pending with the decision latched. Reappeared
 Docker routers are not adopted or modified: the existing inverse may restore
 only the exact original file or the exact candidate document this attempt wrote.
 Foreign file bytes, changed physical custody and metadata CAS conflicts remain
-fenced. The final source-drift result does not invent a health failure.
+fenced. The admission-change result retains its actual reason and does not
+invent a health failure.
 
 `testing_rebuild_storage.py` stores checkpoints in the existing DB-backed record
 payloads, scoped by product, context and operation key. The envelope is completed

@@ -31,7 +31,22 @@ def select_testing_route_raw(
     middlewares = {}
     # Declared stopped-container routes may reference this already-applied,
     # value-free HTTPS redirect without any application router being present.
-    for name, item in raw.get("middlewares", {}).items():
+    supplied_middlewares = raw.get("middlewares")
+    if external_middlewares and not isinstance(supplied_middlewares, dict):
+        raise RuntimeError("Applied middleware inventory is unavailable")
+    for name, item in (supplied_middlewares or {}).items():
+        if external_middlewares is not None and name in external_middlewares:
+            if (
+                not isinstance(item, dict)
+                or not isinstance(item.get("status"), str)
+                or "redirectScheme" in item
+                and not isinstance(item["redirectScheme"], dict)
+            ):
+                raise RuntimeError("Applied external middleware inventory is incomplete")
+            middlewares[name] = {
+                key: item[key] for key in ("redirectScheme", "status") if key in item
+            }
+            continue
         if (
             (external_middlewares is None or name in external_middlewares)
             and name.endswith("@file")
@@ -757,11 +772,36 @@ def compile_unavailable_testing_route(
             raw=raw,
             observation_sha256=observation_sha256,
             applied=bool(matches),
-            static_sha256=hashlib.sha256(static_configuration.encode()).hexdigest(),
+            static_sha256=testing_route_static_sha256(static_configuration, template),
             declaration_sha256=canonical_json_sha256(declared_testing_ingress(configured_compose))
             if recorded_template is None
             else "",
         ),
+    )
+
+
+def testing_route_static_sha256(static_configuration: str, template: dict[str, Any]) -> str:
+    """Bind the listeners and certificate resolvers used by this route."""
+    static = yaml.safe_load(static_configuration)
+    if not isinstance(static, dict) or not isinstance(static.get("entryPoints"), dict):
+        raise ValueError("The managed proxy's listener configuration is unavailable.")
+    routers = template["http"]["routers"].values()
+    points = {point for router in routers for point in router.get("entryPoints", [])}
+    resolvers = {
+        router["tls"]["certResolver"]
+        for router in routers
+        if isinstance(router.get("tls"), dict) and router["tls"].get("certResolver")
+    }
+    configured_resolvers = static.get("certificatesResolvers", {})
+    if not isinstance(configured_resolvers, dict):
+        raise ValueError("The managed proxy's certificate configuration is unavailable.")
+    return canonical_json_sha256(
+        {
+            "entryPoints": {name: static["entryPoints"].get(name) for name in sorted(points)},
+            "certificatesResolvers": {
+                name: configured_resolvers.get(name) for name in sorted(resolvers)
+            },
+        }
     )
 
 
@@ -772,8 +812,16 @@ def declared_testing_ingress(configured_compose: str) -> dict[str, str]:
     except yaml.YAMLError as error:
         raise ValueError("The provider's testing ingress declaration is malformed.") from error
     services = configuration.get("services") if isinstance(configuration, dict) else None
-    web = services.get("web") if isinstance(services, dict) else None
-    supplied = web.get("labels") if isinstance(web, dict) else None
+    if not isinstance(services, dict):
+        raise ValueError("The provider's converted testing services are unavailable.")
+    if "web" not in services:
+        return {}
+    web = services["web"]
+    if not isinstance(web, dict):
+        raise ValueError("The provider's converted testing web service is unavailable.")
+    if "labels" not in web:
+        return {}
+    supplied = web["labels"]
     if isinstance(supplied, list):
         if any(not isinstance(item, str) or "=" not in item for item in supplied):
             raise ValueError("The declared testing router labels are incomplete.")
@@ -805,6 +853,14 @@ def observe_testing_route(
         )
         if owned_document == original and scoped == preimage.raw:
             return None
+        if owned_document == original:
+            for name in testing_route_external_middlewares(plan.template):
+                current = scoped["middlewares"].get(name)
+                expected = preimage.raw["middlewares"].get(name)
+                if current is not None and current.get("status") != "enabled":
+                    raise TestingRoutePending("Original testing redirect is not enabled.")
+                if current != expected:
+                    raise TestingRouteAuthorityChanged("Original testing redirect changed.")
     matches = possible_lane_routers(raw, plan.host, plan.public_entrypoints)
     owned = plan.template["http"]["routers"]
     names = {name + "@file" for name in owned}
@@ -850,7 +906,7 @@ def observe_testing_route(
                 set(router["entryPoints"]) & set(desired["entryPoints"])
                 and priority >= desired["priority"]
             ):
-                raise ValueError("Testing routing has no strict owned winner.")
+                raise TestingRouteAuthorityChanged("Testing routing has no strict owned winner.")
     for name, expected in plan.template["http"].get("middlewares", {}).items():
         applied = raw.get("middlewares", {}).get(name + "@file")
         if (
@@ -861,7 +917,7 @@ def observe_testing_route(
             raise TestingRoutePending("Testing connection middleware has not been applied.")
     backend = applied_service_backend(raw, plan.route_id, "file")
     if backend not in {plan.old_backend, plan.new_backend}:
-        raise ValueError("Testing route selected an unadmitted backend.")
+        raise TestingRouteAuthorityChanged("Testing route selected an unadmitted backend.")
     if owned_document != route_document(plan, backend):
         raise TestingRoutePending("Testing file and applied backend have not converged.")
     return backend

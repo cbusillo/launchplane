@@ -40,6 +40,7 @@ from control_plane.dokploy.testing_route import (
     select_testing_route_raw,
     canonical_acme_challenge,
     router_configuration,
+    testing_route_static_sha256,
 )
 from control_plane.dokploy.testing_retained_copy import (
     retained_inventory_sha256,
@@ -229,7 +230,7 @@ def main(spec):
     if len(response)>MAX_API_BYTES:
         raise RuntimeError('Managed proxy API response exceeds its bound')
     raw=json.loads(response)
-    raw=select_testing_route_raw(raw,spec['host'],spec['entrypoints'])
+    raw=select_testing_route_raw(raw,spec['host'],spec['entrypoints'],spec.get('external_middlewares'))
     name=spec['route_id']+'.yml'
     file_read=docker('exec',proxy['Id'],'sh','-c','set -eu; p="$1/$2"; test ! -L "$1"; test ! -L "$p"; if test -e "$p"; then test -f "$p"; printf "present\\n"; cat "$p"; else printf "absent\\n"; fi','_',DIRECTORY,name).decode()
     presence, separator, content=file_read.partition('\n')
@@ -370,6 +371,7 @@ class DokployTestingRouteTransport:
         entrypoints: tuple[str, ...],
         old_runtime_identity: RuntimeIdentity | None,
         unavailable_predecessor: dict[str, Any] | None = None,
+        external_middlewares: tuple[str, ...] | None = None,
     ) -> None:
         from control_plane.dokploy.testing_route import testing_route_id
 
@@ -384,6 +386,8 @@ class DokployTestingRouteTransport:
         }
         if unavailable_predecessor is not None:
             self.payload["unavailable_predecessor"] = unavailable_predecessor
+        if external_middlewares is not None:
+            self.payload["external_middlewares"] = external_middlewares
 
     def _run(
         self,
@@ -688,10 +692,12 @@ class DokployTestingRouteTransport:
         if (
             plan.unavailable_preimage is not None
             and backend is not None
-            and hashlib.sha256(frame["static_configuration"].encode()).hexdigest()
+            and testing_route_static_sha256(frame["static_configuration"], plan.template)
             != plan.unavailable_preimage.static_sha256
         ):
-            raise ValueError("The original managed testing listener configuration changed.")
+            raise TestingRouteWriteNotStarted(
+                "The original managed testing listener configuration changed."
+            )
         custody = TestingRouteExecutionCustody.model_validate(frame["execution_custody"])
         custody_matches = custody.physical_sha256 == writer_attempt.custody.physical_sha256
         if not custody_matches:

@@ -193,10 +193,8 @@ class TestingRebuildRecord(FrozenRecord):
         "candidate_route_not_applied",
         "candidate_private_readiness_failed",
         "testing_rebuild_admission_changed",
-        "testing_predecessor_changed",
     ] = ""
     admission_refusal: str = Field(default="", exclude_if=lambda value: not value)
-    predecessor_change: str = Field(default="", exclude_if=lambda value: not value)
     preparation_failure_evidence: str = Field(default="", exclude_if=lambda value: not value)
     private_readiness_failed_at: datetime | None = Field(
         default=None, exclude_if=lambda value: value is None
@@ -236,19 +234,6 @@ class TestingRebuildRecord(FrozenRecord):
             or self.route.plan_digest != self.plan.digest
         ):
             raise ValueError("Original ingress readback belongs to another admitted preimage.")
-        if bool(self.predecessor_change) != (self.error == "testing_predecessor_changed") or (
-            self.predecessor_change
-            and (
-                not isinstance(self.plan.old, UnavailableTestingPredecessor)
-                or self.step in {"preparing", "prepared", "complete"}
-                or self.step == "failed"
-                and (
-                    not self.rollback_started
-                    or not isinstance(self.route, TestingOriginalIngressReadback)
-                )
-            )
-        ):
-            raise ValueError("Predecessor drift requires a latched original inverse and readback.")
         for stamp in (
             self.began_at,
             self.updated_at,
@@ -270,25 +255,33 @@ class TestingRebuildRecord(FrozenRecord):
         private_failed = (
             self.step == "failed" and self.error == "candidate_private_readiness_failed"
         )
-        admission_failed = (
-            self.step == "failed" and self.error == "testing_rebuild_admission_changed"
-        )
+        admission_changed = self.error == "testing_rebuild_admission_changed"
+        admission_failed = admission_changed and self.step == "failed" and not self.rollback_started
+        if bool(self.admission_refusal) != admission_changed:
+            raise ValueError("An admission change requires its original recorded cause.")
         if (
-            bool(self.admission_refusal) != admission_failed
-            or admission_failed
+            admission_changed
+            and not admission_failed
             and (
-                self.publication_started
-                or self.retirement_started
-                or self.rollback_started
-                or self.route is None
-                or self.route.slot_id != self.plan.old.copy_id
-                or self.preparation is not None
-                and (self.preparation.plan_digest, self.preparation.copy_id)
-                != (self.plan.digest, self.plan.new.copy_id)
-                or self.readiness is not None
-                and (self.readiness.copy_id, self.readiness.host, self.readiness.runtime_identity)
-                != (self.plan.new.copy_id, self.plan.host, self.plan.new.runtime_identity)
+                not isinstance(self.plan.old, UnavailableTestingPredecessor)
+                or self.step in {"preparing", "prepared", "complete"}
+                or self.step == "failed"
+                and not isinstance(self.route, TestingOriginalIngressReadback)
             )
+        ):
+            raise ValueError("Changed admission requires the original inverse and readback.")
+        if admission_failed and (
+            self.publication_started
+            or self.retirement_started
+            or self.rollback_started
+            or self.route is None
+            or self.route.slot_id != self.plan.old.copy_id
+            or self.preparation is not None
+            and (self.preparation.plan_digest, self.preparation.copy_id)
+            != (self.plan.digest, self.plan.new.copy_id)
+            or self.readiness is not None
+            and (self.readiness.copy_id, self.readiness.host, self.readiness.runtime_identity)
+            != (self.plan.new.copy_id, self.plan.host, self.plan.new.runtime_identity)
         ):
             raise ValueError(
                 "An admission refusal requires the original copy before traffic effects."

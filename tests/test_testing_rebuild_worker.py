@@ -323,6 +323,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
                 deepcopy(self.raw),
                 str(transport.payload["host"]),
                 cast(tuple[str, ...], transport.payload["entrypoints"]),
+                cast(tuple[str, ...] | None, transport.payload.get("external_middlewares")),
             )
             if transport is not None
             else deepcopy(self.raw),
@@ -499,7 +500,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
 
     def test_unavailable_declaration_read_failures_do_not_invent_source_drift(self) -> None:
         self.admit_unavailable("absent")
-        for response in ("services: [", "services: {}"):
+        for response in ("services: [", "services: []", "services: {web: []}"):
             with self.subTest(response=response):
                 with patch.object(
                     compose, "fetch_dokploy_converted_compose_file", return_value=response
@@ -517,6 +518,15 @@ class NativeTestingWorkerTests(unittest.TestCase):
         with patch.object(compose, "fetch_dokploy_converted_compose_file", side_effect=denied):
             with self.assertRaises(NativeSourceAuthorizationDenied):
                 self.execute()
+        self.assertEqual(self.effects, [])
+        self.assertEqual(self.current(), self.fixture.before)
+
+    def test_removed_unavailable_ingress_ends_admission_without_repeating_preparation(self) -> None:
+        self.admit_unavailable("absent")
+        self.hold_after_private_candidate_effects()
+        self.converted_compose.return_value = "services: {}"
+        result = self.execute()
+        self.assertEqual(result.error_code, "testing_rebuild_admission_changed")
         self.assertEqual(self.effects, [])
         self.assertEqual(self.current(), self.fixture.before)
 
@@ -593,7 +603,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
                         )
                     ):
                         result = fixture.execute()
-                    self.assertEqual(result.error_code, "testing_predecessor_changed")
+                    self.assertEqual(result.error_code, "testing_rebuild_admission_changed")
                     self.assertEqual(result.health_status, "skipped")
                     self.assertEqual(fixture.effects, ["switch-new", "switch-old"])
                     self.assertEqual(fixture.current(), fixture.fixture.before)
@@ -624,9 +634,9 @@ class NativeTestingWorkerTests(unittest.TestCase):
             with self.assertRaises(service.NativeTestingRebuildPending):
                 self.execute()
         latched = self.checkpoint()
-        self.assertEqual(latched.error, "testing_predecessor_changed")
+        self.assertEqual(latched.error, "testing_rebuild_admission_changed")
         self.assertEqual(latched.step, "switching")
-        self.assertTrue(latched.predecessor_change)
+        self.assertTrue(latched.admission_refusal)
         # A later stopped/absent observation cannot erase the abort decision.
         self.retained.update(availability="absent", stopped=True, web_stopped=True)
         for section in ("routers", "services", "middlewares"):
@@ -636,9 +646,9 @@ class NativeTestingWorkerTests(unittest.TestCase):
                 if not name.endswith("@docker")
             }
         result = self.execute()
-        self.assertEqual(result.error_code, "testing_predecessor_changed")
+        self.assertEqual(result.error_code, "testing_rebuild_admission_changed")
         self.assertEqual(self.effects, ["switch-new", "switch-old"])
-        self.assertEqual(self.checkpoint().predecessor_change, latched.predecessor_change)
+        self.assertEqual(self.checkpoint().admission_refusal, latched.admission_refusal)
 
     def test_predecessor_abort_seals_an_original_route_that_never_dispatched_a_writer(self) -> None:
         for preparing in (False, True):
@@ -687,7 +697,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
                         )
                     ):
                         result = fixture.execute()
-                    self.assertEqual(result.error_code, "testing_predecessor_changed")
+                    self.assertEqual(result.error_code, "testing_rebuild_admission_changed")
                     self.assertEqual(fixture.effects, [])
                     self.assertEqual(fixture.current(), fixture.fixture.before)
                     forward = fixture.store.read_idempotency_record(
@@ -768,7 +778,150 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertEqual(self.current(), self.fixture.before)
         self.assertIsNone(self.owned)
 
-    def test_unavailable_planned_inverse_checks_metadata_under_its_transaction_lock(self) -> None:
+    def test_unavailable_provider_drift_before_retirement_restores_the_original_route(self) -> None:
+        self.old_provider["autoDeploy"] = True
+        self.admit_unavailable("stopped")
+        retire = service.NativeTestingRebuildExecution.retire_old
+
+        def changed(executor: Any, plan: Any) -> None:
+            self.old_provider["serverId"] = "different-registered-server"
+            retire(executor, plan)
+
+        with patch.object(service.NativeTestingRebuildExecution, "retire_old", new=changed):
+            result = self.execute()
+        self.assertEqual(result.error_code, "testing_rebuild_admission_changed")
+        self.assertEqual(result.health_status, "skipped")
+        self.assertEqual(self.effects, ["switch-new", "switch-old"])
+        self.assertEqual(self.current(), self.fixture.before)
+        self.assertIsNone(self.owned)
+        self.assertTrue(self.old_provider["autoDeploy"])
+
+    def test_unavailable_provider_move_to_local_host_ends_admission(self) -> None:
+        self.admit_unavailable("stopped")
+        self.hold_after_private_candidate_effects()
+        self.old_provider["serverId"] = None
+        result = self.execute()
+        self.assertEqual(result.error_code, "testing_rebuild_admission_changed")
+        self.assertEqual(self.effects, [])
+        self.assertEqual(self.current(), self.fixture.before)
+
+    def test_incomplete_independent_inventory_read_does_not_invent_provider_drift(self) -> None:
+        self.admit_unavailable("stopped")
+        self.hold_after_private_candidate_effects()
+        for missing in ("serverId", "composeId", "environmentId"):
+            with self.subTest(missing=missing):
+
+                def incomplete(**kwargs: Any) -> Any:
+                    result = self.provider_request(**kwargs)
+                    if kwargs["path"] == "/api/compose.one":
+                        result.pop(missing)
+                    return result
+
+                with patch.object(api, "dokploy_request", side_effect=incomplete):
+                    with self.assertRaises(service.NativeTestingRebuildPending):
+                        self.execute()
+                self.assertEqual(self.effects, [])
+                self.assertEqual(self.current(), self.fixture.before)
+        self.assertEqual(self.execute().deploy_status, "pass")
+
+    def test_queued_old_deployment_prevents_unavailable_retirement_completion(self) -> None:
+        self.admit_unavailable("stopped")
+        retire = service.NativeTestingRebuildExecution.retire_old
+
+        def queued(executor: Any, plan: Any) -> None:
+            self.deployment_history.return_value = [
+                {"deploymentId": "fixture-queued-old-job", "status": "running"}
+            ]
+            retire(executor, plan)
+
+        with patch.object(service.NativeTestingRebuildExecution, "retire_old", new=queued):
+            with self.assertRaises(service.NativeTestingRebuildPending):
+                self.execute()
+        self.assertEqual(self.effects, ["switch-new"])
+        self.assertEqual(self.checkpoint().step, "retiring")
+        self.deployment_history.return_value = []
+        self.assertEqual(self.execute().deploy_status, "pass")
+
+    def test_old_job_before_unavailable_publication_cannot_trap_the_original_inverse(self) -> None:
+        self.admit_unavailable("stopped")
+        publish_forward = service.NativeTestingRebuildExecution.publish
+
+        def queued(executor: Any, plan: Any, desired: Any, **kwargs: Any) -> None:
+            if desired == plan.new:
+                self.deployment_history.return_value = [
+                    {"deploymentId": "fixture-queued-old-job", "status": "running"}
+                ]
+            publish_forward(executor, plan, desired, **kwargs)
+
+        with patch.object(service.NativeTestingRebuildExecution, "publish", new=queued):
+            with self.assertRaises(service.NativeTestingRebuildPending):
+                self.execute()
+        self.assertEqual(self.current(), self.fixture.before)
+        self.assertEqual(self.checkpoint().step, "publishing")
+        self.fail_public = True
+        result = self.execute()
+        self.assertEqual(result.error_code, "candidate_public_health_failed")
+        self.assertEqual(self.effects, ["switch-new", "switch-old"])
+        self.assertEqual(self.current(), self.fixture.before)
+
+    def test_moved_unavailable_provider_cannot_retry_an_unknown_disable(self) -> None:
+        self.old_provider["autoDeploy"] = True
+        self.admit_unavailable("stopped")
+        sends: list[bool] = []
+
+        def lost_disable(**kwargs: Any) -> Any:
+            if kwargs["path"] != "/api/compose.update":
+                return self.provider_request(**kwargs)
+            self.assertEqual(kwargs["path"], "/api/compose.update")
+            sends.append(kwargs["payload"]["autoDeploy"])
+            self.old_provider["autoDeploy"] = False
+            self.old_provider["serverId"] = "different-registered-server"
+            raise TimeoutError("Fixture lost the original disable reply")
+
+        with patch.object(api, "dokploy_request", side_effect=lost_disable):
+            with self.assertRaises(TimeoutError):
+                self.execute()
+            with self.assertRaises(service.NativeTestingRebuildPending):
+                self.execute()
+        self.assertEqual(sends, [False])
+        self.assertEqual(self.effects, ["switch-new"])
+        self.assertEqual(self.checkpoint().step, "retiring")
+        child = self.store.read_idempotency_record(
+            scope=REBUILD_SCOPE,
+            route_path=REBUILD_ROUTE + ":effect",
+            idempotency_key=self.operation.operation_id + ":disable-old-auto-deploy",
+        )
+        assert child is not None
+        self.assertTrue(child.provider_effect_started_at)
+        self.assertNotEqual(child.state, "completed")
+
+    def test_old_workflow_before_disable_is_not_recorded_as_a_dispatched_effect(self) -> None:
+        self.old_provider["autoDeploy"] = True
+        self.admit_unavailable("stopped")
+        effect = service.NativeTestingRebuildExecution.run_effect
+
+        def queued(executor: Any, phase: str, *args: Any, **kwargs: Any) -> Any:
+            if phase == "disable-old-auto-deploy":
+                with patch.object(
+                    post_deploy, "compose_data_workflow_is_quiescent", return_value=False
+                ):
+                    return effect(executor, phase, *args, **kwargs)
+            return effect(executor, phase, *args, **kwargs)
+
+        with patch.object(service.NativeTestingRebuildExecution, "run_effect", new=queued):
+            with self.assertRaises(service.NativeTestingRebuildPending):
+                self.execute()
+        child = self.store.read_idempotency_record(
+            scope=REBUILD_SCOPE,
+            route_path=REBUILD_ROUTE + ":effect",
+            idempotency_key=self.operation.operation_id + ":disable-old-auto-deploy",
+        )
+        assert child is not None
+        self.assertFalse(child.provider_effect_started_at)
+        self.assertTrue(self.old_provider["autoDeploy"])
+        self.assertEqual(self.effects, ["switch-new"])
+
+    def test_unavailable_planned_inverse_preserves_metadata_it_never_adopted(self) -> None:
         self.admit_unavailable("absent")
         self.fail_public = True
         publish = publication_write
@@ -785,19 +938,37 @@ class NativeTestingWorkerTests(unittest.TestCase):
             return publish(*args, **kwargs)
 
         with patch.object(service, "publish", side_effect=changed_before_transaction):
-            with self.assertRaises(service.NativeTestingRebuildPending):
-                self.execute()
+            result = self.execute()
         receipt = read_publication(self.store, raced["key"])
         assert receipt is not None
-        self.assertEqual(receipt.state, "planned")
+        self.assertEqual(receipt.state, "reversed")
         self.assertEqual(self.current().target, raced["target"])
         self.assertIsNone(self.owned)
-        self.assertEqual(self.checkpoint().step, "rolling_back")
-        self.store.write_dokploy_target_record(self.fixture.before.target)
-        result = self.execute()
+        self.assertEqual(self.checkpoint().step, "failed")
         self.assertEqual(result.error_code, "candidate_public_health_failed")
         self.assertEqual(self.effects, ["switch-new", "switch-old"])
-        self.assertEqual(self.current(), self.fixture.before)
+
+    def test_unavailable_admission_refusal_preserves_an_unadopted_metadata_edit(self) -> None:
+        self.admit_unavailable("absent")
+        prepare = service.NativeTestingRebuildExecution.prepare
+        edited: dict[str, Any] = {}
+
+        def changed(executor: Any, plan: Any) -> Any:
+            receipt = prepare(executor, plan)
+            target = self.current().target
+            replacement = target.model_copy(
+                update={"env": {**target.env, "FIXTURE_ADMIN_EDIT": "preserved"}}
+            )
+            self.store.write_dokploy_target_record(replacement)
+            edited["target"] = replacement
+            return receipt
+
+        with patch.object(service.NativeTestingRebuildExecution, "prepare", new=changed):
+            result = self.execute()
+        self.assertEqual(result.error_code, "testing_rebuild_admission_changed")
+        self.assertEqual(self.current().target, edited["target"])
+        self.assertEqual(self.effects, [])
+        self.assertIsNone(self.owned)
 
     def test_unavailable_predecessor_reports_missing_registered_placement(self) -> None:
         self.old_provider["serverId"] = None

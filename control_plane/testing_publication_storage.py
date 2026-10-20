@@ -393,11 +393,6 @@ def publish(
         if inverse and prior.state == "planned":
             # This row lock has waited for any original forward transaction.
             # A committed planned row proves it never adopted serving authority.
-            if plan.route.unavailable_preimage is not None and not serving_snapshot_matches(
-                _snapshot(store, session, plan.candidate.product, plan.candidate.context),
-                plan.before,
-            ):
-                raise ValueError("The original testing metadata changed before inverse completion.")
             result = prior.model_copy(update={"state": "reversed", "updated_at": now})
             _save(store, session, result)
             session.commit()

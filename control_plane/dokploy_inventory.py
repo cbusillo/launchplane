@@ -228,7 +228,9 @@ def _hydrate_inventory_target(
             query={id_field: target.target_id},
         )
     )
-    if detail.get(id_field) != target.target_id or detail.get("environmentId") != environment_id:
+    detail_id = _text(detail.get(id_field))
+    detail_environment = _text(detail.get("environmentId"))
+    if detail_id != target.target_id or detail_environment != environment_id:
         raise InventoryUnavailable("target_identity_changed")
     target.name = _text(detail.get("name"))
     # Missing is unknown; an explicit null is Dokploy's local host.
@@ -248,7 +250,7 @@ def _hydrate_inventory_target(
                 query={"serverId": server_id},
             )
         )
-        if server.get("serverId") != server_id:
+        if _text(server.get("serverId")) != server_id:
             raise InventoryUnavailable("server_identity_changed")
         servers[server_id] = _text(server.get("name"))
     target.placement = Placement(kind="server", server_id=server_id, server_name=servers[server_id])

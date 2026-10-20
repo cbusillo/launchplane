@@ -1022,6 +1022,42 @@ class TestingRouteTransportTests(unittest.TestCase):
                 finally:
                     fixture.doCleanups()
 
+    def test_unavailable_forward_ignores_unrelated_static_configuration(self) -> None:
+        self.unavailable_route()
+        self.static += "\nlog:\n  level: INFO\n"
+        self.publish(self.plan.new_backend, None)
+        self.assertTrue(self.route_file.exists())
+
+    def test_changed_unavailable_listener_excludes_forward_before_writer_dispatch(self) -> None:
+        self.unavailable_route()
+        attempt = self.fenced_attempt(self.plan.new_backend)
+        self.static = self.static.replace(":443", ":444")
+        with self.assertRaises(transport.TestingRouteWriteNotStarted):
+            self.publish_attempt(attempt, None)
+        self.assertFalse(self.route_file.exists())
+
+    def test_unavailable_redirect_drift_remains_visible_in_scoped_host_reads(self) -> None:
+        self.declared_two_listener_route()
+        reference = "redirect-to-https@file"
+        self.client.payload["external_middlewares"] = (reference,)
+        self.raw["middlewares"][reference]["redirectScheme"]["scheme"] = "http"
+        frame = self.client.read()
+        self.assertEqual(frame["raw"]["middlewares"][reference]["redirectScheme"]["scheme"], "http")
+        with self.assertRaises(routing.TestingRouteAuthorityChanged):
+            observe_testing_route(self.plan, frame["raw"], None)
+        self.raw["middlewares"].pop(reference)
+        with self.assertRaises(routing.TestingRouteAuthorityChanged):
+            observe_testing_route(self.plan, self.client.read()["raw"], None)
+        self.raw["middlewares"][reference] = {
+            "status": "disabled",
+            "redirectScheme": {"scheme": "https"},
+        }
+        with self.assertRaises(TestingRoutePending):
+            observe_testing_route(self.plan, self.client.read()["raw"], None)
+        self.raw["middlewares"][reference] = {"status": "enabled", "redirectScheme": []}
+        with self.assertRaises(NativeSourceUnavailable):
+            self.client.read()
+
     def test_lost_absence_inverse_reply_is_settled_without_recreating_the_file(self) -> None:
         self.unavailable_route()
         self.publish(self.plan.new_backend, None)
@@ -1126,9 +1162,7 @@ class TestingRouteTransportTests(unittest.TestCase):
             self.client.read()
         self.assertEqual(self.effect_count, 0)
 
-    def test_real_declared_two_listener_routes_use_actual_redirect_without_a_running_predecessor(
-        self,
-    ) -> None:
+    def declared_two_listener_route(self) -> None:
         self.unavailable_route()
         self.raw["middlewares"]["redirect-to-https@file"] = {
             "status": "enabled",
@@ -1153,6 +1187,14 @@ class TestingRouteTransportTests(unittest.TestCase):
             configured_compose=configured,
         )
         self.client.payload["entrypoints"] = self.plan.public_entrypoints
+        self.client.payload["external_middlewares"] = routing.testing_route_external_middlewares(
+            self.plan.template
+        )
+
+    def test_real_declared_two_listener_routes_use_actual_redirect_without_a_running_predecessor(
+        self,
+    ) -> None:
+        self.declared_two_listener_route()
         self.assertEqual(
             set(self.plan.public_entrypoints), set(yaml.safe_load(self.static)["entryPoints"])
         )

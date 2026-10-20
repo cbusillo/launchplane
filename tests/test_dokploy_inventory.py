@@ -142,7 +142,7 @@ class InventoryTests(unittest.TestCase):
         ]
         self.assertTrue(target_reads)
         for detail in target_reads:
-            self.assertEqual(detail["path"], "/api/postgres.one")
+            self.assertEqual(detail["path"], f"/api/{TARGET_COLLECTIONS['postgres'][0]}.one")
             self.assertEqual(detail["query"], {TARGET_COLLECTIONS["postgres"][1]: "database-only"})
         self.assertNotIn("never-output", location.model_dump_json())
 
