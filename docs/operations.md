@@ -1597,7 +1597,8 @@ terminal failure settles only that typed hold, never deployment verification.
 The shared typed writer preserves original request identity across updates and
 imports and refuses every terminal status change/reinitialization. Initial,
 identical and valid same-terminal metadata imports remain supported; source
-revalidation still fences changed terminal evidence during observation. Owner completion rejects changed original identity.
+revalidation still fences changed terminal evidence during observation. Completion
+by the execution lease holder rejects changed original identity.
 Preview reservation probes keep their own existing path. The monitor never clears a provider fence.
 
 Original custody comes from the immutable receipt, or a legacy encoded snapshot
@@ -1662,7 +1663,7 @@ Lanes with no hold and no open warning receive no provider probe. Malformed
 reservation or provider-authority evidence makes the provider source explicitly
 unavailable: its observation remains unaccepted/skipped and cannot clear an
 incident. HTTP, TLS and private checks and scheduler authority detection continue;
-no invalid held row is treated as absent or assigned an invented owner. The
+no invalid held row is treated as absent or assigned invented custody. The
 strict service attention read still returns unavailable for contradictory held
 records rather than an empty page.
 

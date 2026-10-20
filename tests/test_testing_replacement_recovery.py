@@ -55,7 +55,7 @@ from control_plane.workflows.odoo_post_deploy import (
     _prefix_post_deploy_readback_evidence,
 )
 from tests.test_product_reconcile import _profile, _inventory
-from typing import cast
+from typing import Any, cast
 
 
 def stamp(offset: int = 0) -> str:
@@ -1318,9 +1318,42 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
             )
             self.assertEqual(cancelled.status, "cancelled")
             if isinstance(store, PostgresRecordStore):
+                assert cancelled.cancellation is not None
+                attestation = cancelled.cancellation.reconciliation_attestation
+                assert attestation is not None
+                changed_proof = cancelled.model_copy(
+                    update={
+                        "cancellation": cancelled.cancellation.model_copy(
+                            update={
+                                "reconciliation_attestation": attestation.model_copy(
+                                    update={
+                                        "evidence_reference": attestation.evidence_reference
+                                        + ":refreshed-inspection"
+                                    }
+                                )
+                            }
+                        )
+                    }
+                )
+                transition = store.write_public_ingress_transition_with_outbox
+
+                def change_terminal_proof(**kwargs: Any) -> Any:
+                    store.write_odoo_stable_target_replacement_operation_record(changed_proof)
+                    return transition(**kwargs)
+
+                with patch.object(
+                    store,
+                    "write_public_ingress_transition_with_outbox",
+                    side_effect=change_terminal_proof,
+                ):
+                    stale = run_public_ingress_monitor_once(
+                        record_store=store, checked_at=stamp(1), notify=False
+                    )
+                self.assertEqual(stale.resolved_incident_count, 0)
+                self.assertEqual(stale.skipped_count, 1)
                 self.assertEqual(
                     run_public_ingress_monitor_once(
-                        record_store=store, checked_at=stamp(1), notify=False
+                        record_store=store, checked_at=stamp(2), notify=False
                     ).resolved_incident_count,
                     1,
                 )

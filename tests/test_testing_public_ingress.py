@@ -156,7 +156,6 @@ class TestingPublicIngressScenario(FreshTestingBootstrapScenario):
             "testing",
             replaces_operation_id=self.fixture.operation.operation_id,
             replaced_target_id=preparation.retained_target_id,
-            production_resources="separation_ready",
         )
         self.assertTrue(self.store.supersede_disposable_testing_replacement(self.fixture.operation))
         superseded = self.store.read_odoo_stable_target_replacement_operation_record(

@@ -308,22 +308,28 @@ class TestingVerificationTests(TestingVerificationScenario):
                         )
                     )
                 else:
-                    scenario = TestingVerificationScenario()
-                    scenario.installed_operation_running = True
-                    try:
-                        scenario.setUp()
-                        matching = [
-                            row
-                            for row in scenario.store.list_odoo_stable_target_replacement_operation_records()
-                            if row.deployment_record_id == scenario.deployment.record_id
-                        ]
-                        self.assertEqual(len(matching), 1)
-                        self.assertEqual(matching[0].status, "running")
-                        with self.assertRaises(ValueError):
-                            scenario.verification().plan()
-                        scenario.receiver.assert_not_called()
-                    finally:
-                        scenario.doCleanups()
+                    # Use the same fresh setup as a positive control before changing
+                    # only the installed operation's lifecycle at its initial write.
+                    for running in (False, True):
+                        scenario = TestingVerificationScenario()
+                        scenario.installed_operation_running = running
+                        try:
+                            scenario.setUp()
+                            matching = [
+                                row
+                                for row in scenario.store.list_odoo_stable_target_replacement_operation_records()
+                                if row.deployment_record_id == scenario.deployment.record_id
+                            ]
+                            self.assertEqual(len(matching), 1)
+                            self.assertEqual(matching[0].status, "running" if running else "fail")
+                            if running:
+                                with self.assertRaises(ValueError):
+                                    scenario.verification().plan()
+                            else:
+                                scenario.verification().plan()
+                            scenario.receiver.assert_not_called()
+                        finally:
+                            scenario.doCleanups()
                     continue
                 with self.assertRaises(ValueError):
                     self.verification().plan()
