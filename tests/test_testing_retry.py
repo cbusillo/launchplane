@@ -326,6 +326,16 @@ class TestingRetryTests(reconcile_fixtures.ProductReconcileTestCase):
         self.assertEqual(response.json()["error"]["code"], "testing_retry_storage_unavailable")
 
     def test_repeated_rearms_do_not_exhaust_traversal_on_retained_history(self) -> None:
+        self.repeated_existing_rearms()
+        inventory = self.store.read_environment_inventory(
+            context_name="cm", instance_name="testing"
+        )
+        self.store.write_environment_inventory(
+            inventory.model_copy(update={"deployment_record_id": "review-new-state"})
+        )
+        self.assertEqual(self.post(self.reviewed(), "review-after-movement").status_code, 202)
+
+    def repeated_existing_rearms(self) -> None:
         for cycle in range(
             TESTING_DEPLOY_MAX_ATTEMPT_CHAIN // TESTING_DEPLOY_MAX_FAILED_ATTEMPTS + 1
         ):
@@ -339,13 +349,48 @@ class TestingRetryTests(reconcile_fixtures.ProductReconcileTestCase):
             len(self.store.list_odoo_stable_target_replacement_operation_records()),
             TESTING_DEPLOY_MAX_ATTEMPT_CHAIN,
         )
-        inventory = self.store.read_environment_inventory(
-            context_name="cm", instance_name="testing"
-        )
-        self.store.write_environment_inventory(
-            inventory.model_copy(update={"deployment_record_id": "review-new-state"})
-        )
-        self.assertEqual(self.post(self.reviewed(), "review-after-movement").status_code, 202)
+
+    def test_fresh_generation_uses_old_traversal_without_inheriting_old_budget(self) -> None:
+        self.repeated_existing_rearms()
+        generation = self.fresh_generation(after_history=True)
+        with (
+            patch(
+                "control_plane.odoo_testing_restore.read_current_testing_generation",
+                return_value=generation,
+            ),
+            patch("control_plane.product_reconcile._utc_now", return_value=generation.prepared_at),
+        ):
+            self.request()
+            for _ in range(TESTING_DEPLOY_MAX_FAILED_ATTEMPTS):
+                queued = self.reconcile()["queued_operation_id"]
+                self.finish(str(queued), "fail")
+                self.request()
+            with self.assertLogs("control_plane.product_reconcile", "WARNING"):
+                stopped = self.run_once()
+            self.assertEqual(stopped.state, "failed")
+            # The older product-key boundary only skipped history. It did not
+            # replenish the new generation's bounded budget.
+            self.assertNotIn("queued_operation_id", stopped.last_plan)
+            applied = self.post(self.reviewed(), "fresh-after-long-history")
+            self.assertEqual(applied.status_code, 202, applied.text)
+
+    def test_completed_generation_keeps_existing_data_retry_receipt(self) -> None:
+        self.assertEqual(self.post(self.reviewed(), "old-existing-rearm").status_code, 202)
+        generation = self.fresh_generation()
+        completed = generation.model_copy(update={"completed_at": generation.prepared_at})
+        with self.store._session_factory() as session:
+            row = session.get(LaunchplaneFreshOdooTestingGenerationRow, ("site", "cm"))
+            assert row is not None
+            row.payload = completed.model_dump(mode="json")
+            session.commit()
+        with patch(
+            "control_plane.odoo_testing_restore.read_current_testing_generation",
+            return_value=completed,
+        ):
+            queued = self.reconcile()["queued_operation_id"]
+        operation = self.store.read_odoo_stable_target_replacement_operation_record(str(queued))
+        self.assertEqual(operation.request.data_source_mode, "existing")
+        self.assertFalse(operation.request.allow_empty_data)
 
     def test_fresh_generation_does_not_inherit_existing_data_rearm(self) -> None:
         self.assertEqual(self.post(self.reviewed(), "existing-data-rearm").status_code, 202)
@@ -377,10 +422,13 @@ class TestingRetryTests(reconcile_fixtures.ProductReconcileTestCase):
         self.assertEqual(operation.request.data_source_mode, "upstream_restore")
         self.assertTrue(operation.request.allow_empty_data)
 
-    def fresh_generation(self) -> FreshOdooTestingGeneration:
+    def fresh_generation(self, *, after_history: bool = False) -> FreshOdooTestingGeneration:
         operations = self.store.list_odoo_stable_target_replacement_operation_records()
+        timestamps = [datetime.fromisoformat(op.created_at) for op in operations]
         prepared = (
-            min(datetime.fromisoformat(op.created_at) for op in operations) - timedelta(seconds=1)
+            max(timestamps) + timedelta(seconds=1)
+            if after_history
+            else min(timestamps) - timedelta(seconds=1)
         ).isoformat()
         generation = FreshOdooTestingGeneration(
             product="site",

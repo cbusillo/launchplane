@@ -633,9 +633,7 @@ def reconcile_testing_target(
             instance=TESTING_INSTANCE,
             strategy="recreate-in-place",
             allow_empty_data=fresh_generation or not bool(rearmed_after),
-            data_source_mode="upstream_restore"
-            if generation and not generation.completed_at
-            else "existing",
+            data_source_mode="upstream_restore" if fresh_generation else "existing",
             artifact_id=manifest.artifact_id,
             source_git_ref=manifest.source_commit,
         ),
@@ -1242,6 +1240,14 @@ def testing_retry_after_operation(
     rearm = record_store.read_testing_retry_rearm(
         profile.product, generation_binding_sha256=generation_binding_sha256
     )
+    if (
+        not require_current_binding
+        and generation_binding_sha256
+        and (rearm is None or (rearm.context, rearm.artifact_id) != (lane.context, artifact_id))
+    ):
+        # A predecessor's terminal boundary can skip immutable history, but it
+        # can never replenish this generation's budget.
+        rearm = record_store.read_testing_retry_rearm(profile.product)
     if rearm is None or (rearm.context, rearm.artifact_id) != (lane.context, artifact_id):
         return ""
     if require_current_binding and (

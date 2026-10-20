@@ -24267,21 +24267,15 @@ class PostgresRecordStore(HumanSessionStore):
             )
 
     def _testing_retry_binding_in_session(self, session: Any, *, product: str, context: str) -> str:
-        from control_plane.odoo_testing_restore import generation_binding
-
         rows = {
             "profile": session.get(LaunchplaneProductProfileRow, product),
             "target_id": session.get(LaunchplaneDokployTargetIdRow, (context, "testing")),
             "inventory": session.get(LaunchplaneInventoryRow, (context, "testing")),
             "release_tuple": session.get(LaunchplaneReleaseTupleRow, (context, "testing")),
         }
-        payloads = {name: row.payload if row is not None else None for name, row in rows.items()}
-        generation_row = session.get(LaunchplaneFreshOdooTestingGenerationRow, (product, context))
-        if generation_row is not None:
-            payloads["generation"] = generation_binding(
-                FreshOdooTestingGeneration.model_validate(generation_row.payload)
-            )
-        return canonical_json_sha256(payloads)
+        return canonical_json_sha256(
+            {name: row.payload if row is not None else None for name, row in rows.items()}
+        )
 
     def read_testing_retry_binding(self, *, product: str, context: str) -> str:
         with self._session_factory() as session:

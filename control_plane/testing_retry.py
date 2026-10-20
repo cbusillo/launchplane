@@ -131,7 +131,7 @@ def build_testing_retry_plan(
                 "reason": request.reason,
                 "after_operation_id": attempt.last_failed_operation_id,
                 "lane_binding_sha256": binding,
-                "generation_binding_sha256": generation_sha256,
+                **({"generation_binding_sha256": generation_sha256} if fresh else {}),
             }
         ),
         generation_binding_sha256=generation_sha256,
