@@ -10,6 +10,25 @@ from control_plane.contracts.odoo_upgrade_rehearsal import ODOO_UPGRADE_REHEARSA
 from tests import test_odoo_upgrade_rehearsal as rehearsal
 
 
+def native_fixture(record: Any, key: str, digest: str, disposed: bool = False) -> dict[str, object]:
+    from control_plane.contracts.odoo_upgrade_rehearsal import IncompleteRehearsalHostResult
+    from control_plane.contracts.canonical_json import canonical_json_sha256
+
+    return IncompleteRehearsalHostResult(
+        qualified=True,
+        disposed=disposed,
+        binding_sha256=digest,
+        intent_sha256=record.intent_sha256,
+        attempt_sha256=canonical_json_sha256({"operation_key": key}),
+        containers_absent=disposed,
+        volumes_absent=disposed,
+        network_absent=disposed,
+        raw_source_absent=disposed,
+        public_route=False,
+        business_host_frozen=False,
+    ).model_dump(mode="json")
+
+
 class IncompleteRehearsalRetirementTests(unittest.TestCase):
     def setUp(self) -> None:
         self.fixture = rehearsal.RehearsalScenario()
@@ -62,13 +81,34 @@ class IncompleteRehearsalRetirementTests(unittest.TestCase):
         )
 
     def test_held_incomplete_operation_retires_and_replays_with_readback(self) -> None:
+        from control_plane.storage.postgres import LaunchplaneOdooUpgradeRehearsalRow
+
+        with self.store._session_factory() as session:
+            row = session.get(LaunchplaneOdooUpgradeRehearsalRow, self.prepared.rehearsal_id)
+            assert row is not None
+            row.payload = {
+                key: value for key, value in row.payload.items() if key != "incomplete_retirement"
+            }
+            session.commit()
         operation = self.retirement()
-        native = {"qualified": True, "disposed": False, "binding_sha256": "a" * 64}
+        native = native_fixture(self.prepared, self.key, "a" * 64)
         with (
             patch.object(
                 type(operation),
                 "host",
-                side_effect=lambda mode, check: {**native, "disposed": mode != "dry-run"},
+                side_effect=lambda mode, check: {
+                    **native,
+                    **{
+                        key: mode != "dry-run"
+                        for key in (
+                            "disposed",
+                            "containers_absent",
+                            "volumes_absent",
+                            "network_absent",
+                            "raw_source_absent",
+                        )
+                    },
+                },
             ) as host,
             patch.object(type(operation), "placement", return_value=True),
         ):
@@ -100,7 +140,7 @@ class IncompleteRehearsalRetirementTests(unittest.TestCase):
 
     def test_failed_publication_keeps_original_hold_record_and_target_registration(self) -> None:
         operation = self.retirement()
-        native = {"qualified": True, "disposed": False, "binding_sha256": "b" * 64}
+        native = native_fixture(self.prepared, self.key, "b" * 64)
         owned = self.store.read_provider_target_record(
             context_name=self.fixture.identifier, instance_name="rehearsal"
         )
@@ -108,7 +148,19 @@ class IncompleteRehearsalRetirementTests(unittest.TestCase):
             patch.object(
                 type(operation),
                 "host",
-                side_effect=lambda mode, check: {**native, "disposed": mode != "dry-run"},
+                side_effect=lambda mode, check: {
+                    **native,
+                    **{
+                        key: mode != "dry-run"
+                        for key in (
+                            "disposed",
+                            "containers_absent",
+                            "volumes_absent",
+                            "network_absent",
+                            "raw_source_absent",
+                        )
+                    },
+                },
             ),
             patch.object(type(operation), "placement", return_value=True),
         ):
@@ -133,9 +185,11 @@ class IncompleteRehearsalRetirementTests(unittest.TestCase):
                         },
                     )()
                 )
-        self.assertEqual(
-            self.store.read_odoo_upgrade_rehearsal(self.fixture.identifier), self.prepared
-        )
+        current = self.store.read_odoo_upgrade_rehearsal(self.fixture.identifier)
+        assert current is not None
+        self.assertEqual(current.state, self.prepared.state)
+        self.assertEqual(current.binding_sha256, self.prepared.binding_sha256)
+        self.assertIsNotNone(current.incomplete_retirement)
         self.assertEqual(
             self.store.read_provider_target_record(
                 context_name=self.fixture.identifier, instance_name="rehearsal"
@@ -144,9 +198,96 @@ class IncompleteRehearsalRetirementTests(unittest.TestCase):
         )
         self.assertEqual(operation.original(self.prepared).state, "reconcile_required")
 
+    def test_same_key_recovers_each_interrupted_retirement_phase(self) -> None:
+        for phase in (
+            "precheck",
+            "partial_host",
+            "lost_host_reply",
+            "lost_compose_reply",
+            "publication",
+        ):
+            with self.subTest(phase=phase):
+                scenario = IncompleteRehearsalRetirementTests()
+                scenario.setUp()
+                self.addCleanup(scenario.doCleanups)
+                operation = scenario.retirement()
+                flags = {
+                    "failed": False,
+                    "disposed": False,
+                    "compose_absent": False,
+                    "project_absent": False,
+                    "planned": False,
+                }
+
+                def host(mode: str, check: Any) -> dict[str, object]:
+                    if flags["compose_absent"]:
+                        raise AssertionError("Host transport cannot use a removed compose")
+                    if mode == "dry-run":
+                        if flags["planned"] and phase == "precheck" and not flags["failed"]:
+                            flags["failed"] = True
+                            raise RuntimeError("Transient precheck failure")
+                        return native_fixture(
+                            scenario.prepared, scenario.key, "e" * 64, flags["disposed"]
+                        )
+                    if phase in {"partial_host", "lost_host_reply"} and not flags["failed"]:
+                        flags["failed"] = True
+                        flags["disposed"] = phase == "lost_host_reply"
+                        raise RuntimeError("Host response lost after native progress")
+                    flags["disposed"] = True
+                    return native_fixture(scenario.prepared, scenario.key, "e" * 64, True)
+
+                def placement(apply: bool = False, check: Any = None) -> bool:
+                    if apply:
+                        flags["compose_absent"] = True
+                        if phase == "lost_compose_reply" and not flags["failed"]:
+                            flags["failed"] = True
+                            raise RuntimeError("Compose removal acknowledged by provider only")
+                        flags["project_absent"] = True
+                    return flags["project_absent"]
+
+                publish = scenario.store.complete_incomplete_rehearsal_retirement
+
+                def publication(**kwargs: Any) -> None:
+                    if phase == "publication" and not flags["failed"]:
+                        flags["failed"] = True
+                        raise RuntimeError("Transient publication failure")
+                    publish(**kwargs)
+
+                with (
+                    patch.object(type(operation), "host", side_effect=host),
+                    patch.object(type(operation), "placement", side_effect=placement),
+                    patch.object(
+                        scenario.store,
+                        "complete_incomplete_rehearsal_retirement",
+                        side_effect=publication,
+                    ),
+                ):
+                    plan = operation.plan()
+                    flags["planned"] = True
+                    operation.adapter.request = operation.adapter.request.model_copy(
+                        update={"reviewed_plan_sha256": plan["plan_sha256"]}
+                    )
+                    with self.assertRaises(RuntimeError):
+                        scenario.run_retirement(operation)
+                    self.assertEqual(
+                        operation.original(operation.record()).state, "reconcile_required"
+                    )
+                    resumed = scenario.run_retirement(operation)
+                    self.assertIn(resumed.status, {"completed", "adopted"})
+                    self.assertTrue(resumed.response_payload["result"]["disposed"])
+                    self.assertFalse(scenario.store.list_held_provider_target_reservations())
+
     def test_verified_or_running_operation_is_refused_before_host_effects(self) -> None:
         operation = self.retirement()
         with patch.object(type(operation), "host") as host:
+            self.assertEqual(
+                operation.observe(
+                    "fixture-operation",
+                    "dispose_incomplete_rehearsal",
+                    operation.reconciliation_key(),
+                ).outcome,
+                "unknown",
+            )
             verified = self.prepared.model_copy(update={"state": "verified"})
             self.store.compare_and_write_odoo_upgrade_rehearsal(self.prepared, verified)
             with self.assertRaises(RehearsalRefused):
@@ -363,10 +504,33 @@ class IncompleteRetirementHostTests(unittest.TestCase):
         self.assertFalse(self.fixture.fixture.volumes)
         self.assertFalse((self.root / "raw").exists())
         self.assertEqual((self.outside / "keep").read_bytes(), b"production fixture")
-        self.spec["mode"] = "observe"
-        self.assertTrue(self.fixture.run_host(self.spec)["disposed"])
         self.spec["mode"] = "apply"
         self.assertTrue(self.fixture.run_host(self.spec)["disposed"])
+
+    def test_host_resumes_its_manifest_after_a_lost_volume_removal_reply(self) -> None:
+        plan = self.fixture.run_host(self.spec)
+        self.spec["mode"] = "apply"
+        docker = self.fixture.host["docker"]
+        failed = False
+
+        def lose_reply(*args: str, stdin: bytes | None = None) -> bytes:
+            nonlocal failed
+            result = cast(bytes, docker(*args, stdin=stdin))
+            if args[:2] == ("volume", "rm") and not failed:
+                failed = True
+                raise RuntimeError("Volume removed; reply lost")
+            return result
+
+        self.fixture.host["docker"] = lose_reply
+        with self.assertRaises(RuntimeError):
+            self.fixture.run_host(self.spec)
+        self.assertTrue((self.root / "raw/database.dump").exists())
+        self.spec["mode"] = "dry-run"
+        resumed_plan = self.fixture.run_host(self.spec)
+        self.assertEqual(resumed_plan["binding_sha256"], plan["binding_sha256"])
+        self.spec["mode"] = "apply"
+        self.assertTrue(self.fixture.run_host(self.spec)["disposed"])
+        self.assertEqual((self.outside / "keep").read_bytes(), b"production fixture")
 
     def test_host_refuses_running_execute_and_shared_storage_before_disposal(self) -> None:
         import fcntl
@@ -436,7 +600,7 @@ class IncompleteRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(TimeoutError):
                 fixture.run_operation(fixture.adapter("execute"), "original-execute")
         before = fixture.authority()
-        native = {"qualified": True, "disposed": False, "binding_sha256": "c" * 64}
+        native = native_fixture(prepared, "original-execute", "c" * 64)
         headers = {
             "Authorization": "Bearer local-operator-token",
             "Idempotency-Key": "original-execute",
@@ -449,7 +613,19 @@ class IncompleteRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
             patch.object(
                 IncompleteRehearsalRetirement,
                 "host",
-                side_effect=lambda mode, check: {**native, "disposed": mode != "dry-run"},
+                side_effect=lambda mode, check: {
+                    **native,
+                    **{
+                        key: mode != "dry-run"
+                        for key in (
+                            "disposed",
+                            "containers_absent",
+                            "volumes_absent",
+                            "network_absent",
+                            "raw_source_absent",
+                        )
+                    },
+                },
             ) as host,
             patch.object(IncompleteRehearsalRetirement, "placement", return_value=True),
         ):
@@ -493,7 +669,7 @@ class IncompleteRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                 patch(
                     "control_plane.http_app.run_durable_provider_operation",
                     side_effect=[outcome, replay_outcome],
-                ),
+                ) as route_runner,
             ):
                 applied = await request(
                     fixture.app, "POST", route, payload=payload, headers=headers
@@ -503,6 +679,10 @@ class IncompleteRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                 replay = await request(fixture.app, "POST", route, payload=payload, headers=headers)
                 self.assertEqual(replay.status_code, 202, replay.text)
                 self.assertTrue(replay.json()["replayed"])
+                routed = route_runner.call_args.kwargs
+                self.assertEqual(routed["scope"], fixture.principal + "|incomplete-retirement")
+                self.assertEqual(routed["idempotency_key"], headers["Idempotency-Key"])
+                self.assertNotEqual(routed["adapter"].target_key(), fixture.identifier)
             calls = host.call_count
             payload.update(mode="readback", reviewed_plan_sha256="")
             readback = await request(fixture.app, "POST", route, payload=payload, headers=headers)

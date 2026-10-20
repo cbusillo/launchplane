@@ -11244,9 +11244,9 @@ class PostgresRecordStore(HumanSessionStore):
             row = session.get(
                 LaunchplaneOdooUpgradeRehearsalRow, replacement.rehearsal_id, with_for_update=True
             )
-            if (row.payload if row else None) != (
-                self._payload_dict(expected) if expected is not None else None
-            ):
+            if (
+                OdooUpgradeRehearsalRecord.model_validate(row.payload) if row else None
+            ) != expected:
                 raise ValueError("Rehearsal state changed; preserve its original operation.")
             if replacement.compose_id and (expected is None or not expected.compose_id):
                 # The native physical registry fences aliases without claiming a lane.
@@ -11325,7 +11325,7 @@ class PostgresRecordStore(HumanSessionStore):
             )
             if (
                 row is None
-                or row.payload != self._payload_dict(expected)
+                or OdooUpgradeRehearsalRecord.model_validate(row.payload) != expected
                 or operation_row is None
                 or operation_row.payload != self._payload_dict(original)
             ):

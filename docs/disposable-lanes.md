@@ -2597,8 +2597,11 @@ For a held execute that never produced its sanitized recovery copies, use
 `action: retire-incomplete` with the **unchanged original execute intent and
 execute key**. Take it through the same client dry-run, saved review, apply and
 readback. It accepts only `prepared` with no copy receipts and an exact original
-`reconcile_required` execute checkpoint. Verified, running, unbound or
-production-aliased operations refuse. Ordinary `retire` still requires both
+`reconcile_required` execute checkpoint. Its native scope is capture before the
+first sanitized source snapshot and target-runtime switch: the source database
+must still be selected and the web writer stopped. Later-phase incomplete
+runtimes remain held for their qualified disposition. Verified, running,
+unbound or production-aliased operations refuse. Ordinary `retire` still requires both
 verified final recovery tuples; incomplete retirement produces neither tuple.
 
 The dry-run acquires executor exclusion and inspects the exact private placement,
@@ -2617,12 +2620,29 @@ rehearsal retired, removes its physical target registration and completes the
 original held execute with an explicit incomplete-retirement result. This frees
 its operation hold without advertising a successful execute. The retirement's
 own reservation uses a separate scope under the same principal and original
-key, so it cannot displace the held execute before disposal. Completed same-key
-apply replay returns its stored result; readback verifies that receipt and
-provider placement absence. An interrupted/unknown retirement keeps both
-journals held and never replays destructive effects automatically. Preserve the
-same key and disposal custody for supported reconciliation; a failed readback
-never authorizes a new capture.
+key, so it cannot displace the held execute before disposal. A typed checkpoint
+binds the reviewed plan and native manifest before deletion; completed host
+disposal is persisted before provider placement removal. This checkpoint is
+excluded from the original execute binding and does not produce recovery
+copies. Legacy records without it retain their original binding. Use a
+compatible service to finish an admitted retirement before rolling back to a
+version that cannot read that checkpoint.
+
+Completed same-key apply replay returns its stored result; readback validates
+the shared typed receipt and provider placement absence. Interrupted calls keep
+both journals held. An explicit same-key apply can resume only after read-only
+qualification of the bound host manifest or persisted host disposal under the
+executor lock; it skips the removed host runtime once disposal is proved.
+Unavailable, changed or running resources stay held. The client rejects a
+retirement result when an old execute request is replayed, so cancellation
+cannot be reported as a successful execute. A failed readback never authorizes
+a new capture.
+
+The existing disabled manual server schedule and purpose-local managed-secret
+records remain as audit/configuration metadata with no runtime consumer. The
+retirement schedule carries no source configuration or local passwords and is
+not enabled for recurring execution. This action changes neither credential
+bindings nor access.
 
 After prepare, keep the returned `rehearsal_id` in the private intent and take
 each next `action` through its own dry-run/review/apply with a distinct stable

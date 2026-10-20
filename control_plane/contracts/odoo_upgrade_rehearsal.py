@@ -118,6 +118,84 @@ class RehearsalCopyReceipt(BaseModel):
         return self
 
 
+class IncompleteRehearsalHostResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    qualified: Literal[True]
+    disposed: bool
+    binding_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    intent_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    attempt_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    containers_absent: bool
+    volumes_absent: bool
+    network_absent: bool
+    raw_source_absent: bool
+    public_route: Literal[False]
+    business_host_frozen: Literal[False]
+
+    @model_validator(mode="after")
+    def disposal_matches_absence(self) -> "IncompleteRehearsalHostResult":
+        if self.disposed != all(
+            (
+                self.containers_absent,
+                self.volumes_absent,
+                self.network_absent,
+                self.raw_source_absent,
+            )
+        ):
+            raise ValueError("Disposal requires every native absence observation.")
+        return self
+
+
+class IncompleteRehearsalRetirementCheckpoint(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    original_key_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    reviewed_plan_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    host_binding_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    host_disposal: IncompleteRehearsalHostResult | None = None
+
+    @model_validator(mode="after")
+    def bound_disposal(self) -> "IncompleteRehearsalRetirementCheckpoint":
+        if self.host_disposal is not None and (
+            not self.host_disposal.disposed
+            or self.host_disposal.binding_sha256 != self.host_binding_sha256
+            or self.host_disposal.attempt_sha256 != self.original_key_sha256
+        ):
+            raise ValueError("Retirement checkpoint requires bound native disposal.")
+        return self
+
+
+class IncompleteRehearsalRetirementReceipt(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    rehearsal_id: str = Field(pattern=r"^lp-rehearsal-[a-f0-9]{32}$")
+    product: str
+    state: Literal["retired"]
+    source_odoo_version: str
+    target_artifact_id: str
+    source_binding_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    shape_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    copies: tuple[RehearsalCopyReceipt, ...] = Field(max_length=0)
+    elapsed_seconds: dict[str, float]
+    resources_preserved: Literal[False]
+    public_route: Literal[False]
+    business_host_frozen: Literal[False]
+    action: Literal["retire-incomplete"]
+    completed: Literal[True]
+    disposed: Literal[True]
+    raw_source_retained: Literal[False]
+    original_operation_released: Literal[True]
+    recovery_tuples_produced: Literal[False]
+    host_disposal: IncompleteRehearsalHostResult
+
+    @model_validator(mode="after")
+    def native_disposal(self) -> "IncompleteRehearsalRetirementReceipt":
+        if not self.host_disposal.disposed:
+            raise ValueError("Retirement requires completed native disposal.")
+        return self
+
+
 class OdooUpgradeRehearsalRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -139,13 +217,16 @@ class OdooUpgradeRehearsalRecord(BaseModel):
     compose_id: str = ""
     state: RehearsalState = "planned"
     copies: tuple[RehearsalCopyReceipt, ...] = ()
+    incomplete_retirement: IncompleteRehearsalRetirementCheckpoint | None = None
     elapsed_seconds: dict[str, float] = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime
 
     @property
     def binding_sha256(self) -> str:
-        return canonical_json_sha256(self.model_dump(mode="json", exclude={"elapsed_seconds"}))
+        return canonical_json_sha256(
+            self.model_dump(mode="json", exclude={"elapsed_seconds", "incomplete_retirement"})
+        )
 
 
 class RehearsalCustodyObservation(BaseModel):

@@ -266,7 +266,7 @@ class RehearsalClientTests(unittest.TestCase):
                                 "request": request,
                                 "key": "fixture-key",
                             },
-                            "plan": {**result, "applied": False},
+                            "plan": {**result, "plan_sha256": "a" * 64, "applied": False},
                         }
                     )
                 )
@@ -319,7 +319,24 @@ class RehearsalClientTests(unittest.TestCase):
             "raw_source_retained": False,
             "public_route": False,
             "business_host_frozen": False,
-            "plan_sha256": "a" * 64,
+            "source_odoo_version": "1.0",
+            "target_artifact_id": "target-artifact",
+            "source_binding_sha256": "b" * 64,
+            "shape_sha256": "c" * 64,
+            "elapsed_seconds": {},
+            "host_disposal": {
+                "qualified": True,
+                "disposed": True,
+                "binding_sha256": "d" * 64,
+                "intent_sha256": "e" * 64,
+                "attempt_sha256": "f" * 64,
+                "containers_absent": True,
+                "volumes_absent": True,
+                "network_absent": True,
+                "raw_source_absent": True,
+                "public_route": False,
+                "business_host_frozen": False,
+            },
         }
         for mode in ("apply", "readback"):
             code, result, _ = self.call(mode, action="retire-incomplete", response_result=receipt)
@@ -333,6 +350,24 @@ class RehearsalClientTests(unittest.TestCase):
                     )
                     self.assertNotEqual(code, 0)
                     self.assertTrue(result["original_key_required"])
+
+    def test_retirement_replay_cannot_claim_a_successful_execute(self) -> None:
+        code, result, _ = self.call(
+            "apply",
+            action="execute",
+            response_result={
+                "action": "retire-incomplete",
+                "state": "retired",
+                "completed": True,
+                "copies": [],
+                "disposed": True,
+                "plan_sha256": "a" * 64,
+                "public_route": False,
+                "business_host_frozen": False,
+            },
+        )
+        self.assertNotEqual(code, 0)
+        self.assertNotEqual(result["status"], "verified")
 
     def test_dry_run_saves_its_exact_private_review_without_mutating(self) -> None:
         code, result, post = self.call("dry-run")

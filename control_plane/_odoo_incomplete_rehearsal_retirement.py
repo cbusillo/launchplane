@@ -4,7 +4,7 @@ INCOMPLETE_REHEARSAL_RETIREMENT_LIBRARY = r"""
 def incomplete_retirement(spec, root):
     record=spec['record']
     namespace=record['rehearsal_id']
-    if record['state']!='prepared' or record['copies'] or spec['mode'] not in {'dry-run','apply','observe'}:
+    if record['state']!='prepared' or record['copies'] or spec['mode'] not in {'dry-run','apply'}:
         raise RuntimeError('Only an incomplete prepared rehearsal can be disposed')
     if not root.is_dir() or root.is_symlink() or root.resolve()!=root.absolute():
         raise RuntimeError('Missing private rehearsal custody')
@@ -39,7 +39,6 @@ def incomplete_retirement_locked(spec,root):
         manifest=json.loads(marker.read_text())
         if manifest['binding']!=binding: raise RuntimeError('Disposal belongs to another operation')
     else:
-        if spec['mode']=='observe': raise RuntimeError('No disposal receipt')
         if not (root/'execute.started').is_file() or (root/'execute.started').is_symlink() or (root/'execute.json').exists():
             raise RuntimeError('Original execute is not incomplete')
         database,image=current(spec)

@@ -14,6 +14,7 @@ from control_plane.contracts.odoo_upgrade_rehearsal import (
     ODOO_UPGRADE_REHEARSAL_PREFLIGHT_ROUTE,
     REHEARSAL_PUBLIC_FAILURE_MESSAGES,
     OdooUpgradeRehearsalRequest,
+    IncompleteRehearsalRetirementReceipt,
     RehearsalPreflightResult,
 )
 
@@ -133,19 +134,13 @@ def main() -> int:
                 os.open(evidence, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w"
             ) as output:
                 json.dump({"intent": intent, "plan": result}, output)
+        if (
+            args.mode in {"apply", "readback"}
+            and result.get("action", draft.action) != draft.action
+        ):
+            raise ValueError("The receipt describes a different rehearsal action.")
         if draft.action == "retire-incomplete" and args.mode != "dry-run":
-            if (
-                result.get("action") != draft.action
-                or result.get("state") != "retired"
-                or result.get("completed") is not True
-                or result.get("copies") != []
-                or result.get("disposed") is not True
-                or result.get("original_operation_released") is not True
-                or result.get("recovery_tuples_produced") is not False
-                or result.get("raw_source_retained") is not False
-                or result.get("resources_preserved") is not False
-            ):
-                raise ValueError("Incomplete retirement has no determinate disposal receipt.")
+            IncompleteRehearsalRetirementReceipt.model_validate(result)
         unobserved_readback = (
             args.mode == "readback"
             and result.get("completed") is False
