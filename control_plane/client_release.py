@@ -9,10 +9,13 @@ another backup, and promotes the same artifact again. Rolling back restores the
 checklist's production version, so the checklist recompiles to the digest the
 Client accepted, and that acceptance covers the second promotion and nothing else.
 
-Every step runs under a Client release grant naming the decision. Before a step is
-queued, and before each provider effect, the decision must still be the product's
-newest one, accepted by its recorded Client, with releases not held. The promotion
-still checks release approval for the exact candidate and the verified backup.
+Every step runs under a Client release grant naming the decision. Fresh work
+checks the product's newest decision, its recorded Client, and any release hold.
+Generic rollback checks that authority until its own first marked effect. A
+recipient inverse checks until its own replacement-writer pause dispatch, including
+any earlier peer parking. After the relevant boundary, protective restoration
+finishes under the original lease and target/publication fences.
+The promotion checks release approval for the exact candidate and verified backup.
 Each step's operation id derives from the decision, so the run needs no record of
 its own and a second worker replica finds the same operations.
 
@@ -79,6 +82,7 @@ from control_plane.contracts.odoo_prod_rollback_operation import (
     odoo_prod_rollback_request_fingerprint,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.production_recipient import ProductionRecipientRecord
 from control_plane.contracts.production_backup_gate import (
     PRODUCTION_BACKUP_GATE_EXECUTE_ACTION,
     ProductionBackupGateRequest,
@@ -847,8 +851,21 @@ def read_client_release_run(
         and read_status(store).get("admission_paused")
     ):
         blocked_reason = "Launchplane is draining admitted release steps before replacement. Pending steps will resume on the replacement worker."
+    next_step = next((view for view in views if view.status != "pass"), None)
+    native_inverse = None
+    if (
+        not blocked_reason
+        and profile.driver_id == "generic-web"
+        and state == "waiting"
+        and next_step is not None
+        and next_step.kind == "rollback"
+    ):
+        try:
+            native_inverse = _native_recipient_inverse(store, profile, decision)
+        except ClientReleaseNotReady:
+            blocked_reason = "The retained recipient inverse's saved baseline or owned publication rows changed. Reconcile its existing release before restoring production."
     if not blocked_reason and decision.release_start == "rollback" and state == "waiting":
-        if rejection_rollback_target(store, profile) is None:
+        if native_inverse is None and rejection_rollback_target(store, profile) is None:
             blocked_reason = "No Client-accepted release has a passing production deployment to roll back to. An admin must roll back by hand."
     elif not blocked_reason and profile.driver_id == "odoo" and state == "waiting":
         try:
@@ -860,6 +877,7 @@ def read_client_release_run(
         and profile.driver_id == "generic-web"
         and decision.release_start == "promote_with_rollback_drill"
         and state == "waiting"
+        and native_inverse is None
     ):
         try:
             _generic_web_drill_target(store, profile, decision)
@@ -901,15 +919,16 @@ def _require_standing_release_available(store: PostgresRecordStore, product: str
             raise ClientReleaseNotReady("standing_release_effects_outstanding")
     if (
         decision.release_start == "promote_with_rollback_drill"
-        and statuses.get("promote-1") == "pass"
-        and statuses.get("rollback-1")
+        and statuses.get(ClientReleaseStep("promote", 1).name) == "pass"
+        and statuses.get(ClientReleaseStep("rollback", 1).name)
         in {"not_started", "pending", "running", "reconciliation_required"}
     ):
         production = release_version(store=store, profile=profile, instance="prod")
         if production != decision.checklist.candidate:
             return
         try:
-            _generic_web_drill_target(store, profile, decision)
+            if _native_recipient_inverse(store, profile, decision) is None:
+                _generic_web_drill_target(store, profile, decision)
         except ClientReleaseNotReady:
             # No original inverse was dispatched. A new candidate must qualify
             # its own reviewed production baseline and drill before any effect.
@@ -1746,19 +1765,16 @@ def _queue_rejection_rollback(
     return persisted.operation_id if persisted.operation_id == operation.operation_id else ""
 
 
-def _queue_recipient_inverse(
+def _native_recipient_inverse(
     store: PostgresRecordStore,
-    root: Path,
     profile: LaunchplaneProductProfileRecord,
     decision: ReleaseReviewDecisionRecord,
-    step: ClientReleaseStep,
-    context: str,
-    authorized_at: str,
-) -> str | None:
-    from control_plane.production_recipient import custody
-    from control_plane.production_recipient_inverse import run_recipient_inverse
+) -> ProductionRecipientRecord | None:
+    """Read native inverse applicability without provider I/O or fresh drill gates."""
+    from control_plane.production_recipient import custody, RecipientAuthorityChanged
+    from control_plane.production_recipient_publication import require_owned_publication_rows
 
-    record = custody(store, profile.product, context)
+    record = custody(store, profile.product, _prod_context(profile))
     if (
         record is None
         or not record.publication
@@ -1774,6 +1790,28 @@ def _queue_recipient_inverse(
         != decision.checklist.production.artifact_id
     ):
         raise ClientReleaseNotReady("recipient_inverse_target_changed")
+    if record.phase in {"published", "reverting"}:
+        try:
+            require_owned_publication_rows(store, record)
+        except (RecipientAuthorityChanged, FileNotFoundError) as error:
+            raise ClientReleaseNotReady("recipient_inverse_publication_changed") from error
+    return record
+
+
+def _queue_recipient_inverse(
+    store: PostgresRecordStore,
+    root: Path,
+    profile: LaunchplaneProductProfileRecord,
+    decision: ReleaseReviewDecisionRecord,
+    step: ClientReleaseStep,
+    context: str,
+    authorized_at: str,
+) -> str | None:
+    from control_plane.production_recipient_inverse import run_recipient_inverse
+
+    record = _native_recipient_inverse(store, profile, decision)
+    if record is None:
+        return None
     grant = client_release_grant(
         decision=decision,
         action="generic_web_rollback.execute",

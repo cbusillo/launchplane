@@ -10,6 +10,7 @@ from unittest.mock import patch
 import click
 
 from control_plane.client_release import (
+    ClientReleaseStep,
     advance_client_releases,
     StandingReleaseReviewBackoff,
     read_client_release_run,
@@ -386,6 +387,8 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         self.pre_effect_source_refusal_retest("context_rebound")
 
     def pre_effect_source_refusal_retest(self, change: str) -> None:
+        from control_plane import client_release as releases
+
         profile = self.store.read_product_profile_record(self.profile.product)
         inventory = self.store.read_environment_inventory(
             context_name=self.context, instance_name="testing"
@@ -397,7 +400,9 @@ class GenericWebClientReleaseTests(unittest.TestCase):
             reservation = self.store.read_idempotency_record(
                 scope=CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
                 route_path=GENERIC_WEB_PROD_PROMOTION_ROUTE,
-                idempotency_key=decision.record_id + ":promote-1",
+                idempotency_key=releases._step_key(
+                    decision, releases.ClientReleaseStep("promote", 1)
+                ),
             )
             self.assertIsNone(reservation)
             self.store.write_product_profile_record(profile)
@@ -975,15 +980,188 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         run = read_client_release_run(store=self.store, profile=self.profile, decision=decision)
         assert run is not None
         self.assertEqual(
-            next(step for step in run.steps if step.step == "rollback-1").status, "pass"
+            next(
+                step for step in run.steps if step.step == ClientReleaseStep("rollback", 1).name
+            ).status,
+            "pass",
         )
         self.assertEqual(
-            next(step for step in run.steps if step.step == "backup-2").status, "not_started"
+            next(
+                step for step in run.steps if step.step == ClientReleaseStep("backup", 2).name
+            ).status,
+            "not_started",
         )
         assert self.provider.running is not None
         self.assertEqual(
             self.provider.running.artifact_id, decision.checklist.production.artifact_id
         )
+
+    def test_started_inverse_finishes_lifecycle_after_authority_changes(self) -> None:
+        for rejection, hold in ((False, True), (False, False), (True, False)):
+            with self.subTest(rejection=rejection, hold=hold):
+                case = GenericWebClientReleaseTests()
+                case.setUp()
+                try:
+                    case.inverse_authority_changes_after_image(rejection=rejection, hold=hold)
+                finally:
+                    case.doCleanups()
+
+    def inverse_authority_changes_after_image(self, *, rejection: bool, hold: bool) -> None:
+        from control_plane import client_release as releases
+        from control_plane.contracts.generic_web_extensions import (
+            GenericWebApplicationSchedule,
+            GenericWebLaneExtensions,
+            GenericWebMaintenanceCommand,
+        )
+        from control_plane.workflows.generic_web_application_lifecycle import schedule_payload
+        from control_plane.workflows.generic_web_deploy_provider import (
+            DokployGenericWebDeployProvider,
+        )
+
+        case = self
+        changed = False
+
+        class Provider(_ProductionProvider, DokployGenericWebDeployProvider):
+            def execute_artifact_deploy(self, **kwargs: Any) -> None:
+                nonlocal changed
+                super().execute_artifact_deploy(**kwargs)
+                if kwargs["runtime_identity"].artifact_id != _PREVIOUS_ARTIFACT or changed:
+                    return
+                changed = True
+                if hold:
+                    case.switch("held")
+                else:
+                    # Human acceptance can supersede A without the standing guard.
+                    case.accept(suffix="-new-human")
+
+        self.provider = Provider()
+        resolve = self.provider.resolve_deploy_target
+        self.enterContext(
+            patch.object(
+                self.provider,
+                "resolve_deploy_target",
+                side_effect=lambda **kwargs: resolve(**kwargs).model_copy(
+                    update={"deployed_target": self.target.to_deployed_target_reference()}
+                ),
+            )
+        )
+        self.enterContext(
+            patch(
+                "control_plane.generic_web_promotion_provider_adapter.default_generic_web_deploy_provider",
+                return_value=self.provider,
+            )
+        )
+        extensions = GenericWebLaneExtensions(
+            maintenance=(GenericWebMaintenanceCommand(name="migrate", command="./migration"),),
+            schedules=(
+                GenericWebApplicationSchedule(
+                    name="billing", command="./new-billing", cron_expression="*/15 * * * *"
+                ),
+            ),
+        )
+        self.profile = self.profile.model_copy(
+            update={
+                "release_on_acceptance": "promote_with_rollback_drill",
+                "lanes": tuple(
+                    lane.model_copy(update={"generic_web_extensions": extensions})
+                    if lane.instance == "prod"
+                    else lane
+                    for lane in self.profile.lanes
+                ),
+            }
+        )
+        self.store.write_product_profile_record(self.profile)
+        original = schedule_payload(
+            GenericWebApplicationSchedule(
+                name="billing", command="./old-billing", cron_expression="*/20 * * * *"
+            ),
+            "app-123",
+            enabled=True,
+        )
+        schedules = {"billing": dict(original)}
+        commands: list[str] = []
+
+        def upsert(**kwargs: Any) -> dict[str, Any]:
+            payload = kwargs["schedule_payload"]
+            schedules[str(payload["name"])] = dict(payload)
+            return {**payload, "scheduleId": payload["name"]}
+
+        with (
+            patch(
+                "control_plane.dokploy.source.read_dokploy_config",
+                return_value=("https://provider.invalid", "synthetic"),
+            ),
+            patch(
+                "control_plane.dokploy.api.read_dokploy_application_schedule",
+                side_effect=lambda **kwargs: schedules.get(str(kwargs["schedule_name"])),
+            ),
+            patch(
+                "control_plane.dokploy.api.upsert_dokploy_application_schedule", side_effect=upsert
+            ),
+            patch(
+                "control_plane.dokploy.api.run_dokploy_schedule",
+                side_effect=lambda **kwargs: commands.append(
+                    str(schedules[str(kwargs["schedule_id"])]["command"])
+                ),
+            ),
+        ):
+            decision = self.accept()
+            self.advance()
+            self.capture()
+            self.advance()
+            if rejection:
+                baseline = decision.checklist.model_copy(
+                    update={
+                        "candidate": decision.checklist.production,
+                        "database_compatibility": None,
+                    }
+                )
+                self.store.write_release_review_decision_record(
+                    decision.model_copy(
+                        update={
+                            "checklist": baseline,
+                            "checklist_digest": checklist_digest(baseline),
+                            "release_start": "",
+                            "decided_at": (datetime.now(UTC) - timedelta(seconds=2)).isoformat(),
+                        }
+                    )
+                )
+                self.store.write_release_review_decision_record(
+                    decision.model_copy(
+                        update={
+                            "record_id": "director-hotfix",
+                            "decision": "temporary_hotfix",
+                            "actor_github_id": "123",
+                            "actor_github_login": "director",
+                            "release_start": "promote",
+                            "decided_at": (datetime.now(UTC) - timedelta(seconds=1)).isoformat(),
+                        }
+                    )
+                )
+                decision = decision.model_copy(
+                    update={
+                        "record_id": "client-rejection",
+                        "decision": "changes_requested",
+                        "release_start": "rollback",
+                        "decided_at": datetime.now(UTC).isoformat(),
+                    }
+                )
+                self.store.write_release_review_decision_record(decision)
+            commands.clear()
+            self.assertTrue(self.advance())
+        self.assertTrue(changed)
+        self.assertEqual(schedules["billing"], original)
+        self.assertIn("./old-billing", commands)
+        from control_plane.generic_web_rollback_http import GENERIC_WEB_ROLLBACK_ROUTE
+
+        reservation = self.store.read_idempotency_record(
+            scope=CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
+            route_path=GENERIC_WEB_ROLLBACK_ROUTE,
+            idempotency_key=releases._step_key(decision, releases.ClientReleaseStep("rollback", 1)),
+        )
+        assert reservation is not None
+        self.assertEqual(reservation.state, "completed")
+        self.assertEqual(reservation.response_payload["result"]["rollback_status"], "pass")
 
     def test_standing_failed_testing_cannot_starve_admitted_drill_inverse(self) -> None:
         self.standing_testing_change_after_admission(new_candidate=False)
@@ -1133,7 +1311,10 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         run = read_client_release_run(store=self.store, profile=self.profile, decision=decision)
         assert run is not None
         self.assertEqual(
-            next(step for step in run.steps if step.step == "rollback-1").status, "pass"
+            next(
+                step for step in run.steps if step.step == ClientReleaseStep("rollback", 1).name
+            ).status,
+            "pass",
         )
         if new_candidate:
             # The settled inverse no longer pins an obsolete A's fresh second attempt.
@@ -1571,7 +1752,9 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         run = read_client_release_run(store=self.store, profile=self.profile, decision=first)
         assert run is not None
         self.assertEqual(run.state, "stopped", run.model_dump())
-        failed = next(step for step in run.steps if step.step == "promote-2")
+        failed = next(
+            step for step in run.steps if step.step == ClientReleaseStep("promote", 2).name
+        )
         self.assertEqual(failed.status, "fail")
         deployed = list(self.provider.deployed_artifacts)
         self.assertEqual(self.advance(), ())
@@ -2058,7 +2241,9 @@ class GenericWebClientReleaseTests(unittest.TestCase):
             failure.assert_not_called()
         run = read_client_release_run(store=self.store, profile=self.profile, decision=accepted)
         assert run is not None
-        promotion = next(step for step in run.steps if step.step == "promote-1")
+        promotion = next(
+            step for step in run.steps if step.step == ClientReleaseStep("promote", 1).name
+        )
         self.assertEqual(promotion.status, "not_started")
         self.assertEqual(self.provider.deployed_artifacts, [])
         self.store.write_deployment_record(testing)

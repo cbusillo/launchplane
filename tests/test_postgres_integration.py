@@ -5440,146 +5440,6 @@ def _owner_control_shadow_envelope(
 
 
 class RealPostgresStorageConcurrencyTests(unittest.TestCase):
-    def test_standing_acceptance_and_first_effect_serialize_in_both_orders(self) -> None:
-        from control_plane import client_release as releases
-        from control_plane.generic_web_promotion_http import GENERIC_WEB_PROD_PROMOTION_ROUTE
-        from tests.test_generic_web_client_release import GenericWebClientReleaseTests
-
-        for effect_first in (True, False):
-            with self.subTest(effect_first=effect_first), _head_postgres_database() as database_url:
-                fixture = GenericWebClientReleaseTests()
-                with patch(
-                    "tests.test_generic_web_client_release.PostgresRecordStore",
-                    side_effect=lambda **_: PostgresRecordStore(database_url=database_url),
-                ):
-                    fixture.setUp()
-                try:
-                    store = fixture.store
-                    fixture.switch("director_standing")
-                    decision = fixture.accept()
-                    next_decision = decision.model_copy(
-                        update={
-                            "record_id": decision.record_id + "-next",
-                            "acceptance_source": "director_standing",
-                            "decided_at": (
-                                datetime.now(timezone.utc) + timedelta(seconds=1)
-                            ).isoformat(),
-                        }
-                    )
-                    key = releases._step_key(decision, releases.ClientReleaseStep("promote", 1))
-                    reserved = store.reserve_mutation(
-                        scope=releases.CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
-                        route_path=GENERIC_WEB_PROD_PROMOTION_ROUTE,
-                        idempotency_key=key,
-                        request_fingerprint="f" * 64,
-                        lease_owner="admitted-A",
-                        provider_target_key="production-A",
-                        reconciliation_key="production-A",
-                    ).record
-                    assert reserved is not None
-                    grant = releases.client_release_grant(
-                        decision=decision,
-                        action="generic_web_prod_promotion.execute",
-                        context=fixture.context,
-                        authorized_at=decision.decided_at,
-                    )
-                    url = make_url(database_url)
-                    second = PostgresRecordStore(
-                        database_url=url.set(
-                            query={**url.query, "application_name": "release-admission-contender"}
-                        ).render_as_string(hide_password=False)
-                    )
-                    try:
-                        entered, proceed = threading.Event(), threading.Event()
-                        original_lock = store._lock_product_authority_bundle_write
-
-                        def held_lock(session: Any) -> None:
-                            original_lock(session)
-                            entered.set()
-                            if not proceed.wait(10):
-                                raise RuntimeError("release admission barrier timed out")
-
-                        def authority(active: PostgresRecordStore) -> None:
-                            if not releases._generic_web_release_authority_allows(active, grant):
-                                raise releases.ClientReleaseNotReady("newer_decision")
-
-                        def checkpoint(active: PostgresRecordStore) -> Any:
-                            with active.provider_evidence_guard(
-                                lambda: reserved,
-                                effect_admission_checkpoint=lambda: authority(active),
-                            ):
-                                return active.checkpoint_mutation_provider_effect(
-                                    reservation=reserved, effect_phase="first_production_effect"
-                                )
-
-                        def create(active: PostgresRecordStore) -> Any:
-                            return active.create_release_review_decision_record_if_absent(
-                                next_decision,
-                                validate_before_insert=lambda: (
-                                    releases._require_standing_release_available(
-                                        active, fixture.profile.product
-                                    )
-                                ),
-                            )
-
-                        with (
-                            patch.object(
-                                store, "_lock_product_authority_bundle_write", side_effect=held_lock
-                            ),
-                            ThreadPoolExecutor(max_workers=2) as executor,
-                        ):
-                            first = executor.submit(checkpoint if effect_first else create, store)
-                            self.assertTrue(entered.wait(5))
-                            contender = executor.submit(
-                                create if effect_first else checkpoint, second
-                            )
-                            try:
-                                waiting = 0
-                                deadline = time.monotonic() + 5
-                                with store._engine.connect().execution_options(
-                                    isolation_level="AUTOCOMMIT"
-                                ) as connection:
-                                    while time.monotonic() < deadline:
-                                        waiting = int(
-                                            connection.scalar(
-                                                text(
-                                                    "SELECT count(*) FROM pg_stat_activity WHERE application_name='release-admission-contender' AND wait_event_type='Lock'"
-                                                )
-                                            )
-                                            or 0
-                                        )
-                                        if waiting:
-                                            break
-                                        time.sleep(0.01)
-                                self.assertGreater(
-                                    waiting,
-                                    0,
-                                    "The contender must reach the shared PostgreSQL authority lock",
-                                )
-                            finally:
-                                proceed.set()
-                            first.result(timeout=10)
-                            with self.assertRaises(releases.ClientReleaseNotReady):
-                                contender.result(timeout=10)
-                        current = store.read_idempotency_record(
-                            scope=reserved.scope,
-                            route_path=reserved.route_path,
-                            idempotency_key=reserved.idempotency_key,
-                        )
-                        assert current is not None
-                        self.assertEqual(bool(current.provider_effect_started_at), effect_first)
-                        latest = store.list_release_review_decision_records(
-                            product=fixture.profile.product
-                        )[0]
-                        self.assertEqual(
-                            latest.record_id,
-                            decision.record_id if effect_first else next_decision.record_id,
-                        )
-                    finally:
-                        second.close()
-                finally:
-                    fixture.doCleanups()
-
     def test_discussion_topic_retries_are_atomic_on_independent_connections(self) -> None:
         from control_plane.contracts.discussion_topic import DiscussionTopicInput
 
@@ -9482,6 +9342,146 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
         self.assertEqual(results["retained_volume_backup_import"], "")
         self.assertEqual(stored_restore.status, "running")
         self.assertEqual(stored_import.status, "pending")
+
+    def test_standing_acceptance_and_first_effect_serialize_in_both_orders(self) -> None:
+        from control_plane import client_release as releases
+        from control_plane.generic_web_promotion_http import GENERIC_WEB_PROD_PROMOTION_ROUTE
+        from tests.test_generic_web_client_release import GenericWebClientReleaseTests
+
+        for effect_first in (True, False):
+            with self.subTest(effect_first=effect_first), _head_postgres_database() as database_url:
+                fixture = GenericWebClientReleaseTests()
+                with patch(
+                    "tests.test_generic_web_client_release.PostgresRecordStore",
+                    side_effect=lambda **_: PostgresRecordStore(database_url=database_url),
+                ):
+                    fixture.setUp()
+                try:
+                    store = fixture.store
+                    fixture.switch("director_standing")
+                    decision = fixture.accept()
+                    next_decision = decision.model_copy(
+                        update={
+                            "record_id": decision.record_id + "-next",
+                            "acceptance_source": "director_standing",
+                            "decided_at": (
+                                datetime.now(timezone.utc) + timedelta(seconds=1)
+                            ).isoformat(),
+                        }
+                    )
+                    key = releases._step_key(decision, releases.ClientReleaseStep("promote", 1))
+                    reserved = store.reserve_mutation(
+                        scope=releases.CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
+                        route_path=GENERIC_WEB_PROD_PROMOTION_ROUTE,
+                        idempotency_key=key,
+                        request_fingerprint="f" * 64,
+                        lease_owner="admitted-A",
+                        provider_target_key="production-A",
+                        reconciliation_key="production-A",
+                    ).record
+                    assert reserved is not None
+                    grant = releases.client_release_grant(
+                        decision=decision,
+                        action="generic_web_prod_promotion.execute",
+                        context=fixture.context,
+                        authorized_at=decision.decided_at,
+                    )
+                    url = make_url(database_url)
+                    second = PostgresRecordStore(
+                        database_url=url.set(
+                            query={**url.query, "application_name": "release-admission-contender"}
+                        ).render_as_string(hide_password=False)
+                    )
+                    try:
+                        entered, proceed = threading.Event(), threading.Event()
+                        original_lock = store._lock_product_authority_bundle_write
+
+                        def held_lock(session: Any) -> None:
+                            original_lock(session)
+                            entered.set()
+                            if not proceed.wait(10):
+                                raise RuntimeError("release admission barrier timed out")
+
+                        def authority(active: PostgresRecordStore) -> None:
+                            if not releases._generic_web_release_authority_allows(active, grant):
+                                raise releases.ClientReleaseNotReady("newer_decision")
+
+                        def checkpoint(active: PostgresRecordStore) -> Any:
+                            with active.provider_evidence_guard(
+                                lambda: reserved,
+                                effect_admission_checkpoint=lambda: authority(active),
+                            ):
+                                return active.checkpoint_mutation_provider_effect(
+                                    reservation=reserved, effect_phase="first_production_effect"
+                                )
+
+                        def create(active: PostgresRecordStore) -> Any:
+                            return active.create_release_review_decision_record_if_absent(
+                                next_decision,
+                                validate_before_insert=lambda: (
+                                    releases._require_standing_release_available(
+                                        active, fixture.profile.product
+                                    )
+                                ),
+                            )
+
+                        with (
+                            patch.object(
+                                store, "_lock_product_authority_bundle_write", side_effect=held_lock
+                            ),
+                            ThreadPoolExecutor(max_workers=2) as executor,
+                        ):
+                            first = executor.submit(checkpoint if effect_first else create, store)
+                            self.assertTrue(entered.wait(5))
+                            contender = executor.submit(
+                                create if effect_first else checkpoint, second
+                            )
+                            try:
+                                waiting = 0
+                                deadline = time.monotonic() + 5
+                                with store._engine.connect().execution_options(
+                                    isolation_level="AUTOCOMMIT"
+                                ) as connection:
+                                    while time.monotonic() < deadline:
+                                        waiting = int(
+                                            connection.scalar(
+                                                text(
+                                                    "SELECT count(*) FROM pg_stat_activity WHERE application_name='release-admission-contender' AND wait_event_type='Lock'"
+                                                )
+                                            )
+                                            or 0
+                                        )
+                                        if waiting:
+                                            break
+                                        time.sleep(0.01)
+                                self.assertGreater(
+                                    waiting,
+                                    0,
+                                    "The contender must reach the shared PostgreSQL authority lock",
+                                )
+                            finally:
+                                proceed.set()
+                            first.result(timeout=10)
+                            with self.assertRaises(releases.ClientReleaseNotReady):
+                                contender.result(timeout=10)
+                        current = store.read_idempotency_record(
+                            scope=reserved.scope,
+                            route_path=reserved.route_path,
+                            idempotency_key=reserved.idempotency_key,
+                        )
+                        assert current is not None
+                        self.assertEqual(bool(current.provider_effect_started_at), effect_first)
+                        latest = store.list_release_review_decision_records(
+                            product=fixture.profile.product
+                        )[0]
+                        self.assertEqual(
+                            latest.record_id,
+                            decision.record_id if effect_first else next_decision.record_id,
+                        )
+                    finally:
+                        second.close()
+                finally:
+                    fixture.doCleanups()
 
 
 def _attempt_stale_owner_completion(

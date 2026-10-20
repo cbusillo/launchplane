@@ -934,9 +934,14 @@ remains permitted even when the Client's forward release authority is revoked.
 
 Generic-web testing qualification admits each fresh forward production attempt.
 After that attempt starts, a newer or failed testing deployment does not interrupt
-its accepted production work. The drill's rollback, recipient inverse and their
-original-key recovery check the accepted production boundary and ongoing Client
-release authority, without depending on testing. The second backup and promotion
+its accepted production work. The generic drill's rollback checks Client release
+authority until its own first marked effect. The recipient inverse checks until
+its own replacement-writer pause dispatch; earlier peer parking still requires
+authority. After the relevant boundary, they finish the bound restore or protective
+cleanup under the original lease and target/publication fences, even if a newer
+decision or hold stops fresh work.
+They do not depend on testing. Separate recovery Apply still requires the current
+accepted release and the original operation key. The second backup and promotion
 still require the accepted artifact and source to qualify in testing again. A
 same-artifact qualified retest uses the existing acceptance and checklist digest
 for an unstarted source-held promotion with still-current backup evidence.
@@ -981,8 +986,10 @@ is withdrawn. A crash or uncertain provider outcome keeps the provider operation
 fenced for reconciliation rather than repeating the release.
 
 A changed testing candidate stops the next fresh backup or promotion, and never
-falls back to a newer testing build. A newer decision or a hold stops planned
-release work at its next authority checkpoint. A failed or
+falls back to a newer testing build. A newer decision or a hold stops fresh planned
+release work. Once a generic rollback starts, or a recipient inverse dispatches its
+own replacement-writer pause, its protective restore finishes under its original
+fences. A failed or
 cancelled step stops forward progress; the successful rollback drill never runs
 for a failed promotion. An admin override never starts a release; it stays a hand
 promotion from the Release panel. No automated identity gains a promote right,

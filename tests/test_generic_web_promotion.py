@@ -1604,6 +1604,7 @@ class GenericWebProdPromotionRollbackTests(unittest.TestCase):
 
 class GenericWebPromotionWorkflowTests(unittest.TestCase):
     def test_workflow_profile_rejects_colliding_input_names(self) -> None:
+        ProductPromotionWorkflowProfile(dry_run_input="operation", artifact_id_input="artifact")
         with self.assertRaises(ValidationError):
             ProductPromotionWorkflowProfile(
                 dry_run_input=" operation ",

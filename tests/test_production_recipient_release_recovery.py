@@ -469,6 +469,101 @@ class RecipientReleaseRecoveryTests(unittest.TestCase):
             f.publication_case.inventory,
         )
 
+    def test_native_inverse_is_owed_without_a_passing_historical_deployment(self) -> None:
+        f = self.fixture
+        profile, _testing = self.qualified_testing_source()
+        operation_id = releases._queue_backup(
+            f.store,
+            profile,
+            self.decision,
+            releases.ClientReleaseStep("backup", 1),
+            f.record.context,
+            self.decision.decided_at,
+        )
+        backup_operation = f.store.read_verireel_prod_backup_gate_operation_record(operation_id)
+        # Reuse the fixture's real backup worker for the already queued Client
+        # operation rather than enqueueing its separate fixture-capture key.
+        with patch(
+            "tests.test_production_recipient_cutover.enqueue_production_backup_gate",
+            return_value=backup_operation,
+        ):
+            f.capture(f.publication_case.policy, backup_operation.backup_record_id)
+        f.old_backup = backup_operation.backup_record_id
+        self.started_recipient_with_new_testing(resume=False)
+        baseline = f.publication_case.inventory
+        current = f.store.read_environment_inventory(
+            context_name=f.record.context, instance_name="prod"
+        )
+        published = f.store.read_deployment_record(current.deployment_record_id)
+        retained = published.model_copy(
+            update={
+                "record_id": baseline.deployment_record_id,
+                "artifact_identity": baseline.artifact_identity,
+                "runtime_identity": baseline.runtime_identity,
+                "source_git_ref": baseline.source_git_ref,
+                "deploy": published.deploy.model_copy(update={"status": "fail"}),
+            }
+        )
+        f.store.write_deployment_record(retained)
+        self.assertEqual(f.store.list_held_provider_target_reservations(), ())
+        with self.assertRaises(releases.ClientReleaseNotReady):
+            releases._require_standing_release_available(f.store, profile.product)
+        with self.assertRaises(releases.ClientReleaseNotReady):
+            releases._generic_web_drill_target(f.store, profile, self.decision)
+        run = releases.read_client_release_run(
+            store=f.store, profile=profile, decision=self.decision
+        )
+        assert run is not None
+        self.assertFalse(run.blocked_reason)
+        owned = f.store.read_provider_target_record(
+            context_name=f.record.context, instance_name="prod"
+        )
+        f.store.write_provider_target_record(
+            owned.model_copy(update={"display_name": "operator changed the owned target"})
+        )
+        blocked = releases.read_client_release_run(
+            store=f.store, profile=profile, decision=self.decision
+        )
+        assert blocked is not None
+        self.assertTrue(blocked.blocked_reason)
+        actions = list(f.actions)
+        with patch("control_plane.client_release._generic_web_drill_target") as fallback:
+            with self.assertRaises(releases.ClientReleaseNotReady):
+                releases._queue_rollback(
+                    f.store,
+                    f.fixture.root,
+                    profile,
+                    self.decision,
+                    releases.ClientReleaseStep("rollback", 1),
+                    f.record.context,
+                    self.decision.decided_at,
+                )
+            fallback.assert_not_called()
+        self.assertEqual(f.actions, actions)
+        # A local owned-row refusal is distinct from a transient provider wait.
+        releases._require_standing_release_available(f.store, profile.product)
+        f.store.write_provider_target_record(owned)
+        with (
+            patch("control_plane.production_recipient_inverse.writer_action", side_effect=f.writer),
+            patch(
+                "control_plane.production_recipient_inverse._verify_health_evidence_with_identity",
+                side_effect=f.health,
+            ),
+        ):
+            self.assertTrue(
+                releases._queue_recipient_inverse(
+                    f.store,
+                    f.fixture.root,
+                    profile,
+                    self.decision,
+                    releases.ClientReleaseStep("rollback", 1),
+                    f.record.context,
+                    self.decision.decided_at,
+                )
+            )
+        self.assertTrue(f.old_running)
+        self.assertFalse(f.new_running)
+
     def test_admitted_inverse_restores_baseline_after_hold(self) -> None:
         self.inverse_revocation_after_pause(new_decision=False, abort=False)
 
@@ -570,16 +665,29 @@ class RecipientReleaseRecoveryTests(unittest.TestCase):
         )
         actions = list(f.actions)
         step = releases.ClientReleaseStep("rollback", 1)
-        with self.assertRaises(ValueError):
-            releases._queue_recipient_inverse(
-                f.store,
-                f.fixture.root,
-                profile,
-                self.decision,
-                step,
-                f.record.context,
-                self.decision.decided_at,
-            )
+        authority = releases._generic_web_release_authority_allows
+        refusals: list[bool] = []
+
+        def check_authority(*args: Any, **kwargs: Any) -> bool:
+            allowed = authority(*args, **kwargs)
+            refusals.append(not allowed)
+            return allowed
+
+        with patch(
+            "control_plane.client_release._generic_web_release_authority_allows",
+            side_effect=check_authority,
+        ):
+            with self.assertRaises(ValueError):
+                releases._queue_recipient_inverse(
+                    f.store,
+                    f.fixture.root,
+                    profile,
+                    self.decision,
+                    step,
+                    f.record.context,
+                    self.decision.decided_at,
+                )
+        self.assertIn(True, refusals)
         self.assertEqual(f.actions, actions)
         self.assertFalse(f.old_running)
         self.assertTrue(f.new_running)
