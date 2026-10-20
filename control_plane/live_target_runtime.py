@@ -17,6 +17,7 @@ from control_plane.contracts.product_profile_record import (
     product_context_owner_map,
 )
 from control_plane.contracts.runtime_identity import COMPOSE_IMAGE_REFERENCE_ENV_KEYS
+from control_plane.contracts.secret_record import SecretBinding
 from control_plane.disposable_lanes import (
     DisposableLaneStore,
     DisposableLaneSafetyUnknown,
@@ -467,15 +468,21 @@ def evaluate_runtime_key_safety_for_live_target_sync(
     instance_name: str,
     require_policy: bool = True,
     required_binding_keys: tuple[str, ...] | None = None,
+    secret_bindings: tuple[SecretBinding, ...] | None = None,
 ) -> dict[str, object]:
+    """Evaluate current policy, optionally against the caller's exact delivered suppliers."""
     target = RuntimeKeySafetyTarget(
         context=context_name,
         instance=instance_name,
         environment_class=runtime_key_safety_environment_class(instance_name),
     )
-    all_runtime_bindings = record_store.list_secret_bindings(
-        integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
-        limit=None,
+    all_runtime_bindings = (
+        secret_bindings
+        if secret_bindings is not None
+        else record_store.list_secret_bindings(
+            integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+            limit=None,
+        )
     )
     bindings = tuple(
         binding
@@ -491,7 +498,7 @@ def evaluate_runtime_key_safety_for_live_target_sync(
         return {"required": False, "status": "skipped", "checked_binding_keys": []}
     try:
         policy_record = latest_active_runtime_key_safety_policy(record_store)
-        if required_binding_keys is not None:
+        if required_binding_keys is not None or secret_bindings is not None:
             evaluation = evaluate_runtime_key_safety(
                 target=target,
                 required_binding_keys=binding_keys,

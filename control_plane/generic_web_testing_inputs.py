@@ -1,7 +1,6 @@
 """Site-only managed inputs for the ordinary application testing deploy."""
 
 import json
-from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Protocol, cast
 
@@ -17,12 +16,8 @@ from control_plane.contracts.product_profile_record import (
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.deploy_target import ProviderTargetRecord
-from control_plane.contracts.secret_record import SecretBinding
-from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyTarget
-from control_plane.runtime_key_safety import (
-    RuntimeKeySafetyPolicyReadStore,
-    runtime_secret_binding_matches_target,
-)
+from control_plane.contracts.secret_record import SecretBinding, SecretRecord
+from control_plane.runtime_key_safety import RuntimeKeySafetyPolicyReadStore
 
 DELIVERY_RECEIPT_KEY = "testing_runtime_inputs_verified_sha256"
 TESTING_DISPATCH_REFUSED_PHASE = "testing_dispatch_refused"
@@ -37,10 +32,27 @@ class TestingTargetAuthorityRefused(TestingInputSafetyRefused):
 
 
 @dataclass(frozen=True)
+class TestingSecretProvenance:
+    binding_id: str
+    secret_id: str
+    binding_integration: str
+    binding_type: str
+    binding_key: str
+    binding_context: str
+    binding_instance: str
+    binding_status: str
+    secret_integration: str
+    secret_scope: str
+    secret_context: str
+    secret_instance: str
+    secret_status: str
+
+
+@dataclass(frozen=True)
 class TestingInputEnvelope:
     environment: environments.SiteRuntimeEnvironment
     safety_keys: frozenset[str]
-    bindings: tuple[SecretBinding, ...]
+    provenance: tuple[TestingSecretProvenance, ...]
 
 
 class TestingInputStore(
@@ -267,8 +279,15 @@ def prepare_testing_inputs(
         transported_keys=environment.values,
     )
     safety_keys = frozenset(required_secrets | transported | environment.secret_keys)
+    sources = _selected_testing_secret_sources(store, lane)
+    if environment.secret_keys - sources.keys():
+        raise TestingInputSafetyRefused(
+            "Application testing secret suppliers changed during capture."
+        )
     envelope = TestingInputEnvelope(
-        environment, safety_keys, _safety_bindings(store, lane, safety_keys)
+        environment,
+        safety_keys,
+        tuple(_secret_provenance(*sources[key]) for key in sorted(environment.secret_keys)),
     )
     require_testing_input_key_safety(store, lane, envelope)
     if (
@@ -282,19 +301,36 @@ def prepare_testing_inputs(
     return envelope
 
 
-def _safety_bindings(
-    store: TestingInputStore, lane: ProductLaneProfile, keys: Iterable[str]
-) -> tuple[SecretBinding, ...]:
-    target = RuntimeKeySafetyTarget(
-        context=lane.context, instance=lane.instance, environment_class="testing"
+def _selected_testing_secret_sources(
+    store: TestingInputStore, lane: ProductLaneProfile
+) -> dict[str, tuple[SecretBinding, SecretRecord]]:
+    # This is the canonical site-delivery selection. Retirement was already
+    # applied to captured environment.secret_keys; today's retirement must not
+    # revoke the continuation of values saved by this execution.
+    return secrets.resolve_effective_secret_bindings_from_store(
+        record_store=store,
+        integration=secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+        context_name=lane.context,
+        instance_name=lane.instance,
+        scopes=environments.site_secret_scopes(lane.instance),
     )
-    return tuple(
-        binding
-        for binding in store.list_secret_bindings(
-            integration=secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION, limit=None
-        )
-        if binding.binding_key in keys
-        and runtime_secret_binding_matches_target(binding=binding, target=target)
+
+
+def _secret_provenance(binding: SecretBinding, secret: SecretRecord) -> TestingSecretProvenance:
+    return TestingSecretProvenance(
+        binding_id=binding.binding_id,
+        secret_id=secret.secret_id,
+        binding_integration=binding.integration,
+        binding_type=binding.binding_type,
+        binding_key=binding.binding_key,
+        binding_context=binding.context,
+        binding_instance=binding.instance,
+        binding_status=binding.status,
+        secret_integration=secret.integration,
+        secret_scope=secret.scope,
+        secret_context=secret.context,
+        secret_instance=secret.instance,
+        secret_status=secret.status,
     )
 
 
@@ -305,27 +341,35 @@ def require_testing_input_key_safety(
 ) -> None:
     """Current policy and original bindings govern the captured payload, not later inputs."""
     store = cast(TestingInputStore, record_store)
-    current = _safety_bindings(store, lane, captured.safety_keys)
-
-    def identities(bindings: tuple[SecretBinding, ...]) -> set[tuple[str, ...]]:
-        return {
-            (
-                binding.binding_id,
-                binding.secret_id,
-                binding.integration,
-                binding.binding_type,
-                binding.binding_key,
-                binding.context,
-                binding.instance,
+    sources = _selected_testing_secret_sources(store, lane)
+    delivered_keys = {source.binding_key for source in captured.provenance}
+    suppliers: list[SecretBinding] = []
+    for original in captured.provenance:
+        current = sources.get(original.binding_key)
+        if (
+            current is None
+            or _secret_provenance(*current) != original
+            or current[0].status != "configured"
+            or current[1].status != "configured"
+        ):
+            raise TestingInputSafetyRefused("Captured application testing secret supplier changed.")
+        suppliers.append(current[0])
+    # A frozen safety requirement can exist without a delivered secret (for
+    # example a plain setting sharing a global binding's key). Keep its current
+    # fail-closed policy lookup rather than silently dropping that requirement.
+    policy_only_keys = captured.safety_keys - delivered_keys
+    if policy_only_keys:
+        suppliers.extend(
+            binding
+            for binding in store.list_secret_bindings(
+                integration=secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION, limit=None
             )
-            for binding in bindings
-        }
-
-    if identities(current) != identities(captured.bindings):
-        raise TestingInputSafetyRefused("Captured application testing secret binding changed.")
+            if binding.binding_key in policy_only_keys
+        )
     runtime.evaluate_runtime_key_safety_for_live_target_sync(
         record_store=store,
         context_name=lane.context,
         instance_name=lane.instance,
         required_binding_keys=tuple(sorted(captured.safety_keys)),
+        secret_bindings=tuple(suppliers),
     )

@@ -158,12 +158,22 @@ authority. Once image save returns successfully in that same execution, the
 trigger finishes only the captured values and earns only their original receipt;
 the next sweep repairs any newer inputs. Current product activity, lane/target
 binding and active key safety for the captured safety requirement set still
-govern the trigger. Preparation retains original binding and secret identities
-without plaintext persistence. A later declaration or binding on a captured
+govern the trigger. Preparation uses the canonical site-delivery selection and
+retains each actual supplier's binding identity and secret-record identity,
+integration, scope, context, instance and configured status, without version or
+audit timestamps or plaintext persistence. Unused global and shadowed bindings
+do not become captured suppliers. Current policy checks those actual suppliers
+during preparation and before dispatch; an unrelated higher-ranked binding
+cannot supply their safety classification. Frozen safety requirements without
+a delivered secret still receive their existing fail-closed policy check.
+A later declaration or binding on a captured
 plain setting does not expand that set. Original bindings must remain active
 and bound to the same secrets and routes; deleting and recreating a binding
 under its old key cannot authorize the captured payload. Version rotation may
-finish the already captured version before the next sweep repairs it.
+finish the already captured version before the next sweep repairs it. Explicit
+provider-key retirement added after image save likewise finishes the captured
+dispatch and removes the key on the next operation; current retirement does
+not change the saved operation's captured supplier set.
 
 A typed safety refusal after the synchronous image-save reply and before the
 trigger checkpoint records `testing_dispatch_refused`. Cleanup preserves this
