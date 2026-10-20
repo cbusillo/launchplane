@@ -295,7 +295,7 @@ class TestingRouteRehearsalTests(unittest.TestCase):
                 api = "http://127.0.0.1:" + ports["8080/tcp"][0]["HostPort"]
                 public = "http://127.0.0.1:" + ports["80/tcp"][0]["HostPort"]
 
-                def observed() -> str:
+                def observed() -> str | None:
                     with opener.open(api + "/api/rawdata", timeout=3) as response:
                         applied = json.load(response)
                     return observe_testing_route(plan, applied, json.loads(route_file.read_text()))

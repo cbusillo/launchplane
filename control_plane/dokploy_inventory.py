@@ -132,16 +132,9 @@ def _read(
         raise InventoryUnavailable("provider_read_failed") from error
 
 
-def read_dokploy_inventory(
-    *,
-    host: str,
-    token: str,
-    offset: int,
-    limit: int,
-    inventory_digest: str = "",
-    clock: Callable[[], float] = time.monotonic,
-) -> InventoryPage:
-    deadline = clock() + 25
+def _read_inventory_membership(
+    *, host: str, token: str, deadline: float, clock: Callable[[], float]
+) -> tuple[list[InventoryProject], str]:
     raw_projects = _items(
         _read(host=host, token=token, path="/api/project.all", deadline=deadline, clock=clock)
     )
@@ -209,6 +202,112 @@ def read_dokploy_inventory(
             [project.model_dump() for project in projects], sort_keys=True, separators=(",", ":")
         ).encode()
     ).hexdigest()
+    return projects, digest
+
+
+def _hydrate_inventory_target(
+    *,
+    host: str,
+    token: str,
+    target: InventoryTarget,
+    environment_id: str,
+    deadline: float,
+    clock: Callable[[], float],
+    servers: dict[str, str],
+) -> None:
+    id_field = TARGET_COLLECTIONS[
+        "applications" if target.category == "application" else target.category
+    ][1]
+    detail = _object(
+        _read(
+            host=host,
+            token=token,
+            deadline=deadline,
+            clock=clock,
+            path=f"/api/{target.category}.one",
+            query={id_field: target.target_id},
+        )
+    )
+    if detail.get(id_field) != target.target_id or detail.get("environmentId") != environment_id:
+        raise InventoryUnavailable("target_identity_changed")
+    target.name = _text(detail.get("name"))
+    # Missing is unknown; an explicit null is Dokploy's local host.
+    if "serverId" not in detail:
+        raise InventoryUnavailable("missing_placement")
+    if detail["serverId"] is None:
+        return
+    server_id = _text(detail["serverId"])
+    if server_id not in servers:
+        server = _object(
+            _read(
+                host=host,
+                token=token,
+                deadline=deadline,
+                clock=clock,
+                path="/api/server.one",
+                query={"serverId": server_id},
+            )
+        )
+        if server.get("serverId") != server_id:
+            raise InventoryUnavailable("server_identity_changed")
+        servers[server_id] = _text(server.get("name"))
+    target.placement = Placement(kind="server", server_id=server_id, server_name=servers[server_id])
+
+
+class InventoryTargetLocation(InventoryModel):
+    project_id: str
+    environment_id: str
+    target: InventoryTarget
+
+
+def read_dokploy_target_placement(
+    *,
+    host: str,
+    token: str,
+    target_category: str,
+    target_id: str,
+    clock: Callable[[], float] = time.monotonic,
+) -> InventoryTargetLocation:
+    """Validate full membership, then read only this target and its server."""
+    deadline = clock() + 25
+    projects, _ = _read_inventory_membership(host=host, token=token, deadline=deadline, clock=clock)
+    matches = [
+        (project, environment, target)
+        for project in projects
+        for environment in project.environments
+        for target in environment.targets
+        if (target.category, target.target_id) == (target_category, target_id)
+    ]
+    if len(matches) != 1:
+        raise InventoryUnavailable("target_identity_changed")
+    project, environment, target = matches[0]
+    _hydrate_inventory_target(
+        host=host,
+        token=token,
+        target=target,
+        environment_id=environment.environment_id,
+        deadline=deadline,
+        clock=clock,
+        servers={},
+    )
+    return InventoryTargetLocation(
+        project_id=project.project_id, environment_id=environment.environment_id, target=target
+    )
+
+
+def read_dokploy_inventory(
+    *,
+    host: str,
+    token: str,
+    offset: int,
+    limit: int,
+    inventory_digest: str = "",
+    clock: Callable[[], float] = time.monotonic,
+) -> InventoryPage:
+    deadline = clock() + 25
+    projects, digest = _read_inventory_membership(
+        host=host, token=token, deadline=deadline, clock=clock
+    )
     if inventory_digest and inventory_digest != digest:
         raise InventoryChanged
     if offset and not inventory_digest:
@@ -227,54 +326,23 @@ def read_dokploy_inventory(
     for project in selected:
         for environment in project.environments:
             for target in environment.targets:
-                id_field = TARGET_COLLECTIONS[
-                    "applications" if target.category == "application" else target.category
-                ][1]
-                detail = _object(
-                    _read(
-                        host=host,
-                        token=token,
-                        deadline=deadline,
-                        clock=clock,
-                        path=f"/api/{target.category}.one",
-                        query={id_field: target.target_id},
-                    )
-                )
-                if (
-                    detail.get(id_field) != target.target_id
-                    or detail.get("environmentId") != environment.environment_id
-                ):
-                    raise InventoryUnavailable("target_identity_changed")
-                target.name = _text(detail.get("name"))
-                # Missing is unknown; an explicit null is Dokploy's local host.
-                if "serverId" not in detail:
-                    raise InventoryUnavailable("missing_placement")
-                if detail["serverId"] is None:
-                    continue
-                server_id = _text(detail["serverId"])
-                if server_id not in servers:
-                    server = _object(
-                        _read(
-                            host=host,
-                            token=token,
-                            deadline=deadline,
-                            clock=clock,
-                            path="/api/server.one",
-                            query={"serverId": server_id},
-                        )
-                    )
-                    if server.get("serverId") != server_id:
-                        raise InventoryUnavailable("server_identity_changed")
-                    servers[server_id] = _text(server.get("name"))
-                target.placement = Placement(
-                    kind="server", server_id=server_id, server_name=servers[server_id]
+                _hydrate_inventory_target(
+                    host=host,
+                    token=token,
+                    target=target,
+                    environment_id=environment.environment_id,
+                    deadline=deadline,
+                    clock=clock,
+                    servers=servers,
                 )
     next_offset = offset + len(selected)
     return InventoryPage(
         inventory_digest=digest,
         total_projects=len(projects),
-        total_environments=len(environment_ids),
-        total_targets=len(target_ids),
+        total_environments=sum(len(project.environments) for project in projects),
+        total_targets=sum(
+            len(environment.targets) for project in projects for environment in project.environments
+        ),
         offset=offset,
         limit=limit,
         next_offset=next_offset if next_offset < len(projects) else None,

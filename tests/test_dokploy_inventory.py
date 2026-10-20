@@ -13,6 +13,7 @@ from control_plane.dokploy_inventory import (
     InventoryUnavailable,
     TARGET_COLLECTIONS,
     read_dokploy_inventory,
+    read_dokploy_target_placement,
 )
 from control_plane.http_app import create_launchplane_fastapi_app
 from tests.http_app_test_support import (
@@ -122,6 +123,69 @@ class InventoryTests(unittest.TestCase):
         serialized = second.model_dump_json()
         for secret in ("never-output", "composeFile", "ipAddress"):
             self.assertNotIn(secret, serialized)
+
+    def test_owned_placement_validates_whole_membership_without_unrelated_detail_reads(
+        self,
+    ) -> None:
+        with patch(
+            "control_plane.dokploy_inventory.api.dokploy_request", side_effect=self.provider
+        ):
+            location = read_dokploy_target_placement(
+                host="host", token="opaque", target_category="postgres", target_id="database-only"
+            )
+        self.assertEqual(location.project_id, self.projects[1]["projectId"])
+        self.assertEqual(location.environment_id, self.environment["environmentId"])
+        self.assertEqual(location.target.placement.kind, "server")
+        self.assertEqual(self.calls, ["/api/project.all", "/api/postgres.one", "/api/server.one"])
+        self.assertNotIn("never-output", location.model_dump_json())
+
+    def test_owned_placement_cannot_use_partial_membership_or_a_moved_target(self) -> None:
+        self.environment.pop("redis")
+        with patch(
+            "control_plane.dokploy_inventory.api.dokploy_request", side_effect=self.provider
+        ):
+            with self.assertRaises(InventoryUnavailable):
+                read_dokploy_target_placement(
+                    host="host", token="opaque", target_category="compose", target_id="self-host"
+                )
+        self.assertEqual(self.calls, ["/api/project.all"])
+        self.environment["redis"] = []
+        provider = self.provider
+
+        def moved(**kwargs: Any) -> Any:
+            detail = provider(**kwargs)
+            if kwargs["path"] == "/api/compose.one":
+                detail["environmentId"] = "different-environment"
+            return detail
+
+        with patch("control_plane.dokploy_inventory.api.dokploy_request", side_effect=moved):
+            with self.assertRaises(InventoryUnavailable):
+                read_dokploy_target_placement(
+                    host="host", token="opaque", target_category="compose", target_id="self-host"
+                )
+
+    def test_unrelated_candidate_additions_preserve_only_the_owned_location(self) -> None:
+        def read() -> Any:
+            return read_dokploy_target_placement(
+                host="host", token="opaque", target_category="postgres", target_id="database-only"
+            )
+
+        with patch(
+            "control_plane.dokploy_inventory.api.dokploy_request", side_effect=self.provider
+        ):
+            original = read()
+            candidate = environment("candidate-environment", "Independent candidate")
+            candidate["compose"] = [{"composeId": "independent-candidate"}]
+            self.projects.append(
+                {
+                    "projectId": "candidate-project",
+                    "name": "Independent candidate",
+                    "environments": [candidate],
+                }
+            )
+            self.assertEqual(read(), original)
+            self.projects[1]["projectId"] = "moved-owned-project"
+            self.assertNotEqual(read(), original)
 
     def test_empty_provider_is_complete(self) -> None:
         self.projects = []

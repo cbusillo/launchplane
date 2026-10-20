@@ -7,14 +7,18 @@ from typing import Protocol
 from urllib.parse import urlsplit
 
 from control_plane.contracts.testing_rebuild import (
-    TestingCopy,
     TestingCopyReadiness,
     TestingCopyReceipt,
     TestingRebuildPlan,
     TestingRebuildRecord,
     TestingRouteObservation,
+    TestingPredecessor,
+    UnavailableTestingPredecessor,
+    TestingUnavailableReadback,
+    TestingRetirementRecovery,
 )
 from control_plane.traffic_switch import (
+    MAX_READINESS_AGE_SECONDS,
     require_fresh_readiness,
     require_route_authority,
     require_serving_route,
@@ -56,8 +60,8 @@ class TestingRebuildProvider(Protocol):
     def switch(
         self,
         plan: TestingRebuildPlan,
-        previous: TestingCopy,
-        desired: TestingCopy,
+        previous: TestingPredecessor,
+        desired: TestingPredecessor,
         *,
         reconcile_only: bool,
     ) -> None:
@@ -69,7 +73,7 @@ class TestingRebuildProvider(Protocol):
         ...
 
     def publish(
-        self, plan: TestingRebuildPlan, desired: TestingCopy, *, forward_started: bool
+        self, plan: TestingRebuildPlan, desired: TestingPredecessor, *, forward_started: bool
     ) -> None:
         """DB-only atomic CAS/adoption with readback, preserving the lane address.
 
@@ -86,7 +90,7 @@ class TestingRebuildProvider(Protocol):
         """Drain/stop the old copy idempotently; retain its storage and custody."""
         ...
 
-    def retirement_exclusion(self, plan: TestingRebuildPlan) -> TestingCopyReadiness | None:
+    def retirement_exclusion(self, plan: TestingRebuildPlan) -> TestingRetirementRecovery | None:
         """Read a prior terminal stop exclusion and fresh old-copy health.
 
         No exclusion returns None. A known exclusion with unavailable health
@@ -95,7 +99,7 @@ class TestingRebuildProvider(Protocol):
         """
         ...
 
-    def unstarted_retirement(self, plan: TestingRebuildPlan) -> TestingCopyReadiness | None:
+    def unstarted_retirement(self, plan: TestingRebuildPlan) -> TestingRetirementRecovery | None:
         """Return fresh old-copy health only after excluding the original stop.
 
         The original provider fence must prove the stop was never dispatched,
@@ -107,8 +111,20 @@ class TestingRebuildProvider(Protocol):
 
 
 def _route(
-    observation: TestingRouteObservation, plan: TestingRebuildPlan, copy: TestingCopy
+    observation: TestingRouteObservation, plan: TestingRebuildPlan, copy: TestingPredecessor
 ) -> None:
+    if isinstance(copy, UnavailableTestingPredecessor):
+        if (
+            not observation.unavailable
+            or observation.target_url is not None
+            or observation.applied != copy.route_applied
+            or (observation.route_id, observation.host, observation.slot_id)
+            != (plan.route_id, plan.host, copy.copy_id)
+        ):
+            raise ValueError("The unavailable predecessor's exact route preimage changed.")
+        return
+    if observation.unavailable or not observation.applied:
+        raise ValueError("A serving copy requires its applied backend.")
     require_route_authority(
         observation,
         route_id=plan.route_id,
@@ -142,10 +158,14 @@ class TestingRebuildRouteFailure(ValueError):
 def _serving(
     observation: TestingRouteObservation,
     plan: TestingRebuildPlan,
-    copy: TestingCopy,
+    copy: TestingPredecessor,
     now: datetime,
 ) -> None:
     _route(observation, plan, copy)
+    if isinstance(copy, UnavailableTestingPredecessor):
+        if not 0 <= (now - observation.observed_at).total_seconds() <= MAX_READINESS_AGE_SECONDS:
+            raise TestingRebuildObservationUnavailable("The unavailable route preimage is stale.")
+        return
     require_fresh_readiness(
         observed_at=observation.observed_at,
         now=now,
@@ -371,12 +391,24 @@ def execute_testing_rebuild(
                 if recovery is not None:
                     if (recovery.copy_id, recovery.host) != (plan.old.copy_id, plan.host):
                         raise ValueError("Retirement recovery belongs to another copy or address.")
-                    require_fresh_readiness(
-                        observed_at=recovery.observed_at,
-                        now=clock(),
-                        actual=recovery.runtime_identity,
-                        expected=plan.old.runtime_identity,
-                    )
+                    if isinstance(plan.old, UnavailableTestingPredecessor):
+                        if (
+                            not isinstance(recovery, TestingUnavailableReadback)
+                            or recovery.observation_sha256 != plan.old.observation_sha256
+                            or not 0
+                            <= (clock() - recovery.observed_at).total_seconds()
+                            <= MAX_READINESS_AGE_SECONDS
+                        ):
+                            raise ValueError("Unavailable retirement recovery changed custody.")
+                    else:
+                        if not isinstance(recovery, TestingCopyReadiness):
+                            raise ValueError("A serving predecessor needs fresh private health.")
+                        require_fresh_readiness(
+                            observed_at=recovery.observed_at,
+                            now=clock(),
+                            actual=recovery.runtime_identity,
+                            expected=plan.old.runtime_identity,
+                        )
                 save(
                     step="rolling_back",
                     error="candidate_public_health_failed",

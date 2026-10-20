@@ -17,6 +17,7 @@ from control_plane.contracts.testing_rebuild import (
     TestingRebuildPlan,
     TestingRebuildRecord,
     TestingRouteObservation,
+    TestingPredecessor,
 )
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_rebuild_storage import RecordTestingRebuildStore
@@ -60,6 +61,26 @@ def rebuild_plan(source: str = "production") -> TestingRebuildPlan:
             "new": copies[1],
         }
     )
+
+
+class UnavailablePredecessorContractTests(unittest.TestCase):
+    def test_unavailable_predecessor_has_no_invented_backend_or_runtime(self) -> None:
+        original = rebuild_plan()
+        for availability in ("stopped", "absent"):
+            with self.subTest(availability=availability):
+                payload = original.model_dump()
+                payload["old"] = {
+                    "copy_id": original.old.copy_id,
+                    "target_id": original.old.target_id,
+                    "availability": availability,
+                    "observation_sha256": "c" * 64,
+                    "route_applied": False,
+                }
+                plan = TestingRebuildPlan.model_validate(payload)
+                self.assertIsNone(plan.old.private_url)
+                self.assertIsNone(plan.old.runtime_identity)
+                with self.assertRaises(ValueError):
+                    TestingRebuildPlan.model_validate({**payload, "new": payload["old"]})
 
 
 class TestingProvider:
@@ -156,8 +177,8 @@ class TestingProvider:
     def switch(
         self,
         plan: TestingRebuildPlan,
-        previous: TestingCopy,
-        desired: TestingCopy,
+        previous: TestingPredecessor,
+        desired: TestingPredecessor,
         *,
         reconcile_only: bool,
     ) -> None:
@@ -174,7 +195,7 @@ class TestingProvider:
             raise TimeoutError("fixture lost switch reply")
 
     def publish(
-        self, plan: TestingRebuildPlan, desired: TestingCopy, *, forward_started: bool
+        self, plan: TestingRebuildPlan, desired: TestingPredecessor, *, forward_started: bool
     ) -> None:
         if self.serving != desired or (desired == plan.new and self.bad_public):
             raise AssertionError("Only a publicly healthy copy may become authoritative.")
@@ -208,6 +229,7 @@ class TestingProvider:
         return self.old_readiness(plan)
 
     def old_readiness(self, plan: TestingRebuildPlan) -> TestingCopyReadiness:
+        assert isinstance(plan.old, TestingCopy)
         return TestingCopyReadiness(
             copy_id=plan.old.copy_id,
             host=self.host,
@@ -239,6 +261,7 @@ class TestingRebuildTests(unittest.TestCase):
         )
 
     def test_managed_legacy_predecessor_keeps_its_observed_identity(self) -> None:
+        assert self.plan.old.runtime_identity is not None
         old = self.plan.old.model_copy(
             update={
                 "runtime_identity": self.plan.old.runtime_identity.model_copy(
@@ -250,6 +273,7 @@ class TestingRebuildTests(unittest.TestCase):
             {**self.plan.model_dump(), "old": old.model_dump()}
         )
         self.assertEqual(plan.old.runtime_identity, old.runtime_identity)
+        assert old.runtime_identity is not None
         with self.assertRaises(ValueError):
             TestingRebuildPlan.model_validate(
                 {
@@ -454,8 +478,8 @@ class TestingRebuildTests(unittest.TestCase):
 
         def switch(
             plan: TestingRebuildPlan,
-            previous: TestingCopy,
-            desired: TestingCopy,
+            previous: TestingPredecessor,
+            desired: TestingPredecessor,
             *,
             reconcile_only: bool,
         ) -> None:
@@ -521,8 +545,8 @@ class TestingRebuildTests(unittest.TestCase):
 
         def switch(
             plan: TestingRebuildPlan,
-            previous: TestingCopy,
-            desired: TestingCopy,
+            previous: TestingPredecessor,
+            desired: TestingPredecessor,
             *,
             reconcile_only: bool,
         ) -> None:
@@ -612,7 +636,7 @@ class TestingRebuildTests(unittest.TestCase):
         self.provider.bad_public = True
 
         def unresolved(
-            plan: TestingRebuildPlan, desired: TestingCopy, *, forward_started: bool
+            plan: TestingRebuildPlan, desired: TestingPredecessor, *, forward_started: bool
         ) -> None:
             self.assertTrue(forward_started)
             raise TimeoutError("fixture original publication outcome unavailable")
@@ -630,6 +654,7 @@ class TestingRebuildTests(unittest.TestCase):
 
     def test_operation_key_is_scoped_to_its_testing_lane(self) -> None:
         first = self.run_rebuild()
+        assert self.plan.old.runtime_identity is not None
         other_context = "another-context"
         self.plan = TestingRebuildPlan.model_validate(
             {

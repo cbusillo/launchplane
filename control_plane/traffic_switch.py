@@ -6,6 +6,8 @@ from typing import Protocol
 from control_plane.contracts.promotion_record import HealthcheckEvidence
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 
+MAX_READINESS_AGE_SECONDS = 60
+
 
 class ServingRoute(Protocol):
     @property
@@ -13,7 +15,7 @@ class ServingRoute(Protocol):
     @property
     def host(self) -> str: ...
     @property
-    def target_url(self) -> str: ...
+    def target_url(self) -> str | None: ...
     @property
     def slot_id(self) -> str: ...
     @property
@@ -57,5 +59,8 @@ def require_route_authority(
 def require_fresh_readiness(
     *, observed_at: datetime, now: datetime, actual: RuntimeIdentity, expected: RuntimeIdentity
 ) -> None:
-    if actual != expected or not 0 <= (now - observed_at).total_seconds() <= 60:
+    if (
+        actual != expected
+        or not 0 <= (now - observed_at).total_seconds() <= MAX_READINESS_AGE_SECONDS
+    ):
         raise ValueError("private readiness identity is wrong, stale or unavailable")

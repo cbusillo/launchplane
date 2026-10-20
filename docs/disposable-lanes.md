@@ -11,11 +11,10 @@ version is not proof of those facts.
 ## Stable-address rebuild lifecycle
 
 `workflows/testing_rebuild.py` provides the service-side lifecycle for a testing
-lane with one stable HTTPS address and a separate candidate copy. It is a source
-component: the existing resource/bootstrap endpoints below do not yet call it.
-It exposes no new HTTP operation, UI control or permission. Its tests qualify the
-controller and checkpoint storage, not a real provider, restored data or a live
-lane.
+lane with one stable HTTPS address and a separate candidate copy. The existing
+testing replacement action and durable worker call it without a separate queue
+or permission. Source and fixture tests qualify that behavior; they do not prove
+a particular live lane or restored business data.
 
 The immutable plan binds the existing route/address, old and new target/resource
 identities, the candidate build and a managed source reference. Empty rebuilds,
@@ -45,6 +44,34 @@ the original operation and authority-writer lock. An unavailable publication
 outcome cannot be replaced with an assertion that the old metadata still wins.
 The checkpoint retains whether forward publication started and passes that fact
 to inverse publication, including after a lost commit reply.
+
+A predecessor verified stopped or absent uses an explicit unavailable record.
+It needs the existing lane's address ownership, provider target and registered
+server placement. Complete container IDs, ownership fields, states and mount
+inventory must agree; an incomplete inspection never proves absence. Stopped
+copies keep their actual storage/configuration witness without requiring an old
+runtime identity or starting a process. Fully absent containers leave any old
+storage custody unknown and preserved. Holds, positive use, needed-copy evidence,
+production isolation and unresolved provider effects keep their existing gates.
+
+An unavailable predecessor has no invented private endpoint, runtime identity or
+healthy public observation. The candidate route comes from the original recorded
+template or the provider's converted web-router declaration, checked against the
+current proxy listeners, TLS resolver and applied conflicts. Missing placement or
+ingress declaration is a record/capability prerequisite; repairing or starting
+the old application is not an admission step. Forward checkpoints retain the
+original declaration and listener witnesses. Candidate preparation, generated
+local credentials, sanitation, immutable build, private identity and public
+health checks use the ordinary lifecycle.
+
+Failure restores the captured route file's exact bytes or original absence and
+the original metadata. The same physical writer lock, generation, CAS and durable
+receipt cover restoration, including removal of only that lane's newly created
+file; a lost response is settled through its original writer. An unavailable
+original stays unavailable after rollback. After successful publication, automatic
+deployment of the old target is disabled and its stop is recorded as undispatched
+because it was already unavailable. That success receipt does not itself request
+rollback after a checkpoint interruption. Its data is never deleted here.
 
 `testing_rebuild_storage.py` stores checkpoints in the existing DB-backed record
 payloads, scoped by product, context and operation key. The envelope is completed
@@ -81,9 +108,8 @@ provider effects, rather than deleting checkpoints or replaying a legacy
 bootstrap against that copy. Terminal checkpoint reads return their historical
 receipt even after a later rebuild moves the lane. They do not reacquire a
 mutation lease or claim current live health; the service caller still authorizes
-the read. Worker/HTTP integration in [#3968](https://github.com/cbusillo/launchplane/issues/3968)
-must supply cancellation/abandonment for failed preparation with retained
-candidate custody before this component is activated as a rebuild control.
+the read. Failed preparation retains its candidate custody through the existing
+worker's cancellation/abandonment and original-operation recovery paths.
 
 ## Repair usage rule
 
@@ -750,8 +776,10 @@ A written
 but partly/unapplied group stays pending without another dispatch. Public health
 and exact runtime identity remain the controller's separate proof before serving
 publication or old-copy retirement. The old physical copy must still be qualified
-before switch-back; an already stopped predecessor does not prevent observing the
-current candidate, but cannot authorize an inverse switch.
+before switch-back. A predecessor that was serving at admission still needs its
+fresh private readiness before an excluded-stop inverse. An explicitly unavailable
+predecessor instead restores its captured route preimage and unavailable truth;
+it never supplies healthy rollback evidence.
 
 The supported host capability requires Dokploy's directory-mounted dynamic file
 provider, its private applied API and the existing managed terminal/Docker

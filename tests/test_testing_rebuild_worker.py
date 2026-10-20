@@ -3,6 +3,7 @@
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 import json
+import yaml
 from urllib.parse import urlsplit
 from typing import Any, Literal
 import unittest
@@ -32,7 +33,9 @@ from control_plane.contracts.testing_candidate import (
 from control_plane.contracts.testing_candidate_application import TestingCandidatePrepared
 from control_plane.dokploy.testing_route import route_document, compile_testing_route
 from control_plane.dokploy.testing_route_transport import DokployTestingRouteTransport
-from control_plane.dokploy import post_deploy, api, source
+from control_plane.dokploy import post_deploy, api, source, compose
+from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
+from control_plane.dokploy_inventory import TARGET_COLLECTIONS
 from control_plane import testing_candidate_application as candidate_application
 from control_plane.testing_candidate_allocation import candidate_resources
 from control_plane.testing_candidate_runtime import candidate_runtime_inputs
@@ -76,6 +79,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
         assert candidate.application is not None and candidate.application.prepared is not None
         self.app = candidate.application
         self.prepared = candidate.application.prepared
+        assert self.fixture.route.old_backend is not None
         self.original_identity = RuntimeIdentity(
             product=candidate.product,
             context=candidate.context,
@@ -140,6 +144,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.fail_public = False
         self.fail_after_stop = False
         self.old_private_healthy = True
+        self.provider_inventory_incomplete = False
         self.authorize = Mock()
         self.old_provider: dict[str, Any] = {
             "composeId": self.intent.old.target_id,
@@ -243,7 +248,23 @@ class NativeTestingWorkerTests(unittest.TestCase):
             self.store, product=self.operation.product, context=self.operation.context
         )
 
-    def provider_request(self, **kwargs: Any) -> dict[str, Any]:
+    def provider_request(self, **kwargs: Any) -> Any:
+        if kwargs["path"] == "/api/project.all":
+            environment: dict[str, Any] = {
+                "environmentId": "old-environment",
+                "name": "Testing",
+                **{key: [] for key in TARGET_COLLECTIONS},
+            }
+            environment["compose"] = [{"composeId": self.intent.old.target_id}]
+            if self.provider_inventory_incomplete:
+                environment.pop("postgres")
+            return [
+                {"projectId": "old-project", "name": "Owned project", "environments": [environment]}
+            ]
+        if kwargs["path"] == "/api/compose.one":
+            return {**self.old_provider, "environmentId": "old-environment"}
+        if kwargs["path"] == "/api/server.one":
+            return {"serverId": self.intent.server_id, "name": "Managed server"}
         self.assertEqual(kwargs["path"], "/api/compose.stop")
         self.assertEqual(kwargs["payload"]["composeId"], self.intent.old.target_id)
         self.assertIsNotNone(self.owned)
@@ -276,6 +297,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
         if endpoints and legacy is not None:
             endpoints.extend(item["url"] for item in legacy["loadBalancer"]["servers"])
         return {
+            "static_configuration": "entryPoints:\n  web:\n    address: ':80'\n  websecure:\n    address: ':443'\n",
             "raw": deepcopy(self.raw),
             "owned_file": json.dumps(self.owned) if self.owned is not None else None,
             "old_endpoints": tuple(endpoints),
@@ -293,6 +315,8 @@ class NativeTestingWorkerTests(unittest.TestCase):
 
     def settle_execution(self, execution: Any, key: str, *, dispatch_guard: Any) -> str:
         dispatch_guard(lambda: None)
+        if execution.backend is None and self.owned is None:
+            return "applied"
         if self.owned is not None:
             backend = self.owned["http"]["services"][self.fixture.route.route_id]["loadBalancer"][
                 "servers"
@@ -304,9 +328,9 @@ class NativeTestingWorkerTests(unittest.TestCase):
     def switch(
         self,
         plan: Any,
-        backend: str,
+        backend: str | None,
         *,
-        expected_backend: str,
+        expected_backend: str | None,
         dispatch_guard: Any,
         desired_runtime_identity: RuntimeIdentity | None = None,
         execution: Any = None,
@@ -317,8 +341,13 @@ class NativeTestingWorkerTests(unittest.TestCase):
             if backend == plan.new_backend:
                 self.assertEqual(self.current().target_id, self.fixture.before.target_id)
                 self.assertEqual(self.current().provider, self.fixture.before.provider)
-            self.assertFalse(self.retained["stopped"])
+            if plan.unavailable_preimage is None:
+                self.assertFalse(self.retained["stopped"])
             self.effects.append("switch-new" if backend == plan.new_backend else "switch-old")
+            if backend is None:
+                self.owned = None
+                self.raw = deepcopy(plan.unavailable_preimage.raw)
+                return
             self.owned = route_document(plan, backend)
             for section in ("routers", "services", "middlewares"):
                 for name, value in self.owned["http"].get(section, {}).items():
@@ -354,6 +383,155 @@ class NativeTestingWorkerTests(unittest.TestCase):
             authorize=self.authorize,
             lease_owner="native-worker-fixture",
         )
+
+    def admit_unavailable(self, availability: str) -> None:
+        self.retained.update(
+            availability=availability,
+            stopped=True,
+            web_stopped=True,
+            observation_sha256="c" * 64,
+            inventory_sha256="d" * 64,
+        )
+        if availability == "absent":
+            for field in ("web_id", "identity", "resource_binding", "physical_binding"):
+                self.retained.pop(field, None)
+        self.raw = {"routers": {}, "services": {}, "middlewares": {}}
+        configured = yaml.safe_dump(
+            {
+                "services": {
+                    "web": {
+                        "labels": {
+                            "traefik.enable": "true",
+                            "traefik.docker.network": "dokploy-network",
+                            "traefik.http.routers.testing.rule": f"Host(`{self.fixture.route.host}`)",
+                            "traefik.http.routers.testing.entrypoints": "websecure",
+                            "traefik.http.routers.testing.tls": "true",
+                        }
+                    }
+                }
+            }
+        )
+        self.enterContext(
+            patch.object(compose, "fetch_dokploy_converted_compose_file", return_value=configured)
+        )
+        self.intent = self.capture_function(
+            root=self.root, store=self.store, operation=self.operation
+        )
+        self.capture.return_value = self.intent
+        self.assertIsNone(self.intent.old.private_url)
+        self.assertIsNone(self.intent.old.runtime_identity)
+        self.assertIsNone(self.intent.old.resource_binding)
+        self.assertEqual(self.effects, [])
+
+    def test_stopped_predecessor_rebuilds_without_starting_or_stopping_it(self) -> None:
+        self.admit_unavailable("stopped")
+        result = self.execute()
+        self.assertEqual(result.deploy_status, "pass", result.error_code)
+        self.assertEqual(self.effects, ["switch-new"])
+        self.assertEqual(self.current().target_id.target_id, self.fixture.candidate.compose_id)
+        self.assertTrue(self.retained["stopped"])
+
+    def test_absent_predecessor_rebuild_preserves_unknown_old_storage_custody(self) -> None:
+        self.admit_unavailable("absent")
+        before = dict(self.retained)
+        result = self.execute()
+        self.assertEqual(result.deploy_status, "pass", result.error_code)
+        self.assertEqual(self.effects, ["switch-new"])
+        self.assertEqual(self.retained, before)
+
+    def test_unavailable_declaration_change_ends_before_candidate_execution(self) -> None:
+        self.admit_unavailable("absent")
+        with (
+            patch.object(compose, "fetch_dokploy_converted_compose_file", return_value="{}"),
+            patch.object(service, "prepare_candidate_application") as prepare,
+        ):
+            result = self.execute()
+        self.assertEqual(result.deploy_status, "fail")
+        prepare.assert_not_called()
+        self.assertEqual(self.effects, [])
+        self.assertEqual(self.current(), self.fixture.before)
+
+    def test_unavailable_predecessor_reports_missing_registered_placement(self) -> None:
+        self.old_provider["serverId"] = None
+        with self.assertRaises(service.TestingRebuildRefused):
+            self.admit_unavailable("absent")
+        self.assertEqual(self.effects, [])
+
+    def test_known_single_target_cannot_replace_complete_provider_inventory(self) -> None:
+        self.provider_inventory_incomplete = True
+        with self.assertRaises(service.TestingRebuildRefused):
+            self.admit_unavailable("absent")
+        self.assertEqual(self.effects, [])
+        self.assertEqual(self.current(), self.fixture.before)
+
+    def test_failed_unavailable_preparation_preserves_unrouted_original_and_metadata(self) -> None:
+        from control_plane.workflows.testing_rebuild import TestingRebuildPreparationFailure
+
+        self.admit_unavailable("absent")
+        preimage = deepcopy(self.raw)
+        with patch.object(
+            service.NativeTestingRebuildExecution,
+            "prepare",
+            side_effect=TestingRebuildPreparationFailure(
+                copy_id=self.fixture.candidate.namespace,
+                evidence_id="fixture-terminal-private-failure",
+            ),
+        ):
+            result = self.execute()
+        self.assertEqual(result.deploy_status, "fail")
+        self.assertEqual(self.effects, [])
+        self.assertEqual(self.raw, preimage)
+        self.assertEqual(self.current(), self.fixture.before)
+        self.assertIsNone(self.owned)
+
+    def test_failed_unavailable_public_probe_restores_unrouted_original_truth(self) -> None:
+        self.admit_unavailable("absent")
+        preimage = deepcopy(self.raw)
+        self.fail_public = True
+        result = self.execute()
+        self.assertEqual(result.deploy_status, "fail")
+        self.assertEqual(self.effects, ["switch-new", "switch-old"])
+        self.assertEqual(self.raw, preimage)
+        self.assertEqual(self.current(), self.fixture.before)
+        self.assertIsNone(self.owned)
+        self.assert_failed_checkpoint(result)
+
+    def test_lost_unavailable_switch_reply_reconciles_original_writer_once(self) -> None:
+        self.admit_unavailable("absent")
+        switch = self.switch
+
+        def lost(*args: Any, **kwargs: Any) -> str:
+            switch(*args, **kwargs)
+            raise NativeSourceUnavailable("fixture lost original route reply")
+
+        with patch.object(DokployTestingRouteTransport, "publish", side_effect=lost):
+            with self.assertRaises(service.NativeTestingRebuildPending):
+                self.execute()
+        result = self.execute()
+        self.assertEqual(result.deploy_status, "pass", result.error_code)
+        self.assertEqual(self.effects, ["switch-new"])
+
+    def test_unavailable_retirement_receipt_is_not_a_rollback_request_after_interruption(
+        self,
+    ) -> None:
+        from control_plane.testing_rebuild_storage import RecordTestingRebuildStore
+
+        self.admit_unavailable("absent")
+        save = RecordTestingRebuildStore.save
+
+        def interrupted(store: RecordTestingRebuildStore, record: TestingRebuildRecord) -> None:
+            if record.step == "complete":
+                raise NativeSourceUnavailable("fixture interrupted before final checkpoint")
+            save(store, record)
+
+        with patch.object(RecordTestingRebuildStore, "save", new=interrupted):
+            with self.assertRaises(service.NativeTestingRebuildPending):
+                self.execute()
+        self.assertEqual(self.effects, ["switch-new"])
+        result = self.execute()
+        self.assertEqual(result.deploy_status, "pass", result.error_code)
+        self.assertEqual(self.effects, ["switch-new"])
+        self.assertEqual(self.current().target_id.target_id, self.fixture.candidate.compose_id)
 
     def assert_failed_checkpoint(self, result: Any) -> None:
         from control_plane.testing_rebuild_storage import RecordTestingRebuildStore
@@ -2238,7 +2416,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
     def test_automatic_old_deploys_are_disabled_only_after_the_new_copy_is_selected(self) -> None:
         self.old_provider["autoDeploy"] = True
 
-        def update(**kwargs: Any) -> dict[str, Any]:
+        def update(**kwargs: Any) -> Any:
             if kwargs["path"] == "/api/compose.stop":
                 return self.provider_request(**kwargs)
             self.assertEqual(kwargs["payload"]["composeId"], self.intent.old.target_id)
@@ -3094,7 +3272,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
     def test_provider_reply_does_not_retire_until_every_old_service_is_observed_stopped(
         self,
     ) -> None:
-        def partial(**kwargs: Any) -> dict[str, Any]:
+        def partial(**kwargs: Any) -> Any:
             result = self.provider_request(**kwargs)
             self.retained["stopped"] = False  # web stopped, another old service is still running
             return result

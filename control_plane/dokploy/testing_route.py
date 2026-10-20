@@ -1,12 +1,14 @@
 """Lane-owned testing traffic over retained Docker routes and disposable copies."""
 
 from copy import deepcopy
+import hashlib
 from ipaddress import ip_address
 import json
 from typing import Any, Self
 from urllib.parse import urlsplit
 
 from pydantic import Field, field_validator, model_validator
+import yaml
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.prepared_public_site import FrozenRecord
@@ -19,17 +21,34 @@ class TestingRoutePending(ValueError):
     """The owned file and applied provider view have not converged."""
 
 
+class UnavailableTestingRoutePreimage(FrozenRecord):
+    file_content: str | None
+    raw: dict[str, Any]
+    observation_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    applied: bool
+    static_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    declaration_sha256: str = Field(default="", exclude_if=lambda value: not value)
+
+    @field_validator("raw", mode="before")
+    @classmethod
+    def capture_raw(cls, value: object) -> object:
+        return json.loads(json.dumps(value))
+
+
 class TestingLaneRoute(FrozenRecord):
     product: str = Field(min_length=1)
     context: str = Field(min_length=1)
     host: str = Field(pattern=r"^[a-zA-Z0-9.-]+$")
     route_id: str = Field(pattern=r"^lp-testing-route-[a-f0-9]{32}$")
-    old_backend: str
+    old_backend: str | None
     new_backend: str
     template: dict[str, Any]
     legacy_routers: dict[str, dict[str, Any]]
     legacy_backend: str = ""
     public_entrypoints: tuple[str, ...] = Field(min_length=1)
+    unavailable_preimage: UnavailableTestingRoutePreimage | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
     @field_validator("template", "legacy_routers", mode="before")
     @classmethod
@@ -46,7 +65,13 @@ class TestingLaneRoute(FrozenRecord):
             raise ValueError("Testing traffic identity belongs to another lane.")
         if self.old_backend == self.new_backend:
             raise ValueError("Testing traffic needs an independent successor.")
+        if (self.old_backend is None) != (self.unavailable_preimage is not None):
+            raise ValueError("Unavailable predecessor routing requires its distinct preimage.")
         for backend in (self.old_backend, self.new_backend):
+            if backend is None:
+                if self.unavailable_preimage is None:
+                    raise ValueError("A missing backend requires its unavailable route preimage.")
+                continue
             parsed = urlsplit(backend)
             if (
                 parsed.scheme != "http"
@@ -105,12 +130,33 @@ def router_configuration(router: dict[str, Any]) -> dict[str, Any]:
     return configuration
 
 
-def route_document(plan: TestingLaneRoute, backend: str) -> dict[str, Any]:
+def route_document(plan: TestingLaneRoute, backend: str | None) -> dict[str, Any]:
     if backend not in {plan.old_backend, plan.new_backend}:
         raise ValueError("Testing traffic cannot select an unadmitted backend.")
+    if backend is None:
+        assert plan.unavailable_preimage is not None
+        content = plan.unavailable_preimage.file_content
+        if content is None:
+            raise ValueError("An absent preimage has no route document.")
+        document = json.loads(content)
+        if not isinstance(document, dict):
+            raise ValueError("The captured testing route is not a document.")
+        return document
     document = deepcopy(plan.template)
     document["http"]["services"][plan.route_id]["loadBalancer"]["servers"] = [{"url": backend}]
     return document
+
+
+def route_document_content(plan: TestingLaneRoute, backend: str | None) -> str | None:
+    if backend is None:
+        assert plan.unavailable_preimage is not None
+        return plan.unavailable_preimage.file_content
+    return json.dumps(route_document(plan, backend), sort_keys=True, separators=(",", ":"))
+
+
+def route_document_digest(plan: TestingLaneRoute, backend: str | None) -> str:
+    content = route_document_content(plan, backend)
+    return hashlib.sha256(content.encode()).hexdigest() if content is not None else "absent"
 
 
 def testing_ingress_entrypoints(raw: dict[str, Any], host: str) -> tuple[str, ...]:
@@ -405,10 +451,242 @@ def compile_testing_route(
     return plan
 
 
+def compile_unavailable_testing_route(
+    *,
+    product: str,
+    context: str,
+    host: str,
+    new_backend: str,
+    raw: dict[str, Any],
+    file_content: str | None,
+    observation_sha256: str,
+    static_configuration: str,
+    configured_compose: str,
+    recorded_template: dict[str, Any] | None = None,
+    recorded_backend: str | None = None,
+) -> TestingLaneRoute:
+    """Use declared ingress without claiming a stopped Docker router is applied."""
+    static = yaml.safe_load(static_configuration)
+    if not isinstance(static, dict) or not isinstance(static.get("entryPoints"), dict):
+        raise ValueError("The managed proxy's listener configuration is unavailable.")
+    identifier = testing_route_id(product, context)
+    template = deepcopy(recorded_template)
+    if template is None:
+        if file_content is not None:
+            raise ValueError("The existing testing route has no recorded template authority.")
+        configuration = yaml.safe_load(configured_compose)
+        services = configuration.get("services") if isinstance(configuration, dict) else None
+        web = services.get("web") if isinstance(services, dict) else None
+        supplied = web.get("labels") if isinstance(web, dict) else None
+        if isinstance(supplied, list):
+            if any(not isinstance(item, str) or "=" not in item for item in supplied):
+                raise ValueError("The declared testing router labels are incomplete.")
+            pairs = [item.split("=", 1) for item in supplied]
+            if len({pair[0] for pair in pairs}) != len(pairs):
+                raise ValueError("The declared testing router labels conflict.")
+            labels = dict(pairs)
+        elif isinstance(supplied, dict) and all(
+            isinstance(key, str) and isinstance(value, str) for key, value in supplied.items()
+        ):
+            labels = supplied
+        else:
+            raise ValueError("The provider's converted testing router declaration is unavailable.")
+        if (
+            labels.get("traefik.enable", "").lower() != "true"
+            or labels.get("traefik.docker.network") != "dokploy-network"
+        ):
+            raise ValueError("The declared testing web service does not own managed ingress.")
+        declared = {}
+        for key, value in labels.items():
+            if key.startswith("traefik.http.routers.") and key.endswith(".rule"):
+                if host_rule_may_match(value, host):
+                    if value not in {f"Host(`{host}`)", f'Host("{host}")'}:
+                        raise ValueError("The declared testing router is not an exact host rule.")
+                    declared[key.removeprefix("traefik.http.routers.").removesuffix(".rule")] = (
+                        value
+                    )
+        if not declared:
+            raise ValueError("The provider has no declared router for the owned testing address.")
+        template = {"http": {"routers": {}, "services": {}, "middlewares": {}}}
+        connections = identifier + "-connections"
+        for index, (name, rule) in enumerate(sorted(declared.items())):
+            prefix = "traefik.http.routers." + name + "."
+            fields = {
+                key.removeprefix(prefix): value
+                for key, value in labels.items()
+                if key.startswith(prefix)
+            }
+            service = fields.get("service")
+            if service is not None:
+                service_prefix = "traefik.http.services." + service + "."
+                service_fields = {
+                    key.removeprefix(service_prefix): value
+                    for key, value in labels.items()
+                    if key.startswith(service_prefix)
+                }
+                port = service_fields.get("loadbalancer.server.port", "")
+                if (
+                    "@" in service
+                    or set(service_fields) != {"loadbalancer.server.port"}
+                    or not port.isdigit()
+                    or not 0 < int(port) < 65536
+                ):
+                    raise ValueError(
+                        "The declared testing router does not select its local web service."
+                    )
+            if set(fields) - {
+                "rule",
+                "entrypoints",
+                "service",
+                "middlewares",
+                "tls",
+                "tls.certresolver",
+                "tls.options",
+                "priority",
+                "rulesyntax",
+            }:
+                raise ValueError("The declared testing router uses unsupported routing behavior.")
+            points = tuple(fields.get("entrypoints", "").split(","))
+            if not points or any(
+                not point or point not in static["entryPoints"] for point in points
+            ):
+                raise ValueError(
+                    "The declared testing listeners are unavailable on the managed proxy."
+                )
+            references = []
+            for reference in filter(None, fields.get("middlewares", "").split(",")):
+                if reference.endswith("@file"):
+                    applied = raw.get("middlewares", {}).get(reference)
+                    if (
+                        not isinstance(applied, dict)
+                        or applied.get("status") != "enabled"
+                        or applied.get("redirectScheme", {}).get("scheme") != "https"
+                    ):
+                        raise ValueError("The declared testing redirect middleware is unavailable.")
+                    references.append(reference)
+                elif (
+                    labels.get(
+                        "traefik.http.middlewares." + reference + ".headers.contentsecuritypolicy"
+                    )
+                    == TESTING_CONNECTION_CSP
+                ):
+                    if {
+                        key
+                        for key in labels
+                        if key.startswith("traefik.http.middlewares." + reference + ".")
+                    } != {
+                        "traefik.http.middlewares." + reference + ".headers.contentsecuritypolicy"
+                    }:
+                        raise ValueError(
+                            "The copy-owned testing middleware has unsupported behavior."
+                        )
+                    references.append(connections + "@file")
+                else:
+                    raise ValueError(
+                        "The declared testing middleware has no supported independent copy."
+                    )
+            tls = fields.get("tls", "false").lower()
+            if tls not in {"true", "false"}:
+                raise ValueError("The declared testing TLS behavior is unavailable.")
+            resolver = fields.get("tls.certresolver", "")
+            if resolver and resolver not in static.get("certificatesResolvers", {}):
+                raise ValueError("The declared testing certificate resolver is unavailable.")
+            priority = int(fields.get("priority", str(len(rule.encode()))))
+            if not 0 < priority < 2147482647:
+                raise ValueError("The declared testing priority cannot admit a strict winner.")
+            if tls == "true" and connections + "@file" not in references:
+                references.append(connections + "@file")
+            document = http_route_payload(
+                route_id=identifier,
+                host=host,
+                entrypoints=points,
+                backend=new_backend,
+                tls=tls == "true",
+                certificate_resolver=resolver,
+                middlewares=tuple(references),
+            )
+            router = document["http"]["routers"][identifier]
+            router["priority"] = priority + 1
+            if "rulesyntax" in fields:
+                router["ruleSyntax"] = fields["rulesyntax"]
+            if "tls.options" in fields:
+                raise ValueError(
+                    "Declared TLS options require an original recorded testing template."
+                )
+            template["http"]["routers"][identifier + "-" + str(index)] = router
+            template["http"]["services"] = document["http"]["services"]
+        template["http"]["middlewares"][connections] = {
+            "headers": {"contentSecurityPolicy": TESTING_CONNECTION_CSP}
+        }
+    points = tuple(
+        sorted(
+            {
+                point
+                for router in template["http"]["routers"].values()
+                for point in router.get("entryPoints", [])
+            }
+        )
+    )
+    if not points or not set(points) <= set(static["entryPoints"]):
+        raise ValueError("The original testing template's listeners are unavailable.")
+    for router in template["http"]["routers"].values():
+        tls_config = router.get("tls")
+        if tls_config is not None:
+            if not isinstance(tls_config, dict):
+                raise ValueError("The testing template's TLS configuration is unavailable.")
+            resolver = tls_config.get("certResolver")
+            if resolver and resolver not in static.get("certificatesResolvers", {}):
+                raise ValueError("The testing template's certificate resolver is unavailable.")
+    matches = possible_lane_routers(raw, host, points)
+    if file_content is None:
+        if matches:
+            raise ValueError("An unavailable Docker predecessor still has applied testing routers.")
+    else:
+        if recorded_template is None or recorded_backend is None:
+            raise ValueError("The original testing file has no recorded authority.")
+        compile_testing_route(
+            product=product,
+            context=context,
+            host=host,
+            old_backend=recorded_backend,
+            new_backend=new_backend,
+            raw=raw,
+            public_entrypoints=points,
+            owned_document=json.loads(file_content),
+            recorded_template=recorded_template,
+        )
+    return TestingLaneRoute(
+        product=product,
+        context=context,
+        host=host,
+        route_id=identifier,
+        old_backend=None,
+        new_backend=new_backend,
+        template=template,
+        legacy_routers={},
+        public_entrypoints=points,
+        unavailable_preimage=UnavailableTestingRoutePreimage(
+            file_content=file_content,
+            raw=raw,
+            observation_sha256=observation_sha256,
+            applied=bool(matches),
+            static_sha256=hashlib.sha256(static_configuration.encode()).hexdigest(),
+            declaration_sha256=hashlib.sha256(configured_compose.encode()).hexdigest()
+            if recorded_template is None
+            else "",
+        ),
+    )
+
+
 def observe_testing_route(
     plan: TestingLaneRoute, raw: dict[str, Any], owned_document: dict[str, Any] | None
-) -> str:
+) -> str | None:
     """Require one effective owned winner per entrypoint, plus its actual backend."""
+    preimage = plan.unavailable_preimage
+    if preimage is not None:
+        original = json.loads(preimage.file_content) if preimage.file_content is not None else None
+        if owned_document == original and raw == preimage.raw:
+            return None
     matches = possible_lane_routers(raw, plan.host, plan.public_entrypoints)
     owned = plan.template["http"]["routers"]
     names = {name + "@file" for name in owned}

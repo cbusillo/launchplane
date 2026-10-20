@@ -23,6 +23,22 @@ class TestingCopy(FrozenRecord):
     runtime_identity: RuntimeIdentity
 
 
+class UnavailableTestingPredecessor(FrozenRecord):
+    """An owned predecessor observed stopped or absent, never a healthy copy."""
+
+    copy_id: str = Field(min_length=1)
+    target_id: str = Field(min_length=1)
+    availability: Literal["stopped", "absent"]
+    observation_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    route_applied: bool
+    private_url: None = Field(default=None, exclude=True)
+    resource_binding: None = Field(default=None, exclude=True)
+    runtime_identity: None = Field(default=None, exclude=True)
+
+
+TestingPredecessor = TestingCopy | UnavailableTestingPredecessor
+
+
 class TestingRebuildPlan(FrozenRecord):
     operation_id: str = Field(min_length=1)
     product: str = Field(min_length=1)
@@ -33,7 +49,7 @@ class TestingRebuildPlan(FrozenRecord):
     authority_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
     source: Literal["empty", "production", "upstream"]
     source_reference: str = ""
-    old: TestingCopy
+    old: TestingPredecessor
     new: TestingCopy
 
     @model_validator(mode="after")
@@ -52,6 +68,8 @@ class TestingRebuildPlan(FrozenRecord):
         if (self.source == "empty") == bool(self.source_reference):
             raise ValueError("A restore requires its managed source reference; empty does not.")
         for copy in (self.old, self.new):
+            if isinstance(copy, UnavailableTestingPredecessor):
+                continue
             identity = copy.runtime_identity
             # Older managed copies did not install a product field or digest.
             # Keep their observed identity intact; the caller still proves lane
@@ -65,7 +83,7 @@ class TestingRebuildPlan(FrozenRecord):
         for field in ("copy_id", "target_id", "private_url", "resource_binding"):
             if getattr(self.old, field) == getattr(self.new, field):
                 raise ValueError("A candidate requires independent target and resources.")
-        if (
+        if isinstance(self.old, TestingCopy) and (
             self.old.runtime_identity.deployment_record_id
             == self.new.runtime_identity.deployment_record_id
         ):
@@ -101,15 +119,39 @@ class TestingCopyReadiness(FrozenRecord):
     evidence_id: str = Field(min_length=1)
 
 
+class TestingUnavailableReadback(FrozenRecord):
+    copy_id: str
+    host: str
+    observed_at: datetime
+    observation_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    runtime_identity: None = None
+    healthy: Literal[False] = False
+
+
+TestingRetirementRecovery = TestingCopyReadiness | TestingUnavailableReadback
+
+
 class TestingRouteObservation(FrozenRecord):
     route_id: str
     host: str
-    target_url: str
+    target_url: str | None
     slot_id: str
-    applied: Literal[True]
-    authoritative_router_count: Literal[1]
+    applied: bool
+    authoritative_router_count: Literal[0, 1]
     observed_at: datetime
     public_health: HealthcheckEvidence | None = None
+    unavailable: bool = Field(default=False, exclude_if=lambda value: not value)
+
+    @model_validator(mode="after")
+    def validate_route(self) -> Self:
+        if self.applied != bool(self.authoritative_router_count):
+            raise ValueError("Applied routing must agree with its observed authority count.")
+        if self.unavailable:
+            if self.target_url is not None or self.public_health is not None:
+                raise ValueError("An unavailable predecessor cannot claim a backend or health.")
+        elif not self.applied or not self.target_url:
+            raise ValueError("Serving routing requires its applied backend.")
+        return self
 
 
 TestingRebuildStep = Literal[
@@ -136,7 +178,7 @@ class TestingRebuildRecord(FrozenRecord):
     retirement_started: bool = False
     publication_started: bool = False
     rollback_started: bool = False
-    retirement_recovery: TestingCopyReadiness | None = None
+    retirement_recovery: TestingRetirementRecovery | None = None
     error: Literal[
         "",
         "candidate_public_health_failed",
@@ -169,6 +211,17 @@ class TestingRebuildRecord(FrozenRecord):
             != (self.plan.old.copy_id, self.plan.host, self.plan.old.runtime_identity)
         ):
             raise ValueError("Retirement recovery requires proof for this operation's old copy.")
+        if (
+            isinstance(self.plan.old, UnavailableTestingPredecessor)
+            and self.retirement_recovery is not None
+            and (
+                not isinstance(self.retirement_recovery, TestingUnavailableReadback)
+                or self.retirement_recovery.observation_sha256 != self.plan.old.observation_sha256
+            )
+        ):
+            raise ValueError(
+                "Unavailable retirement recovery must retain its original inventory witness."
+            )
         for stamp in (
             self.began_at,
             self.updated_at,

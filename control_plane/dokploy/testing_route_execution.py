@@ -44,8 +44,8 @@ class TestingRouteExecutionIntent(FrozenRecord):
     server_id: str = Field(min_length=1)
     route_id: str = Field(pattern=r"^lp-testing-route-[a-f0-9]{32}$")
     route_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
-    backend: str = Field(min_length=1)
-    document_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    backend: str | None
+    document_sha256: str = Field(pattern=r"^(absent|[a-f0-9]{64})$")
     custody: TestingRouteExecutionCustody
 
     def key(self, *, attempt: int) -> str:
@@ -232,10 +232,13 @@ retired_boot_id=${5:-}
     + r"""
 case "$name" in lp-testing-route-*.yml) ;; *) exit 21 ;; esac
 case "$mode" in initialize|inspect|publish|settle) ;; *) exit 21 ;; esac
-case "$generation$key$desired" in *[!a-f0-9]*) exit 21 ;; esac
+case "$generation$key" in *[!a-f0-9]*) exit 21 ;; esac
 test "${#generation}" = 64
 test "${#key}" = 64
-test "${#desired}" = 64
+if test "$desired" != absent; then
+    case "$desired" in *[!a-f0-9]*) exit 21 ;; esac
+    test "${#desired}" = 64
+fi
 case "$revision" in ''|*[!0-9]*) exit 21 ;; esac
 test ! -L "$root"
 cd -P -- "$root"
@@ -377,6 +380,17 @@ if test "$current" != "$expected"; then
 fi
 state=pending
 save
+if test "$desired" = absent; then
+    test "$(digest)" = "$expected"
+    # The same physical lock, generation and receipt cover this exact lane file.
+    test ! -L "$path"
+    if test -e "$path"; then rm -- "$path"; fi
+    sync -f .
+    state=applied
+    save
+    printf 'applied\n'
+    exit 0
+fi
 temporary=$(mktemp ".$name.pending.XXXXXX")
 cat > "$temporary"
 test "$(sha256sum "$temporary" | cut -d ' ' -f 1)" = "$desired"
