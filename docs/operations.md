@@ -4730,7 +4730,10 @@ A typed `self_deploy_drain_timeout` uses the existing deploy-failure Discord
 reporter once in the failed deploy run. It explicitly reports zero replacement
 dispatch; the rollback dispatch classifier still treats that refusal as
 pre-effect. The absolute ten-minute drain budget survives polls and service
-restarts. New Client-release/event effects and agent-started rehearsal operations
+restarts. For a legacy drain without a saved budget, its first updated poll anchors
+the budget to the prior stored observation. This budget is independent of the
+worker stop, provider deployment and health-verification budgets after dispatch.
+New Client-release/event effects and agent-started rehearsal operations
 wait behind the active drain; rehearsal HTTP calls receive `409/service_deploy_draining`
 with `Retry-After`. Original-key observation, admitted heartbeats and completion
 remain available. Constant fresh traffic cannot extend the drain deadline.
@@ -4764,6 +4767,12 @@ startup resume are separate work, not supplied by this drain guard. A fresh
 normal request can still time out while a real blocker remains. If supported
 recovery cannot settle it, the existing approved manual break-glass path remains
 the emergency recovery route; this alert does not dispatch it or grant approval.
+
+Service rollback and marker-bound repair use this same drain. If a rehearsal
+starts on a confirmed replacement before verification fails, automated rollback
+can wait for that rehearsal and reach the bounded refusal. The existing approved
+manual break-glass route remains available for that emergency; a repair marker
+does not authorize killing an operation.
 
 ### Fishbowl import proof on an exact PR artifact
 
