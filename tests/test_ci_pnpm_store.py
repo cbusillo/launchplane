@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
-import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -67,7 +67,7 @@ class PnpmStoreTests(unittest.TestCase):
             "GITHUB_OUTPUT": str(workspace / "outputs"),
         }
         step = self.workflow.step_named(job, "Resolve pnpm store path")
-        assert step is not None
+        assert step is not None, f"{job}: missing executable pnpm setup/install step"
         result = subprocess.run(
             ["bash", "-euo", "pipefail", "-c", step.run],
             cwd=workspace,
@@ -84,11 +84,11 @@ class PnpmStoreTests(unittest.TestCase):
             line.split("=", 1)
             for line in Path(environment["GITHUB_OUTPUT"]).read_text().splitlines()
         )
-        return workspace, Path(outputs["path"]), environment
+        return workspace, workspace / outputs["path"], environment
 
     def install(self, job: str, workspace: Path, environment: dict[str, str]) -> None:
         step = self.workflow.step_named(job, "Install frontend dependencies")
-        assert step is not None
+        assert step is not None, f"{job}: missing executable pnpm setup/install step"
         result = subprocess.run(
             ["bash", "-euo", "pipefail", "-c", step.run],
             cwd=workspace,
@@ -101,12 +101,15 @@ class PnpmStoreTests(unittest.TestCase):
         self.assertEqual((workspace / "installed-object").read_bytes(), b"package payload")
 
     def test_sibling_cache_replacement_cannot_remove_an_install_source(self) -> None:
-        jobs = (
-            "frontend_validate",
-            "frontend_validate_fork",
-            "frontend_browser_smoke",
-            "frontend_browser_smoke_evidence",
-        )
+        jobs = [
+            job
+            for job in self.workflow.jobs
+            if any(
+                re.search(r"\bpnpm\b[^\n]*\binstall\b", step.run)
+                for step in self.workflow.steps(job)
+            )
+        ]
+        self.assertTrue(jobs, "No frontend install jobs discovered")
         for job in jobs:
             with self.subTest(job=job):
                 workspace, store, environment = self.prepare(job, job)
@@ -142,19 +145,23 @@ class PnpmStoreTests(unittest.TestCase):
         self.assertFalse(env_file.exists())
         self.assertFalse(output_file.exists())
 
-    def test_cached_store_relocates_to_the_restoring_checkout(self) -> None:
+    def test_cache_target_is_portable_between_runner_slots(self) -> None:
         job = "frontend_browser_smoke"
-        first, store, environment = self.prepare(job, "first")
-        store.mkdir(parents=True)
-        (store / "package-object").write_bytes(b"package payload")
-        archive = self.root / "store.tar"
-        with tarfile.open(archive, "w") as handle:
-            handle.add(store, arcname=store.relative_to(first))
-        second, _, second_environment = self.prepare(job, "second")
-        with tarfile.open(archive) as handle:
-            handle.extractall(second, filter="data")
-        self.install(job, second, second_environment)
-        self.install(job, first, environment)
+        targets = []
+        for name in ("first-runner", "second-runner"):
+            workspace, store, environment = self.prepare(job, name)
+            output = dict(
+                line.split("=", 1) for line in (workspace / "outputs").read_text().splitlines()
+            )["path"]
+            # Actions hashes the raw path input for cache lookup, before making
+            # archive entries relative. Different slots must publish the same
+            # target while installing from different physical directories.
+            self.assertFalse(Path(output).is_absolute())
+            targets.append(output)
+            store.mkdir(parents=True)
+            (store / "package-object").write_bytes(b"package payload")
+            self.install(job, workspace, environment)
+        self.assertEqual(targets[0], targets[1])
 
 
 if __name__ == "__main__":
