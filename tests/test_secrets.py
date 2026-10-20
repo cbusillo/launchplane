@@ -600,6 +600,11 @@ class LaunchplaneSecretsTests(unittest.TestCase):
                 payload,
                 purpose="product-config-request",
             )
+            self.assertTrue(
+                control_plane_secrets.verify_keyed_secret_payload_fingerprint(
+                    payload, fingerprint=first, purpose="product-config-request"
+                )
+            )
             other_purpose = control_plane_secrets.keyed_secret_payload_fingerprint(
                 payload,
                 purpose="different-purpose",
@@ -619,6 +624,44 @@ class LaunchplaneSecretsTests(unittest.TestCase):
         self.assertNotEqual(first, rotated)
         self.assertTrue(first.startswith("hmac-sha256:"))
         self.assertNotIn("guessable-smtp-password", first)
+
+        old_key, new_key = _test_fernet_key(0), _test_fernet_key(32)
+        key_config = {"active_key_id": "old", "keys": {"old": old_key, "new": new_key}}
+        with patch.dict(
+            os.environ,
+            {control_plane_secrets.LAUNCHPLANE_SECRET_KEYS_JSON_ENV_VAR: json.dumps(key_config)},
+            clear=True,
+        ):
+            original = control_plane_secrets.keyed_secret_payload_fingerprint(
+                payload, purpose="product-config-request"
+            )
+            key_config["active_key_id"] = "new"
+            os.environ[control_plane_secrets.LAUNCHPLANE_SECRET_KEYS_JSON_ENV_VAR] = json.dumps(
+                key_config
+            )
+            verify = control_plane_secrets.verify_keyed_secret_payload_fingerprint
+            self.assertTrue(verify(payload, fingerprint=original, purpose="product-config-request"))
+            for value, fingerprint, purpose in (
+                (payload + "changed", original, "product-config-request"),
+                (payload, original, "different-purpose"),
+                (payload, "invalid", "product-config-request"),
+                (payload, original + ":suffix", "product-config-request"),
+            ):
+                self.assertFalse(verify(value, fingerprint=fingerprint, purpose=purpose))
+            key_config["keys"] = {"new": new_key}
+            os.environ[control_plane_secrets.LAUNCHPLANE_SECRET_KEYS_JSON_ENV_VAR] = json.dumps(
+                key_config
+            )
+            self.assertFalse(
+                verify(payload, fingerprint=original, purpose="product-config-request")
+            )
+            key_config["keys"] = {"old": new_key, "new": new_key}
+            os.environ[control_plane_secrets.LAUNCHPLANE_SECRET_KEYS_JSON_ENV_VAR] = json.dumps(
+                key_config
+            )
+            self.assertFalse(
+                verify(payload, fingerprint=original, purpose="product-config-request")
+            )
 
     def test_json_encryption_keys_reject_malformed_or_weak_configuration(self) -> None:
         invalid_configurations = (

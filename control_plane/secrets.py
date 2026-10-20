@@ -8,7 +8,7 @@ import json
 import os
 import re
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Literal, Mapping, Protocol
 
 import click
@@ -172,6 +172,7 @@ class KeyRing:
     keys: Mapping[str, Fernet]
     active_hmac_key: bytes
     legacy_compatibility_key_loaded: bool = False
+    hmac_keys: Mapping[str, bytes] = field(default_factory=dict, repr=False)
 
 
 def _validated_key_id(value: object, *, label: str) -> str:
@@ -252,6 +253,9 @@ def _key_ring_from_values(*, keys_json: str, legacy_master_key: str) -> KeyRing:
             keys={key_id: Fernet(encoded) for key_id, encoded in encoded_keys.items()},
             active_hmac_key=_derived_hmac_key(encoded_keys[active_key_id]),
             legacy_compatibility_key_loaded=legacy_compatibility_key_loaded,
+            hmac_keys={
+                key_id: _derived_hmac_key(encoded) for key_id, encoded in encoded_keys.items()
+            },
         )
 
     if legacy_master_key:
@@ -261,6 +265,7 @@ def _key_ring_from_values(*, keys_json: str, legacy_master_key: str) -> KeyRing:
             keys={LEGACY_SECRET_KEY_ID: Fernet(encoded_legacy_key)},
             active_hmac_key=_derived_hmac_key(encoded_legacy_key),
             legacy_compatibility_key_loaded=True,
+            hmac_keys={LEGACY_SECRET_KEY_ID: _derived_hmac_key(encoded_legacy_key)},
         )
 
     expected_keys = " or ".join(
@@ -322,6 +327,32 @@ def keyed_secret_payload_fingerprint(payload: str, *, purpose: str) -> str:
         hashlib.sha256,
     ).hexdigest()
     return f"hmac-sha256:{key_ring.active_key_id}:{digest}"
+
+
+def verify_keyed_secret_payload_fingerprint(
+    payload: str, *, fingerprint: str, purpose: str
+) -> bool:
+    """Verify original private evidence using its retained key identity and purpose."""
+    match = re.fullmatch(
+        r"hmac-sha256:([A-Za-z0-9][A-Za-z0-9._-]{0,63}):([0-9a-f]{64})", fingerprint
+    )
+    normalized_purpose = purpose.strip()
+    if match is None or not normalized_purpose:
+        return False
+    key_id, expected_digest = match.groups()
+    key_ring = _get_key_ring()
+    key = key_ring.hmac_keys.get(key_id)
+    # Directly constructed keyrings historically supplied only the active HMAC key.
+    if key is None and key_id == key_ring.active_key_id:
+        key = key_ring.active_hmac_key
+    if key is None:
+        return False
+    digest = hmac.new(
+        key,
+        b"launchplane\x00" + normalized_purpose.encode("utf-8") + b"\x00" + payload.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return hmac.compare_digest(digest, expected_digest)
 
 
 def validate_secret_key_configuration() -> None:

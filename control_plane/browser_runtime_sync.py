@@ -59,6 +59,8 @@ class RuntimeSyncIntent(BaseModel):
     desired_commitment: str
     target_commitment: str
     baseline_commitment: str
+    values_commitment: str
+    recipient_commitment: str
     target_key: str
 
 
@@ -116,7 +118,13 @@ def require_runtime_sync_lane(
 
 
 def runtime_sync_availability(
-    store: object, *, administrator: bool, product: str, context: str, instance: str
+    store: object,
+    *,
+    control_plane_root: Path,
+    administrator: bool,
+    product: str,
+    context: str,
+    instance: str,
 ) -> RuntimeSyncAvailability:
     reason = "A signed-in administrator is required."
     if administrator:
@@ -130,7 +138,7 @@ def runtime_sync_availability(
                     require_runtime_sync_lane(store, product, context, instance)
                     secrets.validate_secret_key_configuration()
                     dokploy_source.read_dokploy_config(
-                        control_plane_root=Path("."), database_url=store.database_url
+                        control_plane_root=control_plane_root, database_url=store.database_url
                     )
                     reason = ""
             except (ValueError, FileNotFoundError, click.ClickException):
@@ -181,7 +189,11 @@ def _key_safety(store: PostgresRecordStore, captured: PreparedRuntimeSync) -> No
 
 
 def prepare_runtime_sync(
-    store: PostgresRecordStore, root: Path, request: runtime.LiveTargetRuntimeApplyEnvelope
+    store: PostgresRecordStore,
+    root: Path,
+    request: runtime.LiveTargetRuntimeApplyEnvelope,
+    *,
+    for_observation: bool = False,
 ) -> PreparedRuntimeSync:
     authority = _authority(store, request)
     prepared = runtime.prepare_live_target_runtime_environment(
@@ -264,15 +276,46 @@ def prepare_runtime_sync(
             desired_commitment=desired,
             target_commitment=target,
             baseline_commitment=baseline,
+            values_commitment=_private_commitment(
+                [prepared.desired_env_map, sorted(prepared.retired_keys)],
+                "browser-runtime-sync-values",
+            ),
+            recipient_commitment=_private_commitment(
+                _recipient(prepared, provider), "browser-runtime-sync-recipient"
+            ),
             target_key=dokploy_generic_web_provider_target_key(provider),
         ),
         tuple(sorted(required | transported)),
         tuple(suppliers),
     )
-    _key_safety(store, captured)
+    if not for_observation:
+        _key_safety(store, captured)
     if _authority(store, request) != authority:
         raise RuntimeSyncRefused("stale")
     return captured
+
+
+def _recipient(
+    prepared: runtime.PreparedLiveTargetRuntime, provider: ProviderTargetRecord
+) -> list[str]:
+    """Physical recipient identity, independent of mutable descriptive metadata."""
+    return [
+        prepared.context_name,
+        prepared.instance_name,
+        prepared.host,
+        provider.provider_id,
+        provider.provider_target_type,
+        prepared.target_definition.target_type,
+        prepared.target_definition.target_id,
+    ]
+
+
+def _verifies(value: object, *, fingerprint: str, purpose: str) -> bool:
+    return secrets.verify_keyed_secret_payload_fingerprint(
+        json.dumps(value, sort_keys=True, separators=(",", ":")),
+        fingerprint=fingerprint,
+        purpose=purpose,
+    )
 
 
 def runtime_sync_result(captured: PreparedRuntimeSync, *, applied: bool) -> dict[str, object]:
@@ -316,6 +359,13 @@ class ReviewedRuntimeSync:
     def observe(
         self, provider_operation_key: str, provider_effect_phase: str, reconciliation_key: str
     ) -> ProviderObservation:
+        def stale() -> ProviderObservation:
+            return ProviderObservation(
+                outcome="present",
+                response_status_code=409,
+                response_payload=_stale_payload(self.trace_id),
+            )
+
         try:
             if reconciliation_key != self.reconciliation_key():
                 return ProviderObservation(outcome="unknown")
@@ -326,19 +376,52 @@ class ReviewedRuntimeSync:
             ):
                 if provider_effect_phase:
                     return ProviderObservation(outcome="unknown")
-                return ProviderObservation(
-                    outcome="present",
-                    response_status_code=409,
-                    response_payload=_stale_payload(self.trace_id),
+                return stale()
+            if not provider_effect_phase:
+                try:
+                    authority = _authority(self.store, self.request)
+                except FileNotFoundError:
+                    return stale()
+                if authority != self.intent.authority_commitment:
+                    return stale()
+            captured = prepare_runtime_sync(
+                self.store, self.root, self.request, for_observation=bool(provider_effect_phase)
+            )
+            if not provider_effect_phase:
+                # A durable empty phase proves no provider dispatch. Preserve a
+                # terminal refusal rather than holding the lane after input drift.
+                if captured.intent != self.intent:
+                    return stale()
+                if captured.intent.review.changed_keys:
+                    return ProviderObservation(outcome="absent")
+            else:
+                prepared = captured.prepared
+                provider = self.store.read_provider_target_record(
+                    context_name=self.request.context, instance_name=self.request.instance
                 )
-            captured = prepare_runtime_sync(self.store, self.root, self.request)
-            if (captured.intent.desired_commitment, captured.intent.target_commitment) != (
-                self.intent.desired_commitment,
-                self.intent.target_commitment,
-            ):
-                return ProviderObservation(outcome="unknown")
-            if captured.intent.review.changed_keys:
-                return ProviderObservation(outcome="unknown" if provider_effect_phase else "absent")
+                if not _verifies(
+                    _recipient(prepared, provider),
+                    fingerprint=self.intent.recipient_commitment,
+                    purpose="browser-runtime-sync-recipient",
+                ) or not _verifies(
+                    [prepared.desired_env_map, sorted(prepared.retired_keys)],
+                    fingerprint=self.intent.values_commitment,
+                    purpose="browser-runtime-sync-values",
+                ):
+                    return ProviderObservation(outcome="unknown")
+                if (
+                    not prepared.desired_env_map.keys() <= prepared.live_env_map.keys()
+                    or prepared.retired_keys & prepared.live_env_map.keys()
+                    or not _verifies(
+                        [
+                            {key: prepared.live_env_map[key] for key in prepared.desired_env_map},
+                            sorted(prepared.retired_keys),
+                        ],
+                        fingerprint=self.intent.values_commitment,
+                        purpose="browser-runtime-sync-values",
+                    )
+                ):
+                    return ProviderObservation(outcome="unknown")
             result = runtime_sync_result(captured, applied=True)
             result["mode"] = "apply"
             result["apply"] = {
@@ -358,6 +441,8 @@ class ReviewedRuntimeSync:
                     result=result,
                 ),
             )
+        except RuntimeSyncRefused:
+            return ProviderObservation(outcome="unknown") if provider_effect_phase else stale()
         except Exception:
             return ProviderObservation(outcome="unknown")
 

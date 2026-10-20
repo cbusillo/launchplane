@@ -2930,7 +2930,13 @@ guard, and uses the shared durable provider-operation fence. It cannot request
 deployment. A durably recorded stale review requires a new review; an uncertain
 effect retains the original request and key for observation and recovery without
 duplicate dispatch. Completed original receipts remain replayable after later
-configuration changes. Odoo browser sync stays unavailable until its operation
+configuration changes. Recovery of an interrupted pre-effect reservation records
+deterministic input drift as a terminal stale receipt. Recovery after an effect
+verifies separate private values/retirement and physical-recipient evidence with
+the original retained fingerprint key. Descriptive metadata or write-policy
+changes do not prevent proof of that historical effect; changed desired values,
+changed physical recipients or unavailable original proof remain uncertain.
+Odoo browser sync stays unavailable until its operation
 ownership also participates in this durable fence (tracked in #4190).
 
 Live target runtime applies are service-boundary work. Admins and agents must

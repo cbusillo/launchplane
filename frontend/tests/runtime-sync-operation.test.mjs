@@ -90,14 +90,30 @@ test("only the route's durable stale refusal settles an uncertain original key",
   assert.deepEqual(state.identity, original);
 });
 
-test("provider, receipt and unknown post-dispatch failures preserve uncertainty", () => {
+test("provider and receipt failures retain uncertainty while an unreserved request can settle", async () => {
   for (const error of [new Error("bad receipt"), new DOMException("Aborted", "AbortError"),
     new LaunchplaneApiError("failed", 400, "", "dokploy_target_verification_failed"),
     new LaunchplaneApiError("unknown", 409, "", "mutation_reconciliation_required"),
     new LaunchplaneApiError("busy", 409, "", "mutation_in_progress"),
     new LaunchplaneApiError("unavailable", 503, "", "runtime_sync_unavailable"),
-    new LaunchplaneApiError("key conflict", 409, "", "idempotency_key_reused")]) {
+    new LaunchplaneApiError("ambiguous gateway refusal", 503, "", "invalid_request"),
+    new LaunchplaneApiError("ambiguous gateway denial", 502, "", "authorization_denied")]) {
     assert.equal(runtimeSyncFailureCertainty(error, true), "uncertain");
     assert.equal(runtimeSyncFailureCertainty(error, false), "definitive");
+  }
+  for (const code of ["runtime_sync_target_busy", "idempotency_key_reused"]) {
+    const error = new LaunchplaneApiError("Request did not reserve", 409, "fixture-refusal", code);
+    assert.equal(runtimeSyncFailureCertainty(error, true), "definitive");
+    const request = runtimeSyncRequest(scope, review);
+    let state = markBrowserOperationDispatched(beginBrowserOperation(await prepareBrowserOperation(runtimeSyncScope(scope), request)));
+    state = failBrowserOperation(state, { code, message: error.message, statusCode: 409, traceId: error.traceId }, runtimeSyncFailureCertainty(error, true));
+    assert.equal(state.requiresIdempotencyContinuity, false);
+    state = markBrowserOperationDispatched(beginBrowserOperation(await prepareBrowserOperation(runtimeSyncScope(scope), request)));
+    const original = state.identity;
+    state = failBrowserOperation(state, { code: "lost", message: "lost", statusCode: 0, traceId: "" }, "uncertain");
+    state = markBrowserOperationDispatched(beginBrowserOperation(await prepareBrowserOperation(runtimeSyncScope(scope), request, retryBrowserOperation(state))));
+    state = failBrowserOperation(state, { code, message: error.message, statusCode: 409, traceId: error.traceId }, runtimeSyncFailureCertainty(error, true));
+    assert.equal(state.requiresIdempotencyContinuity, true);
+    assert.deepEqual(state.identity, original);
   }
 });

@@ -507,6 +507,14 @@ root, never an unkeyed secret verifier. Secret values must not enter React state
 URLs, browser storage, operation receipts, rendered errors, console or telemetry
 events, fixtures, or live-target next-action evidence.
 
+Reviewed browser runtime sync also keeps private, purpose-bound HMAC evidence
+for historical-effect recovery. Its verifier uses the fingerprint's original key
+ID from the configured retained key ring, with a constant-time digest comparison.
+Changing the active key does not invalidate that evidence while the original key
+remains available. A missing original key or different material under its ID
+leaves the outcome uncertain; recovery never substitutes the active key or
+dispatches another write to fill that evidence gap.
+
 Product-config dry-run does not decrypt an existing secret to compare equality.
 Submitting a binding that already exists plans and applies a new encrypted
 version as an explicit rotation. This keeps dry-run free of plaintext resolution

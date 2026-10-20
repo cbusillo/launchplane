@@ -3,6 +3,8 @@
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta
+import json
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -10,6 +12,7 @@ import unittest
 from unittest.mock import patch
 
 import click
+from cryptography.fernet import Fernet
 
 from control_plane import browser_runtime_sync as sync
 from control_plane import live_target_runtime as runtime
@@ -22,6 +25,7 @@ from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeSecretSafetyRule,
 )
 from control_plane.http_app import create_launchplane_fastapi_app, idempotency_scope
+from control_plane.provider_operations import ProviderMutationUnknownError
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
 from control_plane.storage.postgres import PostgresRecordStore
@@ -123,7 +127,7 @@ class BrowserRuntimeSyncTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch(
                 "control_plane.dokploy.source.read_dokploy_config",
-                side_effect=lambda **kwargs: (self.host, "fixture-token"),
+                side_effect=self.read_provider_config,
             ),
             patch("control_plane.dokploy.api.fetch_dokploy_target_payload", side_effect=self.fetch),
             patch("control_plane.dokploy.api.update_dokploy_target_env", side_effect=self.update),
@@ -141,6 +145,13 @@ class BrowserRuntimeSyncTests(unittest.IsolatedAsyncioTestCase):
             control_plane_root_path=self.root,
             bearer_identity_config=_local_operator_bearer_config(token_label="local-owner-write"),
         )
+
+    def read_provider_config(self, **kwargs: Any) -> tuple[str, str]:
+        if kwargs["control_plane_root"] != self.root:
+            raise click.ClickException(
+                "Fixture provider configuration is unavailable at this root."
+            )
+        return self.host, "fixture-token"
 
     def fetch(self, **kwargs: Any) -> dict[str, str]:
         self.fetch_count += 1
@@ -330,13 +341,142 @@ class BrowserRuntimeSyncTests(unittest.IsolatedAsyncioTestCase):
         self.assert_redacted(first)
         other = await self.post(payload, "new-key")
         self.assertEqual(other.status_code, 409, other.text)
+        self.assertEqual(other.json()["error"]["code"], "runtime_sync_target_busy")
+        self.assertIsNone(
+            self.store.read_idempotency_record(
+                scope=idempotency_scope(self.session.identity),
+                route_path="/v1/live-target-runtime/apply",
+                idempotency_key="new-key",
+            )
+        )
         self.assertEqual(len(self.updates), 1)
+        self.store.write_product_profile_record(
+            self.profile.model_copy(update={"display_name": "Updated display name"})
+        )
+        self.store.write_provider_target_record(
+            self.provider.model_copy(update={"display_name": "Updated provider label"})
+        )
         adopted = await self.post(payload, "unknown")
         self.assertEqual(adopted.status_code, 202, adopted.text)
         self.assertTrue(adopted.json()["review"]["applied"])
         self.assertTrue(adopted.json()["result"]["apply"]["recovered_by_readback"])
         self.assertEqual(len(self.updates), 1)
         self.assert_redacted(adopted)
+
+    async def test_interrupted_pre_effect_drift_settles_original_key_and_releases_target(
+        self,
+    ) -> None:
+        class InterruptedBeforeEffect(BaseException):
+            pass
+
+        payload = self.apply_payload(await self.plan())
+        with patch.object(sync.ReviewedRuntimeSync, "apply", side_effect=InterruptedBeforeEffect):
+            with self.assertRaises((InterruptedBeforeEffect, BaseExceptionGroup)) as raised:
+                await self.post(payload, "interrupted")
+            if isinstance(raised.exception, BaseExceptionGroup):
+                self.assertIsNotNone(raised.exception.subgroup(InterruptedBeforeEffect))
+        with patch(
+            "control_plane.dokploy.api.fetch_dokploy_target_payload",
+            side_effect=click.ClickException("fixture transient provider read failure"),
+        ):
+            unavailable = await self.post(payload, "interrupted")
+        self.assertEqual(unavailable.status_code, 409, unavailable.text)
+        self.assertEqual(unavailable.json()["error"]["code"], "mutation_reconciliation_required")
+        self.change_setting()
+        stale = await self.post(payload, "interrupted")
+        self.assertEqual(stale.status_code, 409, stale.text)
+        self.assertEqual(stale.json()["error"]["code"], "stale")
+        self.assertFalse(self.updates)
+        self.store.write_runtime_environment_record(self.setting)
+        replay = await self.post(payload, "interrupted")
+        self.assertEqual(replay.json(), stale.json())
+        fresh = await self.post(self.apply_payload(await self.plan()), "after-interruption")
+        self.assertEqual(fresh.status_code, 202, fresh.text)
+        self.assertEqual(len(self.updates), 1)
+
+    async def test_unknown_receipt_uses_original_retained_fingerprint_key(self) -> None:
+        old_key, new_key = Fernet.generate_key().decode(), Fernet.generate_key().decode()
+        config = {"active_key_id": "old", "keys": {"old": old_key, "new": new_key}}
+        with patch.dict(
+            os.environ,
+            {secrets.LAUNCHPLANE_SECRET_KEYS_JSON_ENV_VAR: json.dumps(config)},
+            clear=True,
+        ):
+            payload = self.apply_payload(await self.plan())
+            self.timeout_after_update = True
+            self.assertEqual((await self.post(payload, "key-rotation")).status_code, 409)
+            config["active_key_id"] = "new"
+            config["keys"] = {"new": new_key}
+            os.environ[secrets.LAUNCHPLANE_SECRET_KEYS_JSON_ENV_VAR] = json.dumps(config)
+            missing = await self.post(payload, "key-rotation")
+            self.assertEqual(missing.status_code, 409, missing.text)
+            config["keys"] = {"old": new_key, "new": new_key}
+            os.environ[secrets.LAUNCHPLANE_SECRET_KEYS_JSON_ENV_VAR] = json.dumps(config)
+            replaced = await self.post(payload, "key-rotation")
+            self.assertEqual(replaced.status_code, 409, replaced.text)
+            config["keys"] = {"old": old_key, "new": new_key}
+            os.environ[secrets.LAUNCHPLANE_SECRET_KEYS_JSON_ENV_VAR] = json.dumps(config)
+            adopted = await self.post(payload, "key-rotation")
+            self.assertEqual(adopted.status_code, 202, adopted.text)
+            self.assertEqual(len(self.updates), 1)
+
+    async def test_unknown_effect_adopts_after_policy_metadata_change(self) -> None:
+        secrets.write_secret_value(
+            record_store=self.store,
+            scope="context_instance",
+            integration="runtime_environment",
+            name="runtime-secret",
+            plaintext_value="secret-private-value",
+            binding_key="APP_SECRET",
+            context_name=self.context,
+            instance_name=self.instance,
+            actor="fixture",
+            source_label="fixture",
+        )
+        policy = RuntimeKeySafetyPolicyRecord(
+            record_id="supplier-policy",
+            source="fixture",
+            updated_at=self.profile.updated_at,
+            rules=(
+                RuntimeSecretSafetyRule(
+                    binding_key="APP_SECRET",
+                    secret_class="testing",
+                    allowed_contexts=(self.context,),
+                    allowed_instances=(self.instance,),
+                ),
+            ),
+        )
+        self.store.write_runtime_key_safety_policy_record(policy)
+        payload = self.apply_payload(await self.plan())
+        self.timeout_after_update = True
+        self.assertEqual((await self.post(payload, "policy-observation")).status_code, 409)
+        self.store.write_runtime_key_safety_policy_record(
+            policy.model_copy(
+                update={
+                    "rules": (
+                        RuntimeSecretSafetyRule(binding_key="APP_SECRET", secret_class="prod_only"),
+                    )
+                }
+            )
+        )
+        adopted = await self.post(payload, "policy-observation")
+        self.assertEqual(adopted.status_code, 202, adopted.text)
+        self.assertEqual(len(self.updates), 1)
+        revoked = self.store.list_runtime_key_safety_policy_records(status="active", limit=1)[0]
+        self.store.write_runtime_key_safety_policy_record(policy)
+        before_effect = self.apply_payload(await self.plan())
+        with patch.object(
+            sync.ReviewedRuntimeSync,
+            "apply",
+            side_effect=ProviderMutationUnknownError("fixture interruption before checkpoint"),
+        ):
+            interrupted = await self.post(before_effect, "policy-before-effect")
+        self.assertEqual(interrupted.status_code, 409, interrupted.text)
+        self.store.write_runtime_key_safety_policy_record(revoked)
+        stale = await self.post(before_effect, "policy-before-effect")
+        self.assertEqual(stale.status_code, 409, stale.text)
+        self.assertEqual(stale.json()["error"]["code"], "stale")
+        self.assertEqual(len(self.updates), 1)
 
     async def test_unknown_changed_inputs_remain_unknown(self) -> None:
         payload = self.apply_payload(await self.plan())
@@ -346,6 +486,34 @@ class BrowserRuntimeSyncTests(unittest.IsolatedAsyncioTestCase):
         response = await self.post(payload, "unknown-drift")
         self.assertEqual(response.status_code, 409, response.text)
         self.assertEqual(response.json()["error"]["code"], "mutation_reconciliation_required")
+        self.assertEqual(len(self.updates), 1)
+        self.store.write_runtime_environment_record(self.setting)
+        self.host = "https://changed-provider.invalid"
+        wrong_recipient = await self.post(payload, "unknown-drift")
+        self.assertEqual(wrong_recipient.status_code, 409, wrong_recipient.text)
+        self.assertEqual(
+            wrong_recipient.json()["error"]["code"], "mutation_reconciliation_required"
+        )
+        self.host = "https://provider.invalid"
+        self.store.write_runtime_environment_record(
+            RuntimeEnvironmentRecord.model_validate(
+                {
+                    **self.setting.model_dump(mode="json"),
+                    "schema_version": 2,
+                    "retired_provider_keys": ["PROVIDER_ONLY"],
+                }
+            )
+        )
+        retirement_drift = await self.post(payload, "unknown-drift")
+        self.assertEqual(retirement_drift.status_code, 409, retirement_drift.text)
+        self.assertEqual(
+            retirement_drift.json()["error"]["code"], "mutation_reconciliation_required"
+        )
+        self.store.write_runtime_environment_record(self.setting)
+        self.env = "GOOGLE_ANALYTICS_MEASUREMENT_ID=unexpected-live-value\n"
+        wrong_live = await self.post(payload, "unknown-drift")
+        self.assertEqual(wrong_live.status_code, 409, wrong_live.text)
+        self.assertEqual(wrong_live.json()["error"]["code"], "mutation_reconciliation_required")
         self.assertEqual(len(self.updates), 1)
 
     async def test_unchanged_apply_has_no_provider_effect_and_still_checks_baseline(self) -> None:
@@ -471,6 +639,23 @@ class BrowserRuntimeSyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 409, response.text)
         self.assertFalse(self.updates)
         review = await self.plan()
+        binding = self.store.list_secret_bindings(integration="runtime_environment")[0]
+        self.fetch_count = 0
+
+        def revoke_binding(count: int) -> None:
+            if count == 3:
+                self.store.write_secret_binding(
+                    binding.model_copy(update={"declared_secret_class": "prod_only"})
+                )
+
+        self.fetch_hook = revoke_binding
+        late = await self.post(self.apply_payload(review), "late-binding-revocation")
+        self.fetch_hook = None
+        self.assertEqual(late.status_code, 409, late.text)
+        self.assertEqual(late.json()["error"]["code"], "stale")
+        self.assertFalse(self.updates)
+        self.store.write_secret_binding(binding)
+        review = await self.plan()
         self.store.write_runtime_key_safety_policy_record(
             policy.model_copy(
                 update={
@@ -499,6 +684,7 @@ class BrowserRuntimeSyncTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         status = sync.runtime_sync_availability(
             self.store,
+            control_plane_root=self.root,
             administrator=True,
             product=self.product,
             context=self.context,
@@ -517,6 +703,7 @@ class BrowserRuntimeSyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(
             sync.runtime_sync_availability(
                 self.store,
+                control_plane_root=self.root,
                 administrator=False,
                 product=self.product,
                 context=self.context,
@@ -528,6 +715,7 @@ class BrowserRuntimeSyncTests(unittest.IsolatedAsyncioTestCase):
         )
         status = sync.runtime_sync_availability(
             self.store,
+            control_plane_root=self.root,
             administrator=True,
             product=self.product,
             context=self.context,

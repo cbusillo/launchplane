@@ -93,6 +93,8 @@ export function runtimeSyncReadbackMatches(applied: RuntimeSyncReview, current: 
 export function runtimeSyncFailureCertainty(error: unknown, dispatched: boolean): BrowserOperationFailureCertainty {
   if (!dispatched) return "definitive";
   if (error instanceof LaunchplaneApiError) {
+    if (error.statusCode >= 500) return "uncertain";
+    if (error.statusCode === 409 && ["runtime_sync_target_busy", "idempotency_key_reused"].includes(error.code)) return "definitive";
     // This route durably stores this original key's terminal, pre-effect refusal.
     if (error.statusCode === 409 && error.code === "stale") return "settled";
     if (["authentication_required", "authorization_denied", "browser_mutation_denied", "invalid_request", "idempotency_key_required"].includes(error.code)) {

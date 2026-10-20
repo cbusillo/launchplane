@@ -1808,6 +1808,7 @@ def register_product_config_status_read_routes(
             update={
                 "runtime_sync": runtime_sync_availability(
                     record_store,
+                    control_plane_root=dependencies.control_plane_root,
                     administrator=common.is_administrator(identity),
                     product=config_status.product,
                     context=config_status.context,

@@ -5546,17 +5546,17 @@ def create_launchplane_fastapi_app(
             allow_owner=False,
         )
         if isinstance(identity, GitHubHumanIdentity):
-            require_route_repair_administrator(identity)
+            require_browser_administrator(identity, operation="Runtime sync")
             return identity
         return read_disposable_runtime_identity(identity=identity, authorization=authorization)
 
-    def require_route_repair_administrator(identity: GitHubHumanIdentity) -> None:
+    def require_browser_administrator(identity: GitHubHumanIdentity, *, operation: str) -> None:
         if not resolved_authz_policy_runtime.policy.names_administrator(identity):
             raise _launchplane_http_error(
                 status_code=403,
                 trace_id=next_trace_id(),
                 code="authorization_denied",
-                message="Browser route repair requires the signed-in administrator.",
+                message=f"{operation} requires the signed-in administrator.",
             )
 
     def read_domain_repair_identity(
@@ -5574,7 +5574,7 @@ def create_launchplane_fastapi_app(
             allow_owner=False,
         )
         if isinstance(identity, GitHubHumanIdentity):
-            require_route_repair_administrator(identity)
+            require_browser_administrator(identity, operation="Browser route repair")
             if (
                 setup_request.operation != "repair-domain-authority"
                 or setup_request.browser_review is None
@@ -5610,7 +5610,7 @@ def create_launchplane_fastapi_app(
             allow_owner=False,
         )
         if isinstance(identity, GitHubHumanIdentity):
-            require_route_repair_administrator(identity)
+            require_browser_administrator(identity, operation="Browser route repair")
             if binding_request.browser_review is None:
                 raise _launchplane_http_error(
                     status_code=403,
@@ -21876,7 +21876,7 @@ def create_launchplane_fastapi_app(
             )
 
             def operation(active_store: PostgresRecordStore) -> DurableProviderOperationResult:
-                return run_durable_provider_operation(
+                result = run_durable_provider_operation(
                     store=active_store,
                     scope=idempotency_scope(identity),
                     route_path=_LIVE_TARGET_RUNTIME_APPLY_ROUTE,
@@ -21887,6 +21887,23 @@ def create_launchplane_fastapi_app(
                     adapter=adapter,
                     original_intent=original,
                 )
+                if (
+                    result.status == "target_busy"
+                    and result.record is not None
+                    and (
+                        result.record.scope,
+                        result.record.route_path,
+                        result.record.idempotency_key,
+                    )
+                    != (idempotency_scope(identity), _LIVE_TARGET_RUNTIME_APPLY_ROUTE, key)
+                ):
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="runtime_sync_target_busy",
+                        message="Another operation holds this lane; this runtime sync was not started.",
+                    )
+                return result
 
             response = await run_provider_operation_http(
                 record_store=store,

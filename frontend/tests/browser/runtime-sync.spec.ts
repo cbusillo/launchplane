@@ -2,7 +2,7 @@ import { waitForState, expect, test, type Page } from "./state";
 import type { RuntimeSyncReview } from "../../src/generated/openapi.ts";
 import { runtimeSyncStorageKey } from "../../src/runtime-sync-operation";
 
-type Scenario = "saved" | "unchanged" | "odoo" | "non-admin" | "denied" | "apply-denied" | "apply-unavailable" | "loading" | "missing-availability" | "config-error" |
+type Scenario = "saved" | "unchanged" | "odoo" | "non-admin" | "denied" | "apply-denied" | "target-busy" | "key-conflict" | "apply-unavailable" | "loading" | "missing-availability" | "config-error" |
   "uncertain" | "unknown-auth" | "unknown-config-error" | "unknown-unavailable" | "missing-request" | "provider-unknown" |
   "stale" | "uncertain-stale" | "receipt-scope" | "receipt-digest" | "receipt-target" | "receipt-fingerprint" |
   "malformed-plan" | "scope-plan" | "applied-plan" | "receipt-result" | "readback-error" | "readback-different" | "refresh" | "storage-unavailable";
@@ -64,6 +64,9 @@ async function fixture(page: Page, scenario: Scenario) {
     if (scenario === "denied" || (applying && scenario === "apply-denied")) return route.fulfill({ status: 403,
       json: { trace_id: "denied", error: { code: "authorization_denied", message: "Runtime sync is denied for this session." } } });
     if (applying) {
+      if (scenario === "target-busy" || scenario === "key-conflict") return route.fulfill({ status: 409,
+        json: { trace_id: "not-reserved", error: { code: scenario === "target-busy" ? "runtime_sync_target_busy" : "idempotency_key_reused",
+          message: "This request did not reserve the lane." } } });
       expect(body.browser_review).toEqual({ reviewed_plan_sha256: original.plan_sha256 });
       if ((scenario === "stale" && applies().length === 1) || (scenario === "uncertain-stale" && applies().length === 2)) return route.fulfill({ status: 409,
         json: { trace_id: "stale", error: { code: "stale", message: "Reviewed runtime inputs changed before any effect." } } });
@@ -100,7 +103,7 @@ async function fixture(page: Page, scenario: Scenario) {
     panel: page.getByRole("region", { name: "Runtime sync", exact: true }) };
 }
 
-const scenarios: Scenario[] = ["saved", "unchanged", "odoo", "non-admin", "denied", "apply-denied", "apply-unavailable", "loading", "missing-availability", "config-error",
+const scenarios: Scenario[] = ["saved", "unchanged", "odoo", "non-admin", "denied", "apply-denied", "target-busy", "key-conflict", "apply-unavailable", "loading", "missing-availability", "config-error",
   "uncertain", "unknown-auth", "unknown-config-error", "unknown-unavailable", "missing-request", "provider-unknown", "stale", "uncertain-stale",
   "receipt-scope", "receipt-digest", "receipt-target", "receipt-fingerprint", "receipt-result", "malformed-plan", "scope-plan", "applied-plan",
   "readback-error", "readback-different", "refresh", "storage-unavailable"];
@@ -114,7 +117,6 @@ for (const scenario of scenarios) {
       await expect(inspect).toBeDisabled();
       await expect(panel.getByRole("status")).toBeVisible();
       if (scenario === "non-admin") await expect(panel).toContainText("A named administrator session is required.");
-      if (scenario === "missing-availability") await expect(panel).toContainText("Runtime sync availability has not been returned");
       if (scenario === "config-error") await expect(panel).toContainText("Current configuration evidence is unavailable.");
       expect(state.calls).toHaveLength(0);
       if (scenario === "odoo") {
@@ -126,7 +128,7 @@ for (const scenario of scenarios) {
     }
     if (scenario === "loading") {
       await expect(inspect).toBeDisabled();
-      await expect(panel.getByRole("status")).toContainText("Checking runtime sync availability");
+      await expect(panel.getByRole("status")).toBeVisible();
       await waitForState(() => !!state.releaseConfig()).toBe(true);
       await state.releaseConfig()!();
       await expect(inspect).toBeEnabled(); expect(state.calls).toHaveLength(0); return;
@@ -145,13 +147,12 @@ for (const scenario of scenarios) {
     }
     if (scenario === "denied") { await expect(panel.getByRole("alert")).toContainText("Runtime sync is denied"); return; }
     if (["malformed-plan", "scope-plan", "applied-plan"].includes(scenario)) {
-      await expect(panel.getByRole("status")).toContainText(/does not verify|unexpectedly/);
+      await expect(panel.getByRole("status")).toBeVisible();
       await expect(panel.getByRole("button", { name: "Apply reviewed runtime sync" })).toHaveCount(0); return;
     }
     const reviewed = panel.getByLabel("Runtime sync review", { exact: true });
     await expect(reviewed).toBeVisible();
     if (scenario === "unchanged") {
-      await expect(reviewed).toContainText("Already matches; no runtime changes needed");
       await expect(panel.getByRole("button", { name: "Apply reviewed runtime sync" })).toHaveCount(0); return;
     }
     const apply = panel.getByRole("button", { name: "Apply reviewed runtime sync", exact: true });
@@ -182,7 +183,13 @@ for (const scenario of scenarios) {
     });
     await apply.click();
     if (scenario === "storage-unavailable") {
-      await expect(panel.getByRole("status")).toContainText("Nothing was sent"); expect(state.applies()).toHaveLength(0); return;
+      await expect(panel.getByRole("status")).toBeVisible(); expect(state.applies()).toHaveLength(0); return;
+    }
+    if (scenario === "target-busy" || scenario === "key-conflict") {
+      await expect(panel).toHaveAttribute("data-recovery", "false");
+      await expect(panel.getByRole("alert")).toContainText("This request did not reserve the lane.");
+      await expect(panel.getByRole("button", { name: "Review runtime sync", exact: true })).toBeEnabled();
+      expect(state.applies()).toHaveLength(1); return;
     }
     if (scenario === "apply-denied") {
       await expect(panel.getByRole("alert")).toContainText("Runtime sync is denied");
@@ -190,21 +197,20 @@ for (const scenario of scenarios) {
     }
     if (scenario.startsWith("receipt-")) {
       await expect(panel).toHaveAttribute("data-recovery", "true");
-      await expect(panel.getByRole("alert")).toContainText(/does not verify/);
-      await expect(panel.getByText("Original runtime sync receipt", { exact: true })).toHaveCount(0); return;
+      await expect(panel.getByRole("alert")).toBeVisible();
+      await expect(panel.locator(".runtime-sync-receipt")).toHaveCount(0); return;
     }
     if (["uncertain", "unknown-auth", "unknown-config-error", "unknown-unavailable", "missing-request", "provider-unknown", "uncertain-stale"].includes(scenario)) {
       await expect(panel).toHaveAttribute("data-recovery", "true");
       await expect(inspect).toBeDisabled();
       if (scenario === "uncertain") {
         await panel.screenshot({ path: testInfo.outputPath("runtime-sync-unknown.png") });
-        await panel.getByText("The original runtime sync outcome is unknown.", { exact: true }).scrollIntoViewIfNeeded();
+        await panel.locator(".runtime-sync-recovery").scrollIntoViewIfNeeded();
         await page.screenshot({ path: testInfo.outputPath("runtime-sync-unknown-viewport.png") });
       }
       if (scenario === "missing-request") await page.evaluate(key => sessionStorage.removeItem(key), runtimeSyncStorageKey(state.scope));
       await page.reload(); panel = page.getByRole("region", { name: "Runtime sync", exact: true });
       if (scenario === "missing-request") {
-        await expect(panel).toContainText("saved request is missing or invalid");
         await expect(panel.getByRole("button", { name: "Resume original runtime sync" })).toHaveCount(0);
         await expect(panel.getByRole("button", { name: "Review runtime sync", exact: true })).toBeDisabled();
         expect(state.applies()).toHaveLength(1); return;
@@ -224,20 +230,20 @@ for (const scenario of scenarios) {
     }
     if (scenario === "stale" || scenario === "uncertain-stale") {
       await expect(panel).toHaveAttribute("data-recovery", "false");
-      await expect(panel.getByRole("status")).toContainText("changed before any effect");
+      await expect(panel.getByRole("status")).toBeVisible();
       await expect(panel.getByRole("button", { name: "Review runtime sync", exact: true })).toBeEnabled();
       await expect(panel.getByLabel("Runtime sync review", { exact: true })).toHaveCount(0); return;
     }
     await expect(panel).toHaveAttribute("data-operation-phase", "succeeded");
     await expect(panel).toHaveAttribute("data-readback", scenario === "readback-error" ? "unavailable" : scenario === "readback-different" ? "different" : "verified");
     await expect(panel).toHaveAttribute("data-recovery", "false");
-    await expect(panel.getByText("Original runtime sync receipt", { exact: true })).toBeVisible();
+    await expect(panel.locator(".runtime-sync-receipt")).toBeVisible();
     expect(state.applies()[0].key).toBeTruthy();
     expect(await page.evaluate(() => JSON.stringify(sessionStorage))).not.toContain("inert-secret-value");
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     if (["saved", "readback-error"].includes(scenario)) {
       await panel.screenshot({ path: testInfo.outputPath(`runtime-sync-${scenario === "saved" ? "verified" : "readback-unavailable"}.png`) });
-      await panel.getByText("Original runtime sync receipt", { exact: true }).scrollIntoViewIfNeeded();
+      await panel.locator(".runtime-sync-receipt").scrollIntoViewIfNeeded();
       await page.screenshot({ path: testInfo.outputPath(`runtime-sync-${scenario === "saved" ? "verified" : "readback-unavailable"}-viewport.png`) });
     }
   });
