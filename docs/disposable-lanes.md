@@ -65,6 +65,8 @@ normalized web-ingress declaration and listener witnesses. Unrelated application
 environment, image or Compose formatting changes do not change that declaration
 witness. Listener witnesses cover the entrypoints and certificate resolvers used
 by this lane; unrelated proxy logging and other listeners do not change them.
+Candidate serving readback verifies these dependencies and external redirect
+behavior after the file is selected, as well as before its forward write.
 Candidate preparation, generated
 local credentials, sanitation, immutable build, private identity and public
 health checks use the ordinary lifecycle.
@@ -95,10 +97,16 @@ cannot trap the inverse of our route artifact. Its data is never deleted here.
 
 Stopped custody binds member identities, ownership labels and storage, separately
 from current stopped/absent state. Incidental Docker lifecycle timestamps do not
-invalidate an unchanged stopped copy. A changed predecessor before cutover can
+invalidate an unchanged stopped copy. The exact admission witness gates the
+original forward writer. Once the candidate is selected, complete current stopped
+or absent evidence is sufficient; pruning stopped containers does not undo a
+verified independent candidate. A bound normal retirement-success receipt and
+its completed disable receipt resume without requalifying later old-side work,
+while the candidate's current ingress and public health are still verified.
+A changed predecessor before cutover can
 end admission once original artifact custody, no metadata adoption and terminal
-candidate custody are proved. After possible cutover, the worker first persists
-the original admission refusal and
+candidate custody are proved. After possible cutover and current recovery-custody
+checks, the worker persists the original admission refusal and
 settles or excludes the original physical writer. That settlement never allocates
 another initializer or sends another forward write, including after a busy call.
 Unknown or busy execution stays pending with the decision latched. Reappeared

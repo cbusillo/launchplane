@@ -1039,24 +1039,32 @@ class TestingRouteTransportTests(unittest.TestCase):
     def test_unavailable_redirect_drift_remains_visible_in_scoped_host_reads(self) -> None:
         self.declared_two_listener_route()
         reference = "redirect-to-https@file"
-        self.client.payload["external_middlewares"] = (reference,)
-        self.raw["middlewares"][reference]["redirectScheme"]["scheme"] = "http"
-        frame = self.client.read()
-        self.assertEqual(frame["raw"]["middlewares"][reference]["redirectScheme"]["scheme"], "http")
-        with self.assertRaises(routing.TestingRouteAuthorityChanged):
-            observe_testing_route(self.plan, frame["raw"], None)
-        self.raw["middlewares"].pop(reference)
-        with self.assertRaises(routing.TestingRouteAuthorityChanged):
-            observe_testing_route(self.plan, self.client.read()["raw"], None)
-        self.raw["middlewares"][reference] = {
-            "status": "disabled",
-            "redirectScheme": {"scheme": "https"},
-        }
-        with self.assertRaises(TestingRoutePending):
-            observe_testing_route(self.plan, self.client.read()["raw"], None)
-        self.raw["middlewares"][reference] = {"status": "enabled", "redirectScheme": []}
-        with self.assertRaises(NativeSourceUnavailable):
-            self.client.read()
+        original = deepcopy(self.raw["middlewares"][reference])
+        for published in (False, True):
+            with self.subTest(published=published):
+                if published:
+                    self.publish(self.plan.new_backend, None)
+                self.raw["middlewares"][reference]["redirectScheme"]["scheme"] = "http"
+                frame = self.client.read()
+                document = json.loads(frame["owned_file"]) if frame["owned_file"] else None
+                self.assertEqual(
+                    frame["raw"]["middlewares"][reference]["redirectScheme"]["scheme"], "http"
+                )
+                with self.assertRaises(routing.TestingRouteAuthorityChanged):
+                    observe_testing_route(self.plan, frame["raw"], document)
+                self.raw["middlewares"].pop(reference)
+                with self.assertRaises(routing.TestingRouteAuthorityChanged):
+                    observe_testing_route(self.plan, self.client.read()["raw"], document)
+                self.raw["middlewares"][reference] = {
+                    "status": "disabled",
+                    "redirectScheme": {"scheme": "https"},
+                }
+                with self.assertRaises(TestingRoutePending):
+                    observe_testing_route(self.plan, self.client.read()["raw"], document)
+                self.raw["middlewares"][reference] = {"status": "enabled", "redirectScheme": []}
+                with self.assertRaises(NativeSourceUnavailable):
+                    self.client.read()
+                self.raw["middlewares"][reference] = deepcopy(original)
 
     def test_lost_absence_inverse_reply_is_settled_without_recreating_the_file(self) -> None:
         self.unavailable_route()

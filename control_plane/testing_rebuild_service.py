@@ -846,7 +846,7 @@ class NativeTestingRebuildExecution:
     def resume_admission_rollback(
         self, checkpoint: TestingRebuildRecord, reason: str
     ) -> TestingRebuildRecord:
-        """Latch source drift before waiting; settle the original forward, then undo it."""
+        """Latch changed admission before waiting; settle the original forward, then undo it."""
         if not isinstance(checkpoint.plan.old, UnavailableTestingPredecessor):
             raise ValueError("Unavailable-predecessor recovery cannot replace healthy retirement.")
         self.guard(recovery=True)
@@ -1106,7 +1106,8 @@ class NativeTestingRebuildExecution:
             )
         if unavailable_recovery:
             # Reversing our own route artifact does not act on the old copy.
-            # Its new deploy/workflow cannot authorize or trap that inverse.
+            # Forward publication/retirement check old jobs separately; those
+            # jobs cannot authorize or trap the original artifact inverse.
             return
         self.require_old_quiescent()
 
@@ -1661,15 +1662,27 @@ class NativeTestingRebuildExecution:
         )
 
     def require_unavailable_forward_frame(self, frame: dict[str, Any]) -> None:
-        if not self.transport.unavailable_predecessor_matches(frame):
-            raise NativeTestingRebuildAdmissionChanged(
-                "The admitted unavailable testing predecessor changed."
-            )
+        if not self.unavailable_retirement_finished(self.plan):
+            if frame["owned_file"] == route_document_content(self.route, self.route.new_backend):
+                self.require_current_unavailable(frame)
+            elif not self.transport.unavailable_predecessor_matches(frame):
+                raise NativeTestingRebuildAdmissionChanged(
+                    "The admitted unavailable testing predecessor changed."
+                )
         if frame["owned_file"] not in {
             route_document_content(self.route, None),
             route_document_content(self.route, self.route.new_backend),
         }:
             raise NativeTestingRebuildPending("The owned testing route file changed custody.")
+        preimage = self.route.unavailable_preimage
+        assert preimage is not None
+        if (
+            testing_route_static_sha256(frame["static_configuration"], self.route.template)
+            != preimage.static_sha256
+        ):
+            raise NativeTestingRebuildAdmissionChanged(
+                "The admitted testing listener configuration changed during cutover."
+            )
         try:
             observe_testing_route(
                 self.route,
@@ -1879,6 +1892,8 @@ class NativeTestingRebuildExecution:
 
     def retire_old(self, plan: TestingRebuildPlan) -> None:
         if isinstance(plan.old, UnavailableTestingPredecessor):
+            if self.unavailable_retirement_finished(plan):
+                return
             self.require_unavailable_retirement()
 
         def disable_auto_deploy(dispatch: Callable[[Callable[[], None]], None]) -> None:
@@ -1936,12 +1951,57 @@ class NativeTestingRebuildExecution:
         )
 
     def require_unavailable_retirement(self) -> None:
+        if self.unavailable_retirement_finished(self.plan):
+            return
         self.require_old_quiescent()
-        frame = self.transport.read()
-        if not self.transport.unavailable_predecessor_matches(frame):
+        self.require_current_unavailable(self.transport.read())
+
+    @staticmethod
+    def require_current_unavailable(frame: dict[str, Any]) -> None:
+        if frame.get("old_availability") == "available":
             raise NativeTestingRebuildAdmissionChanged(
                 "The unavailable predecessor changed before retirement completed."
             )
+        if frame.get("old_availability") not in {"stopped", "absent"}:
+            raise NativeTestingRebuildPending("The current predecessor state is unavailable.")
+
+    def unavailable_retirement_finished(self, plan: TestingRebuildPlan) -> bool:
+        if not isinstance(plan.old, UnavailableTestingPredecessor):
+            return False
+        stop = self.store.read_idempotency_record(
+            scope=REBUILD_SCOPE,
+            route_path=REBUILD_ROUTE + ":effect",
+            idempotency_key=self.operation.operation_id + ":retire-old",
+        )
+        if (
+            stop is None
+            or stop.state != "completed"
+            or stop.response_payload.get("cause") != "predecessor_already_unavailable"
+        ):
+            return False
+        # This existing proof verifies the original stop key, intent, target,
+        # and absence of dispatch. A health-abort exclusion is not success.
+        if not isinstance(
+            self.retirement_exclusion(plan, after_health_failure=True), TestingStopExclusionReadback
+        ):
+            raise NativeTestingRebuildPending("The completed retirement exclusion is unverified.")
+        disable = self.store.read_idempotency_record(
+            scope=REBUILD_SCOPE,
+            route_path=REBUILD_ROUTE + ":effect",
+            idempotency_key=self.operation.operation_id + ":disable-old-auto-deploy",
+        )
+        if (
+            disable is None
+            or disable.state != "completed"
+            or disable.response_payload.get("not_dispatched") is True
+            or disable.provider_target_key != self.adapter.target_key() + ":disable-old-auto-deploy"
+            or disable.request_fingerprint
+            != canonical_json_sha256(
+                {"intent": self.intent.digest, "phase": "disable-old-auto-deploy"}
+            )
+        ):
+            raise NativeTestingRebuildPending("The completed retirement lost its disable custody.")
+        return True
 
     def retirement_exclusion(
         self, plan: TestingRebuildPlan, *, after_health_failure: bool = False

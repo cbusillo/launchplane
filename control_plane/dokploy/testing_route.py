@@ -93,6 +93,15 @@ def select_testing_route_raw(
             qualified = reference if "@" in reference else reference + "@" + provider
             middleware = raw.get("middlewares", {}).get(qualified)
             if not isinstance(middleware, dict):
+                if (
+                    external_middlewares is not None
+                    and qualified in external_middlewares
+                    and isinstance(supplied_middlewares, dict)
+                    and qualified not in supplied_middlewares
+                ):
+                    # A complete map can prove removal of an admitted external
+                    # dependency; preserve that fact for the shared observer.
+                    continue
                 raise RuntimeError("Applied middleware inventory is incomplete")
             middlewares[qualified] = {
                 key: middleware[key]
@@ -851,16 +860,15 @@ def observe_testing_route(
             plan.public_entrypoints,
             testing_route_external_middlewares(plan.template),
         )
+        for name in testing_route_external_middlewares(plan.template):
+            current = scoped["middlewares"].get(name)
+            expected = preimage.raw["middlewares"].get(name)
+            if current is not None and current.get("status") != "enabled":
+                raise TestingRoutePending("Original testing redirect is not enabled.")
+            if current != expected:
+                raise TestingRouteAuthorityChanged("Original testing redirect changed.")
         if owned_document == original and scoped == preimage.raw:
             return None
-        if owned_document == original:
-            for name in testing_route_external_middlewares(plan.template):
-                current = scoped["middlewares"].get(name)
-                expected = preimage.raw["middlewares"].get(name)
-                if current is not None and current.get("status") != "enabled":
-                    raise TestingRoutePending("Original testing redirect is not enabled.")
-                if current != expected:
-                    raise TestingRouteAuthorityChanged("Original testing redirect changed.")
     matches = possible_lane_routers(raw, plan.host, plan.public_entrypoints)
     owned = plan.template["http"]["routers"]
     names = {name + "@file" for name in owned}
