@@ -1990,7 +1990,11 @@ else:
             ),
         )
         short = "copy phase stopped\n"
-        long = "FixtureDatabaseError: " + "é" * (REHEARSAL_DIAGNOSTIC_TEXT_LIMIT // 3)
+        long = (
+            "FixtureDatabaseError: "
+            + "x" * (REHEARSAL_DIAGNOSTIC_TEXT_LIMIT // 2)
+            + "é" * (REHEARSAL_DIAGNOSTIC_TEXT_LIMIT // 8)
+        )
         for stdout, stderr in ((short, long), (long, short)):
             diagnostic = self.host["command_diagnostic"](
                 [], subprocess.CompletedProcess([], 1, stdout.encode(), stderr.encode()), {}
