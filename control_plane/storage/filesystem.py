@@ -1097,7 +1097,7 @@ class FilesystemRecordStore:
         persisted_record = sanitize_runner_host_hygiene_audit_record_for_persistence(record)
         return self._write_model(
             "launchplane_runner_host_hygiene_audits",
-            _runner_host_hygiene_audit_record_id(persisted_record.audit_record_key),
+            _runner_audit_record_id(persisted_record.audit_record_key),
             persisted_record,
         )
 
@@ -1106,7 +1106,7 @@ class FilesystemRecordStore:
     ) -> Path:
         return self._write_model(
             "launchplane_runner_lane_registration_audits",
-            _runner_lane_registration_audit_record_id(record.audit_record_key),
+            _runner_audit_record_id(record.audit_record_key),
             record,
         )
 
@@ -2947,7 +2947,7 @@ class FilesystemRecordStore:
         return self._read_model(
             RunnerHostHygieneApplyAuditRecord,
             "launchplane_runner_host_hygiene_audits",
-            _runner_host_hygiene_audit_record_id(audit_record_key),
+            _runner_audit_record_id(audit_record_key),
         )
 
     def list_runner_lane_registration_audit_records(
@@ -7778,7 +7778,7 @@ def _odoo_stable_bootstrap_lane_reservation_id(
     return f"{record.product}-{record.context}-{record.instance}".replace("/", "-") + f"-{digest}"
 
 
-def _runner_host_hygiene_audit_record_id(audit_record_key: str) -> str:
+def _runner_audit_record_id(audit_record_key: str) -> str:
     digest = hashlib.sha256(audit_record_key.encode()).hexdigest()[:16]
     normalized_key = audit_record_key.strip()
     filename_prefix = "".join(
@@ -7786,11 +7786,6 @@ def _runner_host_hygiene_audit_record_id(audit_record_key: str) -> str:
         for character in normalized_key
     )[:200]
     return f"{filename_prefix or 'audit'}-{digest}"
-
-
-def _runner_lane_registration_audit_record_id(audit_record_key: str) -> str:
-    digest = hashlib.sha256(audit_record_key.encode()).hexdigest()[:16]
-    return audit_record_key.strip().replace("/", "-") + f"-{digest}"
 
 
 def _context_instance_record_id(context: str, instance: str) -> str:

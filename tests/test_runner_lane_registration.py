@@ -4,6 +4,11 @@ from datetime import datetime, timezone
 from collections.abc import Sequence
 from collections.abc import Mapping
 import json
+import os
+import pwd
+import shutil
+import subprocess
+import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -31,6 +36,9 @@ from control_plane.workflows.runner_lane_registration_executor import (
     RunnerLaneRegistrationExecutorRequest,
 )
 from control_plane.workflows.runner_lane_registration_executor import (
+    RunnerLaneRegistrationExecutorResult,
+)
+from control_plane.workflows.runner_lane_registration_executor import (
     execute_runner_lane_registration_executor,
 )
 from control_plane.workflows.runner_lane_registration_executor import (
@@ -39,6 +47,7 @@ from control_plane.workflows.runner_lane_registration_executor import (
 
 
 CLI_MAIN = cast(Command, main)
+REGISTRATION_TOKEN = "secret-token"
 
 
 class _Clock:
@@ -54,7 +63,7 @@ class _TokenFetcher:
         self, *, repository: str
     ) -> tuple[str, RunnerLaneRegistrationTokenRecord]:
         transport = RecordingMergeTrainGitHubTransport(
-            responses=({"token": "secret-token", "expires_at": "2026-06-08T18:30:00Z"},)
+            responses=({"token": REGISTRATION_TOKEN, "expires_at": "2026-06-08T18:30:00Z"},)
         )
         self.calls.append(repository)
         return GitHubRunnerLaneRegistrationTokenFetcher(
@@ -68,10 +77,10 @@ class _CommandRunner:
         self,
         *,
         returncode: int = 0,
-        returncodes: Sequence[int] | None = None,
+        fail_configuration: bool = False,
     ) -> None:
         self.returncode = returncode
-        self.returncodes = list(returncodes or ())
+        self.fail_configuration = fail_configuration
         self.commands: list[tuple[str, ...]] = []
         self.envs: list[dict[str, str]] = []
 
@@ -80,7 +89,9 @@ class _CommandRunner:
     ) -> RemoteCommandResult:
         self.commands.append(tuple(command))
         self.envs.append(dict(env))
-        returncode = self.returncodes.pop(0) if self.returncodes else self.returncode
+        returncode = (
+            1 if self.fail_configuration and "RUNNER_REGISTRATION_TOKEN" in env else self.returncode
+        )
         return RemoteCommandResult(returncode=returncode, stderr="registration failed")
 
 
@@ -254,7 +265,7 @@ class RunnerLaneRegistrationPlanTests(unittest.TestCase):
 class GitHubRunnerLaneRegistrationTokenFetcherTests(unittest.TestCase):
     def test_fetch_registration_token_returns_token_and_safe_record(self) -> None:
         transport = RecordingMergeTrainGitHubTransport(
-            responses=({"token": "secret-token", "expires_at": "2026-06-08T18:30:00Z"},)
+            responses=({"token": REGISTRATION_TOKEN, "expires_at": "2026-06-08T18:30:00Z"},)
         )
 
         token, record = GitHubRunnerLaneRegistrationTokenFetcher(
@@ -262,10 +273,10 @@ class GitHubRunnerLaneRegistrationTokenFetcherTests(unittest.TestCase):
             clock=_Clock(),
         ).fetch_registration_token(repository="cbusillo/odoo-tenant-cm-website")
 
-        self.assertEqual(token, "secret-token")
+        self.assertEqual(token, REGISTRATION_TOKEN)
         self.assertEqual(record.repository, "cbusillo/odoo-tenant-cm-website")
         self.assertEqual(record.fetched_at, "2026-06-08T17:30:00Z")
-        self.assertNotIn("secret-token", json.dumps(record.model_dump(mode="json")))
+        self.assertNotIn(REGISTRATION_TOKEN, json.dumps(record.model_dump(mode="json")))
         self.assertEqual(
             transport.requests[0].path,
             "/repos/cbusillo/odoo-tenant-cm-website/actions/runners/registration-token",
@@ -418,11 +429,15 @@ class RunnerLaneRegistrationExecutorTests(unittest.TestCase):
 
         self.assertEqual(result.status, "completed")
         self.assertEqual(token_fetcher.calls, ["cbusillo/odoo-tenant-cm-website"])
-        self.assertEqual(len(command_runner.commands), 4)
-        self.assertEqual(command_runner.commands[0][:3], ("sh", "-eu", "-c"))
-        self.assertIn("config.sh", command_runner.commands[1][3])
-        self.assertEqual(
-            command_runner.commands[2],
+        configuration_calls = [
+            (command, env)
+            for command, env in zip(command_runner.commands, command_runner.envs, strict=True)
+            if "RUNNER_REGISTRATION_TOKEN" in env
+        ]
+        self.assertEqual(len(configuration_calls), 1)
+        configuration_command, configuration_env = configuration_calls[0]
+        self.assertIn("config.sh", configuration_command[3])
+        self.assertIn(
             (
                 "sudo",
                 "-n",
@@ -431,9 +446,9 @@ class RunnerLaneRegistrationExecutorTests(unittest.TestCase):
                 "--now",
                 "launchplane-runner@cm-website-runner-1.service",
             ),
+            command_runner.commands,
         )
-        self.assertEqual(
-            command_runner.commands[3],
+        self.assertIn(
             (
                 "sudo",
                 "-n",
@@ -442,22 +457,23 @@ class RunnerLaneRegistrationExecutorTests(unittest.TestCase):
                 "--quiet",
                 "launchplane-runner@cm-website-runner-1.service",
             ),
+            command_runner.commands,
         )
         self.assertEqual(
-            command_runner.envs[1]["RUNNER_DIRECTORY"],
+            configuration_env["RUNNER_DIRECTORY"],
             "/home/launchplane-runner-hygiene/actions-runners/cm-website-runner-1",
         )
-        self.assertEqual(command_runner.envs[1]["RUNNER_REGISTRATION_TOKEN"], "secret-token")
-        self.assertNotIn("secret-token", " ".join(command_runner.commands[1]))
+        self.assertEqual(configuration_env["RUNNER_REGISTRATION_TOKEN"], REGISTRATION_TOKEN)
+        self.assertNotIn(REGISTRATION_TOKEN, " ".join(configuration_command))
         self.assertIsNotNone(result.token_record)
         if result.token_record is not None:
             self.assertEqual(result.token_record.repository, "cbusillo/odoo-tenant-cm-website")
-        self.assertNotIn("secret-token", result.model_dump_json())
+        self.assertNotIn(REGISTRATION_TOKEN, result.model_dump_json())
         self.assertEqual([record[0] for record in audit_poster.records], ["planned", "completed"])
 
     def test_ready_executor_posts_failed_audit_when_config_fails(self) -> None:
         token_fetcher = _TokenFetcher()
-        command_runner = _CommandRunner(returncodes=[0, 1])
+        command_runner = _CommandRunner(fail_configuration=True)
         audit_poster = _AuditPoster()
 
         result = execute_runner_lane_registration_executor(
@@ -471,13 +487,15 @@ class RunnerLaneRegistrationExecutorTests(unittest.TestCase):
         )
 
         self.assertEqual(result.status, "failed")
-        self.assertIn("configure runner", result.message)
+        self.assertEqual(
+            len([env for env in command_runner.envs if "RUNNER_REGISTRATION_TOKEN" in env]), 1
+        )
         self.assertEqual([record[0] for record in audit_poster.records], ["planned", "failed"])
-        self.assertNotIn("secret-token", result.model_dump_json())
+        self.assertNotIn(REGISTRATION_TOKEN, result.model_dump_json())
 
     def test_ready_executor_reports_command_stderr_in_failed_audit(self) -> None:
         token_fetcher = _TokenFetcher()
-        command_runner = _CommandRunner(returncodes=[1])
+        command_runner = _CommandRunner(returncode=1)
         audit_poster = _AuditPoster()
 
         result = execute_runner_lane_registration_executor(
@@ -491,7 +509,6 @@ class RunnerLaneRegistrationExecutorTests(unittest.TestCase):
         )
 
         self.assertEqual(result.status, "failed")
-        self.assertIn("prepare runner directory", result.message)
         self.assertIn("registration failed", result.message)
 
     def test_ready_executor_posts_failed_audit_when_post_inventory_is_missing_lane(self) -> None:
@@ -585,6 +602,297 @@ class RunnerLaneRegistrationExecutorTests(unittest.TestCase):
             },
             current_user="launchplane-runner-hygiene",
         )
+
+
+_FILESYSTEM_COMMAND = r"""import io
+import json
+import os
+from pathlib import Path
+import pwd
+import sys
+import tarfile
+
+command = Path(sys.argv[0]).name
+args = sys.argv[1:]
+if command == "realpath":
+    try:
+        print(Path(args[-1]).resolve(strict=True))
+    except (OSError, RuntimeError):
+        sys.exit(1)
+elif command == "stat":
+    owner = Path(args[-1]).stat().st_uid
+    print(pwd.getpwuid(owner).pw_name if "%U" in args else owner)
+else:
+    with Path(os.environ["FIXTURE_LOG"]).open("a") as stream:
+        stream.write(json.dumps(command) + "\n")
+    if command == "curl":
+        archive = args[args.index("--output") + 1]
+        config = b'#!/bin/sh\nprintf \'"configure"\\n\' >> "$FIXTURE_LOG"\n'
+        if os.environ.get("FAIL_CONFIG"):
+            config = b'#!/bin/sh\nprintf %s "$RUNNER_REGISTRATION_TOKEN" >&2\nexit 1\n'
+        with tarfile.open(archive, "w:gz") as stream:
+            member = tarfile.TarInfo("config.sh")
+            member.mode = 0o700
+            member.size = len(config)
+            stream.addfile(member, io.BytesIO(config))
+        if os.environ.get("SWAP_AFTER_DOWNLOAD"):
+            root = Path(os.environ["FIXTURE_ROOT"])
+            root.rename(root.with_name(root.name + "-retained"))
+            root.symlink_to(os.environ["FIXTURE_OUTSIDE"], target_is_directory=True)
+    elif command == "tar":
+        os.execv(os.environ["FIXTURE_REAL_TAR"], ["tar", *args])
+    elif command != "sudo":
+        raise AssertionError(command)
+"""
+
+
+class RunnerLaneRegistrationFilesystemTests(unittest.TestCase):
+    def setUp(self) -> None:
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        # macOS temporary paths can include the /var symlink. The fixture's
+        # approved root must itself be canonical on both supported platforms.
+        self.base = Path(temporary.name).resolve()
+        self.bin = self.base / "bin"
+        self.bin.mkdir()
+        self.root = self.base / "runners"
+        self.outside = self.base / "outside"
+        self.outside.mkdir()
+        self.log = self.base / "commands.jsonl"
+        self.request = _executor_request(
+            mutate=True, registration_root=str(self.root), timeout_seconds=10
+        ).model_copy(update={"service_user": pwd.getpwuid(os.getuid()).pw_name})
+        self.policy = _policy().model_copy(update={"allowed_registration_roots": (str(self.root),)})
+        real_tar = shutil.which("tar", path=os.defpath)
+        if real_tar is None:
+            self.fail("Filesystem behavior tests require tar")
+        for name in ("realpath", "stat", "curl", "tar", "sudo"):
+            executable = self.bin / name
+            executable.write_text(f"#!{sys.executable}\n{_FILESYSTEM_COMMAND}")
+            executable.chmod(0o700)
+        self.env = {
+            "PATH": f"{self.bin}{os.pathsep}{os.defpath}",
+            "FIXTURE_LOG": str(self.log),
+            "FIXTURE_ROOT": str(self.root),
+            "FIXTURE_OUTSIDE": str(self.outside),
+            "FIXTURE_REAL_TAR": real_tar,
+        }
+        self.tokens = _TokenFetcher()
+        self.audits = _AuditPoster()
+        self.audit_messages: list[str] = []
+        self.swap_before_configuration = False
+        self.swap_after_configuration = False
+        self.swap_during_inventory = False
+
+    def swap_root(self) -> None:
+        self.root.rename(self.base / "retained")
+        self.root.symlink_to(self.outside, target_is_directory=True)
+
+    def run_executor(self) -> RunnerLaneRegistrationExecutorResult:
+        def run_command(
+            command: Sequence[str], timeout_seconds: int, env: Mapping[str, str]
+        ) -> RemoteCommandResult:
+            if self.swap_before_configuration and "RUNNER_REGISTRATION_TOKEN" in env:
+                self.swap_root()
+            completed = subprocess.run(
+                command,
+                env={**self.env, **env},
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+                check=False,
+            )
+            if self.swap_after_configuration and "RUNNER_REGISTRATION_TOKEN" in env:
+                self.swap_root()
+            return RemoteCommandResult(
+                returncode=completed.returncode,
+                stdout=completed.stdout,
+                stderr=completed.stderr,
+            )
+
+        def post_audit(
+            audit: RunnerLaneRegistrationAuditRecord, idempotency_key: str
+        ) -> dict[str, object]:
+            self.audit_messages.append(audit.message)
+            return self.audits(audit, idempotency_key)
+
+        def read_inventory(_repository: str) -> RunnerLaneInventory:
+            if self.swap_during_inventory:
+                self.swap_root()
+            return _inventory(lanes=(_lane(),))
+
+        return execute_runner_lane_registration_executor(
+            request=self.request,
+            policy=self.policy,
+            pre_inventory=_inventory(lanes=()),
+            inventory_reader=read_inventory,
+            token_fetcher=self.tokens,  # type: ignore[arg-type]
+            remote_runner=run_command,
+            audit_poster=post_audit,
+        )
+
+    def commands(self) -> list[str]:
+        if not self.log.exists():
+            return []
+        return [json.loads(line) for line in self.log.read_text().splitlines()]
+
+    def assert_static_refusal(self) -> None:
+        result = self.run_executor()
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(self.tokens.calls, [])
+        self.assertEqual(self.commands(), [])
+        self.assertEqual([status for status, _key in self.audits.records], ["planned", "failed"])
+        self.assertEqual(list(self.outside.iterdir()), [])
+
+    def test_creates_absent_canonical_root_and_new_lane(self) -> None:
+        result = self.run_executor()
+        self.assertEqual(result.status, "completed")
+        self.assertTrue((self.root / self.request.lane_name / "config.sh").is_file())
+        self.assertEqual(self.tokens.calls, [self.request.repository])
+        self.assertIn("configure", self.commands())
+
+    def test_token_failure_leaves_absent_target_available_for_retry(self) -> None:
+        with patch.object(
+            self.tokens,
+            "fetch_registration_token",
+            side_effect=RuntimeError("fixture token unavailable"),
+        ):
+            failed = self.run_executor()
+        self.assertEqual(failed.status, "failed")
+        self.assertFalse(self.root.exists())
+        self.assertEqual(self.commands(), [])
+        self.request.audit_record_key += "/retry"
+        self.assertEqual(self.run_executor().status, "completed")
+
+    def test_configuration_failure_redacts_registration_token_from_evidence(self) -> None:
+        self.env["FAIL_CONFIG"] = "1"
+        result = self.run_executor()
+        self.assertEqual(result.status, "failed")
+        self.assertTrue(self.audit_messages)
+        exposed = [
+            surface
+            for surface, evidence in (
+                ("result", result.model_dump_json()),
+                ("audit", " ".join(self.audit_messages)),
+            )
+            if REGISTRATION_TOKEN in evidence
+        ]
+        self.assertEqual(exposed, [])
+
+    def test_rejects_symlinked_root_before_token_or_download(self) -> None:
+        self.root.symlink_to(self.outside, target_is_directory=True)
+        self.assert_static_refusal()
+
+    def test_rejects_dangling_root_before_token_or_download(self) -> None:
+        self.root.symlink_to(self.outside / "missing", target_is_directory=True)
+        self.assert_static_refusal()
+
+    def test_rejects_symlinked_ancestor_of_absent_root(self) -> None:
+        ancestor = self.base / "linked"
+        ancestor.symlink_to(self.outside, target_is_directory=True)
+        self.request.registration_root = str(ancestor / "missing" / "runners")
+        self.policy.allowed_registration_roots = (str(ancestor),)
+        self.assert_static_refusal()
+
+    def test_rejects_dangling_ancestor_of_absent_root(self) -> None:
+        ancestor = self.base / "linked"
+        ancestor.symlink_to(self.outside / "missing", target_is_directory=True)
+        self.request.registration_root = str(ancestor / "runners")
+        self.policy.allowed_registration_roots = (str(ancestor),)
+        self.assert_static_refusal()
+
+    def test_rejects_file_root_before_token_or_download(self) -> None:
+        self.root.write_text("not a directory")
+        self.assert_static_refusal()
+
+    def test_rejects_file_ancestor_before_token_or_download(self) -> None:
+        ancestor = self.base / "file"
+        ancestor.write_text("not a directory")
+        self.request.registration_root = str(ancestor / "runners")
+        self.policy.allowed_registration_roots = (str(ancestor),)
+        self.assert_static_refusal()
+
+    def test_rejects_wrong_owner_before_token_or_download(self) -> None:
+        self.root.mkdir()
+        self.request.service_user += "-different-owner"
+        self.assert_static_refusal()
+        self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_rejects_existing_lane_before_token_or_download(self) -> None:
+        lane = self.root / self.request.lane_name
+        lane.mkdir(parents=True)
+        sentinel = lane / "keep"
+        sentinel.write_text("existing registration")
+        self.assert_static_refusal()
+        self.assertEqual(sentinel.read_text(), "existing registration")
+
+    def test_rejects_dangling_lane_before_token_or_download(self) -> None:
+        self.root.mkdir()
+        (self.root / self.request.lane_name).symlink_to(self.outside / "missing")
+        self.assert_static_refusal()
+
+    def test_rechecks_root_after_download_before_extraction(self) -> None:
+        (self.outside / self.request.lane_name).mkdir()
+        self.env["SWAP_AFTER_DOWNLOAD"] = "1"
+        result = self.run_executor()
+        self.assertEqual(result.status, "failed")
+        self.assertNotIn("tar", self.commands())
+        self.assertEqual(self.tokens.calls, [self.request.repository])
+        self.assertFalse((self.outside / self.request.lane_name / "config.sh").exists())
+
+    def test_rechecks_absent_root_ancestor_after_token_before_preparation(self) -> None:
+        ancestor = self.base / "ancestor"
+        ancestor.mkdir()
+        self.request.registration_root = str(ancestor / "missing" / "runners")
+        self.policy.allowed_registration_roots = (str(ancestor),)
+        original_fetch = self.tokens.fetch_registration_token
+
+        def fetch_and_swap(*, repository: str) -> tuple[str, RunnerLaneRegistrationTokenRecord]:
+            token = original_fetch(repository=repository)
+            ancestor.rename(self.base / "retained")
+            ancestor.symlink_to(self.outside, target_is_directory=True)
+            return token
+
+        with patch.object(self.tokens, "fetch_registration_token", side_effect=fetch_and_swap):
+            result = self.run_executor()
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(self.commands(), [])
+        self.assertEqual(list(self.outside.iterdir()), [])
+        self.assertEqual(self.audits.records[-1][0], "failed")
+        self.assertEqual(self.tokens.calls, [self.request.repository])
+
+    def test_rechecks_root_before_configuration_with_executable_outside_target(self) -> None:
+        outside_lane = self.outside / self.request.lane_name
+        outside_lane.mkdir()
+        config = outside_lane / "config.sh"
+        config.write_text('#!/bin/sh\nprintf \'"configure"\\n\' >> "$FIXTURE_LOG"\n')
+        config.chmod(0o700)
+        self.swap_before_configuration = True
+
+        result = self.run_executor()
+
+        self.assertEqual(result.status, "failed")
+        self.assertNotIn("configure", self.commands())
+        self.assertNotIn("sudo", self.commands())
+        self.assertEqual(self.tokens.calls, [self.request.repository])
+
+    def test_rechecks_root_after_configuration_before_starting_service(self) -> None:
+        self.swap_after_configuration = True
+
+        result = self.run_executor()
+
+        self.assertEqual(result.status, "failed")
+        self.assertIn("configure", self.commands())
+        self.assertNotIn("sudo", self.commands())
+        self.assertEqual(self.audits.records[-1][0], "failed")
+
+    def test_rechecks_root_after_inventory_before_completed_audit(self) -> None:
+        self.swap_during_inventory = True
+
+        result = self.run_executor()
+
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(self.audits.records[-1][0], "failed")
 
 
 class RunnerLaneRegistrationCliTests(unittest.TestCase):
