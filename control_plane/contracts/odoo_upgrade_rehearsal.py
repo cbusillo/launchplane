@@ -136,6 +136,7 @@ class IncompleteRehearsalHostResult(BaseModel):
     volumes_absent: bool
     network_absent: bool
     raw_source_absent: bool
+    initial_source_snapshot: RehearsalCopyReceipt | None = None
     public_route: Literal[False]
     business_host_frozen: Literal[False]
 

@@ -128,6 +128,8 @@ class IncompleteRehearsalRetirementTests(unittest.TestCase):
             session.commit()
         operation = self.retirement()
         native = native_fixture(self.prepared, self.key, "a" * 64)
+        initial = self.fixture.copy("source").model_dump(mode="json")
+        native["initial_source_snapshot"] = initial
         with (
             patch.object(
                 type(operation),
@@ -159,6 +161,7 @@ class IncompleteRehearsalRetirementTests(unittest.TestCase):
             self.assertEqual(result["state"], "retired")
             self.assertEqual(result["copies"], [])
             self.assertTrue(result["original_operation_released"])
+            self.assertEqual(result["host_disposal"]["initial_source_snapshot"], initial)
             count = host.call_count
             self.assertEqual(operation.readback()["state"], "retired")
             replay = self.run_retirement(operation)
@@ -396,7 +399,7 @@ class IncompleteRehearsalRetirementTests(unittest.TestCase):
                         self.assertTrue(operation.plan()["review_refusal_required"])
                         with self.assertRaises(RuntimeError):
                             scenario.run_retirement(operation)
-                    self.assertTrue((native.root / "raw/database.dump").exists())
+                    self.assertTrue((native.root / "raw-source/database.dump").exists())
                     self.assertFalse((native.root / "incomplete-retirement.json").exists())
                     # Restoring the original inventory must still generate a new
                     # review, rather than revive the durably refused admission.
@@ -573,6 +576,150 @@ class IncompleteRehearsalRetirementTests(unittest.TestCase):
 
 
 class IncompleteRetirementHostTests(unittest.TestCase):
+    def initial_snapshot(self, *, switched: bool = True) -> dict[str, Any]:
+        import hashlib
+        import json
+        from datetime import datetime, timezone
+
+        names = self.fixture.host["database_names"](self.spec)
+        self.spec["record"]["source_odoo_version"] = "18.0"
+        self.spec["record"]["source_binding_sha256"] = hashlib.sha256(b"source").hexdigest()
+        capture = self.root / "capture.json"
+        capture.write_text(
+            json.dumps({"source_binding_sha256": self.spec["record"]["source_binding_sha256"]})
+        )
+        snapshot = self.root / names["source"]
+        snapshot.mkdir()
+        (snapshot / "database.dump").write_bytes(b"verified initial database")
+        (snapshot / "filestore.tar").write_bytes(b"verified initial filestore")
+        receipt = {
+            "database": names["source"],
+            "witness_sha256": self.fixture.host["witness"](self.spec, names["source"]),
+            "database_sha256": hashlib.sha256(
+                (snapshot / "database.dump").read_bytes()
+            ).hexdigest(),
+            "filestore_sha256": hashlib.sha256(
+                (snapshot / "filestore.tar").read_bytes()
+            ).hexdigest(),
+            "source_capture_sha256": hashlib.sha256(capture.read_bytes()).hexdigest(),
+            "sanitized": True,
+            "odoo_version": "18.0.1.3",
+            "captured_at": datetime.now(timezone.utc).isoformat(),
+        }
+        (snapshot / "receipt.json").write_text(json.dumps(receipt))
+        if switched:
+            for role in ("web", "script-runner"):
+                container = self.fixture.fixture.containers[role]
+                container["Config"]["Env"] = [
+                    "ODOO_DB_NAME=" + names["upgrade"]
+                    if value.startswith("ODOO_DB_NAME=")
+                    else value
+                    for value in container["Config"]["Env"]
+                ]
+        return receipt
+
+    def test_post_switch_disposal_binds_initial_snapshot_without_inventing_upgrade_proof(
+        self,
+    ) -> None:
+        receipt = self.initial_snapshot()
+        plan = self.fixture.run_host(self.spec)
+        self.assertEqual(plan["initial_source_snapshot"], receipt)
+        self.admit(plan)
+        self.spec["mode"] = "apply"
+        applied = self.fixture.run_host(self.spec)
+        self.assertTrue(applied["disposed"])
+        self.assertEqual(applied["initial_source_snapshot"], receipt)
+        self.assertTrue(self.fixture.run_host(self.spec)["disposed"])
+        self.assertFalse((self.root / receipt["database"]).exists())
+
+    def test_unconfirmed_resource_absence_preserves_initial_snapshot_and_raw_capture(self) -> None:
+        receipt = self.initial_snapshot(switched=False)
+        plan = self.fixture.run_host(self.spec)
+        self.admit(plan)
+        self.spec["mode"] = "apply"
+        docker = self.fixture.host["docker"]
+
+        def unconfirmed(*args: str, stdin: bytes | None = None) -> bytes:
+            if args[:2] == ("network", "rm"):
+                return b""  # A successful response alone does not prove absence.
+            return cast(bytes, docker(*args, stdin=stdin))
+
+        self.fixture.host["docker"] = unconfirmed
+        with self.assertRaises(RuntimeError):
+            self.fixture.run_host(self.spec)
+        self.assertTrue((self.root / receipt["database"] / "database.dump").exists())
+        self.assertTrue((self.root / "raw-source/database.dump").exists())
+
+    def test_post_switch_requires_verified_initial_custody_and_idle_initial_runtime(self) -> None:
+        for changed in (
+            "missing",
+            "no-snapshot",
+            "later-snapshot",
+            "corrupt",
+            "aliased",
+            "lineage",
+            "pending",
+            "final",
+            "writer",
+        ):
+            with self.subTest(changed=changed):
+                native = IncompleteRetirementHostTests()
+                native.setUp()
+                self.addCleanup(native.doCleanups)
+                receipt = native.initial_snapshot()
+                path = native.root / receipt["database"]
+                if changed == "missing":
+                    (path / "receipt.json").unlink()
+                elif changed == "no-snapshot":
+                    import shutil
+
+                    shutil.rmtree(path)
+                elif changed == "later-snapshot":
+                    (
+                        native.root
+                        / native.fixture.host["database_names"](native.spec)["final_upgrade"]
+                    ).mkdir()
+                elif changed == "corrupt":
+                    (path / "database.dump").write_bytes(b"changed snapshot")
+                elif changed == "aliased":
+                    (path / "database.dump").unlink()
+                    (path / "database.dump").symlink_to(native.outside / "keep")
+                elif changed == "lineage":
+                    (native.root / "capture.json").write_text("{}")
+                elif changed == "pending":
+                    (native.root / "capture.pending").touch()
+                elif changed == "final":
+                    for role in ("web", "script-runner"):
+                        config = native.fixture.fixture.containers[role]["Config"]
+                        config["Env"] = [
+                            value.replace("_upgrade", "_final_upgrade") for value in config["Env"]
+                        ]
+                else:
+                    native.fixture.fixture.containers["web"]["State"]["Running"] = True
+                with self.assertRaises((RuntimeError, OSError)):
+                    native.fixture.run_host(native.spec)
+                self.assertFalse(any(call[0] in {"stop", "rm"} for call in native.calls))
+                self.assertTrue((native.root / "raw-source/database.dump").exists())
+
+    def test_snapshot_change_after_review_refuses_before_disposal(self) -> None:
+        import json
+        import hashlib
+
+        receipt = self.initial_snapshot()
+        plan = self.fixture.run_host(self.spec)
+        self.admit(plan)
+        path = self.root / receipt["database"]
+        (path / "database.dump").write_bytes(b"replacement snapshot")
+        receipt["database_sha256"] = hashlib.sha256(
+            (path / "database.dump").read_bytes()
+        ).hexdigest()
+        (path / "receipt.json").write_text(json.dumps(receipt))
+        self.spec["mode"] = "apply"
+        with self.assertRaises(RuntimeError):
+            self.fixture.run_host(self.spec)
+        self.assertFalse(any(call[0] in {"stop", "rm"} for call in self.calls))
+        self.assertTrue((path / "database.dump").exists())
+
     def admit(self, plan: dict[str, Any], review: str = "a" * 64) -> None:
         self.spec["record"]["incomplete_retirement"] = {
             "reviewed_plan_sha256": review,
@@ -599,7 +746,7 @@ class IncompleteRetirementHostTests(unittest.TestCase):
         self.spec["source_image"] = self.spec["target_image"]
         (self.root / ".execution.lock").touch()
         (self.root / "execute.started").touch()
-        raw = self.root / "raw"
+        raw = self.root / "raw-source"
         raw.mkdir()
         (raw / "database.dump").write_bytes(b"disposable raw capture")
         (raw / "filestore.tar").write_bytes(b"disposable raw files")
@@ -661,14 +808,14 @@ class IncompleteRetirementHostTests(unittest.TestCase):
         return cast(bytes, self.original_docker(*args, stdin=stdin))
 
     def test_host_dry_run_apply_and_replay_dispose_only_its_own_custody(self) -> None:
-        # A source snapshot may exist before clone/switch without a recorded copy.
-        snapshot = self.root / "source-snapshot"
+        # A partial source snapshot may exist before its receipt and clone/switch.
+        snapshot = self.root / self.fixture.host["database_names"](self.spec)["source"]
         snapshot.mkdir()
-        (snapshot / "receipt.json").write_text("{}")
+        (snapshot / "database.dump").write_bytes(b"partial snapshot")
         plan = self.fixture.run_host(self.spec)
         self.admit(plan)
         self.assertFalse(plan["disposed"])
-        self.assertTrue((self.root / "raw/database.dump").exists())
+        self.assertTrue((self.root / "raw-source/database.dump").exists())
         self.assertFalse(
             any(
                 call[0] in {"stop", "rm"} or call[:2] in {("volume", "rm"), ("network", "rm")}
@@ -682,7 +829,7 @@ class IncompleteRetirementHostTests(unittest.TestCase):
         self.assertEqual(applied["binding_sha256"], plan["binding_sha256"])
         self.assertFalse(self.fixture.fixture.containers)
         self.assertFalse(self.fixture.fixture.volumes)
-        self.assertFalse((self.root / "raw").exists())
+        self.assertFalse((self.root / "raw-source").exists())
         self.assertFalse(snapshot.exists())
         self.assertEqual((self.outside / "keep").read_bytes(), b"production fixture")
         self.spec["mode"] = "apply"
@@ -730,7 +877,7 @@ class IncompleteRetirementHostTests(unittest.TestCase):
             result = operation.host("dry-run", lambda: None)
         self.assertTrue(result["qualified"])
         self.assertFalse(result["disposed"])
-        self.assertTrue((self.root / "raw/database.dump").exists())
+        self.assertTrue((self.root / "raw-source/database.dump").exists())
         self.assertEqual(operation.original(scenario.prepared).state, "reconcile_required")
 
     def test_host_refuses_unreviewed_inventory_without_deleting_custody(self) -> None:
@@ -746,7 +893,7 @@ class IncompleteRetirementHostTests(unittest.TestCase):
             self.fixture.run_host(self.spec)
         self.assertTrue((self.root / "incomplete-retirement-refusals.json").is_file())
         self.assertFalse((self.root / "incomplete-retirement.json").exists())
-        self.assertTrue((self.root / "raw/database.dump").exists())
+        self.assertTrue((self.root / "raw-source/database.dump").exists())
         self.assertFalse(any(call[0] in {"stop", "rm"} for call in self.calls))
 
     def test_host_resumes_its_manifest_after_a_lost_volume_removal_reply(self) -> None:
@@ -767,7 +914,7 @@ class IncompleteRetirementHostTests(unittest.TestCase):
         self.fixture.host["docker"] = lose_reply
         with self.assertRaises(RuntimeError):
             self.fixture.run_host(self.spec)
-        self.assertTrue((self.root / "raw/database.dump").exists())
+        self.assertTrue((self.root / "raw-source/database.dump").exists())
         self.spec["mode"] = "dry-run"
         resumed_plan = self.fixture.run_host(self.spec)
         self.assertEqual(resumed_plan["binding_sha256"], plan["binding_sha256"])
@@ -799,7 +946,7 @@ class IncompleteRetirementHostTests(unittest.TestCase):
         self.fixture.fixture.containers[other["Id"]] = other
         with self.assertRaises(RuntimeError):
             self.fixture.run_host(self.spec)
-        self.assertTrue((self.root / "raw/database.dump").exists())
+        self.assertTrue((self.root / "raw-source/database.dump").exists())
         self.assertFalse(any(call[0] in {"stop", "rm"} for call in self.calls))
 
 
