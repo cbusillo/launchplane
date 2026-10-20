@@ -1005,6 +1005,23 @@ class ArtifactImageOverrideTests(unittest.TestCase):
                         resolved_target=resolved_target,
                     )
                 raw_compose_sync.assert_not_called()
+                fetch_payload.return_value = {"env": ""}
+                with (
+                    patch(
+                        "control_plane.runtime_environments.resolve_site_runtime_environment",
+                        return_value=_site_environment(
+                            {"GITHUB_TOKEN": "synthetic-platform-credential"}
+                        ),
+                    ),
+                    self.assertRaises(click.ClickException),
+                ):
+                    _sync_artifact_image_reference_for_target(
+                        context_name="opw",
+                        instance_name="prod",
+                        artifact_manifest=artifact_manifest,
+                        resolved_target=resolved_target,
+                    )
+                raw_compose_sync.assert_not_called()
 
         self.assertIn(
             "Host(`opw-prod.shinycomputers.com`)",

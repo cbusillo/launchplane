@@ -129,6 +129,36 @@ class OdooCutoverProviderTests(unittest.TestCase):
                 )
             write.assert_not_called()
 
+    def test_compatible_slots_cannot_confuse_legacy_and_literal_credentials(self) -> None:
+        from control_plane.dokploy import api
+
+        values = {"ODOO_DB_PASSWORD": "password$NAME"}
+        with TemporaryDirectory() as temporary:
+            provider = IsolatedCutoverProvider(Path(temporary))
+            self.addCleanup(provider.engine.dispose)
+            with (
+                patch(
+                    "control_plane.dokploy.slot_prepare.api.fetch_dokploy_target_payload",
+                    side_effect=[
+                        {"appName": "old", "env": api.serialize_dokploy_env_text(values)},
+                        {
+                            "appName": "new",
+                            "env": api.serialize_dokploy_env_text(values, target_type="compose"),
+                        },
+                    ],
+                ),
+                patch("control_plane.dokploy.slot_prepare.api.dokploy_request") as write,
+                self.assertRaisesRegex(ValueError, "identical managed"),
+            ):
+                prepare_dokploy_odoo_slot(
+                    provider.cutover,
+                    host="fixture.invalid",
+                    token="inert",
+                    data_volume="fixture",
+                    private_network="fixture",
+                )
+            write.assert_not_called()
+
     def test_foreign_duplicate_or_wrong_tls_route_is_never_overwritten(self) -> None:
         with TemporaryDirectory() as temporary:
             root = Path(temporary)

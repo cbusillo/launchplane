@@ -139,6 +139,7 @@ def require_candidate_configuration(
         or compose.compose_file_sha256(str(payload.get("composeFile") or ""))
         != compose.compose_file_sha256(inputs.compose_file)
         or api.parse_dokploy_env_text(str(payload.get("env") or "")) != inputs.runtime_environment
+        or api.compose_unqualified_keys(str(payload.get("env") or ""), inputs.runtime_environment)
     ):
         raise ValueError("Candidate configuration has not retained its exact admitted inputs.")
 

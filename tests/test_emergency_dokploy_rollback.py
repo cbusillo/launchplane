@@ -18,6 +18,35 @@ def _load_script() -> SimpleNamespace:
 
 
 class EmergencyDokployRollbackTests(unittest.TestCase):
+    def test_same_image_does_not_rewrite_a_commented_legacy_environment(self) -> None:
+        script = _load_script()
+        image = "synthetic.invalid/example@sha256:old"
+        env = {
+            "LAUNCHPLANE_ALLOW_DIRECT_DOKPLOY_FALLBACK": "true",
+            "LAUNCHPLANE_EMERGENCY_DOKPLOY_HOST": "https://provider.invalid",
+            "LAUNCHPLANE_EMERGENCY_DOKPLOY_TOKEN": "synthetic",
+            "LAUNCHPLANE_DOKPLOY_TARGET_TYPE": "compose",
+            "LAUNCHPLANE_DOKPLOY_TARGET_ID": "synthetic",
+            "LAUNCHPLANE_ROLLBACK_IMAGE_REFERENCE": image,
+            "LAUNCHPLANE_ROLLBACK_REASON": "fixture",
+            "LAUNCHPLANE_ROLLBACK_REQUEST_STATUS": "503",
+        }
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch.object(
+                api,
+                "fetch_dokploy_target_payload",
+                return_value={"env": "# provider comment\nDOCKER_IMAGE_REFERENCE=" + image},
+            ),
+            patch.object(api, "update_dokploy_target_env") as update,
+            patch.object(api, "latest_deployment_for_target", return_value={}),
+            patch.object(api, "trigger_deployment"),
+            patch.object(api, "wait_for_target_deployment", return_value={}),
+        ):
+            result = cast(Any, script.run_break_glass_rollback)()
+        self.assertFalse(result["image_reference_changed"])
+        update.assert_not_called()
+
     def test_fails_closed_without_allow_env(self) -> None:
         script_module = _load_script()
 

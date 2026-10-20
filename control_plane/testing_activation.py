@@ -794,7 +794,9 @@ class TestingActivationAdapter:
                 "Fresh recipient source differs from the reviewed source.",
                 code=TestingActivationRefusalCode.RECIPIENT_SOURCE_UNVERIFIED,
             )
-        if api.parse_dokploy_env_text(str(payload.get("env") or "")) != values:
+        if api.parse_dokploy_env_text(
+            str(payload.get("env") or "")
+        ) != values or api.compose_unqualified_keys(str(payload.get("env") or ""), values):
             raise TestingActivationRefusal(
                 "Fresh provider environment differs from safe managed inputs.",
                 code=TestingActivationRefusalCode.RECIPIENT_ENVIRONMENT_UNVERIFIED,

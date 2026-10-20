@@ -2509,6 +2509,18 @@ def _sync_artifact_image_reference_for_target(
         compose_type=str(target_payload.get("composeType") or "docker-compose"),
         current_env_text=str(target_payload.get("env") or ""),
     )
+    dokploy_api.refuse_app_runtime_env_write(
+        env_text=prepared_env_text,
+        current_env_text=str(target_payload.get("env") or ""),
+        target="Ship runtime environment sync",
+    )
+    if resolved_target.target_type == "compose" and target_payload.get("composeType") != "stack":
+        unqualified_keys = dokploy_api.compose_unqualified_keys(prepared_env_text, desired_env_map)
+        if unqualified_keys:
+            raise click.ClickException(
+                "Compose literal delivery needs explicit runtime apply qualification for key(s): "
+                + ", ".join(unqualified_keys)
+            )
     runtime_source_evidence: dict[str, str] = {}
     if desired_image_reference and resolved_target.target_type == "compose":
         target_domains: tuple[str, ...] = ()
@@ -2571,6 +2583,15 @@ def _sync_artifact_image_reference_for_target(
         for env_key, env_value in desired_env_map.items()
         if refreshed_env_map.get(env_key, "") != env_value
     )
+    if resolved_target.target_type == "compose" and target_payload.get("composeType") != "stack":
+        missing_or_mismatched_keys = sorted(
+            set(missing_or_mismatched_keys)
+            | set(
+                dokploy_api.compose_unqualified_keys(
+                    str(target_payload.get("env") or ""), desired_env_map
+                )
+            )
+        )
     if missing_or_mismatched_keys:
         raise click.ClickException(
             "Dokploy target env did not persist Launchplane DB-backed runtime key(s): "

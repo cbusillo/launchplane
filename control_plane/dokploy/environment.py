@@ -10,6 +10,7 @@ Consumer reference: https://github.com/motdotla/dotenv/blob/v16.4.5/lib/main.js
 
 import json
 import re
+from collections.abc import Iterable
 
 
 # ECMAScript whitespace (also used by String.trim), not Python's broader \s.
@@ -77,7 +78,7 @@ def _compose_literal(value: str) -> str:
 
 def _compose_encoded_keys(raw_env_text: str) -> set[str] | None:
     normalized = raw_env_text.replace("\r\n", "\n").replace("\r", "\n")
-    spans = [(match.start(), match.end()) for match in _LINE.finditer(normalized)]
+    spans = [match.span(2) for match in _LINE.finditer(normalized)]
     encoded_keys: set[str] | None = None
     offset = 0
     for line in normalized.splitlines(keepends=True):
@@ -130,29 +131,55 @@ def parse_dokploy_env_text(raw_env_text: str) -> dict[str, str]:
     return _provider_environment(raw_env_text)[0]
 
 
+def compose_unqualified_keys(raw_env_text: str, keys: Iterable[str]) -> list[str]:
+    """Names whose legacy transport cannot establish literal Compose delivery.
+
+    Plain legacy values need no additional quoting. Missing values are handled
+    by value verification; this reports transport uncertainty, never values.
+    """
+    values, decoded_keys = _provider_environment(raw_env_text)
+    return sorted(
+        key
+        for key in set(keys) & values.keys() - decoded_keys
+        if not _COMPOSE_PLAIN.fullmatch(values[key])
+    )
+
+
 def serialize_dokploy_env_text(
     env_map: dict[str, str],
     *,
     target_type: str = "application",
     compose_type: str = "docker-compose",
     current_env_text: str | None = None,
+    literal_keys: Iterable[str] = (),
 ) -> str:
+    requested_keys = set(literal_keys)
+    if requested_keys - env_map.keys():
+        raise DokployEnvironmentEncodingError("Literal qualification requires managed key names.")
     if target_type != "compose" or compose_type == "stack":
+        if requested_keys:
+            raise DokployEnvironmentEncodingError(
+                "Literal qualification requires a Compose target."
+            )
         return _serialize_dotenv(env_map)
     previous, encoded_keys = _provider_environment(current_env_text or "")
     previous_wire = _parse_dotenv(current_env_text or "")
     encoded: dict[str, str] = {}
-    literal_keys: set[str] = set()
+    encoded_literal_keys: set[str] = set()
     for key, value in env_map.items():
-        if current_env_text is not None and key not in encoded_keys and previous.get(key) == value:
+        if (
+            current_env_text is not None
+            and key not in encoded_keys | requested_keys
+            and previous.get(key) == value
+        ):
             # A routine image/startup write must not reinterpret an untouched
             # legacy password/reference against an already-initialized database.
             encoded[key] = previous_wire[key]
         else:
             encoded[key] = _compose_literal(value)
-            literal_keys.add(key)
+            encoded_literal_keys.add(key)
     rendered = _serialize_dotenv(encoded)
-    return _COMPOSE_HEADER + " " + " ".join(sorted(literal_keys)) + "\n" + rendered
+    return _COMPOSE_HEADER + " " + " ".join(sorted(encoded_literal_keys)) + "\n" + rendered
 
 
 def _serialize_dotenv(env_map: dict[str, str]) -> str:

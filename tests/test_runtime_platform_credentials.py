@@ -89,13 +89,15 @@ class _LaneFixture:
         provider_env: str,
         apply_changes: bool = True,
         before_provider_mutation: Callable[[], None] | None = None,
+        requalify_literal_keys: tuple[str, ...] = (),
+        readback_env: str | None = None,
     ) -> tuple[dict[str, object], list[dict[str, object]]]:
         updates: list[dict[str, object]] = []
 
         def fetch(**_kwargs: object) -> dict[str, object]:
             env = provider_env
             if updates:
-                env = str(updates[-1]["env_text"])
+                env = str(updates[-1]["env_text"]) if readback_env is None else readback_env
             return {"name": "example-site-testing", "env": env}
 
         with (
@@ -124,11 +126,68 @@ class _LaneFixture:
                 deploy_timeout_seconds=None,
                 deploy_trigger=Mock(),
                 before_provider_mutation=before_provider_mutation,
+                requalify_literal_keys=requalify_literal_keys,
             )
         return result, updates
 
 
 class StableLaneSyncRefusalTests(unittest.TestCase):
+    def test_unchanged_compose_literal_requires_explicit_qualification(self) -> None:
+        value = "hello $NAME"
+        lane = _LaneFixture(self, _instance_record({"APP_MODE": value}))
+        _seed_tracked_target_records(
+            database_url=lane.database_url,
+            context="example-site",
+            instance="testing",
+            target_id="app-testing",
+            target_type="compose",
+            target_name="example-site-testing",
+        )
+        legacy = dokploy_api.serialize_dokploy_env_text({"APP_MODE": value})
+        report, updates = lane.sync(provider_env=legacy, apply_changes=False)
+        self.assertEqual(updates, [])
+        transport = report["compose_transport"]
+        assert isinstance(transport, dict)
+        self.assertEqual(transport["unqualified_keys"], ["APP_MODE"])
+        with self.assertRaises(LiveTargetRuntimeError) as refusal:
+            lane.sync(provider_env=legacy)
+        self.assertEqual(refusal.exception.code, "compose_literal_qualification_required")
+        report, updates = lane.sync(provider_env=legacy, requalify_literal_keys=("APP_MODE",))
+        apply_result = report["apply"]
+        assert isinstance(apply_result, dict)
+        self.assertTrue(apply_result["env_updated"])
+        self.assertEqual(apply_result["verification"]["status"], "pass")
+        self.assertEqual(len(updates), 1)
+        self.assertEqual(
+            dokploy_api.parse_dokploy_env_text(str(updates[0]["env_text"])), {"APP_MODE": value}
+        )
+        from tests.test_dokploy_compose_environment import (
+            consumer_commands_available,
+            consume_compose_environment,
+        )
+
+        if consumer_commands_available():
+            actual, _ = consume_compose_environment(str(updates[0]["env_text"]), ("APP_MODE",))
+            for service in actual.values():
+                self.assertEqual(service, {"APP_MODE": value.replace("$", "$$")})
+        with self.assertRaises(LiveTargetRuntimeError) as refusal:
+            lane.sync(
+                provider_env=legacy, requalify_literal_keys=("APP_MODE",), readback_env=legacy
+            )
+        self.assertEqual(refusal.exception.code, "dokploy_target_verification_failed")
+
+    def test_unknown_literal_key_refuses_before_mutation(self) -> None:
+        lane = _LaneFixture(self, _instance_record({"APP_MODE": "on"}))
+        checkpoint = Mock()
+        with self.assertRaises(LiveTargetRuntimeError) as refusal:
+            lane.sync(
+                provider_env="APP_MODE=on",
+                requalify_literal_keys=("MISSING",),
+                before_provider_mutation=checkpoint,
+            )
+        self.assertEqual(refusal.exception.code, "compose_literal_keys_invalid")
+        checkpoint.assert_not_called()
+
     def test_unencodable_value_refuses_before_mutation_checkpoint_or_write(self) -> None:
         lane = _LaneFixture(self, _instance_record({"APP_MODE": "fixture\x00value"}))
         checkpoint = Mock()

@@ -139,6 +139,7 @@ class DokployEnvironmentTests(unittest.TestCase):
         original = {"KEEP": '"literal" $NAME\nnext'}
         wire = api.serialize_dokploy_env_text(original, target_type="compose")
         for edited, additions in (
+            ("NEW=1\n" + wire, {"NEW": "1"}),
             ("# provider comment\n" + wire.replace("\n", "\r\n"), {}),
             (wire + '\nNEW="hello world"\nARRAY=["a"]', {"NEW": "hello world", "ARRAY": '["a"]'}),
             (
@@ -162,3 +163,17 @@ class DokployEnvironmentTests(unittest.TestCase):
         legacy = api.serialize_dokploy_env_text({"APP": "line\n" + header + "\nnext"})
         self.assertFalse(compose_environment_is_encoded(legacy))
         self.assertEqual(api.parse_dokploy_env_text(legacy), {"APP": "line\n" + header + "\nnext"})
+
+    def test_explicit_literal_keys_requalify_unchanged_legacy_values(self) -> None:
+        from control_plane.dokploy.environment import compose_unqualified_keys
+
+        values = {"APP": "hello $NAME", "SAFE": "plain", "OTHER": "${REFERENCE}"}
+        legacy = api.serialize_dokploy_env_text(values)
+        self.assertEqual(compose_unqualified_keys(legacy, values), ["APP", "OTHER"])
+        wire = api.serialize_dokploy_env_text(
+            values, target_type="compose", current_env_text=legacy, literal_keys=("APP",)
+        )
+        self.assertEqual(api.parse_dokploy_env_text(wire), values)
+        self.assertEqual(compose_unqualified_keys(wire, values), ["OTHER"])
+        with self.assertRaises(api.DokployEnvironmentEncodingError):
+            api.serialize_dokploy_env_text(values, target_type="compose", literal_keys=("ABSENT",))

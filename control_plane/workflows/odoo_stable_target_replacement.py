@@ -2541,12 +2541,29 @@ def execute_odoo_stable_target_replacement_apply(
         if (
             plan.data_source_mode == "existing"
             and control_plane_live_target_runtime.retained_database_password_changed(
-                instance_name=plan.instance, desired_env=application_env, live_env=current_env_map
+                instance_name=plan.instance,
+                desired_env=application_env,
+                live_env=current_env_map,
+                live_env_text=str(target_payload.get("env") or ""),
+                literal_keys=("ODOO_DB_PASSWORD",),
             )
         ):
             code = deploy_blocked_code("retained_database_credential_changed")
             raise OdooTargetReplacementStageError(
                 code, deploy_failure_description(code), ("ODOO_DB_PASSWORD",)
+            )
+        preserved_unqualified = tuple(
+            key
+            for key in dokploy_api.compose_unqualified_keys(
+                str(target_payload.get("env") or ""), application_env
+            )
+            if application_env[key] == current_env_map.get(key)
+        )
+        if preserved_unqualified:
+            raise OdooTargetReplacementStageError(
+                deploy_blocked_code("unportable_values"),
+                "Legacy Compose inputs need explicit runtime apply literal qualification before replacement; retained database credentials require a fresh testing generation.",
+                preserved_unqualified,
             )
         if request.data_source_mode == "upstream_restore" and not (
             generation is not None and generation.source_mode == "container-export"
@@ -2860,6 +2877,14 @@ def execute_odoo_stable_target_replacement_apply(
             )
         missing_keys = sorted(
             key for key, value in desired_env_map.items() if refreshed_env_map.get(key, "") != value
+        )
+        missing_keys = sorted(
+            set(missing_keys)
+            | set(
+                dokploy_api.compose_unqualified_keys(
+                    str(refreshed_payload.get("env") or ""), desired_env_map
+                )
+            )
         )
         if missing_keys:
             raise click.ClickException(

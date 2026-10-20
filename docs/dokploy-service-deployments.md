@@ -66,6 +66,41 @@ that Compose previously transformed. Existing lane replacement/rebuild paths
 create their environment from canonical records; retained databases keep their
 existing credential and recovery checks.
 
+Equal stored strings do not prove literal delivery for non-plain legacy values.
+Runtime apply dry-run reports `compose_transport.unqualified_keys` using names
+only. To qualify unchanged managed inputs, an already-authorized admin caller
+can send this body to `POST /v1/live-target-runtime/apply`:
+
+```json
+{
+  "mode": "dry-run",
+  "product": "example-product",
+  "context": "example-context",
+  "instance": "testing",
+  "requalify_literal_keys": ["APP_SETTINGS", "SMTP_PASSWORD"]
+}
+```
+
+Review those names and the desired runtime records, then use `mode: "apply"`
+with the same names and the API's existing authorization and idempotency headers.
+Only managed keys may be named. This encoding-only operation writes even when
+the value delta is empty; the response reports transport work separately from
+value changes. Persistence verification checks both values and literal transport.
+It does not prove that running containers restarted; deployment remains an
+explicit existing operation. Unqualified unchanged inputs block operations that
+claim literal delivery until this step is complete. Ordinary image-only writes
+continue preserving their existing consumer semantics.
+
+Requalifying an uncertain `ODOO_DB_PASSWORD` on a retained testing database is
+refused before effects. Use the existing fresh testing generation, which creates
+its own database, rather than toggling or rotating a retained credential.
+Compatible slots also refuse uncertain shared settings. Historical candidate
+custody and recovery receipts remain intact when exact configuration fails.
+This API field changes no authorization: terminal agents remain unable to apply,
+and Director-agent disposable-lane restrictions still apply. The installed
+runtime-sync helper and legacy workflow do not expose this new optional input;
+use the existing authorized service API surface for it.
+
 The wire quotes and Compose-supported escapes are transport data, not a product
 storage convention. Metadata survives comment movement and CRLF normalization;
 new provider-only fields and edits that cease to match the encoding remain

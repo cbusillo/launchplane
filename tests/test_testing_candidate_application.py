@@ -1,6 +1,7 @@
 """A private candidate uses the current build and only testing-local passwords."""
 
 import os
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import Mock
@@ -374,6 +375,18 @@ class CandidateApplicationTests(unittest.TestCase):
         self.assertIsNotNone(result.application)
         wire = self.provider_state["env"]
         self.assertEqual(api.parse_dokploy_env_text(wire), self.compiled.runtime_environment)
+        unqualified_values = {**self.compiled.runtime_environment, "APP": "hello $NAME"}
+        for key in VALUES:
+            unqualified_values.pop(key, None)
+        with self.assertRaisesRegex(ValueError, "exact admitted inputs"):
+            application.require_candidate_configuration(
+                self.allocation,
+                replace(self.compiled, runtime_environment=unqualified_values),
+                {
+                    **self.provider_state,
+                    "env": api.serialize_dokploy_env_text(unqualified_values),
+                },
+            )
         legacy = api.serialize_dokploy_env_text({"APP": '"literal" $NAME'})
         encoded = api.serialize_dokploy_env_text({"APP": '"literal" $NAME'}, target_type="compose")
         self.assertNotEqual(
