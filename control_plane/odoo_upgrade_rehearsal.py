@@ -533,8 +533,21 @@ class OdooRehearsalAdapter:
     request: OdooUpgradeRehearsalRequest
     principal: str
     trace: str
+    observation_timeout_seconds: int | None = None
     _observed_project_id: str = field(default="", init=False)
     _continue_prepare_host: bool = field(default=False, init=False)
+    _cooperative_wait: bool = field(default=False, init=False)
+
+    def checkpoint_remote_job(self, schedule_id: str, deployment_id: str) -> None:
+        from control_plane.provider_operations import ProviderMutationCheckpoint
+        from control_plane.rehearsal_deploy_resume import drain_requested, persist_checkpoint
+
+        if self.request.action == "execute" and drain_requested(self.store):
+            raise ProviderMutationCheckpoint(
+                lambda reservation: persist_checkpoint(
+                    self, reservation, schedule_id, deployment_id
+                )
+            )
 
     def can_continue_prepare_host(
         self, record: OdooUpgradeRehearsalRecord, result: dict[str, object], phase: str
@@ -1046,8 +1059,12 @@ class OdooRehearsalAdapter:
                 "enabled": False,
                 "timezone": "UTC",
             },
-            resolved_schedule_execution_timeout_seconds=post_deploy.DEFAULT_ODOO_UPSTREAM_RESTORE_EXECUTION_TIMEOUT_SECONDS,
+            resolved_schedule_execution_timeout_seconds=(
+                self.observation_timeout_seconds
+                or post_deploy.DEFAULT_ODOO_UPSTREAM_RESTORE_EXECUTION_TIMEOUT_SECONDS
+            ),
             before_provider_mutation=lambda _phase: checkpoint(),
+            on_observation=self.checkpoint_remote_job if self._cooperative_wait else None,
         )
 
     def host_script(
@@ -1252,7 +1269,12 @@ class OdooRehearsalAdapter:
         }
 
     def observe(
-        self, provider_operation_key: str, provider_effect_phase: str, reconciliation_key: str
+        self,
+        provider_operation_key: str,
+        provider_effect_phase: str,
+        reconciliation_key: str,
+        *,
+        expected_record: OdooUpgradeRehearsalRecord | None = None,
     ) -> ProviderObservation:
         from control_plane.provider_operations import (
             ProviderObservation,
@@ -1264,7 +1286,11 @@ class OdooRehearsalAdapter:
                 if check is None:
                     return ProviderObservation("unknown")
                 record = self.store.read_odoo_upgrade_rehearsal(self.request.rehearsal_id)
-                if record is None or record.product != self.product:
+                if (
+                    record is None
+                    or record.product != self.product
+                    or (expected_record is not None and record != expected_record)
+                ):
                     return ProviderObservation("unknown")
                 require_unaliased_rehearsal(self.store, record)
                 if self.request.action == "prepare" and provider_effect_phase == "project_id":
@@ -1501,13 +1527,17 @@ class OdooRehearsalAdapter:
             script = self.host_script(record, "apply", operation_key=provider_operation_key)
             self.validate_apply_script(record, script)
             lease.checkpoint_effect(self.request.action)
-            result = self.host(
-                record,
-                "apply",
-                checkpoint,
-                operation_key=provider_operation_key,
-                prepared_script=script,
-            )
+            self._cooperative_wait = self.request.action == "execute"
+            try:
+                result = self.host(
+                    record,
+                    "apply",
+                    checkpoint,
+                    operation_key=provider_operation_key,
+                    prepared_script=script,
+                )
+            finally:
+                self._cooperative_wait = False
             if result.get("refusal_code"):
                 return ProviderMutationOutcome(409, self.refusal_response(result))
             public = self.publish(record, result)

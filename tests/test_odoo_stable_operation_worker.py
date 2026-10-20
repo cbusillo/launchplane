@@ -248,6 +248,62 @@ def _restore_operation(
 
 
 class OdooStableOperationWorkerTests(unittest.TestCase):
+    def test_checkpoint_observation_does_not_block_production_poll(self) -> None:
+        from control_plane.storage.postgres import PostgresRecordStore
+
+        started, release, finished, stop = Event(), Event(), Event(), Event()
+
+        def observe(*_args: object, **_kwargs: object) -> tuple[str, ...]:
+            started.set()
+            if not release.wait(10):
+                raise AssertionError("Production poll waited behind checkpoint observation")
+            finished.set()
+            return ()
+
+        def poll(**_kwargs: object) -> object:
+            self.assertTrue(started.wait(10))
+            self.assertFalse(finished.is_set())
+            release.set()
+            stop.set()
+            return type("Idle", (), {"status": "idle"})()
+
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url=f"sqlite+pysqlite:///{Path(directory) / 'store.db'}"
+            )
+            self.addCleanup(store.close)
+            store.ensure_schema()
+            with (
+                patch(
+                    "control_plane.rehearsal_deploy_resume.resume_rehearsals", side_effect=observe
+                ),
+                patch(
+                    "control_plane.workflows.odoo_stable_operation_worker.advance_client_releases"
+                ),
+                patch(
+                    "control_plane.workflows.odoo_stable_operation_worker.advance_release_invitations"
+                ),
+                patch(
+                    "control_plane.workflows.odoo_stable_operation_worker.request_product_reconcile_sweep"
+                ),
+                patch(
+                    "control_plane.workflows.odoo_stable_operation_worker.run_odoo_stable_operation_worker_once",
+                    side_effect=poll,
+                ),
+            ):
+                try:
+                    result = run_odoo_stable_operation_worker_loop(
+                        record_store=store,
+                        control_plane_root_path=Path(directory),
+                        lease_owner="replacement-worker",
+                        stop_event=stop,
+                        max_iterations=1,
+                    )
+                finally:
+                    release.set()
+        self.assertEqual(result.status, "stopped")
+        self.assertTrue(finished.is_set())
+
     def test_cold_invitation_reads_do_not_delay_the_next_accepted_release_pass(self) -> None:
         from control_plane.workflows.odoo_stable_operation_worker import (
             CLIENT_RELEASE_ADVANCE_SECONDS,

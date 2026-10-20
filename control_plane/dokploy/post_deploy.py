@@ -514,6 +514,7 @@ def run_manual_data_schedule(
     resolved_schedule_execution_timeout_seconds: int,
     before_provider_mutation: Callable[[str], None] | None = None,
     provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
+    on_observation: Callable[[str, str], None] | None = None,
 ) -> dict[str, str]:
     api.validate_dokploy_schedule_script(schedule_payload)
     with (provider_mutation_guard or nullcontext)():
@@ -545,6 +546,8 @@ def run_manual_data_schedule(
             if before_provider_mutation
             else None,
         }
+    if on_observation is not None:
+        dispatch["on_observation"] = on_observation
     try:
         completed_schedule_deployment_key = api.deployment_key_from_wait_result(
             api.run_dokploy_schedule(
@@ -952,11 +955,7 @@ def run_compose_post_deploy_update(
         schedule_payload=schedule_payload,
         resolved_schedule_execution_timeout_seconds=resolved_schedule_execution_timeout_seconds,
         before_provider_mutation=before_provider_mutation,
-        **(
-            {"provider_mutation_guard": provider_mutation_guard}
-            if provider_mutation_guard is not None
-            else {}
-        ),
+        provider_mutation_guard=provider_mutation_guard,
     )
     if run_destructive_restore:
         require_odoo_restore_readback_evidence(evidence)

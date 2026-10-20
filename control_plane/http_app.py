@@ -17068,7 +17068,7 @@ def create_launchplane_fastapi_app(
                 message=_provider_mutation_failure_message(payload),
             )
 
-        if result.status in {"completed", "unstored", "adopted"}:
+        if result.status in {"completed", "unstored", "adopted", "checkpointed"}:
             if result.response_status_code >= 400:
                 terminal_failure(result.response_payload, result.response_status_code)
             return AcceptedEvidenceResponse.model_validate(result.response_payload)
