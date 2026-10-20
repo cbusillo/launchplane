@@ -80,6 +80,8 @@ def read_product_compose(store: PostgresRecordStore, product: str, commit: str, 
     from control_plane.product_reconcile import _merge_train_app_identity
 
     profile = store.read_product_profile_record(product)
+    if not profile.is_managed_runtime:
+        raise ValueError("Product has no managed runtime.")
     identity, repository_id = _merge_train_app_identity(
         store, profile, purpose="testing-compose-source"
     )

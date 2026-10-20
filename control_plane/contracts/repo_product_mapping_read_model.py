@@ -5,15 +5,14 @@ from typing import Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.every_code_work_request import EveryCodeWorkRequestRecord
-from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    RepoProductClassification,
+)
 
 
-RepoProductClassification = Literal[
-    "managed_runtime",
-    "active_awareness",
-    "support_dependency",
-    "out_of_scope",
-]
+class RepoProductMappingAmbiguousError(RuntimeError):
+    """An authoritative repository mapping has more than one active product."""
 
 
 class RepoProductMappingProductStore(Protocol):
@@ -42,7 +41,7 @@ class RepoProductMappingEntry(BaseModel):
     classification: RepoProductClassification
     product: str = ""
     display_name: str = ""
-    driver_id: str = ""
+    driver_id: str = Field(default="", exclude_if=lambda value: value == "")
     contexts: tuple[str, ...] = ()
     environments: tuple[str, ...] = ()
     preview_context: str = ""
@@ -88,7 +87,10 @@ def build_repo_product_mapping_from_records(
         repository = profile.repository.strip()
         if not repository or "/" not in repository:
             continue
-        entries[repository.lower()] = _product_profile_entry(profile)
+        key = repository.lower()
+        if key in entries and entries[key].product != profile.product:
+            raise RepoProductMappingAmbiguousError("Repository has multiple product profiles.")
+        entries[key] = _product_profile_entry(profile)
 
     for request in work_requests:
         repository = request.repository.strip()
@@ -115,7 +117,7 @@ def _product_profile_entry(profile: LaunchplaneProductProfileRecord) -> RepoProd
     environments = tuple(lane.instance for lane in profile.lanes)
     return RepoProductMappingEntry(
         repository=profile.repository,
-        classification="managed_runtime",
+        classification=profile.classification,
         product=profile.product,
         display_name=profile.display_name,
         driver_id=profile.driver_id,

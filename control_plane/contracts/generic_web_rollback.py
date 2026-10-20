@@ -433,6 +433,8 @@ def _resolve_generic_web_profile_lane(
 
 
 def _product_profile_uses_generic_web_base(profile: LaunchplaneProductProfileRecord) -> bool:
+    if not profile.is_managed_runtime:
+        return False
     driver_id = profile.driver_id.strip()
     if driver_id == "generic-web":
         return True

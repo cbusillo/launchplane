@@ -1279,6 +1279,8 @@ def _client_release_failure_activity_events(
 def _read_profile_descriptor(
     profile: LaunchplaneProductProfileRecord,
 ) -> tuple[DriverDescriptor | None, str]:
+    if not profile.is_managed_runtime:
+        return None, ""
     try:
         return read_driver_descriptor(profile.driver_id), ""
     except FileNotFoundError:

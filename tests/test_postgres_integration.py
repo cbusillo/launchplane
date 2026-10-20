@@ -5440,6 +5440,12 @@ def _owner_control_shadow_envelope(
 
 
 class RealPostgresStorageConcurrencyTests(unittest.TestCase):
+    def test_nonruntime_registration_competes_for_product_and_repository(self) -> None:
+        from tests.test_nonruntime_products import assert_registration_race
+
+        with _store_for_fresh_head_database() as store:
+            assert_registration_race(self, store)
+
     def test_discussion_topic_retries_are_atomic_on_independent_connections(self) -> None:
         from control_plane.contracts.discussion_topic import DiscussionTopicInput
 

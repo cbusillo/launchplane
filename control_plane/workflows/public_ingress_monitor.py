@@ -573,6 +573,7 @@ def effective_health_check_monitor_target(
 ) -> PublicIngressMonitorTarget | None:
     if (
         not profile.is_active
+        or not profile.is_managed_runtime
         or not check.enabled
         or not product_lane_monitoring_probe_effective(
             monitoring_intent=lane.health_monitoring.monitoring_intent, check_kind=check.kind

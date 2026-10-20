@@ -1,4 +1,5 @@
 import hashlib
+import json
 import re
 from typing import Protocol
 
@@ -28,6 +29,7 @@ from control_plane.storage.product_authority_bundle import (
     ProductAuthorityBundleStore,
     ProviderTargetWrite,
     RuntimeEnvironmentWrite,
+    require_product_profile_writes,
 )
 from control_plane.workflows.provider_target_dual_write import (
     ensure_provider_target_identity_unbound_elsewhere,
@@ -37,6 +39,10 @@ from control_plane.workflows.ship import utc_now_timestamp
 
 
 class ProductOnboardingRecordStore(ProductAuthorityBundleStore, Protocol):
+    def list_product_profile_records(
+        self, *, driver_id: str = ""
+    ) -> tuple[LaunchplaneProductProfileRecord, ...]: ...
+
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord: ...
 
     def write_product_profile_record(self, record: LaunchplaneProductProfileRecord) -> None: ...
@@ -104,6 +110,7 @@ def build_product_profile_record(
         existing_profile=existing_profile,
     )
     product_profile = LaunchplaneProductProfileRecord(
+        classification=manifest.classification,
         product=manifest.product,
         display_name=manifest.display_name,
         repository=manifest.repository,
@@ -448,11 +455,27 @@ def plan_product_onboarding_authority_bundle(
         record_store=record_store,
         product=manifest.product,
     )
+    if manifest.classification != "managed_runtime" and existing_product_profile is not None:
+        raise ValueError("Non-runtime onboarding requires a new product.")
     product_profile = build_product_profile_record(
         manifest=manifest,
         updated_at=recorded_at,
         existing_profile=existing_product_profile,
     )
+    if not product_profile.is_managed_runtime:
+        require_product_profile_writes(
+            (product_profile,),
+            record_store.list_product_profile_records(),
+            absent_product_ids=(product_profile.product,),
+        )
+        return (
+            ProductOnboardingApplyResult(
+                product=product_profile.product, product_profile=product_profile
+            ),
+            ProductAuthorityBundle(
+                product_profiles=(product_profile,), absent_product_ids=(product_profile.product,)
+            ),
+        )
     provider_targets = build_provider_target_records(manifest=manifest, updated_at=recorded_at)
     preserved_targets: list[DokployTargetRecord] = []
     for target in provider_targets:
@@ -610,6 +633,13 @@ def plan_product_onboarding_authority_bundle(
         secret_bindings=(*secret_bindings, *secret_binding_plan.retired_bindings),
     )
     return result, bundle
+
+
+def product_onboarding_manifest_plan_sha256(manifest: ProductOnboardingManifest) -> str:
+    """Bind new inert registration to its complete reviewed input and absence."""
+    return hashlib.sha256(
+        json.dumps(manifest.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
 
 
 def _health_url(base_url: str, health_path: str) -> str:

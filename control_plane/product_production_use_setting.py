@@ -105,9 +105,11 @@ def build_product_production_use_plan(
         evidence["release_on_acceptance"] = request.release_on_acceptance
     release_on_acceptance_after = request.release_on_acceptance or profile.release_on_acceptance
     if release_on_acceptance_after == "director_standing":
-        if profile.driver_id != "generic-web" or not profile.owner.is_set:
+        if (
+            profile.is_managed_runtime and profile.driver_id != "generic-web"
+        ) or not profile.owner.is_set:
             raise ValueError(
-                "Director standing acceptance requires a generic-web product with a recorded Client."
+                "Director standing acceptance requires a generic-web or non-runtime product with a recorded Client."
             )
     digest = hashlib.sha256(
         json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode()

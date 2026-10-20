@@ -174,7 +174,7 @@ def product_retention_dry_run(
         for profile in record_store.list_product_profile_records()
         if profile.product == product
     ]
-    if len(profiles) != 1 or not profiles[0].is_active:
+    if len(profiles) != 1 or not profiles[0].is_active or not profiles[0].is_managed_runtime:
         raise ArtifactRetentionProductMissingError("An active product profile is required.")
     profile = profiles[0]
     now = datetime.now(UTC)

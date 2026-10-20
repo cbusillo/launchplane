@@ -16319,6 +16319,17 @@
       "LaunchplaneProductProfileRecord": {
         "additionalProperties": false,
         "properties": {
+          "classification": {
+            "default": "managed_runtime",
+            "enum": [
+              "managed_runtime",
+              "active_awareness",
+              "support_dependency",
+              "out_of_scope"
+            ],
+            "title": "Classification",
+            "type": "string"
+          },
           "default_branch": {
             "default": "main",
             "title": "Default Branch",
@@ -16329,6 +16340,7 @@
             "type": "string"
           },
           "driver_id": {
+            "default": "",
             "title": "Driver Id",
             "type": "string"
           },
@@ -16474,8 +16486,6 @@
           "product",
           "display_name",
           "repository",
-          "driver_id",
-          "image",
           "updated_at",
           "source"
         ],
@@ -84516,6 +84526,17 @@
                   "ProductOnboardingManifest": {
                     "additionalProperties": false,
                     "properties": {
+                      "classification": {
+                        "default": "managed_runtime",
+                        "enum": [
+                          "managed_runtime",
+                          "active_awareness",
+                          "support_dependency",
+                          "out_of_scope"
+                        ],
+                        "title": "Classification",
+                        "type": "string"
+                      },
                       "default_branch": {
                         "default": "main",
                         "title": "Default Branch",
@@ -84552,6 +84573,7 @@
                         "type": "string"
                       },
                       "lanes": {
+                        "default": [],
                         "items": {
                           "$ref": "#/$defs/ProductOnboardingLaneManifest"
                         },
@@ -84633,8 +84655,7 @@
                     "required": [
                       "product",
                       "display_name",
-                      "repository",
-                      "lanes"
+                      "repository"
                     ],
                     "title": "ProductOnboardingManifest",
                     "type": "object"

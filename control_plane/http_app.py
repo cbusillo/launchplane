@@ -932,7 +932,10 @@ from control_plane.storage.postgres import (
     PostgresRecordStore,
     RouteBindingReconcileWriteResult,
 )
-from control_plane.workflows.product_onboarding import plan_product_onboarding_authority_bundle
+from control_plane.workflows.product_onboarding import (
+    plan_product_onboarding_authority_bundle,
+    product_onboarding_manifest_plan_sha256,
+)
 from control_plane.workflows.public_ingress_monitor import (
     RUNTIME_IDENTITY_CONFIRMATION_DELAY_SECONDS,
     PublicIngressMonitorStore,
@@ -2097,6 +2100,15 @@ class ProductOnboardingApplyEnvelope(BaseModel):
         if (self.manifest is None) == (self.generic_web is None):
             raise ValueError("Product onboarding requires exactly one of manifest or generic_web.")
         if self.manifest is not None:
+            if self.manifest.classification != "managed_runtime":
+                if self.resolved_target_id:
+                    raise ValueError("Non-runtime onboarding has no provider target.")
+                if self.mode == "dry_run":
+                    if self.reviewed_plan_sha256:
+                        raise ValueError("A dry run cannot supply a reviewed plan.")
+                elif re.fullmatch(r"[0-9a-f]{64}", self.reviewed_plan_sha256) is None:
+                    raise ValueError("Non-runtime onboarding apply requires reviewed_plan_sha256.")
+                return self
             if self.mode != "apply":
                 raise ValueError("Legacy product onboarding manifests support apply mode only.")
             if self.reviewed_plan_sha256 or self.resolved_target_id:
@@ -13903,7 +13915,22 @@ def create_launchplane_fastapi_app(
                         "the reviewed prelaunch-rebuild apply endpoint."
                     ),
                 )
-        profile_store.write_product_profile_record(profile)
+        if existing_profile is None and not profile.is_managed_runtime:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="product_onboarding_review_required",
+                message="Register a non-runtime product through reviewed product onboarding.",
+            )
+        try:
+            profile_store.write_product_profile_record(profile)
+        except ProductProfileConflictError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="product_profile_changed",
+                message=str(error),
+            ) from error
         response = accepted_evidence_response(
             trace_id=trace_id,
             records={"product_profile": profile.product},
@@ -18668,6 +18695,27 @@ def create_launchplane_fastapi_app(
             return replay_response
         onboarding_manifest = onboarding_request.manifest
         generic_web_plan_sha256 = ""
+        inert_plan_sha256 = ""
+        if (
+            onboarding_manifest is not None
+            and onboarding_manifest.classification != "managed_runtime"
+        ):
+            inert_plan_sha256 = product_onboarding_manifest_plan_sha256(onboarding_manifest)
+            if onboarding_request.mode == "apply":
+                if not normalized_idempotency_key:
+                    raise _launchplane_http_error(
+                        status_code=400,
+                        trace_id=trace_id,
+                        code="idempotency_key_required",
+                        message="Non-runtime onboarding apply requires Idempotency-Key.",
+                    )
+                if onboarding_request.reviewed_plan_sha256 != inert_plan_sha256:
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="product_onboarding_plan_mismatch",
+                        message="Non-runtime onboarding inputs changed; review a new dry run.",
+                    )
         if onboarding_request.generic_web is not None:
             try:
                 existing_profile = database_store.read_product_profile_record(
@@ -18752,6 +18800,13 @@ def create_launchplane_fastapi_app(
                 record_store=database_store,
                 manifest=onboarding_manifest,
             )
+        except ProductProfileConflictError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="product_profile_changed",
+                message=str(error),
+            ) from error
         except ValueError as error:
             raise _launchplane_http_error(
                 status_code=400,
@@ -18770,6 +18825,14 @@ def create_launchplane_fastapi_app(
                 "mode": "apply",
                 "plan_sha256": generic_web_plan_sha256,
             }
+        if inert_plan_sha256:
+            driver_result = {
+                **driver_result,
+                "mode": onboarding_request.mode,
+                "classification": onboarding_manifest.classification,
+                "plan_sha256": inert_plan_sha256,
+                "product_profile": onboarding_result.product_profile.model_dump(mode="json"),
+            }
         onboarding_response = accepted_evidence_response(
             trace_id=trace_id,
             records={
@@ -18783,6 +18846,8 @@ def create_launchplane_fastapi_app(
             },
             result=driver_result,
         )
+        if inert_plan_sha256 and onboarding_request.mode == "dry_run":
+            return onboarding_response
         try:
             database_store.write_product_authority_bundle(
                 authority_bundle_with_apply_idempotency(
@@ -18795,7 +18860,7 @@ def create_launchplane_fastapi_app(
                     response=onboarding_response,
                 )
             )
-        except RuntimeEnvironmentConflictError as error:
+        except (RuntimeEnvironmentConflictError, ProductProfileConflictError) as error:
             replay_response = replay_stored_apply_idempotency(
                 record_store=database_store,
                 identity=identity,
@@ -18806,6 +18871,13 @@ def create_launchplane_fastapi_app(
             )
             if replay_response is not None:
                 return replay_response
+            if isinstance(error, ProductProfileConflictError):
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="product_profile_changed",
+                    message=str(error),
+                ) from error
             raise runtime_environment_conflict_http_error(trace_id=trace_id, error=error) from error
         return onboarding_response
 

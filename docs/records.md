@@ -895,6 +895,40 @@ the login kept for mentions and display. A Client can veto a change but never
 merge or deploy one (see [DIRECTION.md](../DIRECTION.md)). The field is optional;
 a product without one reports "No Client set" instead of blocking.
 
+A product that Launchplane does not deploy can have the same repository, Client,
+acceptance mode and lifecycle metadata. Its explicit `classification` is
+`active_awareness`, `support_dependency` or `out_of_scope`, from the existing
+repository-mapping vocabulary. Omitted classification means `managed_runtime`
+and keeps existing serialized profiles unchanged. A non-runtime profile has no
+driver, image, lanes, historical contexts, preview configuration, runtime config
+requirements or business-hours policy. Acceptance metadata does not grant runtime
+authority. Repository mappings retain its real product id and classification;
+ambiguous active repository owners make the mapping unavailable.
+
+Register a new non-runtime product through `POST /v1/product-onboarding/apply`
+using the existing `product_onboarding.apply` authorization. Send `product:
+"launchplane"`, `mode: "dry_run"` and a `manifest` containing the new product key,
+display name, one `owner/repository`, explicit classification and `driver_id: ""`.
+Optional immutable repository/owner ids must be supplied together. Supply no
+runtime resources. The dry run writes nothing and returns `plan_sha256` and the
+planned profile. Apply the same manifest with `mode: "apply"`, that digest as
+`reviewed_plan_sha256`, and an `Idempotency-Key`; there is no provider target id.
+The commit rechecks product-key absence and repository ownership under the
+existing authority lock. It refuses an existing product or competing active
+repository owner, including a matching immutable repository id. A committed
+same-key replay returns the recorded result. Read the profile and repository
+mapping back, then use the existing Client and production-use setting routes to
+record the Client and acceptance mode. Standing acceptance still requires its
+recorded Client, reviewed current profile and signed-in admin apply.
+
+The ordinary full-profile write cannot create a non-runtime product. Neither
+onboarding nor another profile writer can change an existing profile's
+classification. This registration path cannot convert or hide an existing
+runtime, its resources or its recovery evidence. Runtime webhook/reconcile,
+build, deploy, preview, promotion and health admissions do not activate a
+non-runtime record. Lifecycle activity continues to control repository and
+Client visibility independently of runtime classification.
+
 Product profiles may also declare expected config requirements for stable lanes:
 runtime-environment key names and managed secret binding keys by context and
 instance. These requirements are declarative intent for admin readiness

@@ -32,6 +32,15 @@ class _ProductOnboardingStore:
     def write_product_profile_record(self, record: LaunchplaneProductProfileRecord) -> None:
         self.product_profiles.append(record)
 
+    def list_product_profile_records(
+        self, *, driver_id: str = ""
+    ) -> tuple[LaunchplaneProductProfileRecord, ...]:
+        return tuple(
+            profile
+            for profile in self.product_profiles
+            if not driver_id or profile.driver_id == driver_id
+        )
+
     def write_dokploy_target_record(self, record: DokployTargetRecord) -> None:
         self.dokploy_targets.append(record)
 

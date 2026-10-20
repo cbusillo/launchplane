@@ -83,6 +83,41 @@ class ProductProfileConflictError(ValueError):
     """A product profile changed after it authorized a bundled write."""
 
 
+def require_product_profile_writes(
+    records: Iterable[LaunchplaneProductProfileRecord],
+    current_profiles: Iterable[LaunchplaneProductProfileRecord],
+    *,
+    absent_product_ids: tuple[str, ...] = (),
+) -> None:
+    """Check inert registration and identity under the existing authority lock."""
+    profiles = {profile.product: profile for profile in current_profiles}
+    if any(product in profiles for product in absent_product_ids):
+        raise ProductProfileConflictError("Product was registered before commit.")
+    for record in records:
+        current = profiles.get(record.product)
+        if current is not None and current.classification != record.classification:
+            raise ProductProfileConflictError(
+                "Product classification cannot change on an existing profile."
+            )
+        if record.is_active:
+            for other in profiles.values():
+                if other.product == record.product or not other.is_active:
+                    continue
+                if record.is_managed_runtime and other.is_managed_runtime:
+                    continue
+                same_repository = (
+                    other.repository.strip().lower() == record.repository.strip().lower()
+                )
+                same_identity = (
+                    bool(record.repository_id) and record.repository_id == other.repository_id
+                )
+                if same_repository or same_identity:
+                    raise ProductProfileConflictError(
+                        "Repository already belongs to another product."
+                    )
+        profiles[record.product] = record
+
+
 class PublicHostAuthorityBusy(RuntimeError):
     """A conflicting authority write must be reviewed again after reconciliation."""
 
@@ -234,6 +269,7 @@ class ProductAuthorityBundle(BaseModel):
 
     product_profiles: tuple[LaunchplaneProductProfileRecord, ...] = ()
     expected_product_profiles: tuple[LaunchplaneProductProfileRecord, ...] = ()
+    absent_product_ids: tuple[str, ...] = ()
     dokploy_targets: tuple[DokployTargetRecord, ...] = ()
     dokploy_target_ids: tuple[DokployTargetIdRecord, ...] = ()
     provider_target_writes: tuple[ProviderTargetWrite, ...] = ()
