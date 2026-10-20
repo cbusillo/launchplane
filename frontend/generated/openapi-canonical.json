@@ -52381,7 +52381,10 @@
             "enum": [
               "dry-run",
               "apply",
-              "readback"
+              "readback",
+              "route-repair-dry-run",
+              "route-repair-apply",
+              "route-repair-readback"
             ],
             "title": "Mode",
             "type": "string"
