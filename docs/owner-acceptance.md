@@ -289,7 +289,9 @@ A permanent history bound or ambiguous receipt returns
 `product_review_withdrawal_history_unverifiable` before dispatch and releases a
 fresh reservation. Resolve history verification before retrying; changing keys
 cannot fix it. Recovery after an uncertain effect settles the original operation
-with `history_unverifiable=true`, preserving prior-effect uncertainty. Completed
+with `history_unverifiable=true`, preserving prior-effect uncertainty. That key
+is terminal: after resolving history verification, review a fresh dry-run and use
+a new key. Completed
 readback retains its applied receipt and reports `readback_matches=false` when
 history cannot be verified. A missing original operation returns
 `product_review_withdrawal_not_started`; resubmit the exact original apply with
