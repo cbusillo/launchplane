@@ -8497,12 +8497,11 @@ class PostgresRecordStore(HumanSessionStore):
         route_path: str,
         idempotency_key: str,
         request_fingerprint: str,
-        provider_target_key: str,
     ) -> MutationReservationResult | None:
         from control_plane.service_deploy_drain import ServiceDeployDraining, admit_reservation
 
         try:
-            admit_reservation(self, session, scope, provider_target_key)
+            admit_reservation(self, session, scope, route_path)
         except ServiceDeployDraining:
             # Keep replay, expiry reconciliation and provider observation usable
             # under the fence. None of these paths admits a fresh effect owner.
@@ -8574,7 +8573,6 @@ class PostgresRecordStore(HumanSessionStore):
                     route_path=normalized_route_path,
                     idempotency_key=normalized_idempotency_key,
                     request_fingerprint=normalized_request_fingerprint,
-                    provider_target_key=normalized_provider_target_key,
                 )
                 if observed is not None:
                     return observed
@@ -8608,7 +8606,6 @@ class PostgresRecordStore(HumanSessionStore):
                 route_path=normalized_route_path,
                 idempotency_key=normalized_idempotency_key,
                 request_fingerprint=normalized_request_fingerprint,
-                provider_target_key=normalized_provider_target_key,
             )
             if observed is not None:
                 return observed
@@ -9380,7 +9377,7 @@ class PostgresRecordStore(HumanSessionStore):
                 self._begin_serialized_write(session)
                 from control_plane.service_deploy_drain import admit_reservation
 
-                admit_reservation(self, session, scope, normalized_provider_target_key)
+                admit_reservation(self, session, scope, route_path)
                 row = session.scalar(
                     self._idempotency_statement(
                         scope=reservation.scope,
@@ -9539,7 +9536,7 @@ class PostgresRecordStore(HumanSessionStore):
             self._begin_serialized_write(session)
             from control_plane.service_deploy_drain import admit_reservation
 
-            admit_reservation(self, session, reservation.scope, reservation.provider_target_key)
+            admit_reservation(self, session, reservation.scope, reservation.route_path)
             row = session.scalar(
                 self._idempotency_statement(
                     scope=reservation.scope,

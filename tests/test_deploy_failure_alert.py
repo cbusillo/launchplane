@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import hashlib
 import os
 from pathlib import Path
 import runpy
@@ -11,6 +10,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import requests
+from control_plane.contracts.service_deploy_drain import operation_reference
 
 from control_plane.deploy_failure_alert import (
     health_results,
@@ -49,7 +49,7 @@ class DeployFailureAlertTests(unittest.TestCase):
     ) -> None:
         with TemporaryDirectory() as directory:
             response = Path(directory) / "response.json"
-            operation_reference = hashlib.sha256(b"private-key").hexdigest()
+            reference = operation_reference("private-key")
             response.write_text(
                 json.dumps(
                     {
@@ -61,10 +61,10 @@ class DeployFailureAlertTests(unittest.TestCase):
                         "records": {
                             "blocking_operation_refs": json.dumps(
                                 [
-                                    operation_reference,
+                                    reference,
                                     "private-key",
                                     "@everyone",
-                                    operation_reference,
+                                    reference,
                                 ]
                             )
                         },
@@ -92,9 +92,7 @@ class DeployFailureAlertTests(unittest.TestCase):
             self.assertNotIn("private-", json.dumps(payload))
             self.assertNotIn("@everyone", json.dumps(payload))
             self.assertEqual(
-                [field["value"] for field in payload["embeds"][0]["fields"]].count(
-                    operation_reference
-                ),
+                [field["value"] for field in payload["embeds"][0]["fields"]].count(reference),
                 1,
             )
             recovery_link = next(

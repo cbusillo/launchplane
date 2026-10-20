@@ -26,7 +26,79 @@ from tests.test_client_release_redeploy import _prepare, _replacement_env
 
 
 class EventDeployRedeployTests(unittest.TestCase):
-    def test_agent_provider_effects_drain_without_losing_original_custody(self) -> None:
+    def test_rehearsal_drain_preserves_unrelated_admission_and_historical_holds(self) -> None:
+        from control_plane.contracts.odoo_upgrade_rehearsal import ODOO_UPGRADE_REHEARSAL_ROUTE
+        from control_plane.contracts.privileged_operation_identity import (
+            PRIVILEGED_OPERATION_EXECUTION_ROUTE,
+            PRIVILEGED_OPERATION_EXECUTION_SCOPE,
+        )
+        from control_plane.contracts.testing_rebuild import REBUILD_SCOPE, REBUILD_ROUTE
+
+        original = self.store.reserve_mutation(
+            scope=PRIVILEGED_OPERATION_EXECUTION_SCOPE,
+            route_path=PRIVILEGED_OPERATION_EXECUTION_ROUTE,
+            idempotency_key="historical",
+            request_fingerprint="historical",
+            lease_owner="ended-worker",
+            reconciliation_key="historical-intent",
+            provider_target_key="historical-record-only-target",
+        ).record
+        assert original is not None
+        held = self.store.mark_mutation_reconcile_required(
+            reservation=original, reconciliation_key=original.reconciliation_key
+        ).record
+        assert held is not None
+        rehearsal = self.store.reserve_mutation(
+            scope="local-operator|example-agent",
+            route_path=ODOO_UPGRADE_REHEARSAL_ROUTE.format(product="example"),
+            idempotency_key="rehearsal",
+            request_fingerprint="rehearsal",
+            lease_owner="rehearsal-worker",
+            reconciliation_key="rehearsal-intent",
+            provider_target_key="isolated-rehearsal",
+        ).record
+        assert rehearsal is not None
+        _, blockers, dispatch = _prepare(self.store)
+        self.assertEqual(blockers, (rehearsal.record_id,))
+        self.assertFalse(dispatch)
+        for scope, route in (
+            (PRIVILEGED_OPERATION_EXECUTION_SCOPE, PRIVILEGED_OPERATION_EXECUTION_ROUTE),
+            (REBUILD_SCOPE, REBUILD_ROUTE),
+        ):
+            with self.subTest(scope=scope):
+                result = self.store.reserve_mutation(
+                    scope=scope,
+                    route_path=route,
+                    idempotency_key="admitted-child",
+                    request_fingerprint="admitted-child",
+                    lease_owner="admitted-parent",
+                    reconciliation_key="child-intent",
+                    provider_target_key=scope + ":child-target",
+                )
+                self.assertEqual(result.status, "acquired")
+        completion = self.store.complete_mutation_reservation(
+            completion=complete_launchplane_mutation_reservation(
+                rehearsal,
+                response_status_code=200,
+                response_trace_id="rehearsal-finished",
+                response_payload={"completed": True},
+                completed_at=rehearsal.updated_at,
+            )
+        )
+        self.assertEqual(completion.status, "completed")
+        _, blockers, dispatch = _prepare(self.store)
+        self.assertFalse(blockers)
+        self.assertTrue(dispatch)
+        self.assertEqual(
+            self.store.read_idempotency_record(
+                scope=held.scope,
+                route_path=held.route_path,
+                idempotency_key=held.idempotency_key,
+            ),
+            held,
+        )
+
+    def test_agent_rehearsals_drain_without_losing_original_custody(self) -> None:
         from control_plane.contracts.odoo_upgrade_rehearsal import ODOO_UPGRADE_REHEARSAL_ROUTE
         from control_plane.odoo_incomplete_rehearsal_retirement import IncompleteRehearsalRetirement
         from control_plane.odoo_upgrade_rehearsal import OdooRehearsalAdapter
@@ -40,7 +112,6 @@ class EventDeployRedeployTests(unittest.TestCase):
             (
                 (ODOO_UPGRADE_REHEARSAL_ROUTE.format(product="example"), adapter.target_key()),
                 (ODOO_UPGRADE_REHEARSAL_ROUTE.format(product="example"), retirement.target_key()),
-                ("/v1/another-provider-operation", "another-target"),
             )
         ):
             with self.subTest(route=route, target=target):
@@ -79,8 +150,8 @@ class EventDeployRedeployTests(unittest.TestCase):
                         self.assertEqual(blockers, (reservation.record_id,))
                         self.assertFalse(dispatch)
                     _, blockers, dispatch = _prepare(store)
-                    self.assertEqual(dispatch, route != "/v1/another-provider-operation")
-                    self.assertEqual(bool(blockers), not dispatch)
+                    self.assertTrue(dispatch)
+                    self.assertFalse(blockers)
                     held = store.reserve_mutation(**intent).record
                     assert held is not None
                     self.assertEqual(held.record_id, reservation.record_id)

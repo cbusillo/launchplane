@@ -4726,12 +4726,12 @@ not an environment. Original intent absent in legacy records stays unavailable:
 current plans and provider idleness cannot reconstruct the original proof.
 ### Self-deploy drain timeout and continuation
 
-a typed `self_deploy_drain_timeout` uses the existing deploy-failure Discord
+A typed `self_deploy_drain_timeout` uses the existing deploy-failure Discord
 reporter once in the failed deploy run. It explicitly reports zero replacement
 dispatch; the rollback dispatch classifier still treats that refusal as
 pre-effect. The absolute ten-minute drain budget survives polls and service
-restarts. New provider-target reservations, including agent-started work, wait
-behind the active drain; fresh HTTP calls receive `409/service_deploy_draining`
+restarts. New Client-release/event effects and agent-started rehearsal operations
+wait behind the active drain; rehearsal HTTP calls receive `409/service_deploy_draining`
 with `Retry-After`. Original-key observation, admitted heartbeats and completion
 remain available. Constant fresh traffic cannot extend the drain deadline.
 At timeout the request stops before provider writes and releases its admission
@@ -4745,8 +4745,7 @@ status; its detail count and truncation flag report coverage.
 
 Let blockers finish or use their own supported recovery. Then dispatch a fresh
 normal Deploy Launchplane run on the default branch, with a new self-deploy key
-and marker (the workflow normally supplies both). No superseded-marker repair
-or break-glass is required for this pre-effect timeout. The fresh request checks
+and marker (the workflow normally supplies both). A fresh normal request checks
 the remaining blockers before any provider write; the old timed-out request
 stays non-dispatchable even after blockers clear. A dispatched replacement fences
 new admission until matching startup. This continuation does not authorize an
@@ -4758,9 +4757,13 @@ An expired rehearsal reservation can stop blocking replacement only when the
 original rehearsal execution lock proves the API executor has exited. Execution
 and incomplete retirement share that lock. This preserves the journal and custody;
 it does not prove a remote provider job stopped or authorize replay. Other provider
-families without executor-exclusion proof remain blockers until supported
-settlement or the bounded timeout. Cooperative long-operation checkpoints and
-automatic startup resume are separate work, not supplied by this drain guard.
+families keep their existing admission and recovery boundaries. Broader top-level
+admission must preserve admitted child work; provider-target keys alone do not
+prove a live executor. Cooperative long-operation checkpoints and automatic
+startup resume are separate work, not supplied by this drain guard. A fresh
+normal request can still time out while a real blocker remains. If supported
+recovery cannot settle it, the existing approved manual break-glass path remains
+the emergency recovery route; this alert does not dispatch it or grant approval.
 
 ### Fishbowl import proof on an exact PR artifact
 

@@ -11,7 +11,6 @@ from datetime import datetime, timedelta
 from collections.abc import Iterator
 from contextlib import contextmanager
 import os
-import hashlib
 import re
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -24,9 +23,13 @@ from control_plane.contracts.odoo_upgrade_rehearsal import (
     ODOO_UPGRADE_REHEARSAL_ROUTE,
     rehearsal_execution_lock_name,
 )
+from control_plane.contracts.service_deploy_drain import operation_reference
 
 
 SERVICE_DEPLOY_DRAIN_TIMEOUT_SECONDS = 10 * 60
+_REHEARSAL_ROUTE_PATTERN = re.compile(
+    re.escape(ODOO_UPGRADE_REHEARSAL_ROUTE).replace(re.escape("{product}"), r"[^/]+")
+)
 
 
 class ServiceDeployDrainRecord(BaseModel):
@@ -51,7 +54,7 @@ class ServiceDeployDrainBudget(BaseModel):
     drain_timed_out: bool = False
 
 
-class ServiceDeployDraining(Exception):
+class ServiceDeployDraining(ValueError):
     """No new provider effect was admitted while the service drains."""
 
 
@@ -179,17 +182,21 @@ def admission_allowed(session: Any, now: str) -> bool:
     )
 
 
-def reservation_requires_admission(scope: str, provider_target_key: str = "") -> bool:
+def rehearsal_route(route_path: str) -> bool:
+    return _REHEARSAL_ROUTE_PATTERN.fullmatch(route_path.strip()) is not None
+
+
+def reservation_requires_admission(scope: str, route_path: str = "") -> bool:
     return (
-        bool(provider_target_key.strip())
-        or scope.strip() == "client-release"
+        scope.strip() == "client-release"
         or scope.strip().startswith(f"{RECONCILE_SOURCE}:")
+        or rehearsal_route(route_path)
     )
 
 
-def admit_reservation(store: Any, session: Any, scope: str, provider_target_key: str = "") -> None:
+def admit_reservation(store: Any, session: Any, scope: str, route_path: str = "") -> None:
     """Order fresh/retried provider effects against the self-deploy fence."""
-    if not reservation_requires_admission(scope, provider_target_key):
+    if not reservation_requires_admission(scope, route_path):
         return
     if not store.database_url.startswith("sqlite"):
         lock(store, session)
@@ -242,11 +249,15 @@ def _operation_observations(store: Any, session: Any, now: str) -> tuple[dict[st
             (
                 (LaunchplaneIdempotencyRow.scope == "client-release")
                 | LaunchplaneIdempotencyRow.scope.startswith(f"{RECONCILE_SOURCE}:")
-                | (LaunchplaneIdempotencyRow.provider_target_key != "")
+                | LaunchplaneIdempotencyRow.route_path.like(
+                    ODOO_UPGRADE_REHEARSAL_ROUTE.format(product="%")
+                )
             ),
             LaunchplaneIdempotencyRow.state.in_(("running", "reconcile_required")),
         )
     ):
+        if not reservation_requires_admission(row.scope, row.route_path):
+            continue
         lease_active = (
             bool(row.lease_expires_at)
             and parse_launchplane_mutation_timestamp(
@@ -260,10 +271,7 @@ def _operation_observations(store: Any, session: Any, now: str) -> tuple[dict[st
         # start an effect between this probe and dispatch admission.
         execution_excluded = False
         execution_lock_name = ""
-        rehearsal_pattern = re.escape(ODOO_UPGRADE_REHEARSAL_ROUTE).replace(
-            re.escape("{product}"), r"[^/]+"
-        )
-        is_rehearsal = re.fullmatch(rehearsal_pattern, row.route_path) is not None
+        is_rehearsal = rehearsal_route(row.route_path)
         if (
             not lease_active
             and (row.scope.startswith(f"{RECONCILE_SOURCE}:") or is_rehearsal)
@@ -307,11 +315,6 @@ def _running_operations(store: Any, session: Any, now: str) -> tuple[str, ...]:
         for item in _operation_observations(store, session, now)
         if item["blocks_drain"]
     )
-
-
-def operation_reference(operation_id: str) -> str:
-    """Correlate a blocker in the Director alert without exporting private IDs."""
-    return hashlib.sha256(operation_id.encode("utf-8")).hexdigest()
 
 
 def prepare(

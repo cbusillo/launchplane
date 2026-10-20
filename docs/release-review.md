@@ -703,9 +703,9 @@ documented in [operations](operations.md#self-deploy-drain-timeout-and-continuat
 Final admission rechecks the fence and running operations under the same lock.
 The typed Odoo and shared backup queues also contain workflow-started operations;
 their claims pause at this worker boundary and resume after replacement. Worker
-debug logs report that pause, and the runtime read exposes its cause. Every
-provider-target reservation participates regardless of caller scope, including
-agent-started rehearsals and other durable provider operations.
+debug logs report that pause, and the runtime read exposes its cause. Agent-started
+rehearsals also participate through their route, independently of caller scope.
+Other families keep their existing request and worker-claim boundaries.
 An active provider request returns pollable `dispatch_in_progress`, also without
 caching the intermediate response. Running reservations remain blockers even
 after lease expiry: losing a heartbeat does not prove a provider call ended.

@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 import requests
 
 from control_plane.notifications import post_discord_webhook, public_discord_url_error
+from control_plane.contracts.service_deploy_drain import OPERATION_REFERENCE_PATTERN
 
 
 REPLACEMENT_TIMEOUT_SECONDS = 120
@@ -101,7 +102,7 @@ def send_failure_alert() -> bool:
                 dict.fromkeys(
                     item
                     for item in refs
-                    if isinstance(item, str) and re.fullmatch(r"[a-f0-9]{64}", item)
+                    if isinstance(item, str) and OPERATION_REFERENCE_PATTERN.fullmatch(item)
                 )
             )
     if not drain_timeout and not replacement_may_have_dispatched(response_file):

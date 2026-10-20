@@ -11933,8 +11933,8 @@ def create_launchplane_fastapi_app(
                 ServiceDeployFenceConflict,
                 ServiceDeployOutcomeUnknown,
                 ServiceDeployPreEffectRefused,
-                operation_reference,
             )
+            from control_plane.contracts.service_deploy_drain import operation_reference
 
             if isinstance(error, ServiceDeployDrainTimeout):
                 raise _launchplane_http_error(
@@ -31339,14 +31339,6 @@ def create_launchplane_fastapi_app(
         )
 
     app.add_exception_handler(PublicHostAuthorityBusy, public_host_authority_busy_handler)
-    from control_plane.service_deploy_drain import ServiceDeployDraining
-
-    async def service_deploy_draining_handler(request: Request, error: Exception) -> JSONResponse:
-        return await launchplane_http_exception_handler(
-            request, _service_deploy_draining_error(next_trace_id())
-        )
-
-    app.add_exception_handler(ServiceDeployDraining, service_deploy_draining_handler)
     app.add_exception_handler(HTTPException, launchplane_http_exception_handler)
     app.add_exception_handler(
         STARLETTE_HTTP_EXCEPTION,

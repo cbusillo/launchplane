@@ -39,7 +39,6 @@ from urllib.parse import quote, urlencode, urlsplit
 from uuid import uuid4
 
 import click
-from control_plane.service_deploy_drain import ServiceDeployDraining
 from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane.testing_restore_prerequisite import (
@@ -1026,7 +1025,7 @@ def _deploy_generic_web_testing(
                 response_trace_id=trace_id,
                 adapter=adapter,
             )
-    except (FileNotFoundError, ValueError, ServiceDeployDraining, click.ClickException) as error:
+    except (FileNotFoundError, ValueError, click.ClickException) as error:
         # Refused before any provider change; the next event or sweep tries again. The
         # message can name provider targets, so it goes to the worker log only.
         _LOGGER.warning("Generic-web testing deploy of %s refused: %s", profile.product, error)
@@ -2388,7 +2387,7 @@ def _run_preview_operation(
         return _preview_failure(plan, "preview_config_refused")
     except OdooPreviewPlanProvenanceError:
         return _preview_failure(plan, "preview_provenance_refused")
-    except (FileNotFoundError, ValueError, ServiceDeployDraining, click.ClickException) as error:
+    except (FileNotFoundError, ValueError, click.ClickException) as error:
         if is_transient_dokploy_error(error):
             plan["preview_transport_retryable"] = True
         return _preview_failure(plan, "preview_apply_failed")
@@ -2512,7 +2511,7 @@ def _run_generic_web_preview_operation(
                 profile=profile,
             )
             status = str(result.get("destroy_status") or "")
-    except (FileNotFoundError, ValueError, ServiceDeployDraining, click.ClickException) as error:
+    except (FileNotFoundError, ValueError, click.ClickException) as error:
         if is_transient_dokploy_error(error):
             plan["preview_transport_retryable"] = True
         _LOGGER.warning(
