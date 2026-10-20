@@ -4,14 +4,17 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol, cast
 
-from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
 )
-from control_plane.generic_web_testing_inputs import TestingInputStore, testing_input_authority
+from control_plane.generic_web_testing_inputs import (
+    TestingInputStore,
+    testing_input_authority,
+    require_testing_application_target_authority,
+)
 from control_plane.provider_operations import (
     ProviderEvidenceLease,
     ProviderMutationOutcome,
@@ -40,10 +43,6 @@ TESTING_PRE_IMAGE_SETTLED = "testing_deploy_pre_image_settled"
 
 
 class _SettlementStore(TestingInputStore, Protocol):
-    def read_provider_target_record(
-        self, *, context_name: str, instance_name: str
-    ) -> ProviderTargetRecord: ...
-
     def read_deployment_record(self, record_id: str) -> DeploymentRecord: ...
 
     def write_deployment_record(self, record: DeploymentRecord) -> object: ...
@@ -64,34 +63,13 @@ def _require_target(
     lane: ProductLaneProfile,
     target: GenericWebResolvedDeployTarget,
 ) -> None:
-    current = store.read_product_profile_record(profile.product)
-    definition = store.read_dokploy_target_record(
-        context_name=lane.context, instance_name=lane.instance
+    require_testing_application_target_authority(
+        store,
+        profile,
+        lane,
+        target_id=target.resolved_target.target_id,
+        provider_id=target.ship_request.provider_id,
     )
-    binding = store.read_dokploy_target_id_record(
-        context_name=lane.context, instance_name=lane.instance
-    )
-    provider = store.read_provider_target_record(
-        context_name=lane.context, instance_name=lane.instance
-    )
-    if (
-        not current.is_active
-        or current.driver_id != "generic-web"
-        or not any(
-            item.context == lane.context
-            and item.instance == "testing"
-            and item.generic_web_cutover is None
-            for item in current.lanes
-        )
-        or lane.instance != "testing"
-        or definition.target_type != "application"
-        or binding.target_id != target.resolved_target.target_id
-        or provider.target_id != binding.target_id
-        or provider.provider_id != target.ship_request.provider_id
-        or provider.target_category != "application"
-        or provider.provider_target_type != "application"
-    ):
-        raise ValueError("Original testing settlement target authority changed.")
 
 
 def _record_and_receipt(
@@ -296,8 +274,12 @@ def settle_testing_pre_image_attempt(
                 effect_started=lambda: None,
             )
             assert lifecycle is not None
-            lifecycle.restore()
-            receipt.state = "restored"
+            if receipt.resume_from_hold or receipt.state == "held":
+                lifecycle.hold()
+                receipt.state = "held"
+            else:
+                lifecycle.restore()
+                receipt.state = "restored"
         finished = utc_now_timestamp()
         if record is None:
             record = build_deployment_record(

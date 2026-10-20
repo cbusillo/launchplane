@@ -15,6 +15,7 @@ from control_plane.contracts.product_profile_record import (
 )
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.runtime_key_safety import RuntimeKeySafetyPolicyReadStore
 
 DELIVERY_RECEIPT_KEY = "testing_runtime_inputs_verified_sha256"
@@ -36,6 +37,51 @@ class TestingInputStore(
     def read_dokploy_target_id_record(
         self, *, context_name: str, instance_name: str
     ) -> DokployTargetIdRecord: ...
+    def read_provider_target_record(
+        self, *, context_name: str, instance_name: str
+    ) -> ProviderTargetRecord: ...
+
+
+def require_testing_application_target_authority(
+    record_store: object,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+    *,
+    target_id: str,
+    provider_id: str,
+) -> None:
+    """Keep dispatch bound to the active application even after inputs are saved."""
+    store = cast(TestingInputStore, record_store)
+    current = store.read_product_profile_record(profile.product)
+    definition = store.read_dokploy_target_record(
+        context_name=lane.context, instance_name=lane.instance
+    )
+    binding = store.read_dokploy_target_id_record(
+        context_name=lane.context, instance_name=lane.instance
+    )
+    provider = store.read_provider_target_record(
+        context_name=lane.context, instance_name=lane.instance
+    )
+    if (
+        not current.is_active
+        or current.driver_id != "generic-web"
+        or lane.instance != "testing"
+        or not any(
+            item.context == lane.context
+            and item.instance == "testing"
+            and item.generic_web_cutover is None
+            for item in current.lanes
+        )
+        or definition.target_type != "application"
+        or binding.target_id != target_id
+        or provider.target_id != target_id
+        or provider.provider_id != provider_id
+        or provider.target_category != "application"
+        or provider.provider_target_type != "application"
+    ):
+        raise TestingInputSafetyRefused(
+            "Application testing target authority changed before mutation."
+        )
 
 
 def testing_input_authority(
@@ -213,6 +259,8 @@ def require_testing_input_key_safety(
     profile: LaunchplaneProductProfileRecord,
     lane: ProductLaneProfile,
     transported_keys: Iterable[str],
+    *,
+    captured_secret_keys: Iterable[str] = (),
 ) -> None:
     """Recheck current policy for the captured key names without reading values."""
     store = cast(TestingInputStore, record_store)
@@ -232,5 +280,7 @@ def require_testing_input_key_safety(
         record_store=store,
         context_name=lane.context,
         instance_name=lane.instance,
-        required_binding_keys=tuple(sorted(required_secrets | transported)),
+        required_binding_keys=tuple(
+            sorted(required_secrets | transported | set(captured_secret_keys))
+        ),
     )

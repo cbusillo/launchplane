@@ -115,8 +115,11 @@ provider-effect phase. An interruption after input readback remains retryable
 under the original operation once provider observation proves no deployment.
 If its captured inputs have changed, or a newer verified image supersedes it,
 the original lease settles the obsolete attempt as failed only with exact
-pre-image proof on the original target. It restores any captured schedule
-baseline through verified provider writes, retaining the old input receipt as
+pre-image proof on the original target. It restores its captured schedule
+baseline through verified provider writes, or preserves an inherited hold on
+an earlier unqualified image. A proved retry also retains that inherited hold;
+only successful qualification or proved rollback may reactivate its schedules.
+Settlement retains the old input receipt as
 failed-attempt evidence. A durable settlement phase resumes cleanup after a
 lost reply, even if inputs subsequently revert. The current image and inputs
 then use a fresh operation. Returning to a settled operation's input identity
@@ -150,8 +153,14 @@ retirement remains the deletion contract. Production, preview and Compose
 delivery paths are unchanged.
 Rotating Launchplane's active master encryption key changes the delivery
 fingerprint, so each managed-input testing lane receives one normal repair
-deployment. An in-flight attempt retains its captured fingerprint and refuses
-changed authority instead of crediting inputs captured under the new key.
+deployment. Before image save, an in-flight attempt refuses changed input
+authority. Once image save returns successfully in that same execution, the
+trigger finishes only the captured values and earns only their original receipt;
+the next sweep repairs any newer inputs. Current product activity, lane/target
+binding and active key safety for every captured secret key still govern the
+trigger. Revoked bindings or policy, changed targets and inactive products
+remain refusals. A crash or uncertain image-save outcome does not gain this
+continuation and remains fenced for exact recovery.
 
 ### Health probes with public wildcard DNS
 

@@ -2114,23 +2114,6 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         )
         before = self.store.list_deployment_records(context_name="cm", instance_name="testing")[0]
         baseline = recorded_application_lifecycle(before)
-        if lifecycle == "held":
-            # A receipt written by the earlier env-as-image implementation.
-            assert baseline is not None
-            baseline.state = "held"
-            before = before.model_copy(
-                update={
-                    "post_deploy_update": before.post_deploy_update.model_copy(
-                        update={
-                            "evidence": {
-                                **before.post_deploy_update.evidence,
-                                **baseline.evidence(),
-                            }
-                        }
-                    )
-                }
-            )
-            self.store.write_deployment_record(before)
         if changed_inputs:
             self.store.write_runtime_environment_record(
                 settings.model_copy(update={"env": {"APP_SETTING": "second"}})
@@ -2173,10 +2156,151 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
     def test_changed_inputs_settle_restored_lifecycle_with_original_baseline(self) -> None:
         self.assert_obsolete_testing_input_settlement(lifecycle="restored")
 
-    def test_new_image_settles_held_pre_image_lifecycle_without_executing_old_image(self) -> None:
-        self.assert_obsolete_testing_input_settlement(
-            lifecycle="held", newer_image=True, changed_inputs=False
+    def prepare_real_inherited_testing_hold(
+        self, *, refuse: bool
+    ) -> tuple[RuntimeEnvironmentRecord, Any, DeploymentRecord, Any, list[str]]:
+        from control_plane.generic_web_testing_inputs import TestingInputSafetyRefused
+        from control_plane.provider_operations import (
+            ProviderMutationUnknownError,
+            build_provider_operation_key,
         )
+        from control_plane.workflows.generic_web_application_snapshot import (
+            generic_web_provider_deployment_record_id,
+            recorded_application_lifecycle,
+        )
+
+        _payload, triggered = self.application_input_provider()
+        schedule = self.application_input_schedule()
+        settings = RuntimeEnvironmentRecord(
+            scope="instance",
+            context="cm",
+            instance="testing",
+            env={"APP_SETTING": "first"},
+            updated_at="2026-10-19T00:00:00Z",
+        )
+        self.store.write_runtime_environment_record(settings)
+        self.github.add_run(20, DEPLOYABLE)
+        self.request()
+        with patch(
+            "control_plane.dokploy.api.run_dokploy_schedule",
+            side_effect=click.ClickException("qualification failed"),
+        ):
+            self.assertEqual(self.run_once().state, "failed")
+        (prior,) = self.store.list_deployment_records(context_name="cm", instance_name="testing")
+        held = recorded_application_lifecycle(prior)
+        assert held is not None
+        self.assertEqual(prior.deploy.status, "pass")
+        self.assertEqual(held.state, "held")
+        self.assertFalse(self.input_schedule["enabled"])
+        self.assertEqual(len(triggered), 1)
+        execute = self.application_inputs_provider.execute_artifact_deploy
+
+        def interrupt(**kwargs: Any) -> Any:
+            original = kwargs["before_provider_mutation"]
+
+            def checkpoint(phase: str) -> None:
+                original(phase)
+                if phase == "runtime_inputs_verified":
+                    if refuse:
+                        raise TestingInputSafetyRefused("transient pre-image refusal")
+                    raise ProviderMutationUnknownError("interrupted before image mutation")
+
+            kwargs["before_provider_mutation"] = checkpoint
+            return execute(**kwargs)
+
+        self.github.add_run(30, NEWEST)
+        self.request()
+        with patch.object(
+            self.application_inputs_provider, "execute_artifact_deploy", side_effect=interrupt
+        ):
+            self.assertEqual(self.run_once().state, "failed")
+        (reservation,) = self.store.list_held_provider_target_reservations()
+        operation_key = build_provider_operation_key(
+            scope=reservation.scope,
+            route_path=reservation.route_path,
+            idempotency_key=reservation.idempotency_key,
+            request_fingerprint=reservation.request_fingerprint,
+            reconciliation_key=reservation.reconciliation_key,
+        )
+        current = self.store.read_deployment_record(
+            generic_web_provider_deployment_record_id(
+                operation_key, context="cm", instance="testing"
+            )
+        )
+        receipt = recorded_application_lifecycle(current)
+        assert receipt is not None
+        self.assertTrue(receipt.resume_from_hold)
+        self.assertEqual(receipt.state, "held" if refuse else "prepared")
+        self.assertEqual(receipt.originals["cleanup"], schedule)
+        self.assertFalse(self.input_schedule["enabled"])
+        self.assertEqual(len(triggered), 1)
+        return settings, reservation, current, receipt, triggered
+
+    def assert_inherited_testing_hold_survives_recovery(
+        self, *, refuse: bool, settle: bool
+    ) -> None:
+        from control_plane.generic_web_testing_inputs import TestingInputSafetyRefused
+        from control_plane.testing_event_deploy_recovery import settle_obsolete_testing_event_deploy
+        from control_plane.workflows.generic_web_application_snapshot import (
+            recorded_application_lifecycle,
+        )
+
+        settings, reservation, before, baseline, triggered = (
+            self.prepare_real_inherited_testing_hold(refuse=refuse)
+        )
+        with patch.object(
+            self.application_inputs_provider,
+            "observe_artifact_deploy",
+            return_value=GenericWebProviderDeploymentObservation(outcome="absent"),
+        ):
+            if settle:
+                self.store.write_runtime_environment_record(
+                    settings.model_copy(update={"env": {"APP_SETTING": "second"}})
+                )
+                result = settle_obsolete_testing_event_deploy(
+                    store=self.store,
+                    reservation=reservation,
+                    profile=self.store.read_product_profile_record("site"),
+                    context="cm",
+                    current_target_key=reservation.provider_target_key,
+                    desired_fingerprint=reservation.request_fingerprint,
+                    provider=self.application_inputs_provider,
+                    root=self.root,
+                    trace_id="inherited-hold-settlement",
+                    check_execution_lock=lambda: None,
+                )
+                assert result is not None
+                self.assertEqual(result.status, "completed")
+                self.assertFalse(self.store.list_held_provider_target_reservations())
+            else:
+                self.request()
+                with patch.object(
+                    self.application_inputs_provider,
+                    "execute_artifact_deploy",
+                    side_effect=TestingInputSafetyRefused("another pre-image refusal"),
+                ):
+                    self.assertEqual(self.run_once().state, "failed")
+        retained = recorded_application_lifecycle(
+            self.store.read_deployment_record(before.record_id)
+        )
+        assert retained is not None
+        self.assertTrue(retained.resume_from_hold)
+        self.assertEqual(retained.state, "held")
+        self.assertEqual(retained.originals, baseline.originals)
+        self.assertFalse(self.input_schedule["enabled"])
+        self.assertEqual(len(triggered), 1)
+
+    def test_held_pre_image_settlement_preserves_prior_unqualified_image_hold(self) -> None:
+        self.assert_inherited_testing_hold_survives_recovery(refuse=True, settle=True)
+
+    def test_prepared_pre_image_settlement_preserves_prior_unqualified_image_hold(self) -> None:
+        self.assert_inherited_testing_hold_survives_recovery(refuse=False, settle=True)
+
+    def test_held_pre_image_retry_failure_preserves_inherited_hold(self) -> None:
+        self.assert_inherited_testing_hold_survives_recovery(refuse=True, settle=False)
+
+    def test_prepared_pre_image_retry_failure_preserves_inherited_hold(self) -> None:
+        self.assert_inherited_testing_hold_survives_recovery(refuse=False, settle=False)
 
     def test_new_image_and_inputs_settle_prepared_original_attempt(self) -> None:
         self.assert_obsolete_testing_input_settlement(lifecycle="prepared", newer_image=True)
@@ -2198,6 +2322,161 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         self.assertFalse(triggered)
         self.assertEqual(self.store.list_held_provider_target_reservations(), (original,))
         self.assertFalse(self.input_schedule["enabled"])
+
+    def test_input_edit_after_image_save_finishes_captured_inputs_then_repairs_once(self) -> None:
+        from control_plane.generic_web_testing_inputs import (
+            DELIVERY_RECEIPT_KEY,
+            testing_input_authority,
+        )
+        from control_plane.dokploy.api import parse_dokploy_env_text
+
+        payload, triggered = self.application_input_provider()
+        settings = RuntimeEnvironmentRecord(
+            scope="instance",
+            context="cm",
+            instance="testing",
+            env={"APP_SETTING": "first"},
+            updated_at="2026-10-19T00:00:00Z",
+        )
+        self.store.write_runtime_environment_record(settings)
+        profile = self.store.read_product_profile_record("site")
+        captured_digest = testing_input_authority(self.store, profile, profile.lanes[0])
+
+        def save(**kwargs: Any) -> dict[str, object]:
+            if kwargs["path"] == "/api/application.saveDockerProvider":
+                self.store.write_runtime_environment_record(
+                    settings.model_copy(update={"env": {"APP_SETTING": "second"}})
+                )
+            return {}
+
+        self.github.add_run(20, DEPLOYABLE)
+        self.request()
+        with patch("control_plane.dokploy.api.dokploy_request", side_effect=save):
+            first = self.reconcile()
+        self.assertEqual(len(triggered), 1)
+        record = self.store.read_deployment_record(str(first["deployment_record_id"]))
+        self.assertEqual(record.runtime_source[DELIVERY_RECEIPT_KEY], captured_digest)
+        self.assertEqual(parse_dokploy_env_text(str(payload["env"]))["APP_SETTING"], "first")
+        self.assertFalse(self.store.list_held_provider_target_reservations())
+        self.request()
+        repaired = self.reconcile()
+        self.assertEqual(len(triggered), 2)
+        self.assertEqual(parse_dokploy_env_text(str(payload["env"]))["APP_SETTING"], "second")
+        current = self.store.read_deployment_record(str(repaired["deployment_record_id"]))
+        self.assertEqual(
+            current.runtime_source[DELIVERY_RECEIPT_KEY],
+            testing_input_authority(self.store, profile, profile.lanes[0]),
+        )
+        self.assertNotEqual(current.runtime_source[DELIVERY_RECEIPT_KEY], captured_digest)
+        self.request()
+        self.assertEqual(self.reconcile()["reason"], "already_deployed")
+        self.assertEqual(len(triggered), 2)
+
+    def assert_post_image_safety_stops_dispatch(self, change: str) -> None:
+        from tests.test_generic_web_deploy import (
+            _runtime_secret_record,
+            _runtime_secret_version,
+            _runtime_secret_binding,
+        )
+
+        _payload, triggered = self.application_input_provider()
+        self.store.write_runtime_environment_record(
+            RuntimeEnvironmentRecord(
+                scope="instance",
+                context="cm",
+                instance="testing",
+                env={"APP_SETTING": "first"},
+                updated_at="2026-10-19T00:00:00Z",
+            )
+        )
+        binding = None
+        if change in {"policy", "binding"}:
+            self.store.write_secret_record(
+                _runtime_secret_record(
+                    secret_id="site-secret",
+                    scope="context",
+                    name="api-token",
+                    version_id="site-version",
+                    context="cm",
+                )
+            )
+            self.store.write_secret_version(
+                _runtime_secret_version(
+                    secret_id="site-secret",
+                    version_id="site-version",
+                    plaintext_value="fixture token",
+                )
+            )
+            binding = _runtime_secret_binding(
+                secret_id="site-secret", binding_key="APP_TOKEN", context="cm"
+            )
+            self.store.write_secret_binding(binding)
+            self.store.write_runtime_key_safety_policy_record(
+                RuntimeKeySafetyPolicyRecord(
+                    record_id="site-policy",
+                    source="test",
+                    updated_at="2026-10-19T00:00:00Z",
+                    rules=(
+                        RuntimeSecretSafetyRule(binding_key="APP_TOKEN", secret_class="testing"),
+                    ),
+                )
+            )
+        revoked = False
+        policies = self.store.list_runtime_key_safety_policy_records
+        saved: list[str] = []
+
+        def save(**kwargs: Any) -> dict[str, object]:
+            nonlocal revoked
+            if kwargs["path"] == "/api/application.saveDockerProvider":
+                saved.append(str(kwargs["payload"]["dockerImage"]))
+                if change == "target":
+                    current = self.store.read_dokploy_target_id_record(
+                        context_name="cm", instance_name="testing"
+                    )
+                    self.store.write_dokploy_target_id_record(
+                        current.model_copy(update={"target_id": "repointed-fixture"})
+                    )
+                elif change == "inactive":
+                    profile = self.store.read_product_profile_record("site")
+                    self.store.write_product_profile_record(
+                        profile.model_copy(update={"lifecycle_state": "retiring"})
+                    )
+                elif change == "policy":
+                    revoked = True
+                else:
+                    assert binding is not None
+                    self.store.write_secret_binding(
+                        binding.model_copy(update={"status": "disabled"})
+                    )
+            return {}
+
+        self.github.add_run(20, DEPLOYABLE)
+        self.request()
+        with (
+            patch("control_plane.dokploy.api.dokploy_request", side_effect=save),
+            patch.object(
+                self.store,
+                "list_runtime_key_safety_policy_records",
+                side_effect=lambda **kwargs: () if revoked else policies(**kwargs),
+            ),
+        ):
+            self.assertEqual(self.run_once().state, "failed")
+        self.assertEqual(len(saved), 1)
+        self.assertFalse(triggered)
+        (held,) = self.store.list_held_provider_target_reservations()
+        self.assertEqual(held.provider_effect_phase, "target_update")
+
+    def test_target_drift_after_image_save_still_refuses_trigger(self) -> None:
+        self.assert_post_image_safety_stops_dispatch("target")
+
+    def test_product_retirement_after_image_save_still_refuses_trigger(self) -> None:
+        self.assert_post_image_safety_stops_dispatch("inactive")
+
+    def test_policy_revocation_after_image_save_still_refuses_trigger(self) -> None:
+        self.assert_post_image_safety_stops_dispatch("policy")
+
+    def test_captured_binding_revocation_after_image_save_still_refuses_trigger(self) -> None:
+        self.assert_post_image_safety_stops_dispatch("binding")
 
     def test_provider_only_platform_credential_refuses_before_schedule_quiesce(self) -> None:
         payload, triggered = self.application_input_provider()

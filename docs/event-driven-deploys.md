@@ -166,7 +166,8 @@ reservation. The webhook request never waits on a deploy.
     Application testing attempts with managed inputs can settle obsolete
     captured inputs or a superseded candidate under the original lease when
     provider absence and the durable journal prove no image mutation. Any
-    original schedule baseline is restored and verified first. The failed
+    original schedule baseline is restored and verified first, while an
+    inherited hold on an earlier unqualified image stays paused. The failed
     original retains its input evidence; a fresh candidate earns its own
     readback receipt. Unknown image effects remain fenced. A return to a
     settled predecessor's exact inputs receives a deterministic successor key.

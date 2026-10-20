@@ -64,7 +64,7 @@ class GenericWebResolvedDeployTarget(BaseModel):
     testing_runtime_verified_digest: str = Field(default="", exclude=True)
     testing_runtime_values: dict[str, str] = Field(default_factory=dict, exclude=True, repr=False)
     testing_runtime_retired_keys: frozenset[str] = Field(default=frozenset(), exclude=True)
-    _testing_runtime_check: Callable[[], None] | None = PrivateAttr(default=None)
+    _testing_runtime_check: Callable[[bool], None] | None = PrivateAttr(default=None)
     _testing_runtime_prepare: Callable[[], None] | None = PrivateAttr(default=None)
 
 
@@ -258,6 +258,7 @@ def prepare_generic_web_testing_runtime(
         TestingInputSafetyRefused,
         prepare_testing_inputs,
         require_testing_input_key_safety,
+        require_testing_application_target_authority,
         testing_input_authority,
     )
 
@@ -295,9 +296,20 @@ def prepare_generic_web_testing_runtime(
         target.testing_runtime_values = environment.values
         target.testing_runtime_retired_keys = environment.retired_keys
 
-        def check() -> None:
+        def check(require_unchanged_inputs: bool) -> None:
             try:
-                current_digest = testing_input_authority(store, profile, lane)
+                require_testing_application_target_authority(
+                    store,
+                    profile,
+                    lane,
+                    target_id=target.resolved_target.target_id,
+                    provider_id=target.ship_request.provider_id,
+                )
+                current_digest = (
+                    testing_input_authority(store, profile, lane)
+                    if require_unchanged_inputs
+                    else target.testing_runtime_digest
+                )
             except (FileNotFoundError, ValueError, click.ClickException) as error:
                 raise TestingInputSafetyRefused(
                     "Application testing runtime input authority is unavailable."
@@ -307,7 +319,13 @@ def prepare_generic_web_testing_runtime(
                     "Application testing input authority changed before mutation."
                 )
             try:
-                require_testing_input_key_safety(store, profile, lane, environment.values)
+                require_testing_input_key_safety(
+                    store,
+                    profile,
+                    lane,
+                    environment.values,
+                    captured_secret_keys=environment.secret_keys,
+                )
             except LiveTargetRuntimeError as error:
                 raise TestingInputSafetyRefused(runtime_key_safety_error_message(error)) from error
             except (FileNotFoundError, ValueError, click.ClickException) as error:
@@ -799,7 +817,10 @@ class DokployGenericWebDeployProvider:
 
         def checked_mutation(phase: str) -> None:
             if resolved_deploy_target._testing_runtime_check is not None:
-                resolved_deploy_target._testing_runtime_check()
+                # The trigger is reached only after image save returns. Finish
+                # those captured inputs while current target/key safety still
+                # governs dispatch; a crash has no such continuation authority.
+                resolved_deploy_target._testing_runtime_check(phase != "deploy_trigger")
             before_provider_mutation(phase)
 
         def runtime_verified() -> None:

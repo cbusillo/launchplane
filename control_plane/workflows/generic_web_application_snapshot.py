@@ -286,7 +286,7 @@ def application_snapshot_for_deploy(
         and prior is same_attempt
         and prior.state in {"prepared", "held"}
     ):
-        held = False
+        held = same_attempt.resume_from_hold or same_attempt.state == "held"
     carry_baseline = prior is not None and prior.state in {"prepared", "held", "restore_failed"}
     previous_names = (
         prior.managed_names
