@@ -24,7 +24,11 @@ from control_plane.storage.migrations.versions import (
     e7c1d5e9a3b6_drop_retired_delivery_tables as migration,
 )
 from control_plane.storage.postgres import Base, PostgresRecordStore
-from control_plane.storage.schema_migration import alembic_config
+from control_plane.storage.schema_migration import (
+    SCHEMA_MIGRATION_TARGET_REVISION,
+    alembic_config,
+    schema_migration_target,
+)
 
 
 def seed_retired_history(engine: Engine) -> None:
@@ -90,12 +94,6 @@ def assert_retired_delivery_drop(test: unittest.TestCase, database_url: str) -> 
             set(inspect(engine).get_table_names()), before_tables - set(migration.RETIRED_TABLES)
         )
         test.assertEqual(history_snapshot(engine, preserved_names), preserved)
-        store = PostgresRecordStore(database_url=database_url)
-        try:
-            store.verify_schema()
-            test.assertEqual(store.expire_ordinary_agent_deliveries(), 0)
-        finally:
-            store.close()
         with test.assertRaises(RuntimeError):
             command.downgrade(config, migration.down_revision)
         with engine.connect() as connection:
@@ -104,6 +102,20 @@ def assert_retired_delivery_drop(test: unittest.TestCase, database_url: str) -> 
                 migration.revision,
             )
         test.assertTrue(set(migration.RETIRED_TABLES).isdisjoint(inspect(engine).get_table_names()))
+        test.assertEqual(history_snapshot(engine, preserved_names), preserved)
+        command.upgrade(
+            config,
+            schema_migration_target(
+                current_revision=migration.revision,
+                target_revision=SCHEMA_MIGRATION_TARGET_REVISION,
+            ),
+        )
+        store = PostgresRecordStore(database_url=database_url)
+        try:
+            store.verify_schema()
+            test.assertEqual(store.expire_ordinary_agent_deliveries(), 0)
+        finally:
+            store.close()
         test.assertEqual(history_snapshot(engine, preserved_names), preserved)
     finally:
         engine.dispose()

@@ -32,7 +32,11 @@ creates the application's HTTP hostname and its own edge route; it does not
 rewrite existing application domains or an unrelated edge route. A successful
 receipt owns later disablement. The active private endpoint is the hostname's
 recorded claim; the public-host write guard also checks that claim before any
-provider effect for another lane. Successful creation or original-key adoption
+provider effect for another lane. Retained DNS claims compare case-insensitively after trimming
+surrounding whitespace and trailing dots, including target domains and pending
+hostname effects. PostgreSQL target/name fences use that same identity; this
+does not rewrite stored claims or relax new public-host input validation.
+Successful creation or original-key adoption
 also records it in the application's `domains`, under the existing name fences,
 without making it a public website. The edge retains its certificate, key, renewal
 and access list. The application owns its HTTP paths and bearer checks; the edge

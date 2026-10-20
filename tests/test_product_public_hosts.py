@@ -8,13 +8,17 @@ import unittest
 from typing import ClassVar, cast
 from fastapi import FastAPI
 from httpx2 import Response
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from sqlalchemy import event, select
 from sqlalchemy.orm import Session
 
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
-from control_plane.contracts.dokploy_target_record import DokployTargetRecord, PublicHostEffect
+from control_plane.contracts.dokploy_target_record import (
+    DokployTargetRecord,
+    DokployTargetRecordChanged,
+    PublicHostEffect,
+)
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
 from control_plane.dokploy import api
@@ -183,6 +187,117 @@ class ProductPublicHostsTests(unittest.IsolatedAsyncioTestCase):
 
     def recorded(self) -> DokployTargetRecord:
         return self.store.read_dokploy_target_record(context_name=CONTEXT, instance_name="prod")
+
+    def write_host_bundle(
+        self, *, pending_effects: tuple[PublicHostEffect, ...] = (), provider: Mock | None = None
+    ) -> Mock:
+        provider = provider if provider is not None else Mock()
+        target = self.recorded()
+        self.store.write_product_public_hosts_bundle(
+            ProductAuthorityBundle(dokploy_targets=(target,)),
+            expected_target=target,
+            expected_target_id=self.target_id,
+            expected_provider_target=self.store.read_provider_target_record(
+                context_name=CONTEXT, instance_name="prod"
+            ),
+            apply_provider=provider,
+            pending_effects=pending_effects,
+        )
+        return provider
+
+    async def test_requested_alias_cannot_take_foreign_private_endpoint(self) -> None:
+        self.store.write_private_health_endpoint_record(
+            PrivateHealthEndpointRecord(
+                endpoint_key="foreign-private",
+                product="another-product",
+                context="another-lane",
+                instance="testing",
+                url=f"https://{HOSTS[0]}/health",
+                updated_at=self.target.updated_at,
+            )
+        )
+        for alias in (HOSTS[0].upper(), f"{HOSTS[0]}.", f" \t{HOSTS[0].upper()}.\n"):
+            for claim_field in ("domains", "pending_effects", "pending_public_host_effects"):
+                with self.subTest(alias=alias, source=claim_field):
+                    target = self.target.model_copy(
+                        update={"domains": (alias,) if claim_field == "domains" else ()}
+                    )
+                    pending = (
+                        (
+                            PublicHostEffect(
+                                host=alias,
+                                provider_host=HOSTS[0],
+                                target_id=self.target_id.target_id,
+                                runtime_port=8069,
+                            ),
+                        )
+                        if claim_field != "domains"
+                        else ()
+                    )
+                    if claim_field == "pending_public_host_effects":
+                        target = target.model_copy(update={"pending_public_host_effects": pending})
+                    self.store.write_dokploy_target_record(target)
+                    provider = Mock()
+                    with self.assertRaises(DokployTargetRecordChanged):
+                        self.write_host_bundle(
+                            pending_effects=pending if claim_field == "pending_effects" else (),
+                            provider=provider,
+                        )
+                    provider.assert_not_called()
+                    self.assertEqual(self.recorded(), target)
+                    self.assertEqual(self.provider.writes, [])
+
+    async def test_foreign_target_aliases_cannot_take_requested_hostname(self) -> None:
+        self.store.write_dokploy_target_record(
+            self.target.model_copy(update={"domains": (HOSTS[0],)})
+        )
+        for alias in (HOSTS[0].upper(), f"{HOSTS[0]}.", f" \t{HOSTS[0].upper()}.\n"):
+            for claim_field in ("domains", "pending_public_host_effects"):
+                with self.subTest(alias=alias, source=claim_field):
+                    foreign = self.target.model_copy(
+                        update={
+                            "context": "foreign-lane",
+                            "domains": (alias,) if claim_field == "domains" else (),
+                            "pending_public_host_effects": (
+                                PublicHostEffect(
+                                    host=alias,
+                                    provider_host=HOSTS[0],
+                                    target_id="foreign-compose",
+                                    runtime_port=8069,
+                                ),
+                            )
+                            if claim_field == "pending_public_host_effects"
+                            else (),
+                        }
+                    )
+                    self.store.write_dokploy_target_record(foreign)
+                    provider = Mock()
+                    with self.assertRaises(DokployTargetRecordChanged):
+                        self.write_host_bundle(provider=provider)
+                    provider.assert_not_called()
+                    self.assertEqual(self.provider.writes, [])
+
+    async def test_distinct_names_and_own_lane_aliases_preserve_provider_path(self) -> None:
+        hostname = "shared.internal"
+        self.store.write_dokploy_target_record(
+            self.target.model_copy(update={"domains": (f" \t{hostname.upper()}.\n",)})
+        )
+        self.store.write_dokploy_target_record(
+            self.target.model_copy(
+                update={"context": "foreign-lane", "domains": (f"other.{hostname}",)}
+            )
+        )
+        self.store.write_private_health_endpoint_record(
+            PrivateHealthEndpointRecord(
+                endpoint_key="own-private",
+                product=PRODUCT,
+                context=CONTEXT,
+                instance="prod",
+                url=f"https://{hostname}/health",
+                updated_at=self.target.updated_at,
+            )
+        )
+        self.write_host_bundle().assert_called_once()
 
     async def test_foreign_private_endpoint_reserves_hostname_before_provider_effect(self) -> None:
         dry = await self.config()
@@ -617,12 +732,14 @@ class ProductPublicHostsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.provider.writes, [])
 
     async def test_internal_name_cannot_become_managed_or_remove_foreign_service(self) -> None:
-        self.store.write_dokploy_target_record(
-            self.target.model_copy(update={"domains": ("origin.example",)})
-        )
-        self.provider.routes[0]["host"] = "origin.example"
-        response = await self.config(["origin.example"])
-        self.assertEqual(response.status_code, 400, response.text)
+        for origin in ("origin.example", "ORIGIN.EXAMPLE.", " \tORIGIN.EXAMPLE.\n"):
+            with self.subTest(origin=origin):
+                self.store.write_dokploy_target_record(
+                    self.target.model_copy(update={"domains": (origin,)})
+                )
+                self.provider.routes[0]["host"] = origin
+                response = await self.config(["origin.example"])
+                self.assertEqual(response.status_code, 400, response.text)
         self.provider.routes.append(
             {
                 **self.provider.routes[0],

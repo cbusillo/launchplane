@@ -4000,7 +4000,9 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                 self.assertEqual(_current_alembic_version(engine), migration.down_revision)
                 with engine.begin() as connection:
                     connection.execute(text("DROP VIEW retained_preview_dependency"))
-                self.assertEqual(migrate_schema(database_url=url), migration.revision)
+                from control_plane.storage.schema_migration import SCHEMA_MIGRATION_TARGET_REVISION
+
+                self.assertEqual(migrate_schema(database_url=url), SCHEMA_MIGRATION_TARGET_REVISION)
                 verify_postgres_schema_invariants(engine)
             finally:
                 engine.dispose()
@@ -4026,6 +4028,7 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                     )
                     self.assertEqual(_current_alembic_version(engine), migration.down_revision)
                 alembic_command.upgrade(config, migration.revision)
+                migrate_schema(database_url=url)
                 verify_postgres_schema_invariants(engine)
             finally:
                 engine.dispose()
@@ -4056,6 +4059,7 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                 with engine.begin() as connection:
                     connection.execute(text("DROP VIEW retained_delivery_reader"))
                 alembic_command.upgrade(config, migration.revision)
+                migrate_schema(database_url=url)
                 verify_postgres_schema_invariants(engine)
             finally:
                 engine.dispose()
@@ -9896,6 +9900,7 @@ class RealPostgresChangeImpactAuditTests(unittest.TestCase):
             finally:
                 engine.dispose()
             alembic_command.upgrade(config, PRE_RETIREMENT_ALEMBIC_REVISION)
+            migrate_schema(database_url=database_url)
             store = PostgresRecordStore(database_url=database_url)
             try:
                 store.verify_schema()
@@ -14137,28 +14142,46 @@ class RealPostgresTestingGenerationRetirementTests(unittest.TestCase):
 
     def test_retirement_custody_survives_schema_downgrade_and_reupgrade(self) -> None:
         from tests.test_testing_generation_retirement import TestingGenerationRetirementTests
+        from control_plane.storage.postgres import LaunchplaneRetainedTestingGenerationRow
         from control_plane.storage.migrations.versions import (
             cd192c59f009_retained_testing_generations as migration,
         )
 
         with _isolated_postgres_database() as url:
             alembic_command.upgrade(_alembic_config(url), PRE_RETIREMENT_ALEMBIC_REVISION)
+            # Seed historical data from a valid rehearsal record. The current
+            # runtime must not start on the pre-hostname schema being upgraded.
             fixture = TestingGenerationRetirementTests()
-            fixture.database_url = url
             fixture.setUp()
             self.addCleanup(fixture.doCleanups)
             fixture.apply()
             before = fixture.store.read_retained_testing_generation(fixture.operation.operation_id)
+            assert before is not None
+            with fixture.store._engine.connect() as connection:
+                retained = dict(
+                    connection.execute(select(LaunchplaneRetainedTestingGenerationRow.__table__))
+                    .mappings()
+                    .one()
+                )
+            engine = create_engine(url)
+            self.addCleanup(engine.dispose)
+            with engine.begin() as connection:
+                connection.execute(
+                    insert(LaunchplaneRetainedTestingGenerationRow).values(**retained)
+                )
+            store = PostgresRecordStore(database_url=url)
+            self.addCleanup(store.close)
             config = _alembic_config(url)
             alembic_command.downgrade(config, migration.down_revision)
             self.assertEqual(
-                fixture.store.read_retained_testing_generation(fixture.operation.operation_id),
+                store.read_retained_testing_generation(fixture.operation.operation_id),
                 before,
             )
             alembic_command.upgrade(config, PRE_RETIREMENT_ALEMBIC_REVISION)
-            fixture.store.verify_schema()
+            migrate_schema(database_url=url)
+            store.verify_schema()
             self.assertEqual(
-                fixture.store.read_retained_testing_generation(fixture.operation.operation_id),
+                store.read_retained_testing_generation(fixture.operation.operation_id),
                 before,
             )
 

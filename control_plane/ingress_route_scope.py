@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from urllib.parse import urlsplit
 
+from control_plane.contracts.public_hosts import canonical_dns_hostname
+
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
@@ -80,7 +82,7 @@ def validate_ingress_route_instance_scope(
             endpoint.context,
             endpoint.instance,
         ) != (profile.product, normalized_context, normalized_instance):
-            if (urlsplit(endpoint.url).hostname or "").rstrip(".").lower() in requested:
+            if canonical_dns_hostname(urlsplit(endpoint.url).hostname or "") in requested:
                 raise IngressRouteInstanceScopeError(
                     code="ingress_route_domain_scope_ambiguous",
                     message="Ingress route domains are shared with another product lane.",
@@ -121,7 +123,7 @@ def _public_https_domain(*, value: str, label: str) -> str:
             code="ingress_route_lane_url_invalid",
             message=f"Product lane {label} is not a valid public HTTPS URL.",
         ) from error
-    domain = (parsed.hostname or "").strip().rstrip(".").lower()
+    domain = canonical_dns_hostname(parsed.hostname or "")
     if (
         parsed.scheme.lower() != "https"
         or not domain
@@ -137,7 +139,7 @@ def _public_https_domain(*, value: str, label: str) -> str:
 
 
 def _normalized_domain(value: str) -> str:
-    normalized = value.strip().rstrip(".").lower()
+    normalized = canonical_dns_hostname(value)
     if not normalized:
         raise IngressRouteInstanceScopeError(
             code="ingress_route_domain_scope_mismatch",

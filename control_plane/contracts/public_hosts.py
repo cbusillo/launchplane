@@ -2,6 +2,11 @@ import re
 from urllib.parse import urlparse
 
 
+def canonical_dns_hostname(value: str) -> str:
+    """Compare retained DNS claims without rewriting or widening input validation."""
+    return value.strip().rstrip(".").lower()
+
+
 def normalize_public_hosts(value: object) -> tuple[str, ...]:
     if not isinstance(value, (list, tuple)) or len(value) > 64:
         raise ValueError("Public hosts require a bounded list of DNS hostnames.")

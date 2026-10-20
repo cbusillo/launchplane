@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from urllib.parse import urlsplit
 
+from control_plane.contracts.public_hosts import canonical_dns_hostname
+
 from control_plane.route_binding_reconcile import (
     RouteBindingReviewSources,
     RouteBindingSourceChanged,
@@ -6090,18 +6092,25 @@ class PostgresRecordStore(HumanSessionStore):
         """Checkpoint owned effects before the atomic config/success-receipt commit."""
 
         def guard(session: Any) -> None:
-            requested_hosts = (
-                set(bundle.dokploy_targets[0].public_hosts)
-                | set(bundle.dokploy_targets[0].domains)
-                | {effect.host for effect in pending_effects}
-            )
+            requested_hosts = {
+                canonical_dns_hostname(host)
+                for host in (
+                    *bundle.dokploy_targets[0].public_hosts,
+                    *bundle.dokploy_targets[0].domains,
+                    *(
+                        effect.host
+                        for effect in bundle.dokploy_targets[0].pending_public_host_effects
+                    ),
+                    *(effect.host for effect in pending_effects),
+                )
+            }
             for row in session.scalars(select(LaunchplanePrivateHealthEndpointRow)).all():
                 endpoint = PrivateHealthEndpointRecord.model_validate(row.payload)
                 if (
                     endpoint.status == "active"
                     and (endpoint.context, endpoint.instance)
                     != (expected_target.context, expected_target.instance)
-                    and (urlsplit(endpoint.url).hostname or "").rstrip(".").lower()
+                    and canonical_dns_hostname(urlsplit(endpoint.url).hostname or "")
                     in requested_hosts
                 ):
                     raise DokployTargetRecordChanged(
@@ -6114,7 +6123,8 @@ class PostgresRecordStore(HumanSessionStore):
                 ):
                     other = DokployTargetRecord.model_validate(row.payload)
                     if requested_hosts.intersection(
-                        (
+                        canonical_dns_hostname(host)
+                        for host in (
                             *other.domains,
                             *other.public_hosts,
                             *(effect.host for effect in other.pending_public_host_effects),

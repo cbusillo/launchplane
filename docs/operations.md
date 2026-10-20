@@ -4948,28 +4948,46 @@ health-alert policies and historical delivery evidence intact.
 ### Prepared retired-delivery table migration
 
 Issue #2437's migration `e7c1d5e9a3b6` removes only the 22 tables named by
-`RETIRED_TABLES` in that revision. Normal service startup applies the separately
-approved Q533 preview-enablement drop, `e8d2f6a0b4c7`, which branches from
-`e6b0c4d8f2a5` alongside the held migration. This is an explicit expand/contract hold: source delivery
+`RETIRED_TABLES` in that revision. Normal service startup targets
+`f0a4c8e2b6d9`, the canonical public-host fence migration, which descends from the
+separately approved Q533 preview-enablement drop, `e8d2f6a0b4c7`. That branch
+starts at `e6b0c4d8f2a5` alongside the held migration. This is an explicit
+expand/contract hold: source delivery
 and a green PR do not authorize applying the drop to the shared database.
-The candidate runtime accepts the common predecessor, either branch revision,
-or their empty merge revision, `e9e3a7b1c5d8`, and retains expiry/key-retirement,
+The candidate runtime requires the hostname revision or the new empty join,
+`f1b5d9a3c7e0`, and retains expiry/key-retirement,
 activation/history/policy maintenance, custody evidence and native train fences.
 While this hold is active, schema initialization refuses a migration graph whose
-head has advanced beyond the reviewed join of these two paths. A later schema change must
+head has advanced beyond that reviewed join. A later schema change must
 reconcile the hold, runtime compatibility and supported migration targets in the
 same change. Keep an independently approved application path for the destructive
 step; advancing an unrelated additive migration does not authorize it. Lifting
 the hold requires the shared-data/release approval below.
 
-The release default never traverses the held branch. If a database has already
-applied the held drop, startup applies only the preview drop and joins the paths.
+The release default never traverses the held branch. Existing common-predecessor
+and preview-only databases advance along the hostname branch with all held tables
+and their rows preserved. If a database has already applied the held drop or old
+join, startup adds only the missing approved preview/hostname steps and joins the paths.
 After explicit approval, requesting the held revision on a database already at
-the preview revision applies the held drop and the empty join. Both routes leave
-one recorded Alembic revision; startup never mistakes incomparable branches for
+the preview or hostname revision applies the missing steps and the new empty join.
+An explicit held target also converges to that join from older supported revisions.
+Both routes leave one recorded Alembic revision; startup never mistakes incomparable branches for
 ordered versions. Do not substitute Alembic `head` for the release migration
 target: `head` includes the held drop and is reserved for disposable rehearsals
 or the separately approved application procedure.
+
+Hostname fencing compares retained target domains, public hosts and pending
+effect hostnames with the same DNS identity as ownership checks: lowercase,
+surrounding whitespace removed, and trailing dots removed. Existing payloads are
+not rewritten. The new runtime rejects pre-hostname schema revisions so it cannot
+run the new comparisons with the old lock identities. Newly submitted public-host
+validation remains unchanged. No hostname migration grants access, changes DNS or
+calls a provider.
+
+The hostname migration's downgrade restores the previous key function without
+rewriting payloads. Older images still require their own accepted schema revision;
+an image-only rollback does not establish that compatibility. Rehearse any schema
+rollback with its matching image and quiesce writers before changing lock identities.
 
 An image rollback across the Q533 preview drop cannot start an older image
 that still requires the enablement table or rejects the new revision. Recovery
