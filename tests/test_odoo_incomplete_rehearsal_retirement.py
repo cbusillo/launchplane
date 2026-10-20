@@ -646,6 +646,51 @@ class IncompleteRetirementHostTests(unittest.TestCase):
         self.spec["mode"] = "apply"
         self.assertTrue(self.fixture.run_host(self.spec)["disposed"])
 
+    def test_emitted_retirement_wrapper_survives_provider_marker_parsing(self) -> None:
+        import copy
+        import io
+        import subprocess
+        import sys
+        from pathlib import Path
+        from contextlib import redirect_stdout
+        from control_plane.dokploy.post_deploy import extract_odoo_post_deploy_readback_markers
+        from control_plane.odoo_upgrade_rehearsal import rehearsal_host_program
+
+        scenario = IncompleteRehearsalRetirementTests()
+        scenario.setUp()
+        self.addCleanup(scenario.doCleanups)
+        operation = scenario.retirement()
+        self.spec["record"]["intent_sha256"] = scenario.prepared.intent_sha256
+        spec = {**copy.deepcopy(self.spec), "program": rehearsal_host_program()}
+
+        def scheduler(record: Any, script: str, check: Any) -> dict[str, str]:
+            output = io.StringIO()
+
+            def command(args: list[str], **kwargs: Any) -> Any:
+                self.assertEqual(args[0], "docker")
+                return subprocess.CompletedProcess(
+                    args, 0, stdout=self.docker(*args[1:]), stderr=b""
+                )
+
+            with (
+                patch.object(sys, "argv", ["host"]),
+                patch.object(Path, "home", return_value=self.fixture.fixture.root),
+                patch.object(subprocess, "run", side_effect=command),
+                redirect_stdout(output),
+            ):
+                exec(compile(rehearsal.python_heredoc(script), "<delivered-wrapper>", "exec"), {})
+            return extract_odoo_post_deploy_readback_markers({"logs": output.getvalue()})
+
+        with (
+            patch("control_plane.odoo_upgrade_rehearsal.rehearsal_host_spec", return_value=spec),
+            patch.object(operation.adapter, "run_script", side_effect=scheduler),
+        ):
+            result = operation.host("dry-run", lambda: None)
+        self.assertTrue(result["qualified"])
+        self.assertFalse(result["disposed"])
+        self.assertTrue((self.root / "raw/database.dump").exists())
+        self.assertEqual(operation.original(scenario.prepared).state, "reconcile_required")
+
     def test_host_refuses_unreviewed_inventory_without_deleting_custody(self) -> None:
         plan = self.fixture.run_host(self.spec)
         self.spec["record"]["incomplete_retirement"] = {
@@ -774,6 +819,44 @@ class IncompleteRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
             mode="json"
         )
         route = ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=fixture.product)
+        # Exercise the real retirement adapter at the provider boundary. A
+        # successful schedule status alone never proves a host qualification.
+        import json
+        import click
+
+        held = fixture.store.list_held_provider_target_reservations()
+        for evidence in (
+            {"log_available": "false"},
+            {"log_available": "true"},
+            {"rehearsal_result": "not-hex"},
+            {"rehearsal_result": b"not-json".hex()},
+            {"rehearsal_result": json.dumps({"qualified": True}).encode().hex()},
+        ):
+            with (
+                self.subTest(evidence=evidence),
+                patch.object(IncompleteRehearsalRetirement, "placement", return_value=False),
+                patch.object(OdooRehearsalAdapter, "run_script", return_value=evidence),
+            ):
+                refused = await request(
+                    fixture.app, "POST", route, payload=payload, headers=headers
+                )
+                self.assertEqual(refused.status_code, 409, refused.text)
+                self.assertTrue(refused.json()["trace_id"])
+                self.assertEqual(refused.json()["error"]["code"], "rehearsal_state_unverified")
+                self.assertEqual(
+                    fixture.store.read_odoo_upgrade_rehearsal(fixture.identifier), prepared
+                )
+                self.assertEqual(fixture.store.list_held_provider_target_reservations(), held)
+        with (
+            patch.object(IncompleteRehearsalRetirement, "placement", return_value=False),
+            patch(
+                "control_plane.dokploy.api.validate_dokploy_schedule_script",
+                side_effect=click.ClickException("Script cannot be materialized"),
+            ),
+        ):
+            refused = await request(fixture.app, "POST", route, payload=payload, headers=headers)
+            self.assertEqual(refused.status_code, 409, refused.text)
+        self.assertEqual(fixture.store.list_held_provider_target_reservations(), held)
         with (
             patch.object(
                 IncompleteRehearsalRetirement,
