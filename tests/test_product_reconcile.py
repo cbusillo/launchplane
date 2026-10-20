@@ -5,6 +5,8 @@ from control_plane.dokploy.api import DokployRequestFailed
 from control_plane.contracts.record_failures import record_failure_summary
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone, tzinfo
+from dataclasses import replace
+from control_plane.dokploy.application_runtime import ApplicationRuntimeObservation
 from email.message import Message
 import io
 import json
@@ -1825,8 +1827,39 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         def update(**kwargs: object) -> None:
             payload["env"] = kwargs["env_text"]
 
+        def runtime(**_kwargs: object) -> ApplicationRuntimeObservation:
+            from control_plane.dokploy.api import parse_dokploy_env_text
+
+            values = parse_dokploy_env_text(str(payload["env"]))
+            source = values.get("LAUNCHPLANE_SOURCE_GIT_REF", DEPLOYABLE)
+            artifact = values.get(
+                "LAUNCHPLANE_ARTIFACT_ID", f"{IMAGE_REPOSITORY}@{_digest(source)}"
+            )
+            record_id = values.get("LAUNCHPLANE_DEPLOYMENT_RECORD_ID", "fixture-no-deployment")
+            return ApplicationRuntimeObservation(
+                application_id="target-123",
+                app_name="site-testing-app",
+                server_id="fixture-server",
+                service_id="fixture-service",
+                service_version=1,
+                service_image=f"{IMAGE_REPOSITORY}:sha-{source}",
+                service_deployment_record_id=record_id,
+                service_environment_keys=tuple(sorted(values)),
+                desired_replicas=1,
+                rollout_state="completed",
+                rollout_started_at="2026-10-19T00:00:30Z",
+                rollout_completed_at="2026-10-19T00:00:45Z",
+                running_container_images=(artifact,),
+                running_container_deployment_record_ids=(record_id,),
+                running_container_health=("",),
+                pending_task_count=0,
+            )
+
+        self.application_runtime = runtime
+
         for patcher in (
             patch.object(provider, "_read_provider_config", return_value=("fixture", "unused")),
+            patch.object(provider, "observe_testing_application_runtime", side_effect=runtime),
             patch(
                 "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 side_effect=lambda **_: dict(payload),
@@ -1854,6 +1887,127 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
         return payload, triggered
+
+    def prepare_application_runtime_test(self) -> list[str]:
+        _payload, triggered = self.application_input_provider()
+        self.store.write_runtime_environment_record(
+            RuntimeEnvironmentRecord(
+                scope="instance",
+                context="cm",
+                instance="testing",
+                env={"APP_SETTING": "fixture"},
+                updated_at="2026-10-19T00:00:00Z",
+            )
+        )
+        self.github.add_run(20, DEPLOYABLE)
+        return triggered
+
+    def rolled_back_application_runtime(self) -> ApplicationRuntimeObservation:
+        return replace(
+            self.application_runtime(),
+            rollout_state="rollback_completed",
+            service_image=f"{IMAGE_REPOSITORY}:sha-{OLDER}",
+            service_deployment_record_id="old-deployment",
+            running_container_images=(),
+            running_container_deployment_record_ids=(),
+            running_container_health=(),
+            pending_task_count=1,
+        )
+
+    def test_provider_job_success_after_swarm_rollback_never_credits_testing(self) -> None:
+        triggered = self.prepare_application_runtime_test()
+        self.request()
+        with patch.object(
+            self.application_inputs_provider,
+            "observe_testing_application_runtime",
+            side_effect=lambda **_: self.rolled_back_application_runtime(),
+        ):
+            first = self.run_once()
+            self.request()
+            repeated = self.run_once()
+        self.assertEqual(first.last_plan["deploy_status"], "fail")
+        self.assertEqual(repeated.last_plan["deploy_operation_status"], "replayed")
+        self.assertEqual(len(triggered), 1)
+        records = self.store.list_deployment_records(context_name="cm", instance_name="testing")
+        self.assertTrue(records)
+        self.assertTrue(
+            all(
+                record.deploy.status == "fail" and record.runtime_identity is None
+                for record in records
+            )
+        )
+        with self.assertRaises(FileNotFoundError):
+            self.store.read_environment_inventory(context_name="cm", instance_name="testing")
+
+    def test_actual_runtime_drift_repairs_once_without_inventory_rewrite(self) -> None:
+        triggered = self.prepare_application_runtime_test()
+        self.request()
+        initial = self.reconcile()
+        old_inventory = self.store.read_environment_inventory(
+            context_name="cm", instance_name="testing"
+        )
+
+        def runtime(**_kwargs: object) -> ApplicationRuntimeObservation:
+            return (
+                self.rolled_back_application_runtime()
+                if len(triggered) == 1
+                else self.application_runtime()
+            )
+
+        with patch.object(
+            self.application_inputs_provider,
+            "observe_testing_application_runtime",
+            side_effect=runtime,
+        ):
+            self.request()
+            repaired = self.reconcile()
+            self.request()
+            repeated = self.reconcile()
+        self.assertEqual(repaired["reason"], "testing_runtime_drift")
+        self.assertIn("testing_runtime_drift_sha256", repaired)
+        self.assertNotEqual(initial["deploy_idempotency_key"], repaired["deploy_idempotency_key"])
+        self.assertNotEqual(old_inventory.deployment_record_id, repaired["deployment_record_id"])
+        self.assertEqual(repeated["reason"], "already_deployed")
+        self.assertEqual(len(triggered), 2)
+
+    def test_pending_runtime_before_skip_waits_without_new_deployment(self) -> None:
+        triggered = self.prepare_application_runtime_test()
+        self.request()
+        self.reconcile()
+        runtime = replace(self.application_runtime(), rollout_state="updating")
+        with patch.object(
+            self.application_inputs_provider,
+            "observe_testing_application_runtime",
+            return_value=runtime,
+        ):
+            self.request()
+            pending = self.run_once()
+        self.assertEqual(pending.last_plan["reason"], "testing_runtime_unverified")
+        self.assertEqual(len(triggered), 1)
+
+    def test_interrupted_job_success_cannot_resurrect_rolled_back_runtime(self) -> None:
+        from control_plane.provider_operations import ProviderMutationUnknownError
+
+        triggered = self.prepare_application_runtime_test()
+        self.request()
+        with patch(
+            "control_plane.dokploy.api.wait_for_target_deployment",
+            side_effect=ProviderMutationUnknownError("lost reply"),
+        ):
+            interrupted = self.run_once()
+        self.assertEqual(interrupted.state, "failed")
+        self.assertTrue(self.store.list_held_provider_target_reservations())
+        with patch.object(
+            self.application_inputs_provider,
+            "observe_testing_application_runtime",
+            side_effect=lambda **_: self.rolled_back_application_runtime(),
+        ):
+            self.request()
+            recovered = self.run_once()
+        self.assertEqual(recovered.last_plan["deploy_status"], "fail")
+        self.assertEqual(len(triggered), 1)
+        with self.assertRaises(FileNotFoundError):
+            self.store.read_environment_inventory(context_name="cm", instance_name="testing")
 
     def test_same_image_missing_managed_inputs_is_repaired_once_and_rotation_converges(
         self,

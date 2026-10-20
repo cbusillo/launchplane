@@ -536,6 +536,60 @@ def reconcile_testing_target(
                 or deployed.runtime_source.get(DELIVERY_RECEIPT_KEY) != delivery_digest
             ):
                 plan.update(action="deploy", reason="testing_runtime_inputs_missing")
+            elif control_plane_root is not None:
+                from control_plane.dokploy.application_runtime import (
+                    application_runtime_drift_fingerprint,
+                    application_runtime_matches,
+                )
+                from control_plane.workflows.generic_web_deploy_provider import (
+                    GenericWebTestingApplicationRuntimeProvider,
+                )
+
+                provider = (
+                    default_generic_web_deploy_provider(
+                        record_store=record_store, control_plane_root=control_plane_root
+                    )
+                    if testing_hooks.generic_web_deploy_provider is None
+                    else testing_hooks.generic_web_deploy_provider()
+                )
+                if isinstance(provider, GenericWebTestingApplicationRuntimeProvider):
+                    try:
+                        binding = cast(
+                            _TestingLaneAuthorityStore, record_store
+                        ).read_dokploy_target_id_record(
+                            context_name=lane.context, instance_name=lane.instance
+                        )
+                        runtime = provider.observe_testing_application_runtime(
+                            control_plane_root=control_plane_root,
+                            target_id=binding.target_id,
+                        )
+                        provider_reference = f"{desired.manifest.image.repository}:sha-{desired.manifest.source_commit}"
+                        matches = application_runtime_matches(
+                            runtime,
+                            artifact_reference=desired.image_reference,
+                            provider_reference=provider_reference,
+                            deployment_record_id=deployed.record_id,
+                        )
+                        drift = application_runtime_drift_fingerprint(
+                            runtime,
+                            artifact_reference=desired.image_reference,
+                            provider_reference=provider_reference,
+                            deployment_record_id=deployed.record_id,
+                        )
+                    except (ValueError, RuntimeError, FileNotFoundError, click.ClickException):
+                        matches, drift = False, ""
+                    if not matches:
+                        if not drift:
+                            plan.update(action="wait", reason="testing_runtime_unverified")
+                            return ReconcileOutcome(plan, deferred=True)
+                        plan.update(
+                            action="deploy",
+                            reason="testing_runtime_drift",
+                            testing_runtime_drift_sha256=drift,
+                        )
+                else:
+                    plan.update(action="wait", reason="testing_runtime_unverified")
+                    return ReconcileOutcome(plan, deferred=True)
     if (
         isinstance(desired, VerifiedGenericWebBuild)
         and declares_verireel_testing_extension(profile, instance=TESTING_INSTANCE)
@@ -825,6 +879,11 @@ def _deploy_generic_web_testing(
             f"{RECONCILE_SOURCE}:{profile.product}:{lane.context}:{TESTING_INSTANCE}:"
             f"{desired.manifest.image.digest}:authority-{authority}:from-{starting_point}"
             + (f":inputs-{delivery_digest}" if delivery_digest else "")
+            + (
+                f":runtime-{plan['testing_runtime_drift_sha256']}"
+                if plan.get("testing_runtime_drift_sha256")
+                else ""
+            )
         )
         plan["deploy_idempotency_key"] = idempotency_key
         request_fingerprint = _fingerprint(envelope.model_dump(mode="json"))

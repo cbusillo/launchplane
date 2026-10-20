@@ -162,7 +162,24 @@ remains fenced.
 A successful deployment retains a keyed, value-free receipt for those captured
 inputs. Missing legacy evidence or changed site inputs makes the same verified
 image eligible for one normal testing deployment; an unchanged receipt settles
-without another deployment. Staff/staging holds and unresolved operations still
+without another deployment only when the actual application runtime also agrees.
+Dokploy job completion and saved environment readback do not prove Swarm rollout:
+the service may still be updating or may have rolled back. Application testing
+completion waits within its deployment timeout for completed rollout, the desired
+running replicas, and independently inspected image digests and deployment identities.
+Container health, when configured, must also pass; private health and authenticated
+WSS retain their separate qualification. The reader binds the exact application
+and recorded server to its service, tasks and inspected containers, retaining no
+environment values. A terminal rollback or paused rollout is reported as failure
+only when its start belongs to the exact provider job; ambiguous or pending effects
+retain the original operation's recovery fence. Recovery uses the same runtime
+qualification before crediting a provider job, without enabling production adoption.
+
+An ordinary sweep also checks runtime before skipping a matching saved receipt.
+Proved stable drift in service image or deployment identity permits one normal
+same-artifact repair under a deterministic service-state identity. Changing task
+IDs, timestamps or replica churn never mint another repair. Unavailable or pending
+observations wait instead. Staff/staging holds and unresolved operations still
 prevent dispatch. Recovery preserves only the original readback-verified receipt
 and never credits current inputs to an earlier attempt. An old operation without
 that receipt can settle, then the next normal sweep repairs its inputs. Removing

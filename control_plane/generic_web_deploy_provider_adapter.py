@@ -63,6 +63,7 @@ from control_plane.workflows.generic_web_deploy_provider import (
     default_generic_web_deploy_provider,
     evaluate_generic_web_runtime_close_out,
     generic_web_provider_deployment_succeeded,
+    qualify_testing_application_observation,
     resolve_generic_web_provider_reconciliation_target,
 )
 from control_plane.workflows.generic_web_post_deploy import (
@@ -469,6 +470,19 @@ class GenericWebDeployProviderMutationAdapter:
                 observation=GenericWebProviderDeploymentObservation(outcome="unknown"),
                 provider_evidence="provider_read_failed",
                 provider_read_error_class="target_resolution_failed",
+            )
+        observation = qualify_testing_application_observation(
+            provider=self._deploy_provider,
+            control_plane_root=self._control_plane_root,
+            target=resolved_target,
+            observation=observation,
+            deployment_record_id=self._deployment_record_id(provider_operation_key),
+        )
+        if observation.outcome == "unknown":
+            return _GenericWebDeployProviderInspection(
+                observation=observation,
+                resolved_deploy_target=resolved_target,
+                provider_evidence="provider_status_unknown",
             )
         post_deploy_unobserved = generic_web_provider_deployment_succeeded(
             observation.deployment_status

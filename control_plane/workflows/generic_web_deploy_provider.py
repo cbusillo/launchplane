@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import hashlib
 from pathlib import Path
 import re
+from time import monotonic, sleep
 from typing import Literal, Protocol, cast, runtime_checkable
 
 import click
@@ -46,6 +47,11 @@ from control_plane.workflows.dokploy_deploy import (
 from control_plane.dokploy import api as dokploy_api
 from control_plane.dokploy import runtime_evidence as dokploy_runtime_evidence
 from control_plane.dokploy import source as dokploy_source
+from control_plane.dokploy.application_runtime import (
+    ApplicationRuntimeObservation,
+    application_runtime_matches,
+    fetch_application_runtime,
+)
 
 
 from control_plane.contracts.generic_web_cutover import GenericWebCutoverPlan
@@ -609,6 +615,81 @@ class GenericWebDeployRuntimeArtifactProvider(Protocol):
 
 
 @runtime_checkable
+class GenericWebTestingApplicationRuntimeProvider(Protocol):
+    def observe_testing_application_runtime(
+        self,
+        *,
+        control_plane_root: Path,
+        target_id: str,
+    ) -> ApplicationRuntimeObservation: ...
+
+
+def qualify_testing_application_observation(
+    *,
+    provider: GenericWebDeployProvider,
+    control_plane_root: Path,
+    target: GenericWebResolvedDeployTarget,
+    observation: GenericWebProviderDeploymentObservation,
+    deployment_record_id: str,
+    wait: bool = False,
+) -> GenericWebProviderDeploymentObservation:
+    """A provider job is insufficient proof of application testing convergence."""
+    if (
+        target.ship_request.instance != "testing"
+        or target.resolved_target.target_type != "application"
+        or not target.testing_runtime_digest
+        or observation.outcome != "present"
+        or not generic_web_provider_deployment_succeeded(observation.deployment_status)
+    ):
+        return observation
+    if not isinstance(provider, GenericWebTestingApplicationRuntimeProvider):
+        return GenericWebProviderDeploymentObservation(outcome="unknown")
+    deadline = monotonic() + (target.deploy_timeout_seconds if wait else 0)
+    while True:
+        try:
+            runtime = provider.observe_testing_application_runtime(
+                control_plane_root=control_plane_root,
+                target_id=target.resolved_target.target_id,
+            )
+            if application_runtime_matches(
+                runtime,
+                artifact_reference=target.ship_request.artifact_id,
+                provider_reference=dokploy_deploy_artifact_reference(
+                    ship_request=target.ship_request,
+                    target_type="application",
+                ),
+                deployment_record_id=deployment_record_id,
+            ):
+                return observation
+            if runtime.rollout_state in {"paused", "rollback_paused", "rollback_completed"}:
+                started = parse_launchplane_mutation_timestamp(
+                    observation.started_at, field_name="started_at"
+                )
+                finished = parse_launchplane_mutation_timestamp(
+                    observation.finished_at, field_name="finished_at"
+                )
+                rollout_started = parse_launchplane_mutation_timestamp(
+                    runtime.rollout_started_at, field_name="started_at"
+                )
+                if started <= rollout_started <= finished:
+                    return observation.model_copy(
+                        update={
+                            "deployment_status": "unhealthy",
+                            "error_message": (
+                                "Application testing rollout failed or rolled back; "
+                                f"provider job status={observation.deployment_status}."
+                            ),
+                        }
+                    )
+        except (ValueError, RuntimeError, click.ClickException):
+            return GenericWebProviderDeploymentObservation(outcome="unknown")
+        remaining = deadline - monotonic()
+        if not wait or remaining <= 0:
+            return GenericWebProviderDeploymentObservation(outcome="unknown")
+        sleep(min(1.0, remaining))
+
+
+@runtime_checkable
 class GenericWebDeployNoLiveEffectProvider(Protocol):
     def observe_testing_no_live_effect(
         self,
@@ -644,6 +725,15 @@ class DokployGenericWebDeployProvider:
 
     provider_id = "dokploy"
     delegated_executor = "control-plane.dokploy"
+
+    def observe_testing_application_runtime(
+        self,
+        *,
+        control_plane_root: Path,
+        target_id: str,
+    ) -> ApplicationRuntimeObservation:
+        host, token = self._read_provider_config(control_plane_root=control_plane_root)
+        return fetch_application_runtime(host=host, token=token, application_id=target_id)
 
     def application_lifecycle(
         self,

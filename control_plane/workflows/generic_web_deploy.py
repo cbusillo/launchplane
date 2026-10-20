@@ -59,6 +59,7 @@ from control_plane.workflows.generic_web_deploy_provider import GenericWebResolv
 from control_plane.workflows.generic_web_deploy_provider import default_generic_web_deploy_provider
 from control_plane.workflows.generic_web_deploy_provider import (
     generic_web_provider_deployment_succeeded,
+    qualify_testing_application_observation,
 )
 from control_plane.workflows.inventory import build_environment_inventory
 from control_plane.workflows.generic_web_application_snapshot import (
@@ -999,6 +1000,32 @@ def _execute_generic_web_deploy_unserialized(
                 raise click.ClickException(
                     "Generic web provider deployment did not return exact successful evidence."
                 )
+        if (
+            resolved_lane.instance == "testing"
+            and prepared_deploy_target.resolved_target.target_type == "application"
+            and prepared_deploy_target.testing_runtime_digest
+        ):
+            qualified_observation = qualify_testing_application_observation(
+                provider=resolved_deploy_provider,
+                control_plane_root=control_plane_root,
+                target=prepared_deploy_target,
+                observation=provider_deployment_observation
+                or GenericWebProviderDeploymentObservation(
+                    outcome="present",
+                    deployment_status="success",
+                    deployment_id="control-plane-dokploy",
+                    started_at=started_at,
+                    finished_at=utc_now_timestamp(),
+                ),
+                deployment_record_id=record_id,
+                wait=True,
+            )
+            if qualified_observation.outcome != "present":
+                raise click.ClickException("Application testing runtime rollout is not qualified.")
+            if not generic_web_provider_deployment_succeeded(
+                qualified_observation.deployment_status
+            ):
+                raise GenericWebProviderDeploymentFailed(qualified_observation)
         deploy_completed = True
         key_readback = integration_key_readback(
             record_store=record_store,
