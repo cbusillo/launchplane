@@ -67,8 +67,6 @@ not describe runtime authority until it is implemented, deployed, and activated.
 - [post-v2-audit.md](post-v2-audit.md) — post-v2 product, security,
   persistence, contract, test, and modularity audit baseline and execution
   graph.
-- [work-graph-read-model.md](work-graph-read-model.md) — record-backed work graph,
-  ranking, and the removed Project/inbox source boundary.
 - [discussion-topics.md](discussion-topics.md) — product-scoped neutral topics,
   supported add/close API, and separate page/reminder delivery slices.
 - [merge-train-policy.md](merge-train-policy.md) — repository/base-branch merge

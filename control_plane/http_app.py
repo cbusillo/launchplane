@@ -243,7 +243,6 @@ from control_plane.http_routes import (
     GovernanceProjectionRouteDependencies,
     ProductReadRouteDependencies,
     ReadRouteDependencies,
-    WorkGraphReadRouteDependencies,
     accepted_evidence_response,
     build_generic_web_write_route_handlers,
     idempotency_capable_store,
@@ -298,8 +297,6 @@ from control_plane.http_routes import (
     register_tenant_admission_write_routes,
     register_topology_read_routes,
     register_tracked_target_log_read_routes,
-    register_work_graph_issue_inbox_read_routes,
-    register_work_graph_snapshot_read_routes,
     replay_idempotent_response,
     request_fingerprint as build_request_fingerprint,
     require_product_profile_read_store,
@@ -720,9 +717,6 @@ from control_plane.workflows.odoo_prod_backup_restore import (
 from control_plane.workflows.odoo_preview_runtime import (
     OdooPreviewApplyInputsResult,
 )
-from control_plane.contracts.product_environment_read_model import (
-    ActionAllowed,
-)
 from control_plane.contracts.product_onboarding_manifest import ProductOnboardingManifest
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
@@ -1016,20 +1010,6 @@ from control_plane.workflows.launchplane import (
     github_api_request,
     resolve_launchplane_github_token,
     launchplane_github_token,
-)
-from control_plane.work_graph_issue_inbox import (
-    GitHubIssueInboxReconcileRequest,
-)
-from control_plane.work_graph_service import (
-    WorkGraphIssueInboxProvider,
-    WorkGraphIssueInboxReconcileProvider,
-    WorkGraphIssueInboxReconcileResponse,
-    WorkGraphIssueInboxReconcileResponseResult,
-    WorkGraphPlanningFactsProvider,
-    WorkGraphRankEnvelope,
-    WorkGraphRankResponse,
-    WorkGraphRankResult,
-    build_work_graph_rank_result,
 )
 
 TrustedMaintenanceGitHubWebhookHandler = Callable[
@@ -4374,9 +4354,6 @@ def create_launchplane_fastapi_app(
     oauth_login_state_store: OAuthLoginStateRepository | None = None,
     control_plane_root_path: FilePath | None = None,
     state_dir: FilePath | None = None,
-    work_graph_planning_facts_provider: WorkGraphPlanningFactsProvider | None = None,
-    work_graph_issue_inbox_provider: WorkGraphIssueInboxProvider | None = None,
-    work_graph_issue_inbox_reconcile_provider: WorkGraphIssueInboxReconcileProvider | None = None,
     repository_evidence_provider: (RepositoryEvidenceProvider | None) = None,
     every_code_discord_sender: Callable[[str, dict[str, object]], object] = post_discord_webhook,
     preview_pr_feedback_discord_sender: Callable[
@@ -5343,36 +5320,6 @@ def create_launchplane_fastapi_app(
             reject_browser_mutation()
         return session.identity
 
-    def read_work_graph_rank_identity(
-        request: Request,
-        response: Response,
-        authorization: Annotated[str, Header(alias="Authorization")] = "",
-        cookie: Annotated[str, Header(alias="Cookie")] = "",
-    ) -> LaunchplaneIdentity:
-        return read_identity(
-            request=request, response=response, authorization=authorization, cookie=cookie
-        )
-
-    def read_browser_work_graph_rank_identity(
-        request: Request,
-        response: Response,
-        authorization: Annotated[str, Header(alias="Authorization")] = "",
-        cookie: Annotated[str, Header(alias="Cookie")] = "",
-    ) -> LaunchplaneIdentity:
-        identity = read_work_graph_rank_identity(
-            request=request,
-            response=response,
-            authorization=authorization,
-            cookie=cookie,
-        )
-        if not isinstance(identity, GitHubHumanIdentity):
-            return identity
-        session: object = getattr(request.state, "launchplane_human_session", None)
-        if not isinstance(session, LaunchplaneHumanSession):
-            reject_browser_mutation()
-        consume_browser_mutation_request(request=request, session=session)
-        return identity
-
     def every_code_worker_token_authorized(authorization: str) -> bool:
         if bearer_identity_config is None:
             return False
@@ -5699,7 +5646,6 @@ def create_launchplane_fastapi_app(
     product_read_route_dependencies = ProductReadRouteDependencies(
         common=read_route_dependencies,
         read_product_profile_list_identity=read_product_profile_list_identity,
-        work_graph_planning_facts_provider=work_graph_planning_facts_provider,
         workflow_credentials_ready=lambda context, repository: delivery_github_credentials_ready(
             control_plane_root=resolved_control_plane_root,
             repository=repository,
@@ -5717,34 +5663,6 @@ def create_launchplane_fastapi_app(
         common=read_route_dependencies,
         control_plane_root=resolved_control_plane_root,
         database_url=database_url,
-    )
-
-    def work_graph_product_action_allowed(*, identity: LaunchplaneIdentity) -> ActionAllowed:
-        def action_allowed(
-            requested_action: str,
-            requested_product: str,
-            requested_context: str,
-            requested_instances: tuple[str, ...],
-        ) -> bool:
-            return resolved_authz_policy_runtime.allows(
-                identity=identity,
-                action=requested_action,
-                product=requested_product,
-                context=requested_context,
-                target=(
-                    AuthorizationTarget(scope="instance", instances=requested_instances)
-                    if requested_instances
-                    else AuthorizationTarget(scope="context")
-                ),
-            )
-
-        return action_allowed
-
-    work_graph_read_route_dependencies = WorkGraphReadRouteDependencies(
-        common=read_route_dependencies,
-        action_allowed_for_identity=work_graph_product_action_allowed,
-        planning_facts_provider=work_graph_planning_facts_provider,
-        issue_inbox_provider=work_graph_issue_inbox_provider,
     )
 
     def require_launchplane_service_read_authorization(
@@ -6191,40 +6109,6 @@ def create_launchplane_fastapi_app(
             ),
         )
 
-    def require_work_graph_rank_authorization(
-        *, identity: LaunchplaneIdentity, trace_id: str, message: str
-    ) -> None:
-        if resolved_authz_policy_runtime.allows(
-            identity=identity,
-            action="work_graph.rank",
-            product="launchplane",
-            context=_LAUNCHPLANE_SERVICE_CONTEXT,
-        ):
-            return
-        raise _launchplane_http_error(
-            status_code=403,
-            trace_id=trace_id,
-            code="authorization_denied",
-            message=message,
-        )
-
-    def require_work_graph_issue_inbox_reconcile_authorization(
-        *, identity: LaunchplaneIdentity, trace_id: str, action: str
-    ) -> None:
-        if resolved_authz_policy_runtime.allows(
-            identity=identity,
-            action=action,
-            product="launchplane",
-            context=_LAUNCHPLANE_SERVICE_CONTEXT,
-        ):
-            return
-        raise _launchplane_http_error(
-            status_code=403,
-            trace_id=trace_id,
-            code="authorization_denied",
-            message="Workflow cannot reconcile the Launchplane GitHub issue inbox.",
-        )
-
     def require_every_code_read_methods(
         record_store: object,
         *,
@@ -6524,61 +6408,6 @@ def create_launchplane_fastapi_app(
             capability="Every Code preview gate writes",
         )
         return cast(_EveryCodePreviewGateWriteStore, record_store)
-
-    def rank_work_graph_snapshot(
-        payload: WorkGraphRankEnvelope,
-        identity: Annotated[
-            LaunchplaneIdentity,
-            Depends(read_browser_work_graph_rank_identity),
-        ],
-    ) -> WorkGraphRankResponse:
-        trace_id = next_trace_id()
-        require_work_graph_rank_authorization(
-            identity=identity,
-            trace_id=trace_id,
-            message="Workflow cannot rank the Launchplane work graph.",
-        )
-        _summary, driver_result = build_work_graph_rank_result(payload)
-        return WorkGraphRankResponse(
-            trace_id=trace_id,
-            records={},
-            result=WorkGraphRankResult.model_validate(driver_result),
-        )
-
-    def reconcile_work_graph_issue_inbox(
-        payload: GitHubIssueInboxReconcileRequest,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
-    ) -> WorkGraphIssueInboxReconcileResponse:
-        trace_id = next_trace_id()
-        required_action = (
-            "work_graph.rank" if payload.mode == "dry_run" else "work_graph.issue_inbox.reconcile"
-        )
-        require_work_graph_issue_inbox_reconcile_authorization(
-            identity=identity,
-            trace_id=trace_id,
-            action=required_action,
-        )
-        if work_graph_issue_inbox_reconcile_provider is None:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_request",
-                message="GitHub issue inbox reconciliation is not configured.",
-            )
-        try:
-            reconcile_result = work_graph_issue_inbox_reconcile_provider(payload)
-        except ValueError as error:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_request",
-                message=str(error) or "Request could not be completed.",
-            ) from error
-        return WorkGraphIssueInboxReconcileResponse(
-            trace_id=trace_id,
-            records={},
-            result=WorkGraphIssueInboxReconcileResponseResult(reconcile=reconcile_result),
-        )
 
     def merge_train_policy_not_configured_error(
         *, trace_id: str, error: MergeTrainPolicyStoreMissingError
@@ -29422,30 +29251,7 @@ def create_launchplane_fastapi_app(
         app,
         dependencies=product_read_route_dependencies,
     )
-    register_work_graph_snapshot_read_routes(
-        app,
-        dependencies=work_graph_read_route_dependencies,
-    )
 
-    app.add_api_route(
-        "/v1/work-graph/rank",
-        rank_work_graph_snapshot,
-        methods=["POST"],
-        status_code=202,
-        response_model=WorkGraphRankResponse,
-        operation_id="rank_work_graph_snapshot",
-        summary="Rank Launchplane work graph snapshot",
-        responses={
-            400: {"model": LaunchplaneErrorResponse},
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-        },
-    )
-
-    register_work_graph_issue_inbox_read_routes(
-        app,
-        dependencies=work_graph_read_route_dependencies,
-    )
     register_tenant_admission_read_routes(
         app,
         dependencies=TenantAdmissionReadRouteDependencies(
@@ -29490,21 +29296,6 @@ def create_launchplane_fastapi_app(
             mutation_identity=read_operator_mutation_identity,
             root=resolved_control_plane_root,
         ),
-    )
-
-    app.add_api_route(
-        "/v1/work-graph/github/issues/reconcile",
-        reconcile_work_graph_issue_inbox,
-        methods=["POST"],
-        status_code=202,
-        response_model=WorkGraphIssueInboxReconcileResponse,
-        operation_id="reconcile_work_graph_issue_inbox",
-        summary="Reconcile Launchplane GitHub issue inbox",
-        responses={
-            400: {"model": LaunchplaneErrorResponse},
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-        },
     )
 
     register_merge_train_read_routes(app, dependencies=read_route_dependencies)

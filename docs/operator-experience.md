@@ -811,10 +811,10 @@ The clean-slate shell uses URL-owned product selection under the service-owned
 - Delivery Governance remains separate from product environment navigation. It
   may show exact-change identity, Client acceptance, independent engineering
   evidence, dependency health, admission, and landing outcomes.
-- Existing `/ui/engineering/work-graph`, `/ui/engineering/issue-inbox`, and
-  `/ui/engineering/every-code` routes belong to designs
-  [DIRECTION.md](../DIRECTION.md) retires (work graphs and Every Code). They
-  receive no investment and are scheduled for deletion.
+- The unused Work graph and Issue inbox routes are removed. Their old links
+  use the existing missing-view page and its Return to Product Ops control.
+- Existing `/ui/engineering/every-code` belongs to the Every Code design that
+  [DIRECTION.md](../DIRECTION.md) retires. It receives no new UI work.
 - Existing `/ui/engineering/merge-train` behavior remains in scope only where
   it presents or executes guarded admission and truthful landing evidence from
   DB-backed policy. It must not infer a planning queue or make forge projections

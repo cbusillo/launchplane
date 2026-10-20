@@ -224,7 +224,6 @@ class MergeTrainDryRunTests(unittest.TestCase):
             result = CliRunner().invoke(
                 CLI_MAIN,
                 [
-                    "work-graph",
                     "merge-train-dry-run",
                     "--snapshot-file",
                     str(snapshot_file),
@@ -691,7 +690,6 @@ class MergeTrainDryRunTests(unittest.TestCase):
             result = CliRunner().invoke(
                 CLI_MAIN,
                 [
-                    "work-graph",
                     "merge-train-dry-run",
                     "--snapshot-file",
                     str(snapshot_file),
@@ -718,11 +716,11 @@ class MergeTrainDryRunTests(unittest.TestCase):
         with (
             TemporaryDirectory() as temp_dir,
             patch(
-                "control_plane.cli_work_graph.UrllibMergeTrainGitHubTransport",
+                "control_plane.cli_merge_train.UrllibMergeTrainGitHubTransport",
                 return_value=object(),
             ) as transport_class,
             patch(
-                "control_plane.cli_work_graph.GitHubMergeTrainSnapshotReader",
+                "control_plane.cli_merge_train.GitHubMergeTrainSnapshotReader",
                 return_value=snapshot_reader,
             ) as reader_class,
             patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
@@ -731,7 +729,6 @@ class MergeTrainDryRunTests(unittest.TestCase):
             result = CliRunner().invoke(
                 CLI_MAIN,
                 [
-                    "work-graph",
                     "merge-train-run-once",
                     "--policy-file",
                     str(policy_file),
@@ -793,21 +790,20 @@ class MergeTrainDryRunTests(unittest.TestCase):
         with (
             TemporaryDirectory() as temp_dir,
             patch(
-                "control_plane.cli_work_graph.UrllibMergeTrainGitHubTransport",
+                "control_plane.cli_merge_train.UrllibMergeTrainGitHubTransport",
                 return_value=object(),
             ),
             patch(
-                "control_plane.cli_work_graph.GitHubMergeTrainSnapshotReader",
+                "control_plane.cli_merge_train.GitHubMergeTrainSnapshotReader",
                 return_value=snapshot_reader,
             ),
-            patch("control_plane.cli_work_graph.GitHubMergeTrainClient", _FakeGitHubClient),
+            patch("control_plane.cli_merge_train.GitHubMergeTrainClient", _FakeGitHubClient),
             patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
         ):
             policy_file = _write_policy_file(Path(temp_dir))
             result = CliRunner().invoke(
                 CLI_MAIN,
                 [
-                    "work-graph",
                     "merge-train-run-once",
                     "--policy-file",
                     str(policy_file),
@@ -833,7 +829,6 @@ class MergeTrainDryRunTests(unittest.TestCase):
             result = CliRunner().invoke(
                 CLI_MAIN,
                 [
-                    "work-graph",
                     "merge-train-run-once",
                     "--policy-file",
                     str(policy_file),
@@ -858,11 +853,11 @@ class MergeTrainDryRunTests(unittest.TestCase):
         with (
             TemporaryDirectory() as temp_dir,
             patch(
-                "control_plane.cli_work_graph.UrllibMergeTrainGitHubTransport",
+                "control_plane.cli_merge_train.UrllibMergeTrainGitHubTransport",
                 return_value=object(),
             ),
             patch(
-                "control_plane.cli_work_graph.GitHubMergeTrainSnapshotReader",
+                "control_plane.cli_merge_train.GitHubMergeTrainSnapshotReader",
                 return_value=snapshot_reader,
             ),
             patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
@@ -870,7 +865,7 @@ class MergeTrainDryRunTests(unittest.TestCase):
             policy_file = _write_policy_file(Path(temp_dir))
             result = CliRunner().invoke(
                 CLI_MAIN,
-                ["work-graph", "merge-train-run-once", "--policy-file", str(policy_file)],
+                ["merge-train-run-once", "--policy-file", str(policy_file)],
             )
 
         self.assertNotEqual(result.exit_code, 0)

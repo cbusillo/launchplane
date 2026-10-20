@@ -27,7 +27,6 @@ import type {
   EnqueueOdooProdPromotionData,
   EnqueueOdooProdRollbackData,
   EnqueueProductionBackupGateData,
-  RankWorkGraphSnapshotData,
   RevokeHumanPrivilegedOperationData,
   PrepareAuthorizationCandidateData,
   WriteProductReviewDecisionData,
@@ -80,8 +79,6 @@ export const BROWSER_WRITE_ROUTES = {
     "/v1/odoo-prod-promotions" satisfies EnqueueOdooProdPromotionData["url"],
   odooProdRollbackEnqueue:
     "/v1/odoo-prod-rollbacks" satisfies EnqueueOdooProdRollbackData["url"],
-  workGraphRank:
-    "/v1/work-graph/rank" satisfies RankWorkGraphSnapshotData["url"],
   productReviewDecision:
     "/v1/product-review/decisions" satisfies WriteProductReviewDecisionData["url"],
   productReviewFeedbackRetry:

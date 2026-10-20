@@ -147,7 +147,7 @@ jobs:
             echo "Missing runner administration GitHub token secret." >&2
             exit 1
           fi
-          GITHUB_TOKEN="$GH_TOKEN" uv run launchplane work-graph \
+          GITHUB_TOKEN="$GH_TOKEN" uv run launchplane \
             runner-inventory \
             --repository "$TARGET_REPOSITORY" \
             > runner-lane-lifecycle-pre-inventory.json
@@ -197,7 +197,7 @@ jobs:
           fi
           GITHUB_TOKEN="$GH_TOKEN" flock -n \
             /tmp/launchplane-runner-host-hygiene.lock \
-            uv run launchplane work-graph \
+            uv run launchplane \
             runner-lane-registration-executor \
             --repository "$TARGET_REPOSITORY" \
             --host-name "$RUNNER_REGISTRATION_HOST" \
@@ -254,7 +254,7 @@ jobs:
           fi
           GITHUB_TOKEN="$GH_TOKEN" flock -n \
             /tmp/launchplane-runner-host-hygiene.lock \
-            uv run launchplane work-graph \
+            uv run launchplane \
             runner-lane-retirement-executor \
             --repository "$TARGET_REPOSITORY" \
             --host-name "$RUNNER_REGISTRATION_HOST" \

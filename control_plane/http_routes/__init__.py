@@ -120,11 +120,6 @@ from control_plane.http_routes.tenant_admission import (
     register_tenant_admission_write_routes,
 )
 from control_plane.http_routes.topology import register_topology_read_routes
-from control_plane.http_routes.work_graph import (
-    WorkGraphReadRouteDependencies,
-    register_work_graph_issue_inbox_read_routes,
-    register_work_graph_snapshot_read_routes,
-)
 
 __all__ = (
     "AcceptedEvidenceResponse",
@@ -157,7 +152,6 @@ __all__ = (
     "ProductionBackupAuthorityWriteRouteDependencies",
     "TenantAdmissionReadRouteDependencies",
     "TenantAdmissionWriteRouteDependencies",
-    "WorkGraphReadRouteDependencies",
     "accepted_evidence_response",
     "build_generic_web_write_route_handlers",
     "idempotency_capable_store",
@@ -209,8 +203,6 @@ __all__ = (
     "TENANT_REPOSITORY_CLASSIFICATION_APPLY_ROUTE",
     "register_topology_read_routes",
     "register_tracked_target_log_read_routes",
-    "register_work_graph_issue_inbox_read_routes",
-    "register_work_graph_snapshot_read_routes",
     "replay_idempotent_response",
     "request_fingerprint",
     "require_product_profile_read_store",

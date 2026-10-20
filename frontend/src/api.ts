@@ -71,8 +71,6 @@ import type {
   ReadHumanPrivilegedOperationResponse,
   ReadHumanPrivilegedOperationReviewData,
   ReadHumanPrivilegedOperationReviewResponse,
-  RankWorkGraphSnapshotData,
-  RankWorkGraphSnapshotResponse,
   ReadProductOperationalReadinessData,
   ReadProductProfileData,
   ReadProductProfileResponse,
@@ -82,9 +80,6 @@ import type {
   RevokeHumanPrivilegedOperationData,
   RevokeHumanPrivilegedOperationResponse,
   TenantAdmissionEvaluationReadResponse,
-  WorkGraphIssueInboxResponse,
-  WorkGraphSnapshot,
-  WorkGraphSnapshotResponse,
   ProductReviewResponse,
   OwnerSecretInputResponse,
   SubmitOwnerSecretInputData,
@@ -482,17 +477,6 @@ export function readEveryCodeSummary(
   );
 }
 
-export function readWorkGraphSnapshot(
-  signal?: AbortSignal,
-): Promise<WorkGraphSnapshotResponse> {
-  return requestJson<WorkGraphSnapshotResponse>(
-    "/v1/work-graph/snapshot",
-    "GET",
-    undefined,
-    signal,
-  );
-}
-
 export function readTenantAdmissionEvaluation(
   request: Pick<ReadTenantAdmissionEvaluationData, "query">,
   signal?: AbortSignal,
@@ -510,32 +494,6 @@ export function readTenantAdmissionEvaluation(
   });
   return requestJson<TenantAdmissionEvaluationReadResponse>(
     `/v1/work-graph/tenant-admission/evaluation?${params.toString()}`,
-    "GET",
-    undefined,
-    signal,
-  );
-}
-
-export function rankWorkGraphSnapshot(
-  snapshot: WorkGraphSnapshot,
-  limit = 12,
-  signal?: AbortSignal,
-): Promise<RankWorkGraphSnapshotResponse> {
-  const request: RankWorkGraphSnapshotData = {
-    url: BROWSER_WRITE_ROUTES.workGraphRank,
-    body: {
-      snapshot,
-      limit,
-    },
-  };
-  return requestGeneratedPost<RankWorkGraphSnapshotResponse>(request, signal);
-}
-
-export function readGitHubIssueInbox(
-  signal?: AbortSignal,
-): Promise<WorkGraphIssueInboxResponse> {
-  return requestJson<WorkGraphIssueInboxResponse>(
-    "/v1/work-graph/github/issues",
     "GET",
     undefined,
     signal,

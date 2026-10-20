@@ -1531,7 +1531,7 @@ uv run launchplane merge-train-policies list \
 The contract is available to dry-run tooling with:
 
 ```sh
-uv run launchplane work-graph merge-train-policy \
+uv run launchplane merge-train-policy \
   --policy-file path/to/merge-train-policy.toml \
   --repository cbusillo/codex-skills \
   --base-branch main
@@ -1540,7 +1540,7 @@ uv run launchplane work-graph merge-train-policy \
 Admins can validate an external TOML before importing it as a policy record:
 
 ```sh
-uv run launchplane work-graph merge-train-policy \
+uv run launchplane merge-train-policy \
   --policy-file path/to/merge-train-policy.toml
 ```
 
@@ -1552,7 +1552,7 @@ The ordered queue dry-run accepts a JSON snapshot of candidate pull requests and
 reports queue order plus the next intended action without mutating GitHub:
 
 ```sh
-uv run launchplane work-graph merge-train-dry-run \
+uv run launchplane merge-train-dry-run \
   --snapshot-file path/to/merge-train-snapshot.json \
   --policy-file path/to/merge-train-policy.toml
 ```
@@ -1562,7 +1562,7 @@ repository/base branch and reports the same worker-step intent without mutating
 by default:
 
 ```sh
-GH_TOKEN=... uv run launchplane work-graph merge-train-run-once \
+GH_TOKEN=... uv run launchplane merge-train-run-once \
   --policy-file path/to/merge-train-policy.toml
 ```
 

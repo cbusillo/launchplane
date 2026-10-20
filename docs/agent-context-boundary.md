@@ -78,16 +78,15 @@ GET /v1/agent/context
 It aggregates existing read models into named sections:
 
 - repo-product mapping
-- work graph snapshot and ranked queue
 - Every Code summary
 - preview readiness
 - exact tenant admission evaluation when the caller supplies the complete
   product, context, numeric repository and repository owner IDs, repository, pull-request
   number, head SHA, and base branch
 
-The work-graph and Every Code sections serve retired designs (see
-[DIRECTION.md](../DIRECTION.md#retired)); they remain until their code is
-deleted and are not to be extended.
+The Every Code section serves a retired design (see
+[DIRECTION.md](../DIRECTION.md#retired)); it remains until its code is deleted
+and is not to be extended.
 
 Each section reports `available`, `unauthorized`, or `unavailable`. The endpoint
 writes no records, fetches no issue bodies, and should preserve the underlying
@@ -106,11 +105,16 @@ Agents may call lower-level read models directly when they need a narrower
 surface:
 
 - `GET /v1/repo-product-mapping`
-- `GET /v1/work-graph/snapshot`
-- `POST /v1/work-graph/rank`
 - `GET /v1/every-code/summary`
 - `GET /v1/previews/readiness`
 - `GET /v1/work-graph/tenant-admission/evaluation`
+
+Repository mapping keeps product-profile ownership separate from awareness-only
+work requests. Profiles supply product, driver, stable environments and preview
+context; a work request supplies `active_awareness` only when no active profile
+owns that repository. Awareness alone enables no runtime operation. The unused
+Work graph chooser and Issue inbox are removed. Existing merge-train and
+tenant-admission APIs retain their `/v1/work-graph/` operational paths.
 
 ## Scoped Intents
 
