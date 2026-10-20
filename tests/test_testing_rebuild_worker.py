@@ -356,9 +356,9 @@ class NativeTestingWorkerTests(unittest.TestCase):
         )
 
     def test_capacity_refusal_releases_fresh_reservation_and_preserves_serving_copy(self) -> None:
-        from control_plane.dokploy import native_copy_stream
+        from control_plane.dokploy import native_copy_stream, network_capacity
         from control_plane.dokploy.network_capacity import (
-            BRIDGE_NETWORK_CAPACITY_MARGIN,
+            BridgeNetworkCapacity,
             BridgeNetworkCapacityRefused,
         )
         from control_plane import testing_candidate_allocation as allocation_service
@@ -372,26 +372,18 @@ class NativeTestingWorkerTests(unittest.TestCase):
             self.operation.product, self.operation.context, self.operation.operation_id
         )
         denial = native_copy_stream.NativeSourceAuthorizationDenied("fixture capacity denial")
-        for observation in (0, BRIDGE_NETWORK_CAPACITY_MARGIN, None, denial):
+        for observation in (BridgeNetworkCapacity(total_slots=0, free_slots=0), denial):
             with self.subTest(observation=observation):
-
-                def capacity(**kwargs: Any) -> None:
-                    self.assertEqual(kwargs["server_id"], self.intent.server_id)
-                    if observation is denial:
-                        raise denial
-                    if observation is not None:
-                        kwargs["receive"](
-                            {
-                                "type": "complete",
-                                "result": {"total_slots": 16, "free_slots": observation},
-                            }
-                        )
-
                 with (
                     patch.object(
                         allocation_service, "created_placement", return_value=("", "", "")
                     ),
-                    patch.object(native_copy_stream, "_read_remote", side_effect=capacity),
+                    patch.object(
+                        network_capacity,
+                        "read_bridge_network_capacity",
+                        return_value=observation,
+                        side_effect=denial if observation is denial else None,
+                    ) as read,
                     patch.object(allocation_service, "create_isolated_placement") as create,
                     patch.object(allocation_service, "run_resource_schedule") as storage,
                     self.assertRaises(
@@ -403,6 +395,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
                     self.execute()
                 create.assert_not_called()
                 storage.assert_not_called()
+                self.assertEqual(read.call_args.kwargs["server_id"], self.intent.server_id)
                 self.assertIsNone(self.store.read_testing_candidate(namespace))
                 self.assertFalse(service.native_rebuild_effects_started(self.store, self.operation))
                 self.assertEqual(

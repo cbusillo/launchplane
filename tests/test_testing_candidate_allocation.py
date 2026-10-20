@@ -12,9 +12,10 @@ from control_plane.contracts.testing_candidate import (
     testing_candidate_namespace,
 )
 from control_plane.dokploy import api, source, sandbox_placement
-from control_plane.dokploy import native_copy_stream
+from control_plane.dokploy import native_copy_stream, network_capacity
 from control_plane.dokploy.network_capacity import (
     BRIDGE_NETWORK_CAPACITY_MARGIN,
+    BridgeNetworkCapacity,
     BridgeNetworkCapacityRefused,
 )
 from control_plane.provider_operations import ProviderMutationRejectedError, ProviderOperationLease
@@ -53,7 +54,9 @@ class TestingCandidateTests(unittest.TestCase):
         self.requests: list[str] = []
         self.free_networks = 1 + BRIDGE_NETWORK_CAPACITY_MARGIN
         self.capacity_read = self.enterContext(
-            patch.object(native_copy_stream, "_read_remote", side_effect=self.capacity)
+            patch.object(
+                network_capacity, "read_bridge_network_capacity", side_effect=self.capacity
+            )
         )
         self.enterContext(
             patch.object(
@@ -75,14 +78,10 @@ class TestingCandidateTests(unittest.TestCase):
             patch.object(candidate, "run_resource_schedule", side_effect=self.resource_schedule)
         )
 
-    def capacity(self, **kwargs: object) -> None:
+    def capacity(self, **kwargs: object) -> BridgeNetworkCapacity:
         self.assertEqual(kwargs["server_id"], self.allocation.server_id)
         self.assertFalse(self.requests)
-        receive = kwargs["receive"]
-        assert callable(receive)
-        receive(
-            {"type": "complete", "result": {"total_slots": 16, "free_slots": self.free_networks}}
-        )
+        return BridgeNetworkCapacity(total_slots=self.free_networks, free_slots=self.free_networks)
 
     def test_short_capacity_or_missing_margin_refuses_before_allocation(self) -> None:
         for free in (0, BRIDGE_NETWORK_CAPACITY_MARGIN):
@@ -108,9 +107,12 @@ class TestingCandidateTests(unittest.TestCase):
 
     def test_unavailable_capacity_and_provider_denial_preserve_their_types(self) -> None:
         denial = native_copy_stream.NativeSourceAuthorizationDenied("fixture denial")
-        for result in ("incomplete", denial):
+        for result in (
+            BridgeNetworkCapacityRefused("host_bridge_network_capacity_unavailable"),
+            denial,
+        ):
             with self.subTest(result=result):
-                self.capacity_read.side_effect = result if isinstance(result, Exception) else None
+                self.capacity_read.side_effect = result
                 with self.assertRaises(ProviderMutationRejectedError) as refused:
                     self.prepare()
                 if result is denial:
