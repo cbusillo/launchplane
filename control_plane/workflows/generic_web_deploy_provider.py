@@ -664,6 +664,8 @@ def qualify_testing_application_observation(
                 "",
                 "completed",
                 "rollback_completed",
+                "paused",
+                "rollback_paused",
             }:
                 # A pull/login failure can end before any service update. This
                 # proves a failed, currently settled effect, never its absence.

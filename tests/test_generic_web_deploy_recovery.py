@@ -518,6 +518,7 @@ class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
             ("legacy hold", "application_schedule_hold", 1, {}, "settle_testing_failure"),
             ("missing failed record", "records_commit", 1, {}, "adopt_observed"),
             ("failed record", "records_commit", 1, {}, "adopt_observed"),
+            ("passed record", "records_commit", 1, {}, "adopt_observed"),
             ("completed hold record", "records_commit", 1, {}, "settle_testing_failure"),
             ("legacy hold record", "records_commit", 1, {}, "settle_testing_failure"),
         ):
@@ -563,6 +564,7 @@ class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
                     "completed hold",
                     "legacy hold",
                     "failed record",
+                    "passed record",
                     "completed hold record",
                     "legacy hold record",
                 }:
@@ -587,7 +589,7 @@ class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
                                 instance=target.ship_request.instance,
                             ),
                             deployment_id="provider-job",
-                            deployment_status="fail",
+                            deployment_status="pass" if name == "passed record" else "fail",
                             started_at="2026-08-15T12:00:00Z",
                             finished_at="2026-08-15T12:00:01Z",
                             resolved_target=target.resolved_target,

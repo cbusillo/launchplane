@@ -59,7 +59,7 @@ def testing_failure_lifecycle_receipt(
     operation_key: str,
     phase: str,
 ) -> tuple[DeploymentRecord | None, ApplicationLifecycleSnapshot | None]:
-    """Validate existing original proof, without reconstructing a missing baseline."""
+    """Validate the original baseline; fresh runtime evidence separately proves failure."""
     if (
         lane.instance != "testing"
         or target.resolved_target.target_type != "application"
@@ -76,8 +76,7 @@ def testing_failure_lifecycle_receipt(
     except FileNotFoundError:
         record = None
     if record is not None and (
-        record.deploy.status == "pass"
-        or record.artifact_identity is None
+        record.artifact_identity is None
         or record.resolved_target is None
         or (
             record.context,
@@ -109,7 +108,7 @@ def testing_failure_lifecycle_receipt(
             raise ValueError("Original testing lifecycle baseline is missing.")
         return record, None
     if (
-        receipt.state not in {"prepared", "held"}
+        receipt.state not in {"prepared", "held", "qualified"}
         or (
             receipt.product,
             receipt.context,

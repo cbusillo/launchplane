@@ -504,16 +504,6 @@ class GenericWebDeployProviderMutationAdapter:
                 ):
                     # Later runtime health cannot undo the original failed qualification.
                     observation = observation.model_copy(update={"deployment_status": "unhealthy"})
-                elif (
-                    provider_effect_phase == "records_commit" and record.deploy.status == "pending"
-                ):
-                    # The same capture receipt precedes success and data/post-deploy work.
-                    # A lost final write does not prove which of those effects completed.
-                    return _GenericWebDeployProviderInspection(
-                        observation=GenericWebProviderDeploymentObservation(outcome="unknown"),
-                        resolved_deploy_target=resolved_target,
-                        provider_evidence="provider_status_unknown",
-                    )
         observation = qualify_testing_application_observation(
             provider=self._deploy_provider,
             control_plane_root=self._control_plane_root,
@@ -609,7 +599,7 @@ class GenericWebDeployProviderMutationAdapter:
         self, operation: str, target: GenericWebResolvedDeployTarget, phase: str
     ) -> bool:
         try:
-            record, receipt = testing_failure_lifecycle_receipt(
+            testing_failure_lifecycle_receipt(
                 record_store=self._record_store,
                 profile=self._profile,
                 lane=self._lane,
@@ -619,12 +609,7 @@ class GenericWebDeployProviderMutationAdapter:
             )
         except (FileNotFoundError, ValueError, click.ClickException):
             return False
-        return not (
-            phase == "records_commit"
-            and receipt is not None
-            and record is not None
-            and record.deploy.status == "pending"
-        )
+        return True
 
     def settle_testing_failure(
         self,

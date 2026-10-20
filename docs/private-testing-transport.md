@@ -192,7 +192,7 @@ service. Dokploy's pinned [application deploy](https://github.com/Dokploy/dokplo
 awaits the [Docker-source login and pull](https://github.com/Dokploy/dokploy/blob/1c4414165d4aedbf6e28afab7a94c8fb7c053373/packages/server/src/utils/providers/docker.ts)
 before the service update; a failed pull leaves the older service installed.
 That exact failed job plus a fresh stable service read (no update status,
-`completed` or `rollback_completed`) proves a currently settled failure even
+`completed`, `rollback_completed`, `paused` or `rollback_paused`) proves a currently settled failure even
 when the old image and deployment identity remain. It does not prove absence,
 permit provider retry or credit successful deployment/inventory. An interrupted
 lifecycle attempt that retains its reservation completes the captured hold through
@@ -224,11 +224,21 @@ original baseline. An exact failed lifecycle record keeps the original attempt
 failed even if its runtime becomes healthy later; recovery still completes the
 hold. A crash while publishing the failed record can resume the same hold. Failure
 publication checks the original lease without replacing its last recoverable phase,
-including application testing lanes without managed inputs. A capture-only pending
-lifecycle receipt at `records_commit` cannot prove whether
-data or post-deploy work completed, so that ambiguous case stays fenced for every
-provider status. Dokploy can publish `done` before a later notification failure
-changes that job to `error`; the final status cannot erase work already started.
+including application testing lanes without managed inputs. At `records_commit`,
+a lost final write is recovered from current runtime evidence. A successful job
+with the exact healthy runtime can be adopted without provider writes; its
+capture-only lifecycle receipt remains unqualified and post-deploy status is
+`fail`, even though inventory records the proved running image. A later deliberate
+deployment inherits that original baseline. A failed job, including one against a
+stable paused or rollback-paused service from an earlier attempt, can complete
+only its captured hold. If the final successful record was saved before inventory
+or reservation completion was interrupted, its pass verdict and qualified receipt
+do not override fresh proof of a settled runtime failure at the original deadline.
+Recovery can hold that exact captured baseline and record failure without adding
+inventory credit. Any existing inventory still points to the now-failed record.
+Dokploy can publish `done` before a later notification
+failure changes that job to `error`; the final status does not authorize rerunning
+data or post-deploy effects.
 Missing or malformed baseline, changed target authority, an active updater,
 unknown service/provider effects or lost lease keep the original operation fenced.
 A failed cleanup also keeps the fence and a durable hold-only checkpoint, so a new
