@@ -26,6 +26,7 @@ from control_plane.testing_replacement_bootstrap import (
     TestingReplacementBootstrapRequest,
     TestingBootstrapPrerequisiteError,
     TestingBootstrapReadbackError,
+    TestingBootstrapReadbackUnavailable,
     bootstrap_plan,
     bootstrap_plan_payload,
     bootstrap_wire_payload,
@@ -100,8 +101,14 @@ def register_testing_replacement_bootstrap_routes(
                 "authorization_denied",
                 "The provider refused the Odoo testing usage read. Preserve the trace and original bootstrap key.",
             )
-        except TestingBootstrapReadbackError as error:
-            refuse(409, error.code, str(error))
+        except (TestingBootstrapReadbackError, TestingBootstrapReadbackUnavailable) as error:
+            if body.mode == "readback":
+                refuse(409, error.code, str(error))
+            refuse(
+                409,
+                "testing_bootstrap_unverified",
+                "Fresh testing bootstrap is unverified. Inspect its original key and exact generation.",
+            )
         except (ValueError, FileNotFoundError, RuntimeError, OSError, click.ClickException):
             refuse(
                 409,

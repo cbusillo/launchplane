@@ -20,7 +20,10 @@ from control_plane.contracts.disposable_lane import (
     TESTING_REPLACEMENT_BOOTSTRAP_ROUTE,
 )
 from control_plane.contracts.dokploy_target_record import PublicHostEffect, DokployTargetRecord
-from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    ProductLaneProfile,
+)
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.disposable_lanes import (
     disposable_lane_binding_sha256,
@@ -35,6 +38,8 @@ from control_plane.live_target_runtime import (
 from control_plane.odoo_testing_resources import OdooTestingResources
 from control_plane.odoo_testing_restore import (
     FreshOdooTestingGeneration,
+    GenerationQualificationCode,
+    TestingGenerationQualificationError,
     TestingCredentialsOverlap,
     TestingCredentialVersionsMissing,
     generation_binding,
@@ -171,6 +176,23 @@ _READBACK_MESSAGES: dict[BootstrapReadbackCode, str] = {
 class TestingBootstrapReadbackError(ValueError):
     """A closed readback checkpoint; private provider errors never reach HTTP."""
 
+    def __init__(self, code: BootstrapReadbackCode | GenerationQualificationCode) -> None:
+        self.code = (
+            f"testing_bootstrap_qualification_{code}"
+            if isinstance(code, GenerationQualificationCode)
+            else code
+        )
+        message = (
+            str(TestingGenerationQualificationError(code))
+            if isinstance(code, GenerationQualificationCode)
+            else _READBACK_MESSAGES[code]
+        )
+        super().__init__(message)
+
+
+class TestingBootstrapReadbackUnavailable(click.ClickException):
+    """Retain ClickException semantics in provider-operation observation."""
+
     def __init__(self, code: BootstrapReadbackCode) -> None:
         self.code = code
         super().__init__(_READBACK_MESSAGES[code])
@@ -186,7 +208,11 @@ def _readback_checkpoint(code: BootstrapReadbackCode) -> Iterator[None]:
         yield
     except (DurableOperationAuthorizationDeniedError, TestingBootstrapReadbackError):
         raise
-    except (ValueError, FileNotFoundError, RuntimeError, OSError, click.ClickException):
+    except TestingGenerationQualificationError as error:
+        raise TestingBootstrapReadbackError(error.code) from None
+    except click.ClickException:
+        raise TestingBootstrapReadbackUnavailable(code) from None
+    except (ValueError, FileNotFoundError, RuntimeError, OSError):
         raise TestingBootstrapReadbackError(code) from None
 
 
@@ -265,10 +291,18 @@ def bootstrap_copy_prerequisites(
     return tuple(sorted(omitted)), source_binding
 
 
-def require_testing_restore_policy(profile: LaunchplaneProductProfileRecord, context: str) -> None:
+def _testing_lane(profile: LaunchplaneProductProfileRecord, context: str) -> ProductLaneProfile:
     lane = next(
-        lane for lane in profile.lanes if (lane.context, lane.instance) == (context, "testing")
+        (lane for lane in profile.lanes if (lane.context, lane.instance) == (context, "testing")),
+        None,
     )
+    if lane is None:
+        raise TestingBootstrapReadbackError(BootstrapReadbackCode.AUTHORITY_CHANGED)
+    return lane
+
+
+def require_testing_restore_policy(profile: LaunchplaneProductProfileRecord, context: str) -> None:
+    lane = _testing_lane(profile, context)
     production = [lane for lane in profile.lanes if lane.instance == "prod"]
     if (
         len(production) != 1
@@ -380,11 +414,7 @@ def bootstrap_plan(
         or target_id.target_id != resources.target_id
     ):
         raise ValueError("Fresh resource qualification is incomplete.")
-    lane = next(
-        lane
-        for lane in profile.lanes
-        if (lane.context, lane.instance) == (request.context, "testing")
-    )
+    lane = _testing_lane(profile, request.context)
     generation = store.read_fresh_odoo_testing_generation(product, request.context)
     if generation is not None and (
         generation.operation_id != operation.operation_id
@@ -501,7 +531,8 @@ class TestingReplacementBootstrapAdapter:
             )
         if not domains:
             return ()
-        profile = self.store.read_product_profile_record(self.product)
+        with _readback_checkpoint(BootstrapReadbackCode.AUTHORITY_UNAVAILABLE):
+            profile = self.store.read_product_profile_record(self.product)
         if len(domains) != 1:
             raise TestingBootstrapReadbackError(BootstrapReadbackCode.ROUTE_CHANGED)
         domain = domains[0]
@@ -656,13 +687,7 @@ class TestingReplacementBootstrapAdapter:
             )
             if (
                 existing_generation is not None
-                and urlsplit(
-                    next(
-                        lane.base_url
-                        for lane in profile.lanes
-                        if (lane.context, lane.instance) == (self.request.context, "testing")
-                    )
-                ).hostname
+                and urlsplit(_testing_lane(profile, self.request.context).base_url).hostname
                 == existing_generation.domain_host
             ):
                 self._require_domains(existing_generation)
@@ -691,11 +716,7 @@ class TestingReplacementBootstrapAdapter:
                 )
             self.store.write_fresh_odoo_testing_generation(generation)
             host, token = source.read_dokploy_config(control_plane_root=self.root)
-            lane = next(
-                lane
-                for lane in profile.lanes
-                if (lane.context, lane.instance) == (self.request.context, "testing")
-            )
+            lane = _testing_lane(profile, self.request.context)
             base_url = f"https://{generation.domain_host}"
             health_path = urlsplit(lane.health_url).path or "/launchplane/health"
             narrowed = narrow_fresh_testing_requirements(

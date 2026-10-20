@@ -2476,27 +2476,26 @@ apply key and receipt separately for recovery. Its provider-domain verification
 reads metadata, not container IPs, bridge identity, TLS reachability or database
 completion.
 
-A refused readback now returns a fixed checkpoint code rather than discarding
-all failures as `testing_bootstrap_unverified`:
+A refused readback returns a fixed checkpoint code. The authoritative names
+and messages are in
+[`BootstrapReadbackCode`](../control_plane/testing_replacement_bootstrap.py)
+and [`GenerationQualificationCode`](../control_plane/odoo_testing_restore.py).
+The checkpoints distinguish missing/unreadable generation, changed original
+intent or target/lane authority, changed generation snapshot, missing queue,
+unreadable/missing/mismatched provider route and missing initial-queue or
+supersession receipt. Qualification names the observed predicate: generation
+record, queue, target, active product, credential separation, allocation,
+use/route hold, volume/project authority, target/provider alias or context owner.
+An unreadable dependency with no observed predicate remains qualification
+unverified; it never implies missing or safe state.
 
-- `testing_bootstrap_generation_missing`, `_generation_unavailable` or
-  `_request_changed`: no recorded generation, unreadable generation or different
-  original intent.
-- `testing_bootstrap_authority_unavailable` or `_authority_changed`: unreadable
-  current authority or a changed target/lane hostname (including an absent lane).
-- `testing_bootstrap_qualification_unverified` or `_generation_changed`:
-  current-generation qualification refused or its returned snapshot differs.
-  Qualification includes credentials, allocation, holds, resource/project values
-  and ownership; this grouped checkpoint does not identify an unobserved subcheck.
-- `testing_bootstrap_queue_unverified`: the generation's queue receipt is missing
-  after qualification. A missing receipt encountered during qualification is
-  reported at that earlier checkpoint.
-- `testing_bootstrap_route_unavailable`, `_route_missing` or `_route_changed`:
-  provider/configuration read failure, no domain, or a domain count/field mismatch.
-  Exact fields remain host, compose id, service, port, HTTPS, certificate type,
-  both paths, strip-path flag and domain id; no private values are returned.
-- `testing_bootstrap_initial_queue_unverified` or `_supersession_unverified`:
-  the appropriate preparation/retained-operation receipt is unreadable or absent.
+Provider-route comparison retains host, compose id, service, port, HTTPS,
+certificate type, both paths, strip-path flag and domain id without returning
+private values. Local record-read failures stay distinct from changed authority.
+The first observed failure is reported; later checkpoints remain unproved.
+A missing queue receipt encountered during qualification is reported there.
+Apply and planning keep their existing generic original-key recovery guidance;
+readback-specific codes do not change unknown-effect operation handling.
 
 Authorization denials keep their existing 403. Unclassified failures retain the
 generic fail-closed response. Preserve the trace, original evidence and unknown
