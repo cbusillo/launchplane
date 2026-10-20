@@ -28,6 +28,7 @@ from control_plane.contracts.idempotency_record import (
     complete_launchplane_mutation_reservation,
 )
 from control_plane.storage.postgres import (
+    MutationEffectAdmissionRefusedError,
     MutationReconciliationSupersessionResult,
     MutationReservationAdoptionResult,
     MutationReservationCompletionResult,
@@ -349,6 +350,11 @@ class _ReservationHeartbeat:
                     effect_phase=normalized_phase,
                     lease_seconds=self._lease_seconds,
                 )
+            except MutationEffectAdmissionRefusedError as refusal:
+                # Let the adapter settle its original domain refusal. This
+                # proposed checkpoint never dispatched; earlier effects still
+                # belong to the exact reservation and the runner's release gate.
+                raise refusal.cause from None
             except Exception as error:
                 self._failure_status = "error"
                 raise _ProviderOperationLeaseLostError(

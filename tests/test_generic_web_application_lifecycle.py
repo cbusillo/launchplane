@@ -1,11 +1,13 @@
 from datetime import UTC, datetime
 from contextlib import nullcontext
+from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 import unittest
 from unittest.mock import Mock, patch
 
 import click
+from control_plane.generic_web_source_qualification import GenericWebPromotionSourceRefused
 
 from control_plane.contracts.generic_web_extensions import (
     GenericWebApplicationSchedule,
@@ -107,6 +109,7 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
         verification_fails: bool = False,
         reset: bool = False,
         input_refusal: bool = False,
+        before_deployment_records: Callable[[], None] | None = None,
     ) -> tuple[GenericWebDeployResult, _GenericWebDeployStore]:
         self.failure_command = failure_command
         profile = _profile()
@@ -160,8 +163,30 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
                 post_deploy_executor=verification,
                 provider_operation_title="deploy-test",
                 provider_effect_checkpoint=self.phases.append,
+                before_deployment_records=before_deployment_records,
             )
         return result, store
+
+    def test_source_refusal_before_lifecycle_effects_leaves_no_draft_for_next_attempt(self) -> None:
+        profile = _profile()
+        lane = profile.lanes[0].model_copy(update={"generic_web_extensions": self.extensions})
+        store = _GenericWebDeployStore(profile.model_copy(update={"lanes": (lane,)}))
+
+        def refuse() -> None:
+            raise GenericWebPromotionSourceRefused("Testing no longer qualifies.")
+
+        with patch(
+            "tests.test_generic_web_application_lifecycle._GenericWebDeployStore",
+            return_value=store,
+        ):
+            for _ in range(2):
+                with self.assertRaises(GenericWebPromotionSourceRefused):
+                    self._deploy(before_deployment_records=refuse)
+                self.assertEqual(store.deployments, [])
+                self.assertEqual(self.schedules["billing-recovery"], self.original)
+                self.assertEqual(self.commands, [])
+            result, _ = self._deploy()
+        self.assertEqual(result.deploy_status, "pass")
 
     def test_input_refusal_after_quiesce_restores_schedules_and_records_failure(self) -> None:
         result, store = self._deploy(input_refusal=True)

@@ -5,6 +5,8 @@ import unittest
 from unittest.mock import Mock, patch
 
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
+from control_plane.contracts.promotion_record import ArtifactIdentityReference
 from control_plane.contracts.product_profile_record import ProductLaneProfile, ProductOwnerProfile
 from control_plane.contracts.promotion_record import DeploymentEvidence, HealthcheckEvidence
 from control_plane.contracts.public_ingress_monitoring import (
@@ -97,30 +99,45 @@ class ReleaseDigestTests(unittest.TestCase):
         )
 
     def inventory(self, lane: ProductLaneProfile, source: str) -> None:
-        self.store.write_environment_inventory(
-            EnvironmentInventory(
+        inventory = EnvironmentInventory(
+            context=lane.context,
+            instance=lane.instance,
+            artifact_identity=ArtifactIdentityReference(artifact_id="fixture-" + source),
+            source_git_ref=source,
+            deployment_record_id="deployment-" + lane.instance,
+            updated_at=self.now.isoformat(),
+            deploy=DeploymentEvidence(
+                deploy_mode="fixture",
+                target_name="fixture",
+                target_type="application",
+                status="pass",
+            ),
+            destination_health=HealthcheckEvidence(status="pass"),
+            runtime_identity=RuntimeIdentity(
+                product=self.profile.product,
                 context=lane.context,
                 instance=lane.instance,
-                source_git_ref=source,
                 deployment_record_id="deployment-" + lane.instance,
-                updated_at=self.now.isoformat(),
-                deploy=DeploymentEvidence(
-                    deploy_mode="fixture",
-                    target_name="fixture",
-                    target_type="application",
-                    status="pass",
-                ),
-                destination_health=HealthcheckEvidence(status="pass"),
-                runtime_identity=RuntimeIdentity(
-                    product=self.profile.product,
-                    context=lane.context,
-                    instance=lane.instance,
-                    deployment_record_id="deployment-" + lane.instance,
-                    artifact_id="fixture-" + source,
-                    source_git_ref=source,
+                artifact_id="fixture-" + source,
+                source_git_ref=source,
+            ),
+        )
+        self.store.write_deployment_record(
+            DeploymentRecord(
+                record_id=inventory.deployment_record_id,
+                context=inventory.context,
+                instance=inventory.instance,
+                artifact_identity=inventory.artifact_identity,
+                source_git_ref=inventory.source_git_ref,
+                runtime_identity=inventory.runtime_identity,
+                deploy=inventory.deploy,
+                destination_health=inventory.destination_health,
+                resolved_target=ResolvedTargetEvidence(
+                    target_type="application", target_id="fixture", target_name="fixture"
                 ),
             )
         )
+        self.store.write_environment_inventory(inventory)
 
     def read(self, path: str) -> object:
         if "/commits/" in path:

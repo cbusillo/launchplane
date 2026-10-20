@@ -16,6 +16,11 @@ from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.odoo_website_settings import OdooWebsiteSettingsIntent
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.generic_web_source_qualification import (
+    GenericWebSourceUnqualified,
+    qualified_generic_web_source_inventory,
+)
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.contracts.preview_record import PreviewRecord
@@ -70,6 +75,8 @@ class ReleaseReviewStore(Protocol):
         self, *, context_name: str, instance_name: str
     ) -> EnvironmentInventory: ...
 
+    def read_deployment_record(self, record_id: str) -> DeploymentRecord: ...
+
     def list_product_review_decision_records(
         self, *, repository: str, pull_request_number: int, limit: int | None = None
     ) -> tuple[ProductReviewDecisionRecord, ...]: ...
@@ -100,7 +107,7 @@ RELEASE_EVIDENCE_MESSAGES: dict[ReleaseEvidenceReason, str] = {
     "testing_lane_missing": "This product has no testing lane to release from.",
     "source_control_access_unavailable": "Launchplane cannot read this product's source control.",
     "production_identity_missing": "Production has no recorded deployed version.",
-    "candidate_identity_missing": "Testing has no recorded deployed version.",
+    "candidate_identity_missing": "Testing has no qualified deployed version.",
     "release_record_missing": "A release record Launchplane needs is missing.",
     "github_read_failed": "Reading this release's changes from GitHub failed. Reload to try again.",
 }
@@ -257,9 +264,13 @@ def release_version(
         except ValueError as error:
             raise _identity_missing(instance) from error
     try:
-        inventory = store.read_environment_inventory(
-            context_name=lane.context, instance_name=instance
+        inventory = (
+            qualified_generic_web_source_inventory(store=store, profile=profile, lane=lane)
+            if instance == "testing"
+            else store.read_environment_inventory(context_name=lane.context, instance_name=instance)
         )
+    except GenericWebSourceUnqualified as error:
+        raise _identity_missing(instance) from error
     except FileNotFoundError as error:
         raise ReleaseEvidenceUnavailable("release_record_missing") from error
     identity = inventory.runtime_identity
