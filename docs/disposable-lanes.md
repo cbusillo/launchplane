@@ -2724,8 +2724,13 @@ not a reason to invoke a local live-target command.
 For a held initial execute that never published its recovery copies, use
 `action: retire-incomplete` with the **unchanged original execute intent and
 execute key**. Take it through the same client dry-run, saved review, apply and
-readback. It accepts only `prepared` with no copy receipts and an exact original
-`reconcile_required` execute checkpoint. Its native scope covers both the
+readback. It accepts only `prepared` with no published copy receipts and an exact original
+execute checkpoint in `reconcile_required`, or a `running` journal whose lease
+has expired according to the reservation database's clock. Lease expiry alone
+does not authorize disposal: the same executor exclusion, native host lock,
+idle runtime, reviewed inventory and absence proofs still apply. Publication
+rechecks the exact original reservation and its expiry transactionally. An
+active lease refuses before host inspection. Its native scope covers both the
 source-selected runtime before the switch and an idle upgrade-selected runtime
 after the initial switch. The latter requires a verified initial sanitized
 source snapshot, with exact witness, capture lineage and database/filestore
@@ -2733,7 +2738,7 @@ hashes. The review binds that receipt into its native disposal manifest;
 apply and readback retain it as `host_disposal.initial_source_snapshot` after
 disposal. It is initial input evidence, never a final-source, upgraded or
 post-write recovery tuple. The web writer must be stopped. Later-phase incomplete
-runtimes remain held for their qualified disposition. Verified, running,
+runtimes remain held for their qualified disposition. Verified, actively running,
 unbound or production-aliased operations refuse. Ordinary `retire` still requires both
 verified final recovery tuples; incomplete retirement produces neither tuple.
 
@@ -2795,6 +2800,14 @@ Retirement does not rerun the failed upgrade or reconstruct missing diagnostics.
 If a historical failure discarded the child error or exit status, they remain
 unknown. A later fresh rehearsal records its own error through the current
 diagnostic path; retirement itself supplies no diagnosis or upgrade proof.
+
+Original-key readback collects operation-bound provider failure events and
+retained host diagnostics for both `running` and `reconcile_required` journals
+after their effect checkpoint. A lost HTTP response can leave the former even
+after its provider job has ended. Readback never relabels that journal or grants
+permission to replay. A busy original job keeps host observation unavailable;
+provider completion alone is not successful upgrade proof. Retained errors stay
+private, bounded and sanitized, bound to the original intent, record and attempt.
 
 The existing disabled manual server schedule and purpose-local managed-secret
 records remain as audit/configuration metadata with no runtime consumer. The

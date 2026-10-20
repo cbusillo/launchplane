@@ -8,6 +8,7 @@ import re
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+from control_plane.contracts.idempotency_record import parse_launchplane_mutation_timestamp
 from control_plane.contracts.odoo_upgrade_rehearsal import (
     ODOO_UPGRADE_REHEARSAL_ROUTE,
     OdooUpgradeRehearsalRecord,
@@ -80,7 +81,19 @@ class IncompleteRehearsalRetirement:
         )
         if (
             original is None
-            or original.state != "reconcile_required"
+            or not (
+                original.state == "reconcile_required"
+                or (
+                    original.state == "running"
+                    and parse_launchplane_mutation_timestamp(
+                        original.lease_expires_at, field_name="lease_expires_at"
+                    )
+                    <= parse_launchplane_mutation_timestamp(
+                        self.adapter.store.mutation_observation_timestamp(),
+                        field_name="observed_at",
+                    )
+                )
+            )
             or original.provider_effect_phase != "execute"
             or not original.provider_effect_started_at
         ):

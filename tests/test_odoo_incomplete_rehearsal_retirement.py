@@ -1,6 +1,7 @@
 """Retirement settles only an idle held execute and never invents recovery copies."""
 
 import unittest
+from datetime import datetime, timedelta
 from typing import Any, cast
 from unittest.mock import patch
 
@@ -433,10 +434,34 @@ class IncompleteRehearsalRetirementTests(unittest.TestCase):
                 operation.plan()
             self.store.compare_and_write_odoo_upgrade_rehearsal(verified, self.prepared)
             original = operation.original(self.prepared)
-            self.store.retry_reconciled_mutation(reservation=original, lease_owner="still-running")
+            self.store.retry_reconciled_mutation(
+                reservation=original, lease_owner="still-running", preserve_effect_checkpoint=True
+            )
             with self.assertRaises(RehearsalRefused):
                 operation.plan()
             host.assert_not_called()
+
+    def test_expired_running_execute_retires_without_replaying_the_upgrade(self) -> None:
+        operation = self.retirement()
+        retried = self.store.retry_reconciled_mutation(
+            reservation=operation.original(self.prepared),
+            lease_owner="lost-caller",
+            preserve_effect_checkpoint=True,
+        )
+        assert retried.record is not None
+        expired_at = datetime.fromisoformat(
+            retried.record.lease_expires_at.replace("Z", "+00:00")
+        ) + timedelta(seconds=1)
+        with (
+            patch.object(
+                self.store,
+                "_database_mutation_timestamp",
+                return_value=expired_at.isoformat().replace("+00:00", "Z"),
+            ),
+        ):
+            # Reuse the complete disposal/replay/readback contract, with the
+            # same bound checkpoint but a caller that never settled its lease.
+            self.test_held_incomplete_operation_retires_and_replays_with_readback()
 
     def test_plan_binds_original_effect_identity_without_incidental_lease_metadata(self) -> None:
         operation = self.retirement()
