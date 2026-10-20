@@ -12,7 +12,12 @@ from control_plane.contracts.testing_candidate import (
     testing_candidate_namespace,
 )
 from control_plane.dokploy import api, source, sandbox_placement
-from control_plane.provider_operations import ProviderOperationLease
+from control_plane.dokploy import native_copy_stream
+from control_plane.dokploy.network_capacity import (
+    BRIDGE_NETWORK_CAPACITY_MARGIN,
+    BridgeNetworkCapacityRefused,
+)
+from control_plane.provider_operations import ProviderMutationRejectedError, ProviderOperationLease
 from control_plane.workflows.provider_target_audit import audit_provider_targets
 from control_plane.workflows.provider_target_backfill import backfill_provider_targets
 from control_plane import testing_candidate_allocation as candidate
@@ -46,6 +51,10 @@ class TestingCandidateTests(unittest.TestCase):
         self.lease = Mock(spec=ProviderOperationLease)
         self.placement: tuple[str, str, str] = ("", "", "")
         self.requests: list[str] = []
+        self.free_networks = 1 + BRIDGE_NETWORK_CAPACITY_MARGIN
+        self.capacity_read = self.enterContext(
+            patch.object(native_copy_stream, "_read_remote", side_effect=self.capacity)
+        )
         self.enterContext(
             patch.object(
                 source, "read_dokploy_config", return_value=("provider.invalid", "fixture")
@@ -65,6 +74,75 @@ class TestingCandidateTests(unittest.TestCase):
         self.storage = self.enterContext(
             patch.object(candidate, "run_resource_schedule", side_effect=self.resource_schedule)
         )
+
+    def capacity(self, **kwargs: object) -> None:
+        self.assertEqual(kwargs["server_id"], self.allocation.server_id)
+        self.assertFalse(self.requests)
+        receive = kwargs["receive"]
+        assert callable(receive)
+        receive(
+            {"type": "complete", "result": {"total_slots": 16, "free_slots": self.free_networks}}
+        )
+
+    def test_short_capacity_or_missing_margin_refuses_before_allocation(self) -> None:
+        for free in (0, BRIDGE_NETWORK_CAPACITY_MARGIN):
+            with self.subTest(free=free):
+                self.free_networks = free
+                with self.assertRaises(ProviderMutationRejectedError) as refused:
+                    self.prepare()
+                cause = refused.exception.cause
+                assert isinstance(cause, BridgeNetworkCapacityRefused)
+                self.assertEqual(cause.code, "host_bridge_network_capacity_short")
+                self.assertIsNone(self.store.read_testing_candidate(self.allocation.namespace))
+                self.assertFalse(self.requests)
+                self.storage.assert_not_called()
+                self.lease.checkpoint_effect.assert_not_called()
+                self.assert_serving_unchanged()
+
+    def test_exact_margin_admits_and_existing_candidate_skips_capacity(self) -> None:
+        self.prepare()
+        self.capacity_read.assert_called_once()
+        self.capacity_read.side_effect = AssertionError("Recovery must use original custody")
+        self.prepare()
+        self.assertEqual(self.storage.call_args.kwargs["mode"], "readback")
+
+    def test_unavailable_capacity_and_provider_denial_preserve_their_types(self) -> None:
+        denial = native_copy_stream.NativeSourceAuthorizationDenied("fixture denial")
+        for result in ("incomplete", denial):
+            with self.subTest(result=result):
+                self.capacity_read.side_effect = result if isinstance(result, Exception) else None
+                with self.assertRaises(ProviderMutationRejectedError) as refused:
+                    self.prepare()
+                if result is denial:
+                    self.assertIs(refused.exception.cause, denial)
+                else:
+                    cause = refused.exception.cause
+                    assert isinstance(cause, BridgeNetworkCapacityRefused)
+                    self.assertEqual(cause.code, "host_bridge_network_capacity_unavailable")
+                self.assertIsNone(self.store.read_testing_candidate(self.allocation.namespace))
+                self.assertFalse(self.requests)
+                self.lease.checkpoint_effect.assert_not_called()
+
+    def test_unrecorded_or_ambiguous_placement_precedes_capacity(self) -> None:
+        for observation in (
+            ("existing-project", "", ""),
+            sandbox_placement.IsolatedPlacementObservationRequired("ambiguous inventory"),
+        ):
+            with self.subTest(observation=observation):
+                with patch.object(candidate, "created_placement") as placement:
+                    if isinstance(observation, Exception):
+                        placement.side_effect = observation
+                    else:
+                        placement.return_value = observation
+                    with self.assertRaises(ProviderMutationRejectedError) as refused:
+                        self.prepare()
+                self.assertIsInstance(
+                    refused.exception.cause, sandbox_placement.IsolatedPlacementObservationRequired
+                )
+                self.capacity_read.assert_not_called()
+                self.assertIsNone(self.store.read_testing_candidate(self.allocation.namespace))
+                self.assertFalse(self.requests)
+                self.lease.checkpoint_effect.assert_not_called()
 
     def authority(self) -> tuple[object, ...]:
         return (
@@ -214,6 +292,7 @@ class TestingCandidateTests(unittest.TestCase):
         assert recovered is not None
         self.assertEqual(recovered.environment_id, self.placement[1])
         self.request.side_effect = self.provider
+        self.capacity_read.side_effect = AssertionError("Partial placement keeps original custody")
         self.prepare()
         self.assertEqual(self.requests.count(ENVIRONMENT_CREATE_PATH), 1)
         self.assertEqual(self.requests.count(COMPOSE_CREATE_PATH), 1)

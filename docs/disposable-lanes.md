@@ -76,6 +76,18 @@ cannot use this path. A refusal propagates before any inverse action.
 Preparation and failure evidence cannot be replaced once recorded; readiness
 and route observations continue to refresh as the operation progresses.
 An interrupted preparation retains its candidate, copy receipt and original key.
+Before allocating a fresh isolated Odoo testing candidate, the service reads
+the selected host's bridge-network capacity through the existing provider
+transport. The candidate's private default bridge needs one free slot plus the
+shared safety margin. Short or unverified capacity returns
+`host_bridge_network_capacity_short` or
+`host_bridge_network_capacity_unavailable` before candidate custody or provider
+creation. The durable runner releases that effect-free attempt; provider
+authorization denials keep their original classification. Existing or uncertain
+placement takes precedence, and partial candidates continue under their original
+custody without repeating capacity admission. This read observes headroom; it
+does not reserve capacity against concurrent actors.
+
 Use a compatible controller/adapter for continuation and preserve unresolved
 provider effects, rather than deleting checkpoints or replaying a legacy
 bootstrap against that copy. Terminal checkpoint reads return their historical
