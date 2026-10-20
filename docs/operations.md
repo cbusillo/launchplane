@@ -2873,7 +2873,12 @@ return a typed blocked result rather than guessing a domain.
   and apply that review. This control never requests deployment and does not
   prove website health. Stale reviews need a fresh review. An uncertain result
   retains the original request and operation key; use **Resume original** to
-  recover it, including after reload. Current readback is separate from the
+  observe its retained evidence, including after reload. A timed-out write with
+  no durable acknowledgement stays unknown even when current values match;
+  neither that read nor another writer proves the old request has ended. It
+  retains the lane fence until request-specific terminal evidence is available.
+  A terminal unverified receipt instead says the update ended but its settings
+  are unverified and permits a fresh review. Current readback is separate from the
   completed original receipt. Odoo lanes currently show that runtime sync is
   unsupported; their durable ownership integration is tracked in #4190.
   Existing authorized machine callers still use `mode: "dry-run"` before

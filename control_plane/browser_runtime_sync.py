@@ -1,6 +1,6 @@
 """Reviewed, value-free browser synchronization of a generic-web stable lane."""
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 import json
@@ -11,7 +11,7 @@ import click
 from pydantic import BaseModel, ConfigDict
 
 from control_plane import live_target_runtime as runtime
-from control_plane import secrets
+from control_plane import secrets, runtime_environments
 from control_plane.contracts.product_profile_record import product_context_owner_map
 from control_plane.contracts.runtime_sync import (
     RuntimeSyncAvailability,
@@ -44,11 +44,33 @@ class RuntimeSyncRefused(ValueError):
         self.code = code
 
 
-def _stale_payload(trace_id: str) -> dict[str, object]:
+_ACKNOWLEDGED_PHASE = "runtime_environment_sync_acknowledged"
+_TERMINAL_PHASES = {
+    "runtime_environment_sync_not_applied": "runtime_sync_not_applied",
+    "runtime_environment_sync_provider_refused": "runtime_sync_provider_refused",
+    "runtime_environment_sync_unverified": "runtime_sync_unverified",
+}
+RUNTIME_SYNC_TERMINAL_MESSAGES = {
+    "stale": "Runtime sync inputs changed; review again.",
+    "runtime_sync_not_applied": "Runtime sync was not sent. Review the current lane again.",
+    "runtime_sync_provider_refused": "The provider refused this runtime sync. Review the current lane again.",
+    "runtime_sync_unverified": "The update ended, but target settings are unverified. Review the current lane again.",
+}
+
+
+def _terminal_payload(code: str, trace_id: str) -> dict[str, object]:
     return {
         "trace_id": trace_id,
-        "error": {"code": "stale", "message": "Runtime sync inputs changed; review again."},
+        "error": {"code": code, "message": RUNTIME_SYNC_TERMINAL_MESSAGES[code]},
     }
+
+
+class RuntimeSyncObservationUnavailable(Exception):
+    """The original recipient and render verified, but its current read failed."""
+
+
+def _stale_payload(trace_id: str) -> dict[str, object]:
+    return _terminal_payload("stale", trace_id)
 
 
 class RuntimeSyncIntent(BaseModel):
@@ -192,8 +214,6 @@ def prepare_runtime_sync(
     store: PostgresRecordStore,
     root: Path,
     request: runtime.LiveTargetRuntimeApplyEnvelope,
-    *,
-    for_observation: bool = False,
 ) -> PreparedRuntimeSync:
     authority = _authority(store, request)
     prepared = runtime.prepare_live_target_runtime_environment(
@@ -288,8 +308,7 @@ def prepare_runtime_sync(
         tuple(sorted(required | transported)),
         tuple(suppliers),
     )
-    if not for_observation:
-        _key_safety(store, captured)
+    _key_safety(store, captured)
     if _authority(store, request) != authority:
         raise RuntimeSyncRefused("stale")
     return captured
@@ -331,6 +350,73 @@ def runtime_sync_result(captured: PreparedRuntimeSync, *, applied: bool) -> dict
         update={"applied": applied}
     ).model_dump(mode="json")
     return result
+
+
+def prepare_runtime_sync_observation(
+    store: PostgresRecordStore,
+    root: Path,
+    request: runtime.LiveTargetRuntimeApplyEnvelope,
+    intent: RuntimeSyncIntent,
+) -> runtime.PreparedLiveTargetRuntime:
+    """Read the old physical recipient without qualifying another write."""
+    review = intent.review
+    host, token = dokploy_source.read_dokploy_config(
+        control_plane_root=root, database_url=store.database_url
+    )
+    recipient = [
+        request.context,
+        request.instance,
+        host,
+        "dokploy",
+        review.target_type,
+        review.target_type,
+        review.target_id,
+    ]
+    if not _verifies(
+        recipient, fingerprint=intent.recipient_commitment, purpose="browser-runtime-sync-recipient"
+    ):
+        raise RuntimeSyncRefused()
+    target = store.read_dokploy_target_record(
+        context_name=request.context, instance_name=request.instance
+    )
+    environment = runtime_environments.resolve_site_runtime_environment_from_store(
+        record_store=store,
+        context_name=request.context,
+        instance_name=request.instance,
+        target_environment=dict(target.env),
+    )
+    if not _verifies(
+        [environment.values, sorted(environment.retired_keys)],
+        fingerprint=intent.values_commitment,
+        purpose="browser-runtime-sync-values",
+    ):
+        raise RuntimeSyncRefused()
+    try:
+        payload = dokploy_api.fetch_dokploy_target_payload(
+            host=host, token=token, target_type=review.target_type, target_id=review.target_id
+        )
+    except (click.ClickException, OSError) as error:
+        raise RuntimeSyncObservationUnavailable() from error
+    return runtime.PreparedLiveTargetRuntime(
+        control_plane_root=root,
+        database_url=store.database_url,
+        product_name=request.product,
+        context_name=request.context,
+        instance_name=request.instance,
+        allow_owned_preview=False,
+        target_definition=dokploy_source.DokployTargetDefinition(
+            context=request.context,
+            instance=request.instance,
+            target_type=review.target_type,
+            target_id=review.target_id,
+            target_name=review.target_name,
+        ),
+        desired_env_map=environment.values.copy(),
+        retired_keys=set(environment.retired_keys),
+        host=host,
+        token=token,
+        live_env_map=dokploy_api.parse_dokploy_env_text(str(payload.get("env") or "")),
+    )
 
 
 @dataclass
@@ -377,6 +463,17 @@ class ReviewedRuntimeSync:
                 if provider_effect_phase:
                     return ProviderObservation(outcome="unknown")
                 return stale()
+            if provider_effect_phase in _TERMINAL_PHASES:
+                return ProviderObservation(
+                    outcome="present",
+                    response_status_code=409,
+                    response_payload=_terminal_payload(
+                        _TERMINAL_PHASES[provider_effect_phase], self.trace_id
+                    ),
+                )
+            if provider_effect_phase and provider_effect_phase != _ACKNOWLEDGED_PHASE:
+                # A matching projection cannot prove a timed-out POST has ended.
+                return ProviderObservation(outcome="unknown")
             if not provider_effect_phase:
                 try:
                     authority = _authority(self.store, self.request)
@@ -384,10 +481,9 @@ class ReviewedRuntimeSync:
                     return stale()
                 if authority != self.intent.authority_commitment:
                     return stale()
-            captured = prepare_runtime_sync(
-                self.store, self.root, self.request, for_observation=bool(provider_effect_phase)
-            )
             if not provider_effect_phase:
+                captured = prepare_runtime_sync(self.store, self.root, self.request)
+                prepared = captured.prepared
                 # A durable empty phase proves no provider dispatch. Preserve a
                 # terminal refusal rather than holding the lane after input drift.
                 if captured.intent != self.intent:
@@ -395,20 +491,9 @@ class ReviewedRuntimeSync:
                 if captured.intent.review.changed_keys:
                     return ProviderObservation(outcome="absent")
             else:
-                prepared = captured.prepared
-                provider = self.store.read_provider_target_record(
-                    context_name=self.request.context, instance_name=self.request.instance
+                prepared = prepare_runtime_sync_observation(
+                    self.store, self.root, self.request, self.intent
                 )
-                if not _verifies(
-                    _recipient(prepared, provider),
-                    fingerprint=self.intent.recipient_commitment,
-                    purpose="browser-runtime-sync-recipient",
-                ) or not _verifies(
-                    [prepared.desired_env_map, sorted(prepared.retired_keys)],
-                    fingerprint=self.intent.values_commitment,
-                    purpose="browser-runtime-sync-values",
-                ):
-                    return ProviderObservation(outcome="unknown")
                 if (
                     not prepared.desired_env_map.keys() <= prepared.live_env_map.keys()
                     or prepared.retired_keys & prepared.live_env_map.keys()
@@ -421,14 +506,28 @@ class ReviewedRuntimeSync:
                         purpose="browser-runtime-sync-values",
                     )
                 ):
-                    return ProviderObservation(outcome="unknown")
-            result = runtime_sync_result(captured, applied=True)
+                    return ProviderObservation(
+                        outcome="present",
+                        response_status_code=409,
+                        response_payload=_terminal_payload(
+                            "runtime_sync_unverified", self.trace_id
+                        ),
+                    )
+            result = runtime.apply_prepared_live_target_runtime_environment(
+                prepared,
+                apply_changes=False,
+                deploy=False,
+                no_cache=False,
+                deploy_timeout_seconds=None,
+                deploy_trigger=runtime.trigger_and_wait_for_dokploy_target_deploy,
+            )
             result["mode"] = "apply"
             result["apply"] = {
                 "applied": True,
-                "env_updated": bool(provider_effect_phase),
+                "env_updated": None,
                 "verification": {"status": "pass"},
                 "recovered_by_readback": True,
+                "update_acknowledged": provider_effect_phase == _ACKNOWLEDGED_PHASE,
             }
             result["runtime_sync_review"] = self.intent.review.model_copy(
                 update={"applied": True}
@@ -441,6 +540,12 @@ class ReviewedRuntimeSync:
                     result=result,
                 ),
             )
+        except RuntimeSyncObservationUnavailable:
+            return ProviderObservation(
+                outcome="present",
+                response_status_code=409,
+                response_payload=_terminal_payload("runtime_sync_unverified", self.trace_id),
+            )
         except RuntimeSyncRefused:
             return ProviderObservation(outcome="unknown") if provider_effect_phase else stale()
         except Exception:
@@ -450,6 +555,25 @@ class ReviewedRuntimeSync:
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
         effect_started = False
+        dispatch_started = False
+        acknowledged = False
+        checkpoint_pending = False
+        refused = False
+
+        def checkpoint(phase: str) -> None:
+            nonlocal checkpoint_pending
+            checkpoint_pending = True
+            lease.checkpoint_effect(phase)
+            checkpoint_pending = False
+
+        def terminal(code: str, phase: str, *, performed: bool) -> ProviderMutationOutcome:
+            checkpoint(phase)
+            return ProviderMutationOutcome(
+                response_status_code=409,
+                provider_effect_performed=performed,
+                response_payload=_terminal_payload(code, self.trace_id),
+            )
+
         try:
             if (
                 self.request.browser_review is None
@@ -474,8 +598,41 @@ class ReviewedRuntimeSync:
                 ):
                     raise RuntimeSyncRefused("stale")
                 _key_safety(self.store, captured)
-                lease.checkpoint_effect("runtime_environment_sync")
+                checkpoint("runtime_environment_sync")
                 effect_started = True
+
+            def observe_update(
+                host: str,
+                path: str,
+                payload: dokploy_api.JsonObject,
+                dispatch: Callable[[], dokploy_api.JsonValue],
+            ) -> dokploy_api.JsonValue:
+                nonlocal dispatch_started, acknowledged, refused
+                definition = captured.prepared.target_definition
+                id_key = "composeId" if definition.target_type == "compose" else "applicationId"
+                if (
+                    host != captured.prepared.host
+                    or path != dokploy_api.dokploy_target_env_update_path(definition.target_type)
+                    or payload.get(id_key) != definition.target_id
+                    or dispatch_started
+                ):
+                    raise RuntimeSyncRefused()
+                dispatch_started = True
+                try:
+                    response = dispatch()
+                except dokploy_api.DokployRequestFailed as error:
+                    refused = (
+                        error.status_code is not None
+                        and 400 <= error.status_code < 500
+                        and not error.retryable
+                        and not error.remote_command_failed
+                    )
+                    raise
+                # Both env-write adapters acknowledge their synchronous update;
+                # persist this before a separate verification GET can fail.
+                checkpoint(_ACKNOWLEDGED_PHASE)
+                acknowledged = True
+                return response
 
             # An unchanged review still needs an authoritative pre-effect comparison;
             # it completes without manufacturing a provider write or effect checkpoint.
@@ -513,21 +670,45 @@ class ReviewedRuntimeSync:
                     "verification": {"status": "pass"},
                 }
             else:
-                result = runtime.apply_prepared_live_target_runtime_environment(
-                    captured.prepared,
-                    apply_changes=True,
-                    deploy=False,
-                    no_cache=False,
-                    deploy_timeout_seconds=None,
-                    deploy_trigger=runtime.trigger_and_wait_for_dokploy_target_deploy,
-                    provider_mutation_guard=self.guard,
-                    before_provider_env_write=check,
-                )
+                with dokploy_api.observe_dokploy_mutations(observe_update):
+                    result = runtime.apply_prepared_live_target_runtime_environment(
+                        captured.prepared,
+                        apply_changes=True,
+                        deploy=False,
+                        no_cache=False,
+                        deploy_timeout_seconds=None,
+                        deploy_trigger=runtime.trigger_and_wait_for_dokploy_target_deploy,
+                        provider_mutation_guard=self.guard,
+                        before_provider_env_write=check,
+                    )
+                cast(dict[str, object], result["apply"])["update_acknowledged"] = acknowledged
             result["runtime_sync_review"] = self.intent.review.model_copy(
                 update={"applied": True}
             ).model_dump(mode="json")
         except Exception as error:
+            if checkpoint_pending:
+                # In particular, preserve the runner's lease-loss branch. A
+                # missing commit acknowledgement is not proof of no dispatch.
+                raise
             if effect_started:
+                if not dispatch_started:
+                    return terminal(
+                        "runtime_sync_not_applied",
+                        "runtime_environment_sync_not_applied",
+                        performed=False,
+                    )
+                if refused:
+                    return terminal(
+                        "runtime_sync_provider_refused",
+                        "runtime_environment_sync_provider_refused",
+                        performed=False,
+                    )
+                if acknowledged:
+                    return terminal(
+                        "runtime_sync_unverified",
+                        "runtime_environment_sync_unverified",
+                        performed=True,
+                    )
                 raise ProviderMutationUnknownError("Runtime sync outcome is unknown.") from error
             if isinstance(error, RuntimeSyncRefused) and error.code == "stale":
                 # Terminal evidence owns this key even if the old inputs later

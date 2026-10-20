@@ -2928,12 +2928,25 @@ target fingerprint. Apply binds the exact reviewed desired environment, live
 baseline, target authority and key-safety policy, rechecks them under the lane
 guard, and uses the shared durable provider-operation fence. It cannot request
 deployment. A durably recorded stale review requires a new review; an uncertain
-effect retains the original request and key for observation and recovery without
-duplicate dispatch. Completed original receipts remain replayable after later
+effect retains the original request and key without duplicate dispatch. The
+service durably distinguishes dispatch from a successful env-update acknowledgement,
+using the existing Dokploy env-write adapter contract for both target types.
+This source contract is not evidence of deployed-version or live-lane qualification.
+A matching baseline or desired projection does not prove that a timed-out POST
+has ended. An unacknowledged call keeps the target fenced even if another writer
+makes its desired values present; supported request-specific quiescence evidence
+is still a prerequisite for resolving that genuine unknown. Neither a replacement
+key nor the machine/workflow path is a recovery workaround.
+Known local no-dispatch or typed nonretryable provider refusals and acknowledged
+updates with failed/unavailable verification have durable terminal 409 receipts.
+The latter says the update ended but settings are unverified and permits a fresh
+review, without claiming successful sync. Completed original receipts remain replayable after later
 configuration changes. Recovery of an interrupted pre-effect reservation records
 deterministic input drift as a terminal stale receipt. Recovery after an effect
-verifies separate private values/retirement and physical-recipient evidence with
-the original retained fingerprint key. Descriptive metadata or write-policy
+requires a durable acknowledgement and verifies separate private values/retirement
+and physical-recipient evidence with the original retained fingerprint key.
+Readback recovery does not attribute the write merely from its dispatch checkpoint.
+Descriptive metadata, current lane qualification or write-policy
 changes do not prevent proof of that historical effect; changed desired values,
 changed physical recipients or unavailable original proof remain uncertain.
 Odoo browser sync stays unavailable until its operation

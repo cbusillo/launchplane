@@ -21826,16 +21826,18 @@ def create_launchplane_fastapi_app(
                 )
             if prior.state not in {"running", "reconcile_required"}:
                 terminal_error = prior.response_payload.get("error")
-                if (
-                    prior.response_status_code == 409
-                    and isinstance(terminal_error, dict)
-                    and terminal_error.get("code") == "stale"
-                ):
+                if (prior.response_status_code or 0) >= 400:
+                    code = terminal_error.get("code") if isinstance(terminal_error, dict) else None
+                    if (
+                        not isinstance(code, str)
+                        or code not in browser_runtime_sync.RUNTIME_SYNC_TERMINAL_MESSAGES
+                    ):
+                        code = "runtime_sync_unverified"
                     raise _launchplane_http_error(
-                        status_code=409,
+                        status_code=prior.response_status_code or 409,
                         trace_id=prior.response_trace_id,
-                        code="stale",
-                        message="Runtime sync inputs changed; review again.",
+                        code=code,
+                        message=browser_runtime_sync.RUNTIME_SYNC_TERMINAL_MESSAGES[code],
                     )
                 replay = replay_stored_apply_idempotency(
                     record_store=store,
@@ -21912,7 +21914,7 @@ def create_launchplane_fastapi_app(
                 operation=operation,
                 in_progress_message="Runtime sync is in progress; preserve its request and key.",
                 reconcile_message="Runtime sync outcome is unknown; preserve its request and key.",
-                public_failure_messages={"stale": "Runtime sync inputs changed; review again."},
+                public_failure_messages=browser_runtime_sync.RUNTIME_SYNC_TERMINAL_MESSAGES,
             )
             return runtime_sync_response(response)
         except browser_runtime_sync.RuntimeSyncRefused as error:

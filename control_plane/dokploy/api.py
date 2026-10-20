@@ -851,6 +851,14 @@ def refuse_app_runtime_env_write(*, env_text: str, current_env_text: str, target
     )
 
 
+def dokploy_target_env_update_path(target_type: str) -> str:
+    if target_type == "compose":
+        return "/api/compose.update"
+    if target_type == "application":
+        return "/api/application.saveEnvironment"
+    raise click.ClickException(f"Unsupported target type: {target_type}")
+
+
 def update_dokploy_target_env(
     *,
     host: str,
@@ -878,7 +886,7 @@ def update_dokploy_target_env(
         dokploy_request(
             host=host,
             token=token,
-            path="/api/compose.update",
+            path=dokploy_target_env_update_path(target_type),
             method="POST",
             payload={"composeId": target_id, "env": env_text},
         )
@@ -898,7 +906,7 @@ def update_dokploy_target_env(
         dokploy_request(
             host=host,
             token=token,
-            path="/api/application.saveEnvironment",
+            path=dokploy_target_env_update_path(target_type),
             method="POST",
             payload=payload,
         )

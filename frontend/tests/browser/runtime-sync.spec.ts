@@ -2,7 +2,7 @@ import { waitForState, expect, test, type Page } from "./state";
 import type { RuntimeSyncReview } from "../../src/generated/openapi.ts";
 import { runtimeSyncStorageKey } from "../../src/runtime-sync-operation";
 
-type Scenario = "saved" | "unchanged" | "odoo" | "non-admin" | "denied" | "apply-denied" | "target-busy" | "key-conflict" | "apply-unavailable" | "loading" | "missing-availability" | "config-error" |
+type Scenario = "saved" | "unchanged" | "odoo" | "non-admin" | "denied" | "apply-denied" | "target-busy" | "key-conflict" | "lane-unqualified" | "terminal-unverified" | "apply-unavailable" | "loading" | "missing-availability" | "config-error" |
   "uncertain" | "unknown-auth" | "unknown-config-error" | "unknown-unavailable" | "missing-request" | "provider-unknown" |
   "stale" | "uncertain-stale" | "receipt-scope" | "receipt-digest" | "receipt-target" | "receipt-fingerprint" |
   "malformed-plan" | "scope-plan" | "applied-plan" | "receipt-result" | "readback-error" | "readback-different" | "refresh" | "storage-unavailable";
@@ -64,8 +64,11 @@ async function fixture(page: Page, scenario: Scenario) {
     if (scenario === "denied" || (applying && scenario === "apply-denied")) return route.fulfill({ status: 403,
       json: { trace_id: "denied", error: { code: "authorization_denied", message: "Runtime sync is denied for this session." } } });
     if (applying) {
-      if (scenario === "target-busy" || scenario === "key-conflict") return route.fulfill({ status: 409,
-        json: { trace_id: "not-reserved", error: { code: scenario === "target-busy" ? "runtime_sync_target_busy" : "idempotency_key_reused",
+      if (scenario === "terminal-unverified") return route.fulfill({ status: 409,
+        json: { trace_id: "unverified-terminal", error: { code: "runtime_sync_unverified",
+          message: "The update ended, but target settings are unverified. Review the current lane again." } } });
+      if (scenario === "target-busy" || scenario === "key-conflict" || scenario === "lane-unqualified") return route.fulfill({ status: 409,
+        json: { trace_id: "not-reserved", error: { code: scenario === "target-busy" ? "runtime_sync_target_busy" : scenario === "lane-unqualified" ? "runtime_sync_lane_unqualified" : "idempotency_key_reused",
           message: "This request did not reserve the lane." } } });
       expect(body.browser_review).toEqual({ reviewed_plan_sha256: original.plan_sha256 });
       if ((scenario === "stale" && applies().length === 1) || (scenario === "uncertain-stale" && applies().length === 2)) return route.fulfill({ status: 409,
@@ -94,7 +97,8 @@ async function fixture(page: Page, scenario: Scenario) {
     const response = { status: 202, json: { status: "accepted", trace_id: applying ? "apply-trace" : "plan-trace", records: {},
       replayed: applying && applies().length > 1, original_trace_id: applying && applies().length > 1 ? "original-apply-trace" : null,
       result: scenario === "receipt-result" && applying ? { mode: "dry-run" } : { mode: body.mode,
-        apply: { applied: applying, verification: applying ? { status: "pass" } : null }, deploy: { requested: false, triggered: false } }, review } };
+        apply: { applied: applying, verification: applying ? { status: "pass" } : null,
+          recovered_by_readback: applying && applies().length > 1, update_acknowledged: applying }, deploy: { requested: false, triggered: false } }, review } };
     if (!applying && scenario === "refresh") { releasePlan = () => route.fulfill(response); return; }
     return route.fulfill(response);
   });
@@ -103,12 +107,12 @@ async function fixture(page: Page, scenario: Scenario) {
     panel: page.getByRole("region", { name: "Runtime sync", exact: true }) };
 }
 
-const scenarios: Scenario[] = ["saved", "unchanged", "odoo", "non-admin", "denied", "apply-denied", "target-busy", "key-conflict", "apply-unavailable", "loading", "missing-availability", "config-error",
+const scenarios: Scenario[] = ["saved", "unchanged", "odoo", "non-admin", "denied", "apply-denied", "target-busy", "key-conflict", "lane-unqualified", "terminal-unverified", "apply-unavailable", "loading", "missing-availability", "config-error",
   "uncertain", "unknown-auth", "unknown-config-error", "unknown-unavailable", "missing-request", "provider-unknown", "stale", "uncertain-stale",
   "receipt-scope", "receipt-digest", "receipt-target", "receipt-fingerprint", "receipt-result", "malformed-plan", "scope-plan", "applied-plan",
   "readback-error", "readback-different", "refresh", "storage-unavailable"];
 for (const scenario of scenarios) {
-  test(`runtime sync: ${scenario}`, { tag: ["saved", "odoo", "uncertain", "readback-error"].includes(scenario) ? "@layout" : [] }, async ({ page }, testInfo) => {
+  test(`runtime sync: ${scenario}`, { tag: ["saved", "odoo", "uncertain", "readback-error", "terminal-unverified"].includes(scenario) ? "@layout" : [] }, async ({ page }, testInfo) => {
     const state = await fixture(page, scenario);
     let panel = state.panel;
     const inspect = panel.getByRole("button", { name: "Review runtime sync", exact: true });
@@ -185,7 +189,17 @@ for (const scenario of scenarios) {
     if (scenario === "storage-unavailable") {
       await expect(panel.getByRole("status")).toBeVisible(); expect(state.applies()).toHaveLength(0); return;
     }
-    if (scenario === "target-busy" || scenario === "key-conflict") {
+    if (scenario === "terminal-unverified") {
+      await expect(panel).toHaveAttribute("data-recovery", "false");
+      await expect(panel).toHaveAttribute("data-outcome", "unverified");
+      await expect(panel.getByRole("button", { name: "Review runtime sync", exact: true })).toBeEnabled();
+      await expect(panel.getByRole("alert")).toContainText("target settings are unverified");
+      await panel.evaluate(element => element.scrollIntoView({ block: "start" }));
+      await page.evaluate(() => window.scrollBy(0, -80));
+      await page.screenshot({ path: testInfo.outputPath("runtime-sync-terminal-unverified-viewport.png") });
+      expect(state.applies()).toHaveLength(1); return;
+    }
+    if (scenario === "target-busy" || scenario === "key-conflict" || scenario === "lane-unqualified") {
       await expect(panel).toHaveAttribute("data-recovery", "false");
       await expect(panel.getByRole("alert")).toContainText("This request did not reserve the lane.");
       await expect(panel.getByRole("button", { name: "Review runtime sync", exact: true })).toBeEnabled();
@@ -235,16 +249,20 @@ for (const scenario of scenarios) {
       await expect(panel.getByLabel("Runtime sync review", { exact: true })).toHaveCount(0); return;
     }
     await expect(panel).toHaveAttribute("data-operation-phase", "succeeded");
+    await expect(panel).toHaveAttribute("data-outcome", state.applies().length > 1 ? "recovered" : "verified");
     await expect(panel).toHaveAttribute("data-readback", scenario === "readback-error" ? "unavailable" : scenario === "readback-different" ? "different" : "verified");
     await expect(panel).toHaveAttribute("data-recovery", "false");
     await expect(panel.locator(".runtime-sync-receipt")).toBeVisible();
     expect(state.applies()[0].key).toBeTruthy();
     expect(await page.evaluate(() => JSON.stringify(sessionStorage))).not.toContain("inert-secret-value");
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    if (["saved", "readback-error"].includes(scenario)) {
+    if (["saved", "readback-error", "uncertain"].includes(scenario)) {
       await panel.screenshot({ path: testInfo.outputPath(`runtime-sync-${scenario === "saved" ? "verified" : "readback-unavailable"}.png`) });
       await panel.locator(".runtime-sync-receipt").scrollIntoViewIfNeeded();
+      await panel.evaluate(element => element.scrollIntoView({ block: "start" }));
+      await page.evaluate(() => window.scrollBy(0, -80));
       await page.screenshot({ path: testInfo.outputPath(`runtime-sync-${scenario === "saved" ? "verified" : "readback-unavailable"}-viewport.png`) });
+      if (scenario === "uncertain") await page.screenshot({ path: testInfo.outputPath("runtime-sync-recovered-viewport.png") });
     }
   });
 }

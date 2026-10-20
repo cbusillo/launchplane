@@ -4,7 +4,7 @@ import { LaunchplaneApiError } from "../src/api.ts";
 import { beginBrowserOperation, completeBrowserOperation, failBrowserOperation, markBrowserOperationDispatched,
   prepareBrowserOperation, recoverBrowserOperationState, persistBrowserOperationState, retryBrowserOperation } from "../src/browser-operation.ts";
 import { checkedRuntimeSyncReview, parsePendingRuntimeSync, runtimeSyncFailureCertainty, runtimeSyncReadbackMatches,
-  runtimeSyncRequest, runtimeSyncScope, verifyRuntimeSyncReceipt } from "../src/runtime-sync-operation.ts";
+  runtimeSyncReceiptState, runtimeSyncRequest, runtimeSyncScope, verifyRuntimeSyncReceipt } from "../src/runtime-sync-operation.ts";
 
 const scope = { product: "sample-site", context: "sample-testing", instance: "testing" };
 const review = { ...scope, operation: "runtime-sync", plan_sha256: "a".repeat(64), target_fingerprint: "opaque:fixture/live-target",
@@ -12,7 +12,8 @@ const review = { ...scope, operation: "runtime-sync", plan_sha256: "a".repeat(64
   different_keys: ["WORKER_TOKEN"], retired_keys_present: [], changed_keys: ["PUBLIC_ORIGIN", "WORKER_TOKEN"],
   desired_key_count: 3, live_key_count: 2, unchanged_key_count: 1, applied: false };
 function response(value = review) { return { status: "accepted", trace_id: "fixture-trace", result: { mode: value.applied ? "apply" : "dry-run",
-  apply: { applied: value.applied, verification: value.applied ? { status: "pass" } : null }, deploy: { requested: false, triggered: false } }, records: {}, review: value }; }
+  apply: { applied: value.applied, update_acknowledged: value.applied && value.changed_keys.length > 0,
+    verification: value.applied ? { status: "pass" } : null }, deploy: { requested: false, triggered: false } }, records: {}, review: value }; }
 
 test("retained runtime sync preserves only the complete reviewed request and value-free evidence", () => {
   const pending = { request: runtimeSyncRequest(scope, review), review };
@@ -38,6 +39,9 @@ test("review and original receipt reject wrong scope, digest, target and malform
   assert.throws(() => checkedRuntimeSyncReview({ ...response(), trace_id: 42 }, scope));
   assert.throws(() => checkedRuntimeSyncReview({ ...response(), result: { mode: "apply" } }, scope));
   assert.deepEqual(verifyRuntimeSyncReceipt(response({ ...review, applied: true }), scope, pending), { ...review, applied: true });
+  const receipt = response({ ...review, applied: true });
+  assert.equal(runtimeSyncReceiptState(receipt), "verified");
+  assert.equal(runtimeSyncReceiptState({ ...receipt, result: { ...receipt.result, apply: { ...receipt.result.apply, recovered_by_readback: true } } }), "recovered");
   for (const changed of [{ product: "other" }, { context: "other" }, { instance: "prod" }, { operation: "other" },
     { target_fingerprint: "" }, { missing_keys: [3] }, { changed_keys: null }, { desired_key_count: -1 }, { live_key_count: 1.5 }, { plan_sha256: "invalid" }]) {
     assert.throws(() => checkedRuntimeSyncReview(response({ ...review, ...changed }), scope));
@@ -55,7 +59,6 @@ test("current readback allows changed digest/fingerprint but cannot replace orig
   assert.equal(runtimeSyncReadbackMatches(applied, { ...current, target_id: "new-target" }), false);
   assert.equal(runtimeSyncReadbackMatches(applied, { ...current, changed_keys: ["PUBLIC_ORIGIN"] }), false);
   assert.equal(runtimeSyncReadbackMatches(applied, { ...current, applied: true }), false);
-  assert.equal(applied.plan_sha256, review.plan_sha256);
 });
 
 test("contradictory or missing apply evidence never settles a receipt", () => {
@@ -63,9 +66,14 @@ test("contradictory or missing apply evidence never settles a receipt", () => {
   const accepted = response({ ...review, applied: true });
   for (const result of [null, {}, { ...accepted.result, mode: "dry-run" }, { ...accepted.result, apply: { applied: false, verification: { status: "pass" } } },
     { ...accepted.result, apply: { applied: true } }, { ...accepted.result, apply: { applied: true, verification: { status: "fail" } } },
+    { ...accepted.result, apply: { applied: true, verification: { status: "pass" }, update_acknowledged: false } },
+    { ...accepted.result, apply: { applied: true, verification: { status: "pass" }, recovered_by_readback: true } },
     { ...accepted.result, deploy: { requested: true, triggered: false } }, { ...accepted.result, deploy: { requested: false, triggered: true } }]) {
     assert.throws(() => verifyRuntimeSyncReceipt({ ...accepted, result }, scope, pending));
   }
+  const unchanged = { ...review, changed_keys: [] };
+  assert.doesNotThrow(() => verifyRuntimeSyncReceipt(response({ ...unchanged, applied: true }), scope,
+    { request: runtimeSyncRequest(scope, unchanged), review: unchanged }));
 });
 
 test("only the route's durable stale refusal settles an uncertain original key", async () => {
@@ -101,9 +109,10 @@ test("provider and receipt failures retain uncertainty while an unreserved reque
     assert.equal(runtimeSyncFailureCertainty(error, true), "uncertain");
     assert.equal(runtimeSyncFailureCertainty(error, false), "definitive");
   }
-  for (const code of ["runtime_sync_target_busy", "idempotency_key_reused"]) {
+  for (const code of ["runtime_sync_target_busy", "idempotency_key_reused", "runtime_sync_lane_unqualified", "runtime_sync_not_applied", "runtime_sync_provider_refused", "runtime_sync_unverified"]) {
+    const settled = ["runtime_sync_not_applied", "runtime_sync_provider_refused", "runtime_sync_unverified"].includes(code);
     const error = new LaunchplaneApiError("Request did not reserve", 409, "fixture-refusal", code);
-    assert.equal(runtimeSyncFailureCertainty(error, true), "definitive");
+    assert.equal(runtimeSyncFailureCertainty(error, true), settled ? "settled" : "definitive");
     const request = runtimeSyncRequest(scope, review);
     let state = markBrowserOperationDispatched(beginBrowserOperation(await prepareBrowserOperation(runtimeSyncScope(scope), request)));
     state = failBrowserOperation(state, { code, message: error.message, statusCode: 409, traceId: error.traceId }, runtimeSyncFailureCertainty(error, true));
@@ -113,7 +122,7 @@ test("provider and receipt failures retain uncertainty while an unreserved reque
     state = failBrowserOperation(state, { code: "lost", message: "lost", statusCode: 0, traceId: "" }, "uncertain");
     state = markBrowserOperationDispatched(beginBrowserOperation(await prepareBrowserOperation(runtimeSyncScope(scope), request, retryBrowserOperation(state))));
     state = failBrowserOperation(state, { code, message: error.message, statusCode: 409, traceId: error.traceId }, runtimeSyncFailureCertainty(error, true));
-    assert.equal(state.requiresIdempotencyContinuity, true);
+    assert.equal(state.requiresIdempotencyContinuity, !settled);
     assert.deepEqual(state.identity, original);
   }
 });

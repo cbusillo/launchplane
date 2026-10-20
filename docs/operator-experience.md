@@ -671,6 +671,11 @@ new reviews are unavailable. A later refusal does not erase earlier uncertainty.
 Completion requires matching original receipt evidence; a separate current
 readback may fail or differ without undoing that completion. Neither result
 claims that the website is healthy.
+Recovered receipts identify confirmation by readback separately from a directly
+verified sync. A terminal unverified outcome says the update ended but settings
+are unverified, and allows another review. A provider timeout without durable
+acknowledgement remains unknown even when current values match: that read cannot
+prove an older remote write has ended, so its request and target fence stay held.
 
 The environment Managed secrets form can also select a credential supplied by the
 named Client. The Client receives the focused `/ui/owner-secrets` page, containing

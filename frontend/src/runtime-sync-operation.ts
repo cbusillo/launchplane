@@ -75,6 +75,7 @@ export function verifyRuntimeSyncReceipt(response: RuntimeSyncResponse, scope: R
   const result = response.result;
   if (!object(result) || result.mode !== "apply" || !object(result.apply) || result.apply.applied !== true ||
       !object(result.apply.verification) || result.apply.verification.status !== "pass" ||
+      (original.changed_keys.length > 0 && result.apply.update_acknowledged !== true) ||
       !object(result.deploy) || result.deploy.requested !== false || result.deploy.triggered !== false ||
       !review.applied || review.plan_sha256 !== pending.request.browser_review.reviewed_plan_sha256 ||
       review.target_id !== original.target_id || review.target_type !== original.target_type ||
@@ -90,13 +91,18 @@ export function runtimeSyncReadbackMatches(applied: RuntimeSyncReview, current: 
     current.changed_keys.length === 0;
 }
 
+export function runtimeSyncReceiptState(response: RuntimeSyncResponse): "recovered" | "verified" {
+  return object(response.result) && object(response.result.apply) && response.result.apply.recovered_by_readback === true
+    ? "recovered" : "verified";
+}
+
 export function runtimeSyncFailureCertainty(error: unknown, dispatched: boolean): BrowserOperationFailureCertainty {
   if (!dispatched) return "definitive";
   if (error instanceof LaunchplaneApiError) {
     if (error.statusCode >= 500) return "uncertain";
-    if (error.statusCode === 409 && ["runtime_sync_target_busy", "idempotency_key_reused"].includes(error.code)) return "definitive";
-    // This route durably stores this original key's terminal, pre-effect refusal.
-    if (error.statusCode === 409 && error.code === "stale") return "settled";
+    if (error.statusCode === 409 && ["runtime_sync_target_busy", "idempotency_key_reused", "runtime_sync_lane_unqualified"].includes(error.code)) return "definitive";
+    // These route-specific codes replay this original key's durable terminal outcome.
+    if (error.statusCode === 409 && ["stale", "runtime_sync_not_applied", "runtime_sync_provider_refused", "runtime_sync_unverified"].includes(error.code)) return "settled";
     if (["authentication_required", "authorization_denied", "browser_mutation_denied", "invalid_request", "idempotency_key_required"].includes(error.code)) {
       return "definitive";
     }

@@ -8,7 +8,7 @@ import type { ResourceState } from "./resource";
 import { useBrowserOperationController } from "./use-browser-operation";
 import {
   checkedRuntimeSyncReview, parsePendingRuntimeSync, runtimeSyncFailureCertainty,
-  runtimeSyncReadbackMatches, runtimeSyncRequest, runtimeSyncScope, runtimeSyncStorageKey,
+  runtimeSyncReadbackMatches, runtimeSyncReceiptState, runtimeSyncRequest, runtimeSyncScope, runtimeSyncStorageKey,
   verifyRuntimeSyncReceipt, type PendingRuntimeSync, type RuntimeSyncRequest,
 } from "./runtime-sync-operation";
 
@@ -126,7 +126,9 @@ export function RuntimeSyncPanel({ detail, configResource, fixtureMode, onRefres
     setAccepted(response); setPending(null); pendingRef.current = null; setReview(null); setConfirmed(false);
     try { sessionStorage.removeItem(storageKey); } catch { /* A settled controller cannot recover a leftover request. */ }
     setReadback("pending");
-    setMessage("Runtime sync completed; current target readback pending. No deployment was requested.");
+    const outcome = runtimeSyncReceiptState(response) === "recovered"
+      ? "Original reviewed values confirmed by readback" : "Runtime sync update and target settings verified";
+    setMessage(`${outcome}; current target readback pending. No deployment was requested.`);
     const generation = revision.current;
     try {
       const currentResponse = await plan.run(runtimeSyncRequest(scope));
@@ -134,19 +136,21 @@ export function RuntimeSyncPanel({ detail, configResource, fixtureMode, onRefres
       if (!currentResponse) throw new Error("Current target readback unavailable.");
       const current = checkedRuntimeSyncReview(currentResponse, scope);
       if (runtimeSyncReadbackMatches(completed, current)) {
-        setReadback("verified"); setMessage("Runtime sync completed and current target settings match. Website health has not been checked.");
+        setReadback("verified"); setMessage(`${outcome}; current target settings match. Website health has not been checked.`);
       } else {
-        setReadback("different"); setMessage("Original runtime sync completed; current target settings differ. Review current evidence before another decision.");
+        setReadback("different"); setMessage(`${outcome}; current target settings differ. Review current evidence before another decision.`);
       }
     } catch (error) {
       setReadback("unavailable");
-      setMessage(`Original runtime sync completed; current target readback is unverified. ${error instanceof Error ? error.message : "Readback unavailable."}`);
+      setMessage(`${outcome}; current target readback is unverified. ${error instanceof Error ? error.message : "Readback unavailable."}`);
     }
     onRefresh();
   }
   const failure = apply.state.failure ?? plan.state.failure;
+  const recovered = accepted ? runtimeSyncReceiptState(accepted) === "recovered" : false;
   return <section className="promotion-control runtime-sync-panel" aria-labelledby={`${id}-title`} aria-busy={busy}
-    data-operation-phase={apply.state.phase} data-recovery={recovering} data-readback={readback}>
+    data-operation-phase={apply.state.phase} data-recovery={recovering} data-readback={readback}
+    data-outcome={accepted ? recovered ? "recovered" : "verified" : !recovering && apply.state.failure?.code === "runtime_sync_unverified" ? "unverified" : "pending"}>
     <header className="promotion-control-header"><span aria-hidden="true"><RefreshCw /></span><div>
       <p className="eyebrow">{detail.display_name} · {detail.environment}</p>
       <h2 id={`${id}-title`}>Runtime sync</h2>
@@ -177,7 +181,7 @@ export function RuntimeSyncPanel({ detail, configResource, fixtureMode, onRefres
     {message && <p role="status">{message}</p>}
     {failure && <p role="alert">{failure.message}{failure.traceId && <> Trace: <code>{failure.traceId}</code></>}</p>}
     {accepted?.review && <details className="runtime-sync-receipt"><summary>Original runtime sync receipt</summary>
-      <p>{accepted.replayed ? "Original sync replay confirmed." : "Original runtime sync completed."} Target: {accepted.review.target_name}.</p>
+      <p>{recovered ? "Original reviewed values confirmed by readback." : accepted.replayed ? "Original verified sync receipt replayed." : "Runtime sync update and target settings verified."} Target: {accepted.review.target_name}.</p>
       <p>Trace: <code>{accepted.trace_id}</code>{accepted.original_trace_id && <> · Original trace: <code>{accepted.original_trace_id}</code></>}</p>
       <ReviewEvidence review={accepted.review} /></details>}
   </section>;

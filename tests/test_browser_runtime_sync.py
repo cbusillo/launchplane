@@ -1,10 +1,12 @@
 """Real browser sessions and store-backed reviewed runtime synchronization."""
 
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 import json
 import os
+import threading
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -17,6 +19,7 @@ from cryptography.fernet import Fernet
 from control_plane import browser_runtime_sync as sync
 from control_plane import live_target_runtime as runtime
 from control_plane import secrets
+from control_plane.dokploy import api as dokploy_api
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
@@ -120,6 +123,8 @@ class BrowserRuntimeSyncTests(unittest.IsolatedAsyncioTestCase):
         self.fetch_count = 0
         self.fetch_hook: Any = None
         self.timeout_after_update = False
+        self.provider_failure: dokploy_api.DokployRequestFailed | None = None
+        self.mismatched_update = False
         self.host = "https://provider.invalid"
         for replacement in (
             patch.dict(
@@ -130,7 +135,7 @@ class BrowserRuntimeSyncTests(unittest.IsolatedAsyncioTestCase):
                 side_effect=self.read_provider_config,
             ),
             patch("control_plane.dokploy.api.fetch_dokploy_target_payload", side_effect=self.fetch),
-            patch("control_plane.dokploy.api.update_dokploy_target_env", side_effect=self.update),
+            patch("control_plane.dokploy.api._dokploy_request", side_effect=self.provider_request),
             patch("control_plane.live_target_runtime.trigger_and_wait_for_dokploy_target_deploy"),
         ):
             replacement.start()
@@ -168,6 +173,40 @@ class BrowserRuntimeSyncTests(unittest.IsolatedAsyncioTestCase):
         self.env = kwargs["env_text"]
         if self.timeout_after_update:
             raise click.ClickException("provider body contains private-desired-value fixture-token")
+
+    def provider_request(self, **kwargs: Any) -> dict[str, object]:
+        self.assertEqual(kwargs["method"], "POST")
+        self.assertEqual(
+            kwargs["path"], dokploy_api.dokploy_target_env_update_path(self.target.target_type)
+        )
+        id_key = "applicationId" if self.target.target_type == "application" else "composeId"
+        self.assertEqual(kwargs["payload"][id_key], self.target_id.target_id)
+        if self.provider_failure is not None:
+            raise self.provider_failure
+        self.update(env_text=kwargs["payload"]["env"])
+        if self.mismatched_update:
+            self.env = "GOOGLE_ANALYTICS_MEASUREMENT_ID=unexpected-value\n"
+        return {}
+
+    async def interrupt_acknowledged(self, payload: dict[str, Any], key: str) -> Any:
+        with patch.object(
+            self.store,
+            "complete_mutation_reservation",
+            side_effect=ValueError("fixture receipt lost"),
+        ):
+            response = await self.post(payload, key)
+        self.assertEqual(response.status_code, 503, response.text)
+        record = self.store.read_idempotency_record(
+            scope=idempotency_scope(self.session.identity),
+            route_path="/v1/live-target-runtime/apply",
+            idempotency_key=key,
+        )
+        assert record is not None
+        transition = self.store.mark_mutation_reconcile_required(
+            reservation=record, reconciliation_key=record.reconciliation_key
+        )
+        self.assertEqual(transition.status, "updated")
+        return response
 
     async def post(
         self,
@@ -334,10 +373,7 @@ class BrowserRuntimeSyncTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         review = await self.plan()
         payload = self.apply_payload(review)
-        self.timeout_after_update = True
-        first = await self.post(payload, "unknown")
-        self.assertEqual(first.status_code, 409, first.text)
-        self.assertEqual(first.json()["error"]["code"], "mutation_reconciliation_required")
+        first = await self.interrupt_acknowledged(payload, "unknown")
         self.assert_redacted(first)
         other = await self.post(payload, "new-key")
         self.assertEqual(other.status_code, 409, other.text)
@@ -360,8 +396,297 @@ class BrowserRuntimeSyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(adopted.status_code, 202, adopted.text)
         self.assertTrue(adopted.json()["review"]["applied"])
         self.assertTrue(adopted.json()["result"]["apply"]["recovered_by_readback"])
+        self.assertIsNone(adopted.json()["result"]["apply"]["env_updated"])
+        self.assertTrue(adopted.json()["result"]["apply"]["update_acknowledged"])
         self.assertEqual(len(self.updates), 1)
         self.assert_redacted(adopted)
+
+    async def test_unacknowledged_write_cannot_settle_from_matching_values(self) -> None:
+        payload = self.apply_payload(await self.plan())
+        self.timeout_after_update = True
+        first = await self.post(payload, "unacknowledged")
+        self.assertEqual(first.status_code, 409, first.text)
+        resumed = await self.post(payload, "unacknowledged")
+        self.assertEqual(resumed.status_code, 409, resumed.text)
+        self.assertEqual(resumed.json()["error"]["code"], "mutation_reconciliation_required")
+        other = await self.post(payload, "must-still-be-fenced")
+        self.assertEqual(other.json()["error"]["code"], "runtime_sync_target_busy")
+        self.assertEqual(len(self.updates), 1)
+
+    async def test_delayed_old_post_stays_fenced_after_machine_writes_matching_values(self) -> None:
+        payload = self.apply_payload(await self.plan())
+        accepted, release = threading.Event(), threading.Event()
+        with ThreadPoolExecutor(max_workers=1) as pool:
+
+            def delayed(env_text: str) -> None:
+                accepted.set()
+                if not release.wait(10):
+                    raise AssertionError("Delayed provider fixture was not released")
+                self.env = env_text
+
+            def dispatch(**kwargs: Any) -> dict[str, object]:
+                self.updates.append(kwargs)
+                future = pool.submit(delayed, kwargs["payload"]["env"])
+                delayed_futures.append(future)
+                self.assertTrue(accepted.wait(10))
+                raise dokploy_api.DokployRequestFailed(
+                    method="POST", path=kwargs["path"], detail="fixture timeout"
+                )
+
+            delayed_futures: list[Any] = []
+            try:
+                with patch("control_plane.dokploy.api._dokploy_request", side_effect=dispatch):
+                    first = await self.post(payload, "delayed-old-post")
+                self.assertEqual(first.status_code, 409, first.text)
+                runtime.apply_live_target_runtime_environment(
+                    control_plane_root=self.root,
+                    database_url=self.store.database_url,
+                    product_name=self.product,
+                    context_name=self.context,
+                    instance_name=self.instance,
+                    apply_changes=True,
+                    deploy=False,
+                    no_cache=False,
+                    deploy_timeout_seconds=None,
+                    deploy_trigger=runtime.trigger_and_wait_for_dokploy_target_deploy,
+                )
+                resumed = await self.post(payload, "delayed-old-post")
+                self.assertEqual(
+                    resumed.json()["error"]["code"], "mutation_reconciliation_required"
+                )
+                other = await self.post(payload, "blocked-new-operation")
+                self.assertEqual(other.json()["error"]["code"], "runtime_sync_target_busy")
+                self.assertEqual(len(self.updates), 2)
+            finally:
+                release.set()
+                for future in delayed_futures:
+                    future.result(timeout=10)
+
+    async def test_provider_refusal_and_local_preflight_are_terminal_and_replay_exactly(
+        self,
+    ) -> None:
+        for local in (False, True):
+            with self.subTest(local=local):
+                payload = self.apply_payload(await self.plan())
+                key = f"definite-refusal-{local}"
+                if local:
+                    with patch(
+                        "control_plane.dokploy.api.update_dokploy_target_env",
+                        side_effect=click.ClickException("fixture local preflight"),
+                    ):
+                        first = await self.post(payload, key)
+                    code = "runtime_sync_not_applied"
+                else:
+                    self.provider_failure = dokploy_api.DokployRequestFailed(
+                        method="POST",
+                        path=dokploy_api.dokploy_target_env_update_path(self.target.target_type),
+                        status_code=403,
+                        detail="fixture denied",
+                    )
+                    first = await self.post(payload, key)
+                    self.provider_failure = None
+                    code = "runtime_sync_provider_refused"
+                self.assertEqual(first.status_code, 409, first.text)
+                self.assertEqual(first.json()["error"]["code"], code)
+                self.change_setting()
+                replay = await self.post(payload, key)
+                self.assertEqual(replay.json(), first.json())
+                self.store.write_runtime_environment_record(self.setting)
+        self.assertFalse(self.updates)
+        self.assertEqual(
+            (await self.post(self.apply_payload(await self.plan()), "after-refusals")).status_code,
+            202,
+        )
+
+    async def test_retryable_provider_failure_remains_unknown(self) -> None:
+        await self.check_unknown_provider_failure(503, False)
+
+    async def test_partial_remote_command_failure_remains_unknown(self) -> None:
+        await self.check_unknown_provider_failure(400, True)
+
+    async def check_unknown_provider_failure(self, status: int, remote: bool) -> None:
+        payload = self.apply_payload(await self.plan())
+        self.provider_failure = dokploy_api.DokployRequestFailed(
+            method="POST",
+            path=dokploy_api.dokploy_target_env_update_path(self.target.target_type),
+            status_code=status,
+            detail="fixture unknown",
+            remote_command_failed=remote,
+        )
+        first = await self.post(payload, "unknown-provider")
+        self.assertEqual(first.json()["error"]["code"], "mutation_reconciliation_required")
+        self.provider_failure = None
+        self.assertEqual(
+            (await self.post(payload, "unknown-provider")).json()["error"]["code"],
+            "mutation_reconciliation_required",
+        )
+        self.assertEqual(
+            (await self.post(payload, "other-provider")).json()["error"]["code"],
+            "runtime_sync_target_busy",
+        )
+        self.assertFalse(self.updates)
+
+    async def test_acknowledged_but_unverified_is_terminal_and_replays(self) -> None:
+        for mismatch in (False, True):
+            with self.subTest(mismatch=mismatch):
+                self.env = "GOOGLE_ANALYTICS_MEASUREMENT_ID=old-private-value\n"
+                payload = self.apply_payload(await self.plan())
+                before = len(self.updates)
+
+                def fail_readback(count: int) -> None:
+                    if len(self.updates) > before:
+                        raise click.ClickException("fixture verification unavailable")
+
+                self.mismatched_update = mismatch
+                self.fetch_hook = None if mismatch else fail_readback
+                first = await self.post(payload, f"unverified-{mismatch}")
+                self.fetch_hook = None
+                self.mismatched_update = False
+                self.assertEqual(first.status_code, 409, first.text)
+                self.assertEqual(first.json()["error"]["code"], "runtime_sync_unverified")
+                self.change_setting()
+                replay = await self.post(payload, f"unverified-{mismatch}")
+                self.assertEqual(replay.json(), first.json())
+                fresh = await self.post(
+                    self.apply_payload(await self.plan()), f"new-after-unverified-{mismatch}"
+                )
+                self.assertEqual(fresh.status_code, 202, fresh.text)
+                self.store.write_runtime_environment_record(self.setting)
+
+    async def test_acknowledgement_commit_loss_preserves_exact_lease_and_dispatch_count(
+        self,
+    ) -> None:
+        for committed in (False, True):
+            with self.subTest(committed=committed):
+                self.env = "GOOGLE_ANALYTICS_MEASUREMENT_ID=old-private-value\n"
+                payload = self.apply_payload(await self.plan())
+                key = f"ack-commit-{committed}"
+                original = self.store.checkpoint_mutation_provider_effect
+                stale: list[Any] = []
+
+                def checkpoint(**kwargs: Any) -> Any:
+                    if kwargs["effect_phase"] == sync._ACKNOWLEDGED_PHASE:
+                        stale.append(kwargs["reservation"])
+                        if committed:
+                            original(**kwargs)
+                        raise ValueError("fixture ACK commit acknowledgement lost")
+                    return original(**kwargs)
+
+                with patch.object(
+                    self.store, "checkpoint_mutation_provider_effect", side_effect=checkpoint
+                ):
+                    first = await self.post(payload, key)
+                self.assertEqual(first.json()["error"]["code"], "mutation_reconciliation_required")
+                record = self.store.read_idempotency_record(
+                    scope=idempotency_scope(self.session.identity),
+                    route_path="/v1/live-target-runtime/apply",
+                    idempotency_key=key,
+                )
+                assert record is not None
+                if committed:
+                    self.assertEqual(
+                        original(
+                            reservation=stale[0], effect_phase=sync._ACKNOWLEDGED_PHASE
+                        ).status,
+                        "reservation_mismatch",
+                    )
+                self.store.mark_mutation_reconcile_required(
+                    reservation=record, reconciliation_key=record.reconciliation_key
+                )
+                resumed = await self.post(payload, key)
+                self.assertEqual(resumed.status_code, 202 if committed else 409, resumed.text)
+                if not committed:
+                    # Keep this unacknowledged target held; the next independent
+                    # case uses another qualified recipient, not a forced release.
+                    self.target_id = self.target_id.model_copy(
+                        update={"target_id": "second-ack-target"}
+                    )
+                    self.store.write_dokploy_target_id_record(self.target_id)
+                    self.provider = ProviderTargetRecord.from_dokploy_records(
+                        target_record=self.target, target_id_record=self.target_id
+                    )
+                    self.store.write_provider_target_record(self.provider)
+                self.assertEqual(len(self.updates), 1 + int(committed))
+
+    async def test_historical_observation_ignores_new_write_qualification(self) -> None:
+        payload = self.apply_payload(await self.plan())
+        await self.interrupt_acknowledged(payload, "historical")
+        self.store.write_product_profile_record(
+            self.profile.model_copy(update={"is_active": False, "lanes": ()})
+        )
+        self.store.write_provider_target_record(
+            self.provider.model_copy(
+                update={
+                    "context": "alias-context",
+                    "instance": "prod",
+                    "target_category": "changed-category",
+                }
+            )
+        )
+        self.store.write_dokploy_target_id_record(
+            self.target_id.model_copy(update={"context": "unrelated-incomplete"})
+        )
+        with patch(
+            "control_plane.dokploy.api.fetch_dokploy_target_payload", side_effect=self.fetch
+        ) as fetch:
+            recovered = await self.post(payload, "historical")
+        self.assertEqual(recovered.status_code, 202, recovered.text)
+        self.assertEqual(fetch.call_args.kwargs["target_id"], self.target_id.target_id)
+        self.assertTrue(recovered.json()["result"]["apply"]["recovered_by_readback"])
+        self.assertEqual(len(self.updates), 1)
+        self.assertNotEqual((await self.post(self.payload)).status_code, 202)
+
+    async def test_both_env_write_adapters_record_successful_acknowledgement(self) -> None:
+        for target_type in ("application", "compose"):
+            with self.subTest(target_type=target_type):
+                self.target = self.target.model_copy(update={"target_type": target_type})
+                self.store.write_dokploy_target_record(self.target)
+                self.provider = ProviderTargetRecord.from_dokploy_records(
+                    target_record=self.target, target_id_record=self.target_id
+                )
+                self.store.write_provider_target_record(self.provider)
+                self.env = "GOOGLE_ANALYTICS_MEASUREMENT_ID=old-private-value\n"
+                payload = self.apply_payload(await self.plan())
+                await self.interrupt_acknowledged(payload, target_type)
+                recovered = await self.post(payload, target_type)
+                self.assertEqual(recovered.status_code, 202, recovered.text)
+                self.assertTrue(recovered.json()["result"]["apply"]["update_acknowledged"])
+        self.assertEqual(len(self.updates), 2)
+
+    async def test_predispatch_checkpoint_commit_ack_loss_never_dispatches_or_settles_by_values(
+        self,
+    ) -> None:
+        payload = self.apply_payload(await self.plan())
+        original = self.store.checkpoint_mutation_provider_effect
+        stale: list[Any] = []
+
+        def checkpoint(**kwargs: Any) -> Any:
+            stale.append(kwargs["reservation"])
+            original(**kwargs)
+            raise ValueError("fixture predispatch checkpoint commit acknowledgement lost")
+
+        with patch.object(
+            self.store, "checkpoint_mutation_provider_effect", side_effect=checkpoint
+        ):
+            response = await self.post(payload, "predispatch-ack-lost")
+        self.assertEqual(response.json()["error"]["code"], "mutation_reconciliation_required")
+        record = self.store.read_idempotency_record(
+            scope=idempotency_scope(self.session.identity),
+            route_path="/v1/live-target-runtime/apply",
+            idempotency_key="predispatch-ack-lost",
+        )
+        assert record is not None
+        self.assertEqual(
+            original(reservation=stale[0], effect_phase=record.provider_effect_phase).status,
+            "reservation_mismatch",
+        )
+        self.store.mark_mutation_reconcile_required(
+            reservation=record, reconciliation_key=record.reconciliation_key
+        )
+        self.env = "GOOGLE_ANALYTICS_MEASUREMENT_ID=private-desired-value\n"
+        resumed = await self.post(payload, "predispatch-ack-lost")
+        self.assertEqual(resumed.json()["error"]["code"], "mutation_reconciliation_required")
+        self.assertFalse(self.updates)
 
     async def test_interrupted_pre_effect_drift_settles_original_key_and_releases_target(
         self,
@@ -403,8 +728,7 @@ class BrowserRuntimeSyncTests(unittest.IsolatedAsyncioTestCase):
             clear=True,
         ):
             payload = self.apply_payload(await self.plan())
-            self.timeout_after_update = True
-            self.assertEqual((await self.post(payload, "key-rotation")).status_code, 409)
+            await self.interrupt_acknowledged(payload, "key-rotation")
             config["active_key_id"] = "new"
             config["keys"] = {"new": new_key}
             os.environ[secrets.LAUNCHPLANE_SECRET_KEYS_JSON_ENV_VAR] = json.dumps(config)
@@ -448,8 +772,7 @@ class BrowserRuntimeSyncTests(unittest.IsolatedAsyncioTestCase):
         )
         self.store.write_runtime_key_safety_policy_record(policy)
         payload = self.apply_payload(await self.plan())
-        self.timeout_after_update = True
-        self.assertEqual((await self.post(payload, "policy-observation")).status_code, 409)
+        await self.interrupt_acknowledged(payload, "policy-observation")
         self.store.write_runtime_key_safety_policy_record(
             policy.model_copy(
                 update={
@@ -480,8 +803,7 @@ class BrowserRuntimeSyncTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unknown_changed_inputs_remain_unknown(self) -> None:
         payload = self.apply_payload(await self.plan())
-        self.timeout_after_update = True
-        self.assertEqual((await self.post(payload, "unknown-drift")).status_code, 409)
+        await self.interrupt_acknowledged(payload, "unknown-drift")
         self.change_setting()
         response = await self.post(payload, "unknown-drift")
         self.assertEqual(response.status_code, 409, response.text)
@@ -513,7 +835,7 @@ class BrowserRuntimeSyncTests(unittest.IsolatedAsyncioTestCase):
         self.env = "GOOGLE_ANALYTICS_MEASUREMENT_ID=unexpected-live-value\n"
         wrong_live = await self.post(payload, "unknown-drift")
         self.assertEqual(wrong_live.status_code, 409, wrong_live.text)
-        self.assertEqual(wrong_live.json()["error"]["code"], "mutation_reconciliation_required")
+        self.assertEqual(wrong_live.json()["error"]["code"], "runtime_sync_unverified")
         self.assertEqual(len(self.updates), 1)
 
     async def test_unchanged_apply_has_no_provider_effect_and_still_checks_baseline(self) -> None:
