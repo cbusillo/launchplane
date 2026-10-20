@@ -26,6 +26,8 @@ from tests import test_testing_hold_rehearsal as testing_hold_rehearsal
 from tests import test_application_state_volume as application_volume_tests
 from tests import test_testing_rebuild as testing_rebuild_tests
 from tests import test_testing_retry as testing_retry_tests
+from tests import test_browser_route_repair as browser_repair_tests
+from tests import test_release_review_http as release_review_http_tests
 from control_plane.contracts.testing_rebuild import TestingRebuildRecord
 from tests import test_merge_train_historical_completion_storage as historical_storage_tests
 from unittest.mock import Mock, patch
@@ -1891,198 +1893,6 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
 
         with _store_for_fresh_head_database() as store:
             assert_committed_reservation_survives_unknown_delete(self, store)
-
-    def test_browser_domain_repair_atomic_receipt_rollback_and_retry(self) -> None:
-        from tests.test_browser_route_repair import BrowserRouteRepairTests
-
-        with _store_for_fresh_head_database() as store:
-            fixture = BrowserRouteRepairTests()
-            try:
-                with patch(
-                    "tests.test_browser_route_repair.PostgresRecordStore", return_value=store
-                ):
-                    fixture.setUp()
-                store.seed_authz_policy_if_absent(
-                    LaunchplaneAuthzPolicyRecord(
-                        record_id=build_authz_policy_record_id(
-                            revision=1, policy_sha256=authz_policy_sha256(fixture.policy)
-                        ),
-                        source="test:browser-route-repair",
-                        updated_at=fixture.target.updated_at,
-                        policy=fixture.policy,
-                    )
-                )
-                asyncio.run(
-                    fixture.test_domain_receipt_failure_rolls_back_records_and_retry_can_complete()
-                )
-                asyncio.run(fixture.test_domain_apply_and_immutable_replay_precede_source_drift())
-            finally:
-                fixture.doCleanups()
-
-    def test_browser_binding_commit_rejects_intervening_domain_repair(self) -> None:
-        from tests.test_browser_route_repair import BrowserRouteRepairTests
-
-        with _store_for_fresh_head_database() as store:
-            fixture = BrowserRouteRepairTests()
-            try:
-                with patch(
-                    "tests.test_browser_route_repair.PostgresRecordStore", return_value=store
-                ):
-                    fixture.setUp()
-                store.seed_authz_policy_if_absent(
-                    LaunchplaneAuthzPolicyRecord(
-                        record_id=build_authz_policy_record_id(
-                            revision=1, policy_sha256=authz_policy_sha256(fixture.policy)
-                        ),
-                        source="test:browser-route-repair",
-                        updated_at=fixture.target.updated_at,
-                        policy=fixture.policy,
-                    )
-                )
-                asyncio.run(fixture.test_binding_commit_rejects_intervening_domain_repair())
-            finally:
-                fixture.doCleanups()
-
-    def test_browser_same_key_concurrent_retries_preserve_original_receipts(self) -> None:
-        from tests.test_browser_route_repair import BrowserRouteRepairTests
-
-        for kind in ("domain", "binding"):
-            with self.subTest(kind=kind), _store_for_fresh_head_database() as store:
-                fixture = BrowserRouteRepairTests()
-                try:
-                    with patch(
-                        "tests.test_browser_route_repair.PostgresRecordStore", return_value=store
-                    ):
-                        fixture.setUp()
-                    store.seed_authz_policy_if_absent(
-                        LaunchplaneAuthzPolicyRecord(
-                            record_id=build_authz_policy_record_id(
-                                revision=1, policy_sha256=authz_policy_sha256(fixture.policy)
-                            ),
-                            source="test:browser-route-repair",
-                            updated_at=fixture.target.updated_at,
-                            policy=fixture.policy,
-                        )
-                    )
-                    for winner in ("stale", "success"):
-                        asyncio.run(fixture.assert_atomic_terminal_winner(kind, winner))
-                finally:
-                    fixture.doCleanups()
-
-    def test_browser_binding_and_authority_publisher_do_not_invert_locks(self) -> None:
-        from control_plane.route_binding_reconcile import (
-            RouteBindingExpectedCurrent,
-            RouteBindingReconcileRequest,
-            plan_route_binding_reconcile,
-        )
-        from control_plane.workflows.ship import utc_now_timestamp
-        from tests.test_browser_route_repair import BrowserRouteRepairTests
-
-        with _store_for_fresh_head_database() as store:
-            fixture = BrowserRouteRepairTests()
-            publisher = PostgresRecordStore(database_url=store.database_url)
-            try:
-                with patch(
-                    "tests.test_browser_route_repair.PostgresRecordStore", return_value=store
-                ):
-                    fixture.setUp()
-                fixture.seed_binding()
-                plan = plan_route_binding_reconcile(
-                    record_store=store,
-                    request=RouteBindingReconcileRequest(
-                        product="example-product",
-                        context="example-testing",
-                        instance="web",
-                        expected_current=RouteBindingExpectedCurrent(state="absent"),
-                        evaluated_at=utc_now_timestamp(),
-                    ),
-                )
-                self.assertEqual(plan.status, "ready")
-                candidate, sources = plan.record, plan.review_sources
-                assert candidate is not None and sources is not None
-                mutation = DbOnlyMutationRequest(
-                    scope="browser-lock-order-fixture",
-                    route_path="/v1/route-bindings/reconcile",
-                    idempotency_key="reviewed-binding",
-                    request_fingerprint="reviewed-binding-request",
-                    lease_owner="browser",
-                    response_status_code=202,
-                    response_trace_id="browser-trace",
-                    response_payload={"status": "accepted", "trace_id": "browser-trace"},
-                )
-                held, proceed, connected = (threading.Event(), threading.Event(), threading.Event())
-                browser_pid: list[int] = []
-
-                def observe_connection(connection: Any, _record: Any, _proxy: Any) -> None:
-                    if threading.current_thread().name.startswith("reviewed-binding"):
-                        browser_pid.append(int(connection.info.backend_pid))
-                        connected.set()
-
-                def publish_authority() -> None:
-                    # Existing authority publishers take the bundle before the binding.
-                    with publisher._session_factory() as session:
-                        publisher._begin_serialized_write(session)
-                        publisher._lock_product_authority_bundle_write(session)
-                        held.set()
-                        if not proceed.wait(30):
-                            raise AssertionError("Browser did not reach its database lock wait.")
-                        publisher._lock_route_binding_write(
-                            session, binding_key=candidate.binding_key
-                        )
-                        session.commit()
-
-                def reconcile_binding() -> str:
-                    if not held.wait(30):
-                        raise AssertionError("Competing publisher did not acquire authority.")
-                    return store.reconcile_route_binding_record(
-                        expected_record=None,
-                        replacement_record=candidate,
-                        mutation=mutation,
-                        reviewed_sources=sources,
-                        reviewed_product=candidate.product,
-                    ).status
-
-                event.listen(store._engine, "checkout", observe_connection)
-                try:
-                    with ThreadPoolExecutor(
-                        max_workers=2, thread_name_prefix="reviewed-binding"
-                    ) as executor:
-                        publishing = executor.submit(publish_authority)
-                        browser = executor.submit(reconcile_binding)
-                        try:
-                            self.assertTrue(connected.wait(30))
-                            deadline = time.monotonic() + 30
-                            with publisher._engine.connect().execution_options(
-                                isolation_level="AUTOCOMMIT"
-                            ) as observer:
-                                while True:
-                                    waiting = observer.execute(
-                                        text(
-                                            "select wait_event_type, wait_event "
-                                            "from pg_stat_activity where pid=:pid"
-                                        ),
-                                        {"pid": browser_pid[0]},
-                                    ).first()
-                                    if waiting is not None and tuple(waiting) == (
-                                        "Lock",
-                                        "advisory",
-                                    ):
-                                        break
-                                    self.assertLess(
-                                        time.monotonic(),
-                                        deadline,
-                                        "Browser did not enter its advisory-lock wait.",
-                                    )
-                                    proceed.wait(0.01)
-                        finally:
-                            proceed.set()
-                        publishing.result(timeout=30)
-                        self.assertEqual(browser.result(timeout=30), "created")
-                finally:
-                    event.remove(store._engine, "checkout", observe_connection)
-            finally:
-                publisher.close()
-                fixture.doCleanups()
 
     def test_profile_cas_and_final_allocation_publication_serialize_in_both_orders(self) -> None:
         from contextlib import nullcontext
@@ -6852,101 +6662,6 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
             finally:
                 store.close()
 
-    def test_release_publication_lock_timeout_returns_pending_and_retry_recovers(self) -> None:
-        from control_plane.release_review import RELEASE_RECORD_PENDING
-        from control_plane.release_review_record import publish_release_decision
-        from tests.test_release_review import decision, profile, seed
-        from tests.test_release_review_http import ReleaseReviewHttpTests
-        from tests.test_release_review_record import FakeReleaseIssues
-
-        with _head_postgres_database() as url:
-            holder_store = PostgresRecordStore(database_url=url)
-            waiter_store = PostgresRecordStore(
-                database_url=url, postgres_statement_timeout_milliseconds=100
-            )
-            http = ReleaseReviewHttpTests()
-            http.setUp()
-            http.store = waiter_store  # type: ignore[assignment]
-            try:
-                seed(holder_store)
-                holder_store.seed_authz_policy_if_absent(
-                    LaunchplaneAuthzPolicyRecord(
-                        record_id="release-publication-test-policy",
-                        source="test",
-                        updated_at="2026-10-07T00:00:00Z",
-                        policy=LaunchplaneAuthzPolicy(
-                            github_humans=(
-                                GitHubHumanPolicyRule(
-                                    logins=("site-owner",),
-                                    roles=("read_only",),
-                                    products=("example-site",),
-                                    contexts=("launchplane",),
-                                    actions=("product_profile.read",),
-                                ),
-                            )
-                        ),
-                    )
-                )
-                saved = decision(holder_store).model_copy(update={"release_issue_url": ""})
-                holder_store.create_release_review_decision_record_if_absent(saved)
-                github = FakeReleaseIssues()
-                github.continue_lookup.clear()
-                with (
-                    patch(
-                        "control_plane.release_review_record.github_api_request",
-                        side_effect=github.request,
-                    ),
-                    patch(
-                        "control_plane.release_review_record.resolve_launchplane_github_token",
-                        return_value="test-token",
-                    ),
-                    patch(
-                        "control_plane.http_app.publish_release_decision",
-                        wraps=publish_release_decision,
-                    ),
-                    ThreadPoolExecutor(max_workers=1) as workers,
-                ):
-                    holder = workers.submit(
-                        publish_release_decision,
-                        store=holder_store,
-                        control_plane_root=Path("."),
-                        profile=profile(),
-                        decision=saved,
-                    )
-                    try:
-                        self.assertTrue(github.lookup_started.wait(10))
-                        pending = asyncio.run(http.post())
-                        self.assertEqual(pending.status_code, 200, pending.text)
-                        self.assertIn(RELEASE_RECORD_PENDING, pending.json()["review"]["blockers"])
-                        self.assertFalse(pending.json()["review"]["approved"])
-                        self.assertEqual(
-                            waiter_store.read_release_review_decision_record(
-                                product=saved.product, record_id=saved.record_id
-                            ),
-                            saved,
-                        )
-                    finally:
-                        github.continue_lookup.set()
-                    published_url = holder.result(timeout=10)
-                    retry = asyncio.run(http.post())
-                self.assertEqual(retry.status_code, 200, retry.text)
-                self.assertTrue(retry.json()["review"]["approved"])
-                self.assertEqual(len(github.issues), 1)
-                self.assertEqual(
-                    retry.json()["review"]["latest_decision"]["release_issue_url"], published_url
-                )
-                self.assertEqual(
-                    waiter_store.list_release_review_decision_records(product=saved.product)[
-                        0
-                    ].record_id,
-                    saved.record_id,
-                )
-                self.assertEqual(waiter_store.list_deployment_records(), ())
-            finally:
-                http.doCleanups()
-                holder_store.close()
-                waiter_store.close()
-
     def test_source_scan_delivery_has_one_lease_and_recovers_without_stale_publication(
         self,
     ) -> None:
@@ -11290,14 +11005,11 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
     def _fresh_resource_preparation_case(
         self, fault: str, *, initial_generation: bool = False
     ) -> None:
-        from tests.test_testing_replacement_resources import TestingReplacementResourceHttpTests
+        from tests.test_testing_replacement_resources import TestingReplacementResourceFixture
         from control_plane.odoo_testing_resources import OdooTestingResources
 
         with _head_postgres_database() as url:
-            fixture = TestingReplacementResourceHttpTests()
-            fixture.database_url = url
-            fixture.setUp()
-            self.addCleanup(fixture.doCleanups)
+            fixture = TestingReplacementResourceFixture(self, database_url=url)
             if initial_generation:
                 from control_plane.odoo_testing_usage import OdooTestingUsage
 
@@ -12103,10 +11815,7 @@ class RealPostgresInitialTestingGenerationTests(unittest.TestCase):
 
         for failure in ("use", "drift", "unknown-placement", "dispatched"):
             with self.subTest(failure=failure), _head_postgres_database() as url:
-                fixture = resource_tests.TestingReplacementResourceHttpTests()
-                fixture.database_url = url
-                fixture.setUp()
-                self.addCleanup(fixture.doCleanups)
+                fixture = resource_tests.TestingReplacementResourceFixture(self, database_url=url)
                 successful = fixture.operation.model_copy(
                     update={
                         "status": "pass",
@@ -12313,10 +12022,7 @@ class RealPostgresInitialTestingGenerationTests(unittest.TestCase):
         from tests import test_testing_replacement_resources as resource_tests
 
         with _head_postgres_database() as url:
-            fixture = resource_tests.TestingReplacementResourceHttpTests()
-            fixture.database_url = url
-            fixture.setUp()
-            self.addCleanup(fixture.doCleanups)
+            fixture = resource_tests.TestingReplacementResourceFixture(self, database_url=url)
             successful = fixture.operation.model_copy(
                 update={
                     "status": "pass",
@@ -15224,3 +14930,313 @@ class RealPostgresNativeTestingWorkerTests(unittest.TestCase):
         self.run_worker_case(
             "test_unknown_dispatched_stop_is_not_excluded_or_repeated_when_health_recovers"
         )
+
+
+class RealPostgresBrowserRouteRepairTests(browser_repair_tests._BrowserRouteRepairFixture):
+    def setUp(self) -> None:
+        from control_plane.dokploy import source
+        from control_plane import dokploy_target_setup_http
+
+        self.original_config_reader = source.read_dokploy_config
+        self.original_target_reader = (
+            dokploy_target_setup_http.fetch_dokploy_target_payload_for_setup
+        )
+        self.original_domain_reader = (
+            dokploy_target_setup_http.fetch_dokploy_target_domains_for_setup
+        )
+        self.addCleanup(self.assert_fixture_callbacks_restored)
+
+    def assert_fixture_callbacks_restored(self) -> None:
+        from control_plane.dokploy import source
+        from control_plane import dokploy_target_setup_http
+
+        self.assertIs(source.read_dokploy_config, self.original_config_reader)
+        self.assertIs(
+            dokploy_target_setup_http.fetch_dokploy_target_payload_for_setup,
+            self.original_target_reader,
+        )
+        self.assertIs(
+            dokploy_target_setup_http.fetch_dokploy_target_domains_for_setup,
+            self.original_domain_reader,
+        )
+
+    def test_browser_domain_repair_atomic_receipt_rollback_and_retry(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            fixture = self
+            with patch("tests.test_browser_route_repair.PostgresRecordStore", return_value=store):
+                browser_repair_tests._BrowserRouteRepairFixture.setUp(fixture)
+            store.seed_authz_policy_if_absent(
+                LaunchplaneAuthzPolicyRecord(
+                    record_id=build_authz_policy_record_id(
+                        revision=1, policy_sha256=authz_policy_sha256(fixture.policy)
+                    ),
+                    source="test:browser-route-repair",
+                    updated_at=fixture.target.updated_at,
+                    policy=fixture.policy,
+                )
+            )
+            asyncio.run(
+                fixture.assert_domain_receipt_failure_rolls_back_records_and_retry_can_complete()
+            )
+            asyncio.run(fixture.assert_domain_apply_and_immutable_replay_precede_source_drift())
+
+    def test_browser_binding_commit_rejects_intervening_domain_repair(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            fixture = self
+            with patch("tests.test_browser_route_repair.PostgresRecordStore", return_value=store):
+                browser_repair_tests._BrowserRouteRepairFixture.setUp(fixture)
+            store.seed_authz_policy_if_absent(
+                LaunchplaneAuthzPolicyRecord(
+                    record_id=build_authz_policy_record_id(
+                        revision=1, policy_sha256=authz_policy_sha256(fixture.policy)
+                    ),
+                    source="test:browser-route-repair",
+                    updated_at=fixture.target.updated_at,
+                    policy=fixture.policy,
+                )
+            )
+            asyncio.run(fixture.assert_binding_commit_rejects_intervening_domain_repair())
+
+    def test_browser_same_key_concurrent_retries_preserve_original_receipts(self) -> None:
+        for kind in ("domain", "binding"):
+            with self.subTest(kind=kind), _store_for_fresh_head_database() as store:
+                fixture = self
+                with patch(
+                    "tests.test_browser_route_repair.PostgresRecordStore", return_value=store
+                ):
+                    browser_repair_tests._BrowserRouteRepairFixture.setUp(fixture)
+                store.seed_authz_policy_if_absent(
+                    LaunchplaneAuthzPolicyRecord(
+                        record_id=build_authz_policy_record_id(
+                            revision=1, policy_sha256=authz_policy_sha256(fixture.policy)
+                        ),
+                        source="test:browser-route-repair",
+                        updated_at=fixture.target.updated_at,
+                        policy=fixture.policy,
+                    )
+                )
+                for winner in ("stale", "success"):
+                    asyncio.run(fixture.assert_atomic_terminal_winner(kind, winner))
+
+    def test_browser_binding_and_authority_publisher_do_not_invert_locks(self) -> None:
+        from control_plane.route_binding_reconcile import (
+            RouteBindingExpectedCurrent,
+            RouteBindingReconcileRequest,
+            plan_route_binding_reconcile,
+        )
+        from control_plane.workflows.ship import utc_now_timestamp
+
+        with _store_for_fresh_head_database() as store:
+            fixture = self
+            publisher = PostgresRecordStore(database_url=store.database_url)
+            try:
+                with patch(
+                    "tests.test_browser_route_repair.PostgresRecordStore", return_value=store
+                ):
+                    browser_repair_tests._BrowserRouteRepairFixture.setUp(fixture)
+                fixture.seed_binding()
+                plan = plan_route_binding_reconcile(
+                    record_store=store,
+                    request=RouteBindingReconcileRequest(
+                        product="example-product",
+                        context="example-testing",
+                        instance="web",
+                        expected_current=RouteBindingExpectedCurrent(state="absent"),
+                        evaluated_at=utc_now_timestamp(),
+                    ),
+                )
+                self.assertEqual(plan.status, "ready")
+                candidate, sources = plan.record, plan.review_sources
+                assert candidate is not None and sources is not None
+                mutation = DbOnlyMutationRequest(
+                    scope="browser-lock-order-fixture",
+                    route_path="/v1/route-bindings/reconcile",
+                    idempotency_key="reviewed-binding",
+                    request_fingerprint="reviewed-binding-request",
+                    lease_owner="browser",
+                    response_status_code=202,
+                    response_trace_id="browser-trace",
+                    response_payload={"status": "accepted", "trace_id": "browser-trace"},
+                )
+                held, proceed, connected = (threading.Event(), threading.Event(), threading.Event())
+                browser_pid: list[int] = []
+
+                def observe_connection(connection: Any, _record: Any, _proxy: Any) -> None:
+                    if threading.current_thread().name.startswith("reviewed-binding"):
+                        browser_pid.append(int(connection.info.backend_pid))
+                        connected.set()
+
+                def publish_authority() -> None:
+                    # Existing authority publishers take the bundle before the binding.
+                    with publisher._session_factory() as session:
+                        publisher._begin_serialized_write(session)
+                        publisher._lock_product_authority_bundle_write(session)
+                        held.set()
+                        if not proceed.wait(30):
+                            raise AssertionError("Browser did not reach its database lock wait.")
+                        publisher._lock_route_binding_write(
+                            session, binding_key=candidate.binding_key
+                        )
+                        session.commit()
+
+                def reconcile_binding() -> str:
+                    if not held.wait(30):
+                        raise AssertionError("Competing publisher did not acquire authority.")
+                    return store.reconcile_route_binding_record(
+                        expected_record=None,
+                        replacement_record=candidate,
+                        mutation=mutation,
+                        reviewed_sources=sources,
+                        reviewed_product=candidate.product,
+                    ).status
+
+                event.listen(store._engine, "checkout", observe_connection)
+                try:
+                    with ThreadPoolExecutor(
+                        max_workers=2, thread_name_prefix="reviewed-binding"
+                    ) as executor:
+                        publishing = executor.submit(publish_authority)
+                        browser = executor.submit(reconcile_binding)
+                        try:
+                            self.assertTrue(connected.wait(30))
+                            deadline = time.monotonic() + 30
+                            with publisher._engine.connect().execution_options(
+                                isolation_level="AUTOCOMMIT"
+                            ) as observer:
+                                while True:
+                                    waiting = observer.execute(
+                                        text(
+                                            "select wait_event_type, wait_event "
+                                            "from pg_stat_activity where pid=:pid"
+                                        ),
+                                        {"pid": browser_pid[0]},
+                                    ).first()
+                                    if waiting is not None and tuple(waiting) == (
+                                        "Lock",
+                                        "advisory",
+                                    ):
+                                        break
+                                    self.assertLess(
+                                        time.monotonic(),
+                                        deadline,
+                                        "Browser did not enter its advisory-lock wait.",
+                                    )
+                                    proceed.wait(0.01)
+                        finally:
+                            proceed.set()
+                        publishing.result(timeout=30)
+                        self.assertEqual(browser.result(timeout=30), "created")
+                finally:
+                    event.remove(store._engine, "checkout", observe_connection)
+            finally:
+                publisher.close()
+
+
+class RealPostgresReleaseReviewHttpTests(release_review_http_tests._ReleaseReviewHttpFixture):
+    def setUp(self) -> None:
+        from control_plane import http_app
+
+        self.original_review_reader = getattr(http_app, "current_release_review")
+        self.original_decision_publisher = getattr(http_app, "publish_release_decision")
+        self.addCleanup(self.assert_fixture_callbacks_restored)
+
+    def assert_fixture_callbacks_restored(self) -> None:
+        from control_plane import http_app
+
+        self.assertIs(getattr(http_app, "current_release_review"), self.original_review_reader)
+        self.assertIs(
+            getattr(http_app, "publish_release_decision"), self.original_decision_publisher
+        )
+
+    def test_release_publication_lock_timeout_returns_pending_and_retry_recovers(self) -> None:
+        from control_plane.release_review import RELEASE_RECORD_PENDING
+        from control_plane.release_review_record import publish_release_decision
+        from tests.test_release_review import decision, profile, seed
+        from tests.test_release_review_record import FakeReleaseIssues
+
+        with _head_postgres_database() as url:
+            holder_store = PostgresRecordStore(database_url=url)
+            waiter_store = PostgresRecordStore(
+                database_url=url, postgres_statement_timeout_milliseconds=100
+            )
+            http = self
+            release_review_http_tests._ReleaseReviewHttpFixture.setUp(http)
+            http.store = waiter_store  # type: ignore[assignment]
+            try:
+                seed(holder_store)
+                holder_store.seed_authz_policy_if_absent(
+                    LaunchplaneAuthzPolicyRecord(
+                        record_id="release-publication-test-policy",
+                        source="test",
+                        updated_at="2026-10-07T00:00:00Z",
+                        policy=LaunchplaneAuthzPolicy(
+                            github_humans=(
+                                GitHubHumanPolicyRule(
+                                    logins=("site-owner",),
+                                    roles=("read_only",),
+                                    products=("example-site",),
+                                    contexts=("launchplane",),
+                                    actions=("product_profile.read",),
+                                ),
+                            )
+                        ),
+                    )
+                )
+                saved = decision(holder_store).model_copy(update={"release_issue_url": ""})
+                holder_store.create_release_review_decision_record_if_absent(saved)
+                github = FakeReleaseIssues()
+                github.continue_lookup.clear()
+                with (
+                    patch(
+                        "control_plane.release_review_record.github_api_request",
+                        side_effect=github.request,
+                    ),
+                    patch(
+                        "control_plane.release_review_record.resolve_launchplane_github_token",
+                        return_value="test-token",
+                    ),
+                    patch(
+                        "control_plane.http_app.publish_release_decision",
+                        wraps=publish_release_decision,
+                    ),
+                    ThreadPoolExecutor(max_workers=1) as workers,
+                ):
+                    holder = workers.submit(
+                        publish_release_decision,
+                        store=holder_store,
+                        control_plane_root=Path("."),
+                        profile=profile(),
+                        decision=saved,
+                    )
+                    try:
+                        self.assertTrue(github.lookup_started.wait(10))
+                        pending = asyncio.run(http.post())
+                        self.assertEqual(pending.status_code, 200, pending.text)
+                        self.assertIn(RELEASE_RECORD_PENDING, pending.json()["review"]["blockers"])
+                        self.assertFalse(pending.json()["review"]["approved"])
+                        self.assertEqual(
+                            waiter_store.read_release_review_decision_record(
+                                product=saved.product, record_id=saved.record_id
+                            ),
+                            saved,
+                        )
+                    finally:
+                        github.continue_lookup.set()
+                    published_url = holder.result(timeout=10)
+                    retry = asyncio.run(http.post())
+                self.assertEqual(retry.status_code, 200, retry.text)
+                self.assertTrue(retry.json()["review"]["approved"])
+                self.assertEqual(len(github.issues), 1)
+                self.assertEqual(
+                    retry.json()["review"]["latest_decision"]["release_issue_url"], published_url
+                )
+                self.assertEqual(
+                    waiter_store.list_release_review_decision_records(product=saved.product)[
+                        0
+                    ].record_id,
+                    saved.record_id,
+                )
+                self.assertEqual(waiter_store.list_deployment_records(), ())
+            finally:
+                holder_store.close()
+                waiter_store.close()

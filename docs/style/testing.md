@@ -29,6 +29,11 @@ title: Testing Style
   contention under parallel execution. Retain separate expired/stolen-lease
   refusal coverage with the real storage implementation.
 - Keep fixtures small and inline unless they are reused heavily.
+- Reuse async test fixtures through inheritance so unittest owns their runner and
+  cleanup phase. Plain fixtures register resources with the running test's
+  `addCleanup` or `enterContext`. Calling `setUp` and `doCleanups` on an unrun
+  `IsolatedAsyncioTestCase` can silently discard cleanup callbacks; do not manage
+  its private runner to compensate.
 
 ## Local test loop
 
