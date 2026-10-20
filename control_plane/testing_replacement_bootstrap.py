@@ -135,6 +135,61 @@ def _bootstrap_prerequisite(code: BootstrapPrerequisiteCode) -> Iterator[None]:
         raise TestingBootstrapPrerequisiteError(code, unavailable=True) from None
 
 
+class BootstrapReadbackCode(StrEnum):
+    GENERATION_UNAVAILABLE = "testing_bootstrap_generation_unavailable"
+    GENERATION_MISSING = "testing_bootstrap_generation_missing"
+    REQUEST_CHANGED = "testing_bootstrap_request_changed"
+    AUTHORITY_UNAVAILABLE = "testing_bootstrap_authority_unavailable"
+    AUTHORITY_CHANGED = "testing_bootstrap_authority_changed"
+    QUALIFICATION_UNVERIFIED = "testing_bootstrap_qualification_unverified"
+    GENERATION_CHANGED = "testing_bootstrap_generation_changed"
+    QUEUE_UNVERIFIED = "testing_bootstrap_queue_unverified"
+    ROUTE_UNAVAILABLE = "testing_bootstrap_route_unavailable"
+    ROUTE_MISSING = "testing_bootstrap_route_missing"
+    ROUTE_CHANGED = "testing_bootstrap_route_changed"
+    INITIAL_QUEUE_UNVERIFIED = "testing_bootstrap_initial_queue_unverified"
+    SUPERSESSION_UNVERIFIED = "testing_bootstrap_supersession_unverified"
+
+
+_READBACK_MESSAGES: dict[BootstrapReadbackCode, str] = {
+    BootstrapReadbackCode.GENERATION_UNAVAILABLE: "The original testing generation could not be read.",
+    BootstrapReadbackCode.GENERATION_MISSING: "No testing bootstrap generation is recorded for this lane.",
+    BootstrapReadbackCode.REQUEST_CHANGED: "The recorded generation differs from the original bootstrap intent.",
+    BootstrapReadbackCode.AUTHORITY_UNAVAILABLE: "Current testing target or product authority could not be read.",
+    BootstrapReadbackCode.AUTHORITY_CHANGED: "Current testing target or hostname differs from the original generation.",
+    BootstrapReadbackCode.QUALIFICATION_UNVERIFIED: "Current generation credential, resource, use or ownership qualification is unverified.",
+    BootstrapReadbackCode.GENERATION_CHANGED: "The qualified generation changed during bootstrap readback.",
+    BootstrapReadbackCode.QUEUE_UNVERIFIED: "The original generation has no committed bootstrap queue receipt.",
+    BootstrapReadbackCode.ROUTE_UNAVAILABLE: "The original testing provider domain records could not be read.",
+    BootstrapReadbackCode.ROUTE_MISSING: "The original testing provider domain record is absent.",
+    BootstrapReadbackCode.ROUTE_CHANGED: "The testing provider domain count or reviewed route fields differ.",
+    BootstrapReadbackCode.INITIAL_QUEUE_UNVERIFIED: "The initial preparation queue receipt is unavailable or incomplete.",
+    BootstrapReadbackCode.SUPERSESSION_UNVERIFIED: "The retained operation supersession receipt is unavailable or incomplete.",
+}
+
+
+class TestingBootstrapReadbackError(ValueError):
+    """A closed readback checkpoint; private provider errors never reach HTTP."""
+
+    def __init__(self, code: BootstrapReadbackCode) -> None:
+        self.code = code
+        super().__init__(_READBACK_MESSAGES[code])
+
+
+@contextmanager
+def _readback_checkpoint(code: BootstrapReadbackCode) -> Iterator[None]:
+    from control_plane.durable_operation_authorization import (
+        DurableOperationAuthorizationDeniedError,
+    )
+
+    try:
+        yield
+    except (DurableOperationAuthorizationDeniedError, TestingBootstrapReadbackError):
+        raise
+    except (ValueError, FileNotFoundError, RuntimeError, OSError, click.ClickException):
+        raise TestingBootstrapReadbackError(code) from None
+
+
 def bootstrap_wire_payload(request: TestingReplacementResourcesRequest) -> dict[str, object]:
     payload = request.model_dump(mode="json")
     if not request.initial_generation:
@@ -439,15 +494,16 @@ class TestingReplacementBootstrapAdapter:
         )
 
     def _domains(self, generation: FreshOdooTestingGeneration) -> tuple[dict[str, object], ...]:
-        host, token = source.read_dokploy_config(control_plane_root=self.root)
-        domains = fetch_dokploy_compose_domains_for_target_setup(
-            host=host, token=token, compose_id=generation.target_id
-        )
+        with _readback_checkpoint(BootstrapReadbackCode.ROUTE_UNAVAILABLE):
+            host, token = source.read_dokploy_config(control_plane_root=self.root)
+            domains = fetch_dokploy_compose_domains_for_target_setup(
+                host=host, token=token, compose_id=generation.target_id
+            )
         if not domains:
             return ()
         profile = self.store.read_product_profile_record(self.product)
         if len(domains) != 1:
-            raise ValueError("Fresh testing has unexpected provider routes.")
+            raise TestingBootstrapReadbackError(BootstrapReadbackCode.ROUTE_CHANGED)
         domain = domains[0]
         if (
             domain.get("host") != generation.domain_host
@@ -461,57 +517,69 @@ class TestingReplacementBootstrapAdapter:
             or domain.get("stripPath") is not False
             or not domain.get("domainId")
         ):
-            raise ValueError("The independent testing route differs from its reviewed binding.")
+            raise TestingBootstrapReadbackError(BootstrapReadbackCode.ROUTE_CHANGED)
         return tuple(dict(item) for item in domains)
 
     def readback(self) -> dict[str, object]:
-        generation = self.store.read_fresh_odoo_testing_generation(
-            self.product, self.request.context
-        )
+        with _readback_checkpoint(BootstrapReadbackCode.GENERATION_UNAVAILABLE):
+            generation = self.store.read_fresh_odoo_testing_generation(
+                self.product, self.request.context
+            )
+        if generation is None:
+            raise TestingBootstrapReadbackError(BootstrapReadbackCode.GENERATION_MISSING)
         if (
-            generation is None
-            or generation.operation_id != self.request.operation_id
+            generation.operation_id != self.request.operation_id
             or generation.domain_host != self.request.domain_host
             or generation.request_sha256 != bootstrap_request_sha256(self.request)
         ):
-            raise ValueError("Testing bootstrap generation is unavailable.")
-        target_id = self.store.read_dokploy_target_id_record(
-            context_name=self.request.context, instance_name="testing"
-        )
-        profile = self.store.read_product_profile_record(self.product)
+            raise TestingBootstrapReadbackError(BootstrapReadbackCode.REQUEST_CHANGED)
+        with _readback_checkpoint(BootstrapReadbackCode.AUTHORITY_UNAVAILABLE):
+            target_id = self.store.read_dokploy_target_id_record(
+                context_name=self.request.context, instance_name="testing"
+            )
+            profile = self.store.read_product_profile_record(self.product)
         lane = next(
-            lane
-            for lane in profile.lanes
-            if (lane.context, lane.instance) == (self.request.context, "testing")
+            (
+                lane
+                for lane in profile.lanes
+                if (lane.context, lane.instance) == (self.request.context, "testing")
+            ),
+            None,
         )
         if (
-            target_id.target_id != generation.target_id
+            lane is None
+            or target_id.target_id != generation.target_id
             or urlsplit(lane.base_url).hostname != generation.domain_host
         ):
-            raise ValueError("Testing bootstrap authority has changed.")
-        current = read_current_testing_generation(
-            self.store, product=self.product, context=self.request.context, instance="testing"
-        )
-        if (
-            not generation_snapshot_matches(current, generation)
-            or not generation.reconcile_requested_at
-            or not self._domains(generation)
-        ):
-            raise ValueError("The independent testing route or queue is unverified.")
-        if self.request.initial_generation:
-            allocation = self.store.read_disposable_resource_preparation(generation.operation_id)
-            if allocation is None or not allocation.initial_reconcile_requested_at:
-                raise ValueError("Initial testing queue receipt is incomplete.")
-        else:
-            operation = self.store.read_odoo_stable_target_replacement_operation_record(
-                generation.operation_id
+            raise TestingBootstrapReadbackError(BootstrapReadbackCode.AUTHORITY_CHANGED)
+        with _readback_checkpoint(BootstrapReadbackCode.QUALIFICATION_UNVERIFIED):
+            current = read_current_testing_generation(
+                self.store, product=self.product, context=self.request.context, instance="testing"
             )
+        if not generation_snapshot_matches(current, generation):
+            raise TestingBootstrapReadbackError(BootstrapReadbackCode.GENERATION_CHANGED)
+        if not generation.reconcile_requested_at:
+            raise TestingBootstrapReadbackError(BootstrapReadbackCode.QUEUE_UNVERIFIED)
+        if not self._domains(generation):
+            raise TestingBootstrapReadbackError(BootstrapReadbackCode.ROUTE_MISSING)
+        if self.request.initial_generation:
+            with _readback_checkpoint(BootstrapReadbackCode.INITIAL_QUEUE_UNVERIFIED):
+                allocation = self.store.read_disposable_resource_preparation(
+                    generation.operation_id
+                )
+            if allocation is None or not allocation.initial_reconcile_requested_at:
+                raise TestingBootstrapReadbackError(BootstrapReadbackCode.INITIAL_QUEUE_UNVERIFIED)
+        else:
+            with _readback_checkpoint(BootstrapReadbackCode.SUPERSESSION_UNVERIFIED):
+                operation = self.store.read_odoo_stable_target_replacement_operation_record(
+                    generation.operation_id
+                )
             if (
                 operation.status != "superseded"
                 or operation.disposable_supersession is None
                 or operation.disposable_supersession.replacement_target_id != generation.target_id
             ):
-                raise ValueError("Testing bootstrap supersession is incomplete.")
+                raise TestingBootstrapReadbackError(BootstrapReadbackCode.SUPERSESSION_UNVERIFIED)
         return bootstrap_plan_payload(
             TestingReplacementBootstrapPlan(
                 product=self.product,

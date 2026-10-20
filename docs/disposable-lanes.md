@@ -2467,6 +2467,44 @@ and context, a new unbound hostname, and the same reviewed `--source-mode` (`ssh
 The existing testing-only upstream-restore policy and distinct managed testing
 credentials are prerequisites; this path creates no credential or grant.
 
+Bootstrap readback is an observation of the original intent, never a new plan,
+apply, retry or completed-copy witness. It matches the preparation, hostname
+and request digest, current target/lane authority, qualified generation snapshot,
+committed queue receipt, exact live provider domain and initial-queue or
+supersession receipt. It does not consume an idempotency key; retain the original
+apply key and receipt separately for recovery. Its provider-domain verification
+reads metadata, not container IPs, bridge identity, TLS reachability or database
+completion.
+
+A refused readback now returns a fixed checkpoint code rather than discarding
+all failures as `testing_bootstrap_unverified`:
+
+- `testing_bootstrap_generation_missing`, `_generation_unavailable` or
+  `_request_changed`: no recorded generation, unreadable generation or different
+  original intent.
+- `testing_bootstrap_authority_unavailable` or `_authority_changed`: unreadable
+  current authority or a changed target/lane hostname (including an absent lane).
+- `testing_bootstrap_qualification_unverified` or `_generation_changed`:
+  current-generation qualification refused or its returned snapshot differs.
+  Qualification includes credentials, allocation, holds, resource/project values
+  and ownership; this grouped checkpoint does not identify an unobserved subcheck.
+- `testing_bootstrap_queue_unverified`: the generation's queue receipt is missing
+  after qualification. A missing receipt encountered during qualification is
+  reported at that earlier checkpoint.
+- `testing_bootstrap_route_unavailable`, `_route_missing` or `_route_changed`:
+  provider/configuration read failure, no domain, or a domain count/field mismatch.
+  Exact fields remain host, compose id, service, port, HTTPS, certificate type,
+  both paths, strip-path flag and domain id; no private values are returned.
+- `testing_bootstrap_initial_queue_unverified` or `_supersession_unverified`:
+  the appropriate preparation/retained-operation receipt is unreadable or absent.
+
+Authorization denials keep their existing 403. Unclassified failures retain the
+generic fail-closed response. Preserve the trace, original evidence and unknown
+effects; resolve the observed checkpoint through its supported route. Never
+refresh a plan, change a key, rebootstrap or release an operation to turn an
+unverified readback into a passing one. Earlier successful readbacks and green
+source checks do not establish current verification.
+
 Bootstrap uses the existing isolated renderer and sanitized production-copy
 worker: live keys and outbound integrations are removed before any copied Odoo
 registry, module or web code runs. It commits only a generation and queue

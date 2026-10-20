@@ -1,6 +1,7 @@
 """Fresh generation continuation against real record transactions and fake provider IO."""
 
 from pathlib import Path
+from contextlib import ExitStack
 import os
 from datetime import datetime, timedelta
 from typing import Any
@@ -1029,6 +1030,51 @@ class TestingBootstrapHttpRefusalTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("private-value", result.text)
         self.assertNotIn(result.json()["error"]["code"], tuple(BootstrapPrerequisiteCode))
 
+    async def test_fixed_readback_errors_are_public_and_private_failures_stay_redacted(
+        self,
+    ) -> None:
+        from control_plane.testing_replacement_bootstrap import (
+            BootstrapReadbackCode,
+            TestingBootstrapReadbackError,
+        )
+        from control_plane.durable_operation_authorization import (
+            DurableOperationAuthorizationDeniedError,
+        )
+
+        # The same outer HTTP catch handles dry-run and readback; SQLite's
+        # independent publication/readback guard remains covered above.
+        for code in BootstrapReadbackCode:
+            with (
+                self.subTest(code=code),
+                patch(
+                    "control_plane.http_routes.testing_replacement_bootstrap.bootstrap_plan",
+                    side_effect=TestingBootstrapReadbackError(code),
+                ),
+            ):
+                response = await self.post()
+            self.assertEqual(response.status_code, 409, response.text)
+            self.assertEqual(response.json()["error"]["code"], code)
+        for error in (
+            ValueError("private-provider-token"),
+            DurableOperationAuthorizationDeniedError(
+                code="fixture", message="private-provider-token"
+            ),
+        ):
+            with (
+                self.subTest(error=type(error).__name__),
+                patch(
+                    "control_plane.http_routes.testing_replacement_bootstrap.bootstrap_plan",
+                    side_effect=error,
+                ),
+            ):
+                response = await self.post()
+            self.assertEqual(
+                response.status_code,
+                403 if isinstance(error, DurableOperationAuthorizationDeniedError) else 409,
+                response.text,
+            )
+            self.assertNotIn("private-provider-token", response.text)
+
     async def test_dry_run_returns_the_prerequisite_classification(self) -> None:
         prerequisite = TestingBootstrapPrerequisiteError(
             BootstrapPrerequisiteCode.CREDENTIALS_UNVERIFIED
@@ -1040,3 +1086,162 @@ class TestingBootstrapHttpRefusalTests(unittest.IsolatedAsyncioTestCase):
             response = await self.post()
         self.assertEqual(response.status_code, 409, response.text)
         self.assertEqual(response.json()["error"]["code"], prerequisite.code)
+
+
+class TestingBootstrapReadbackDiagnosisTests(FreshTestingBootstrapScenario):
+    def setUp(self) -> None:
+        from tests.test_odoo_testing_restore import generation
+        from control_plane.testing_replacement_bootstrap import bootstrap_request_sha256
+
+        self.seed("sqlite+pysqlite:///:memory:", initial_generation=True)
+        self.patches()
+        self.generation = generation().model_copy(
+            update={
+                "product": self.profile.product,
+                "context": self.fixture.context,
+                "operation_id": self.request.operation_id,
+                "domain_host": self.request.domain_host,
+                "request_sha256": bootstrap_request_sha256(self.request),
+                "target_id": "fresh-compose",
+                "namespace": self.resources.namespace,
+                "reconcile_requested_at": self.profile.updated_at,
+            }
+        )
+        self.enterContext(
+            patch.object(
+                self.store, "read_fresh_odoo_testing_generation", return_value=self.generation
+            )
+        )
+        self.store.write_product_profile_record(
+            self.profile.model_copy(
+                update={
+                    "lanes": tuple(
+                        lane.model_copy(update={"base_url": "https://" + self.request.domain_host})
+                        if lane.instance == "testing"
+                        else lane
+                        for lane in self.profile.lanes
+                    )
+                }
+            )
+        )
+        self.enterContext(
+            patch(
+                "control_plane.testing_replacement_bootstrap.read_current_testing_generation",
+                return_value=self.generation,
+            )
+        )
+        allocation = self.store.read_disposable_resource_preparation(self.request.operation_id)
+        assert allocation is not None
+        self.enterContext(
+            patch.object(
+                self.store,
+                "read_disposable_resource_preparation",
+                return_value=allocation.model_copy(
+                    update={
+                        "initial_reconcile_requested_at": self.generation.reconcile_requested_at
+                    }
+                ),
+            )
+        )
+        self.route(
+            domain_host=self.request.domain_host,
+            compose_id=self.generation.target_id,
+            runtime_port=self.profile.runtime_port,
+            certificate_type=self.generation.certificate_type,
+        )
+
+    def test_successful_readback_does_not_mutate_generation_queue_or_provider(self) -> None:
+        with (
+            patch.object(self.store, "request_fresh_testing_reconcile") as queue,
+            patch.object(self.store, "write_fresh_odoo_testing_generation") as write,
+            patch(
+                "control_plane.testing_replacement_bootstrap.compose.ensure_compose_web_domain_route"
+            ) as route,
+        ):
+            result = self.adapter().readback()
+        self.assertTrue(result["applied"])
+        self.assertTrue(result["reconcile_requested"])
+        self.assertFalse(result["runtime_verified"])
+        queue.assert_not_called()
+        write.assert_not_called()
+        route.assert_not_called()
+
+    def test_readback_classifies_missing_queue_and_route_without_repeating_effects(self) -> None:
+        from control_plane.testing_replacement_bootstrap import (
+            BootstrapReadbackCode,
+            TestingBootstrapReadbackError,
+        )
+
+        generation = self.store.read_fresh_odoo_testing_generation(
+            self.profile.product, self.fixture.context
+        )
+        assert generation is not None
+        route_writes = self.route_writes
+        for fault, code in (
+            ("missing_generation", BootstrapReadbackCode.GENERATION_MISSING),
+            ("request_changed", BootstrapReadbackCode.REQUEST_CHANGED),
+            ("queue_missing", BootstrapReadbackCode.QUEUE_UNVERIFIED),
+            ("route_missing", BootstrapReadbackCode.ROUTE_MISSING),
+            ("route_changed", BootstrapReadbackCode.ROUTE_CHANGED),
+            ("provider_unavailable", BootstrapReadbackCode.ROUTE_UNAVAILABLE),
+        ):
+            with self.subTest(fault=fault), ExitStack() as stack:
+                adapter = self.adapter()
+                if fault == "missing_generation":
+                    stack.enter_context(
+                        patch.object(
+                            self.store, "read_fresh_odoo_testing_generation", return_value=None
+                        )
+                    )
+                elif fault == "request_changed":
+                    adapter.request = self.request.model_copy(update={"reason": "different intent"})
+                elif fault == "queue_missing":
+                    stack.enter_context(
+                        patch(
+                            "control_plane.testing_replacement_bootstrap.read_current_testing_generation",
+                            return_value=generation.model_copy(
+                                update={"reconcile_requested_at": ""}
+                            ),
+                        )
+                    )
+                    stack.enter_context(
+                        patch.object(
+                            self.store,
+                            "read_fresh_odoo_testing_generation",
+                            return_value=generation.model_copy(
+                                update={"reconcile_requested_at": ""}
+                            ),
+                        )
+                    )
+                elif fault == "route_missing":
+                    stack.enter_context(
+                        patch(
+                            "control_plane.testing_replacement_bootstrap.fetch_dokploy_compose_domains_for_target_setup",
+                            return_value=(),
+                        )
+                    )
+                elif fault == "route_changed":
+                    stack.enter_context(
+                        patch(
+                            "control_plane.testing_replacement_bootstrap.fetch_dokploy_compose_domains_for_target_setup",
+                            return_value=({**self.routes[0], "serviceName": "other"},),
+                        )
+                    )
+                else:
+                    stack.enter_context(
+                        patch(
+                            "control_plane.testing_replacement_bootstrap.source.read_dokploy_config",
+                            side_effect=OSError("private-provider-token"),
+                        )
+                    )
+                with self.assertRaises(TestingBootstrapReadbackError) as caught:
+                    adapter.readback()
+                self.assertEqual(caught.exception.code, code)
+                self.assertNotIn("private-provider-token", str(caught.exception))
+        self.assertEqual(self.route_writes, route_writes)
+        self.assertEqual(
+            self.store.read_fresh_odoo_testing_generation(
+                self.profile.product, self.fixture.context
+            ),
+            generation,
+        )
