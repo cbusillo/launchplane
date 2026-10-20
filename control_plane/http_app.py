@@ -5173,8 +5173,8 @@ def create_launchplane_fastapi_app(
             allow_owner=False,
         )
 
-    # Only the Owner review routes accept a product Owner's session; each route
-    # still checks that the viewer is the named Owner of the requested product.
+    # Client-facing routes accept a Client session and check the requested
+    # product against its recorded Client identity.
     def read_owner_review_identity(
         request: Request,
         response: Response,
@@ -30924,7 +30924,9 @@ def create_launchplane_fastapi_app(
         app, dependencies=read_route_dependencies, mutation_identity=read_browser_mutation_identity
     )
     register_discussion_topic_routes(
-        app, dependencies=read_route_dependencies, mutation_identity=read_browser_mutation_identity
+        app,
+        dependencies=owner_review_route_dependencies,
+        mutation_identity=read_browser_mutation_identity,
     )
     register_testing_restore_policy_routes(
         app, dependencies=read_route_dependencies, mutation_identity=read_browser_mutation_identity

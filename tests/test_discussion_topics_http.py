@@ -2,9 +2,10 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from control_plane.contracts.discussion_topic import DiscussionTopicInput
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.http_app import create_launchplane_fastapi_app
-from control_plane.service_auth import LaunchplaneAuthzPolicy
+from control_plane.service_auth import GitHubHumanIdentity, LaunchplaneAuthzPolicy
 from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.http_app_test_support import (
@@ -42,7 +43,7 @@ class DiscussionTopicHttpTests(unittest.IsolatedAsyncioTestCase):
         self.headers = {"Authorization": "Bearer local-operator-token"}
         self.route = "/v1/products/site-a/discussion-topics"
         self.payload: dict[str, object] = {
-            "title": "Decide: Contact links",
+            "title": "Should we keep the contact links?",
             "issue_url": "https://git.example.test/issue/7",
         }
 
@@ -114,6 +115,107 @@ class DiscussionTopicHttpTests(unittest.IsolatedAsyncioTestCase):
                     payload=self.payload if method == "PUT" else None,
                 )
                 self.assertEqual(denied.status_code, 403, denied.text)
+
+    async def test_client_session_reads_only_its_product_and_cannot_write(self) -> None:
+        profile = self.store.read_product_profile_record("site-a")
+        self.store.write_product_profile_record(
+            profile.model_copy(
+                update={
+                    "owner": profile.owner.model_copy(
+                        update={"github_id": "9001", "github_login": "client"}
+                    )
+                }
+            )
+        )
+        for product in ("site-a", "site-b"):
+            self.store.add_discussion_topic(
+                product,
+                "open",
+                DiscussionTopicInput(
+                    title="Decide: Discuss contact links",
+                    issue_url="https://git.example.test/issues/7",
+                ),
+            )
+            self.store.add_discussion_topic(
+                product,
+                "closed",
+                DiscussionTopicInput(
+                    title="Decide: Earlier discussion",
+                    issue_url="https://git.example.test/issues/8",
+                ),
+            )
+            self.store.close_discussion_topic(product, "closed")
+        sessions = HumanSessionManager(
+            config=_github_oauth_config(), session_store=InMemoryHumanSessionStore()
+        )
+        session = sessions.issue(
+            GitHubHumanIdentity(
+                login="renamed-client",
+                github_id=9001,
+                name="Client",
+                email="",
+                organizations=frozenset(),
+                teams=frozenset(),
+                role="owner",
+            )
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            human_session_manager=sessions,
+            record_store_factory=lambda: self.store,
+        )
+        headers = {"Cookie": sessions.session_cookie_header(session)}
+        own = await _asgi_request(app, "GET", self.route, headers=headers)
+        self.assertEqual(own.status_code, 200, own.text)
+        self.assertEqual([topic["topic_id"] for topic in own.json()["topics"]], ["open"])
+        self.assertEqual(own.json()["display_name"], profile.display_name)
+        for product in ("site-b", "missing"):
+            for query in ("", "?include_closed=true"):
+                denied = await _asgi_request(
+                    app, "GET", f"/v1/products/{product}/discussion-topics{query}", headers=headers
+                )
+                self.assertEqual(denied.status_code, 403, denied.text)
+                self.assertNotIn("topics", denied.json())
+        for method, suffix in (("PUT", "/new"), ("POST", "/open/close")):
+            denied = await _asgi_request(
+                app,
+                method,
+                self.route + suffix,
+                headers=_browser_mutation_headers(sessions, session),
+                payload=self.payload if method == "PUT" else None,
+            )
+            self.assertEqual(denied.status_code, 401, denied.text)
+        self.assertIsNone(self.store.list_discussion_topics("site-a")[0].closed_at)
+        anonymous = await _asgi_request(app, "GET", self.route)
+        self.assertEqual(anonymous.status_code, 401, anonymous.text)
+        other_profile = self.store.read_product_profile_record("site-b")
+        self.store.write_product_profile_record(
+            other_profile.model_copy(
+                update={
+                    "owner": profile.owner.model_copy(
+                        update={"github_id": "9001", "github_login": "client"}
+                    ),
+                    "lifecycle_state": "retired",
+                    "preview": other_profile.preview.model_copy(update={"enabled": False}),
+                }
+            )
+        )
+        retired = await _asgi_request(
+            app, "GET", "/v1/products/site-b/discussion-topics", headers=headers
+        )
+        self.assertEqual(retired.status_code, 403, retired.text)
+        self.store.write_product_profile_record(
+            profile.model_copy(
+                update={
+                    "owner": profile.owner.model_copy(
+                        update={"github_id": "9002", "github_login": "other-client"}
+                    ),
+                }
+            )
+        )
+        reassigned = await _asgi_request(app, "GET", self.route, headers=headers)
+        self.assertEqual(reassigned.status_code, 401, reassigned.text)
 
     async def test_missing_product_and_topic_and_bad_input_fail_closed(self) -> None:
         missing = await _asgi_request(

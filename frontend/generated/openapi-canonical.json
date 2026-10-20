@@ -6028,6 +6028,14 @@
       "DiscussionTopicsResponse": {
         "additionalProperties": false,
         "properties": {
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
           "status": {
             "const": "ok",
             "default": "ok",
@@ -6048,6 +6056,8 @@
         },
         "required": [
           "trace_id",
+          "product",
+          "display_name",
           "topics"
         ],
         "title": "DiscussionTopicsResponse",
@@ -103225,6 +103235,7 @@
     "/v1/products/{product}": "read_product",
     "/v1/products/{product}/activity": "read_product_activity",
     "/v1/products/{product}/contexts/{context}/instances/{instance}/operational-readiness": "read_product_operational_readiness",
+    "/v1/products/{product}/discussion-topics": "list_discussion_topics",
     "/v1/products/{product}/environments": "list_product_environments",
     "/v1/products/{product}/environments/prod/backup-worker-bindings": "read_backup_worker_bindings",
     "/v1/products/{product}/environments/{environment}": "read_product_environment",

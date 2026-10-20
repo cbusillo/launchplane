@@ -2,6 +2,7 @@ import { OwnerSecretInputsRoute } from "./OwnerSecretInputsRoute";
 import { AlertTriangle, KeyRound, LoaderCircle, ShieldCheck } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import { ProductTopicsRoute } from "./ProductTopicsRoute";
 import { AppShell } from "./AppShell";
 import { useEvidenceRefresh } from "./use-evidence-refresh";
 import { environmentEvidenceDeadlines } from "./product-environment-signal";
@@ -181,7 +182,7 @@ export function App() {
       authState.status !== "signed_in" ||
       authState.identity?.role === "owner" ||
       route.kind === "engineering" ||
-      route.kind === "owner-review" || route.kind === "owner-secrets"
+      route.kind === "owner-review" || route.kind === "owner-secrets" || route.kind === "product-topics"
     ) {
       setProductsResource(emptyResource());
       setInventoryReceivedAt(null);
@@ -246,7 +247,7 @@ export function App() {
 
   const signOut = useCallback(async () => {
     const signedOutDestination =
-      (route.kind === "owner-review" || route.kind === "owner-secrets")
+      (route.kind === "owner-review" || route.kind === "owner-secrets" || route.kind === "product-topics")
         ? `${window.location.pathname}${window.location.search}`
         : productIndexPath();
     setSigningOut(true);
@@ -289,16 +290,17 @@ export function App() {
       <SessionGate
         ownerReview={route.kind === "owner-review"}
         ownerSecrets={route.kind === "owner-secrets"}
+        topics={route.kind === "product-topics"}
         state={authState}
         onRetry={() => setAuthRefreshToken((current) => current + 1)}
       />
     );
   }
 
-  if (route.kind === "owner-review" || route.kind === "owner-secrets") {
+  if (route.kind === "owner-review" || route.kind === "owner-secrets" || route.kind === "product-topics") {
     return (
       <OwnerReviewShell
-        title={route.kind === "owner-secrets" ? "Credential setup" : "Product review"}
+        title={route.kind === "product-topics" ? "Topics to discuss" : route.kind === "owner-secrets" ? "Credential setup" : "Product review"}
         identity={authState.identity}
         notice={sessionNotice}
         onDismissNotice={() => setSessionNotice("")}
@@ -307,7 +309,7 @@ export function App() {
         signingOut={signingOut}
         theme={theme}
       >
-        {route.kind === "owner-secrets" ? <OwnerSecretInputsRoute fixtureMode={fixtureMode} /> : <OwnerProductReviewRoute fixtureMode={fixtureMode} />}
+        {route.kind === "product-topics" ? <ProductTopicsRoute key={route.product} product={route.product} admin={authState.identity.role === "admin"} /> : route.kind === "owner-secrets" ? <OwnerSecretInputsRoute fixtureMode={fixtureMode} /> : <OwnerProductReviewRoute fixtureMode={fixtureMode} />}
       </OwnerReviewShell>
     );
   }
@@ -399,11 +401,13 @@ export function App() {
 function SessionGate({
   ownerReview,
   ownerSecrets,
+  topics,
   state,
   onRetry,
 }: {
   ownerReview: boolean;
   ownerSecrets: boolean;
+  topics: boolean;
   state: Exclude<AuthState, { status: "signed_in" }>;
   onRetry: () => void;
 }) {
@@ -442,7 +446,7 @@ function SessionGate({
             <ShieldCheck aria-hidden="true" />
           )}
         </div>
-        <p className="eyebrow">{ownerSecrets ? "Credential setup" : ownerReview ? "Product review" : "Admin access"}</p>
+        <p className="eyebrow">{topics ? "Topics to discuss" : ownerSecrets ? "Credential setup" : ownerReview ? "Product review" : "Admin access"}</p>
         <h1 data-route-heading tabIndex={-1}>
           {checking
             ? "Verifying your session"
@@ -450,6 +454,8 @@ function SessionGate({
               ? "Session verification failed"
               : expired
                 ? "Your session expired"
+              : topics
+                ? "Sign in to view topics"
               : ownerSecrets
                 ? "Sign in to provide a credential"
                 : ownerReview
@@ -463,6 +469,8 @@ function SessionGate({
               ? state.error
               : expired
                 ? "Sign in again to load current evidence. You will return to this page."
+              : topics
+                ? "Sign in to see your product’s open topics and discussion links."
               : ownerSecrets
                 ? "Sign in as the product's Client to provide the requested credential."
                 : ownerReview

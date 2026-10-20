@@ -48,7 +48,7 @@
       {
         "idempotency": "none",
         "identity_dependencies": [
-          "read_identity"
+          "read_owner_review_identity"
         ],
         "method": "GET",
         "modes": [
@@ -66,7 +66,7 @@
           "503"
         ],
         "reviewed_evidence": [],
-        "schema_fingerprint_sha256": "caa53d068bd6fa0bf6af9f0ae8c7d810c18f8bff008acd96a7e1ccaf2856309f",
+        "schema_fingerprint_sha256": "2cc149a0f8aa3e692be39f9a8ff7275e808ad1e0da4ee6d5dbb426896392e6e6",
         "supported_surfaces": [
           "service_api"
         ]
@@ -967,8 +967,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "d66b794ffbb1d141f1498de9df705c40e8af4687"
+    "source_commit_sha": "636a1216f5a7b99519dffe5c0bcdc80353ef2438"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "809c3c0d62f7c03198d41c67ddb3a4e0f91a8470329a371f0fc6c4218d01f857"
+  "semantic_digest_sha256": "79e59de1e97e674a4c6a479d2ef103f203952d356d4d5ba639be03be322f4670"
 }

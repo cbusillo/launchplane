@@ -4,6 +4,7 @@ import {
   productActivityPath,
   productEnvironmentPath,
   productPath,
+  productTopicsPath,
   type AppRoute,
   type EnvironmentView,
 } from "./router";
@@ -47,6 +48,7 @@ export function ProductWorkspaceNav({
       >
         Activity
       </AppLink>
+      <AppLink to={productTopicsPath(product.product)}>Topics to discuss</AppLink>
     </nav>
   );
 }
