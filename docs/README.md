@@ -55,7 +55,7 @@ not describe runtime authority until it is implemented, deployed, and activated.
 - [odoo-testing-walkthrough.md](odoo-testing-walkthrough.md) — testing task
   accounts, opaque service-owned browser sign-in, receipts and cleanup.
 - [legacy-preview-reconciliation.md](legacy-preview-reconciliation.md) — reviewed
-  reconciliation of provider-absent generic-web preview history.
+  reconciliation of provider-absent generic-web and Odoo preview history.
 - [driver-descriptors.md](driver-descriptors.md) — provider-neutral driver
   descriptor, action safety, registry, and read-model endpoint contract.
 - [driver-development.md](driver-development.md) — when and how to add a new

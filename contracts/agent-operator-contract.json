@@ -692,7 +692,7 @@
         ],
         "operation_id": "reconcile_legacy_generic_web_preview",
         "path": "/v1/previews/legacy-generic-web/reconciliation",
-        "purpose": "Inspect, plan or reconcile one provider-absent legacy generic-web preview.",
+        "purpose": "Inspect, plan or reconcile one provider-absent legacy generic-web or Odoo preview.",
         "response_statuses": [
           "202",
           "400",
@@ -886,8 +886,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "b6977ea1570cbe76f323a7e431a9243485eb2dd0"
+    "source_commit_sha": "f3eca3b3db3bf0f656bcdf6676199e62589014c0"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "4089385dbcfae5074aac56a439ee8ecfe9b1b3062ca9903f7ec938bbae9da722"
+  "semantic_digest_sha256": "7f7e6e24890a3b5120548953c342862e05a7260ca75331711f493413d22e4845"
 }

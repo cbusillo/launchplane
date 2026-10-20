@@ -903,6 +903,20 @@ def read_driver_descriptor(driver_id: str) -> DriverDescriptor:
     raise FileNotFoundError(f"No Launchplane driver descriptor found for {driver_id!r}.")
 
 
+ODOO_DRIVER_ID = "odoo"
+
+
+def product_profile_uses_odoo_driver(profile: LaunchplaneProductProfileRecord) -> bool:
+    profile_driver_id = profile.driver_id.strip()
+    if profile_driver_id == ODOO_DRIVER_ID:
+        return True
+    try:
+        descriptor = read_driver_descriptor(profile_driver_id)
+    except FileNotFoundError:
+        return False
+    return descriptor.base_driver_id == ODOO_DRIVER_ID
+
+
 def _product_profile_lanes(profile: LaunchplaneProductProfileRecord) -> tuple[str, ...]:
     contexts = {lane.context.strip() for lane in profile.lanes if lane.context.strip()}
     if profile.preview.enabled and profile.preview.context.strip():
