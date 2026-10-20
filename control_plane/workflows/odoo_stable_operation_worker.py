@@ -611,6 +611,10 @@ def run_odoo_stable_operation_worker_once(
     if max_attempts < 1:
         raise ValueError("Odoo stable operation worker max_attempts must be positive.")
     now = _utc_now_timestamp()
+    if isinstance(record_store, PostgresRecordStore):
+        from control_plane.rehearsal_deploy_resume import resume_rehearsals
+
+        resume_rehearsals(record_store, control_plane_root_path)
     recovered_bootstrap_ids = record_store.recover_expired_odoo_stable_bootstrap_operation_records(
         now=now,
         safe_phases=SAFE_BOOTSTRAP_RETRY_PHASES,

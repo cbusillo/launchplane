@@ -49,6 +49,7 @@ DurableProviderOperationStatus = Literal[
     "target_busy",
     "in_progress",
     "reconcile_required",
+    "checkpointed",
 ]
 
 
@@ -87,6 +88,17 @@ class ProviderMutationUnknownError(Exception):
     dispatch). The runner marks the reservation ``reconcile_required`` so the
     effect is never blindly repeated.
     """
+
+
+class ProviderMutationCheckpoint(Exception):
+    """An adapter can relinquish an independently running, durably identified job."""
+
+    def __init__(
+        self,
+        persist: Callable[[LaunchplaneIdempotencyRecord], LaunchplaneIdempotencyRecord],
+    ) -> None:
+        super().__init__("The original provider job is checkpointed for service replacement.")
+        self.persist = persist
 
 
 @dataclass(frozen=True)
@@ -636,6 +648,27 @@ def _apply_acquired(
     heartbeat.start()
     try:
         outcome = adapter.apply(provider_operation_key, heartbeat)
+    except ProviderMutationCheckpoint as checkpoint:
+        current_reservation, _ = heartbeat.stop()
+        try:
+            held = checkpoint.persist(current_reservation)
+        except BaseException:
+            _mark_reconcile_required(
+                store=store,
+                reservation=current_reservation,
+                reconciliation_key=reconciliation_key,
+            )
+            raise
+        return DurableProviderOperationResult(
+            "checkpointed",
+            held,
+            202,
+            provider_operation_response_payload(
+                trace_id=response_trace_id,
+                records={"operation": held.record_id},
+                result={"state": "checkpointed", "original_key_required": True},
+            ),
+        )
     except _ProviderOperationLeaseLostError:
         current_reservation, _ = heartbeat.stop()
         return _mark_reconcile_required(
