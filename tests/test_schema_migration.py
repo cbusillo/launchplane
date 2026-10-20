@@ -18,6 +18,12 @@ from control_plane.contracts.product_owner import (
 )
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.migrations.versions import (
+    e7c1d5e9a3b6_drop_retired_delivery_tables as retired_delivery,
+    e9e3a7b1c5d8_join_retirement_paths as retirement_join,
+    f0a4c8e2b6d9_canonical_public_host_fences as public_host_fences,
+    f1b5d9a3c7e0_join_public_host_fences as public_host_join,
+)
 from control_plane.storage.schema_adoption import (
     LEGACY_BASELINE_REVISION,
     LEGACY_CURRENT_SCHEMA_REVISION,
@@ -39,10 +45,62 @@ from control_plane.storage.schema_migration import (
     main as migrate_main,
     schema_migration_action,
     SCHEMA_MIGRATION_TARGET_REVISION,
+    schema_migration_target,
 )
 
 
 class SchemaMigrationTests(unittest.TestCase):
+    def test_compatibility_image_accepts_future_schema_without_activating_it(self) -> None:
+        for revision in (public_host_fences.revision, public_host_join.revision):
+            with self.subTest(revision=revision):
+                self.assertEqual(
+                    schema_migration_action(current_revision=revision), "compatible_ahead"
+                )
+
+    def test_delivery_preview_join_remains_the_existing_approved_join(self) -> None:
+        for current, target in (
+            (retired_delivery.revision, SCHEMA_MIGRATION_TARGET_REVISION),
+            (SCHEMA_MIGRATION_TARGET_REVISION, retired_delivery.revision),
+        ):
+            with self.subTest(current=current, target=target):
+                self.assertEqual(
+                    schema_migration_target(current_revision=current, target_revision=target),
+                    retirement_join.revision,
+                )
+
+    def test_hostname_only_database_does_not_infer_delivery_drop_approval(self) -> None:
+        for revision in (retired_delivery.revision, retirement_join.revision):
+            with self.subTest(target=revision), self.assertRaises(ValueError):
+                schema_migration_action(
+                    current_revision=public_host_fences.revision, target_revision=revision
+                )
+
+    def test_future_source_revision_is_not_an_approved_bootstrap_target(self) -> None:
+        for revision in (public_host_fences.revision, public_host_join.revision):
+            with self.subTest(target=revision):
+                engine = MagicMock()
+                engine.url.get_backend_name.return_value = "postgresql"
+                with (
+                    patch(
+                        "control_plane.storage.schema_migration._build_engine", return_value=engine
+                    ) as build,
+                    patch(
+                        "control_plane.storage.schema_migration.schema_stamp_revision_for_engine",
+                        return_value="",
+                    ),
+                    patch(
+                        "control_plane.storage.schema_migration._current_revision",
+                        side_effect=("", revision),
+                    ),
+                    patch("control_plane.storage.schema_migration.command.upgrade") as upgrade,
+                    self.assertRaises(ValueError),
+                ):
+                    migrate_schema(
+                        database_url="postgresql://local/rehearsal", target_revision=revision
+                    )
+                build.assert_not_called()
+                upgrade.assert_not_called()
+
     def test_prepared_retirement_refuses_unreconciled_later_migration(self) -> None:
         with patch(
             "control_plane.storage.schema_invariants.ScriptDirectory.get_current_head",
@@ -1152,7 +1210,7 @@ class SchemaMigrationTests(unittest.TestCase):
         self.assertEqual(
             schema_migration_action(
                 current_revision=AUTHZ_COMPATIBILITY_FLOOR_REVISION,
-                target_revision=EXPECTED_ALEMBIC_HEAD_REVISION,
+                target_revision=retirement_join.revision,
             ),
             "upgrade",
         )
@@ -1163,7 +1221,7 @@ class SchemaMigrationTests(unittest.TestCase):
 
         for argv, expected in (
             ([], SCHEMA_MIGRATION_TARGET_REVISION),
-            (["--target-revision", EXPECTED_ALEMBIC_HEAD_REVISION], EXPECTED_ALEMBIC_HEAD_REVISION),
+            (["--target-revision", retirement_join.revision], retirement_join.revision),
         ):
             with (
                 self.subTest(argv=argv),

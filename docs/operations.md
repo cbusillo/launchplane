@@ -4953,10 +4953,11 @@ approved Q533 preview-enablement drop, `e8d2f6a0b4c7`, which branches from
 `e6b0c4d8f2a5` alongside the held migration. This is an explicit expand/contract hold: source delivery
 and a green PR do not authorize applying the drop to the shared database.
 The candidate runtime accepts the common predecessor, either branch revision,
-or their empty merge revision, `e9e3a7b1c5d8`, and retains expiry/key-retirement,
+or their empty merge revision, `e9e3a7b1c5d8`, plus the prepared hostname
+revision `f0a4c8e2b6d9` and its join `f1b5d9a3c7e0`. It retains expiry/key-retirement,
 activation/history/policy maintenance, custody evidence and native train fences.
-While this hold is active, schema initialization refuses a migration graph whose
-head has advanced beyond the reviewed join of these two paths. A later schema change must
+Schema initialization refuses a migration graph whose head has advanced beyond
+this reviewed compatibility graph. A later schema change must
 reconcile the hold, runtime compatibility and supported migration targets in the
 same change. Keep an independently approved application path for the destructive
 step; advancing an unrelated additive migration does not authorize it. Lifting
@@ -5018,3 +5019,53 @@ rows. Recovery requires a separately approved restore of the verified full
 pre-migration backup with its matching image and writer quiescence. Images
 before this preparation accept only the old revision and cannot simply restart
 against the contracted database. Keep the Protection App/access decision separate.
+
+### Hostname schema compatibility prelude
+
+Issue #4229 publishes schema knowledge before #4005 activates canonical hostname
+fences. The compatibility image retains the preview-only startup target
+`e8d2f6a0b4c7` and existing hostname comparisons. Its migration entrypoint keeps
+the earlier explicit targets, including the independently approved delivery
+drop and old join. It recognizes an already-applied hostname revision or new
+join as compatible ahead, so startup and image rollback leave their schema and
+stored payloads unchanged. Neither prepared hostname revision is an accepted
+target of this image's migration entrypoint, even for an empty database.
+
+The old delivery/preview crossing still maps explicitly to `e9e3a7b1c5d8`.
+Adding the new graph head must not change that route to one that applies the
+hostname migration. A hostname-only database cannot request the delivery drop
+or old join through this compatibility entrypoint: those branches are
+incomparable, and joining them would newly apply the held drop. Its ordinary
+startup target remains supported and leaves the hostname revision unchanged.
+An already-applied new join accepts all earlier targets without a downgrade.
+The held-drop approval procedure above remains independent.
+
+Before the first explicit public-host authority-key call, runtime provider
+operations acquire a shared transaction advisory schema-transition lock outside
+the validation savepoint. They retain it across provider I/O and reacquire it
+after every checkpoint commit. The prepared hostname migration takes the
+matching exclusive transaction lock in both upgrade and downgrade, then a
+NOWAIT SHARE lock on `launchplane_dokploy_targets` before replacing key
+derivation. This excludes ordinary and prepared target writes that invoke the
+key function through table triggers, including an uncommitted new context.
+Independent provider operations continue concurrently under shared locks.
+
+A busy advisory transition lock raises the migration's busy RuntimeError;
+target-table contention raises a database lock error with SQLSTATE `55P03`.
+VACUUM/ANALYZE can also cause the table-lock refusal. The transaction commits
+no partial DDL or revision change. Retry the supported migration after the
+conflicting activity settles; do not cancel maintenance or use a live SQL
+fallback. Runtime reacquisition contention stops further effects while keeping
+the preceding checkpoint committed; retry from a fresh plan.
+
+Source delivery alone does not establish rollback compatibility for #4005.
+An authorized deployment session must record the immutable compatibility image,
+verify that every earlier HTTP replica and worker has been replaced, and retain
+that qualified image as activation's previous-image rollback target. A drain
+marker alone does not prove older hostname writers have gone. Both new migration
+files remain byte-identical between the compatibility and activation changes.
+Merging #4005 triggers deployment after successful main-push CI and startup
+applies its new default, so its native #4229 blocker must be satisfied before
+merge. Leave its source unopened or its PR draft/held without ready/enqueue
+until the deployed-image evidence exists. Image rollback then returns to this
+qualified compatibility image without downgrading the hostname schema.
