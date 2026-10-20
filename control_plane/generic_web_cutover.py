@@ -177,6 +177,7 @@ def execute_web_cutover_deployment(
     rollback: bool = False,
     checkpoint: Callable[[str], None] = lambda _phase: None,
     before_records_commit: Callable[[], None] = lambda: None,
+    before_deployment_records: Callable[[], None] | None = None,
 ) -> DeploymentRecord:
     # The outer product-operation serializer and existing accepted-release/backup
     # guard remain authority. This store adds checkpoints, not a competing lock.
@@ -286,7 +287,12 @@ def execute_web_cutover_deployment(
         rollback_web_cutover(persistence, provider, source.record_id, checkpoint=checkpoint)
         if rollback
         else execute_web_cutover(
-            plan, persistence, provider, record_id=source.record_id, checkpoint=checkpoint
+            plan,
+            persistence,
+            provider,
+            record_id=source.record_id,
+            checkpoint=checkpoint,
+            before_deployment_records=before_deployment_records,
         )
     )
     failed_source = None

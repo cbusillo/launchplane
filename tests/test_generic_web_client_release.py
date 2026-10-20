@@ -16,10 +16,12 @@ from control_plane.client_release import (
     release_start_for_acceptance,
     client_release_grant,
     client_release_grant_allows,
+    _generic_web_release_authority_allows,
 )
 from control_plane.contracts.product_profile_record import ProductOwnerProfile
 from control_plane.contracts.production_backup_authority import ProductionBackupPolicyRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.release_review import (
     ReleaseReviewDecisionRecord,
     ReleaseReviewStatus,
@@ -374,6 +376,71 @@ class GenericWebClientReleaseTests(unittest.TestCase):
     def test_qualification_lost_during_source_health_wait_never_dispatches(self) -> None:
         self._source_changed_during_health_wait("post_deploy_failure")
 
+    def test_pre_effect_source_refusal_resumes_same_accepted_artifact_after_retest(self) -> None:
+        self.pre_effect_source_refusal_retest("post_deploy_failure")
+
+    def test_new_testing_during_wait_can_return_to_the_accepted_artifact(self) -> None:
+        self.pre_effect_source_refusal_retest("new_testing")
+
+    def test_rebound_testing_during_wait_can_return_to_the_accepted_lane(self) -> None:
+        self.pre_effect_source_refusal_retest("context_rebound")
+
+    def pre_effect_source_refusal_retest(self, change: str) -> None:
+        profile = self.store.read_product_profile_record(self.profile.product)
+        inventory = self.store.read_environment_inventory(
+            context_name=self.context, instance_name="testing"
+        )
+        testing = self.store.read_deployment_record(inventory.deployment_record_id)
+        self._source_changed_during_health_wait(change)
+        decision = self.store.list_release_review_decision_records(product=self.profile.product)[0]
+        for _ in range(2):
+            reservation = self.store.read_idempotency_record(
+                scope=CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
+                route_path=GENERIC_WEB_PROD_PROMOTION_ROUTE,
+                idempotency_key=decision.record_id + ":promote-1",
+            )
+            self.assertIsNone(reservation)
+            self.store.write_product_profile_record(profile)
+            self.store.write_deployment_record(testing)
+            self.store.write_environment_inventory(inventory)
+            with patch(
+                "control_plane.workflows.generic_web_promotion._wait_for_healthcheck",
+                side_effect=lambda **_kwargs: self._lose_testing_source(change, inventory, testing),
+            ):
+                self.assertEqual(self.advance(), ())
+            self.assertEqual(self.provider.deployed_artifacts, [])
+        self.store.write_product_profile_record(profile)
+        assert testing.runtime_identity is not None
+        retest_id = testing.record_id + "-retest"
+        identity = testing.runtime_identity.model_copy(update={"deployment_record_id": retest_id})
+        self.store.write_deployment_record(
+            testing.model_copy(
+                update={
+                    "record_id": retest_id,
+                    "runtime_identity": identity,
+                }
+            )
+        )
+        self.store.write_environment_inventory(
+            inventory.model_copy(
+                update={
+                    "deployment_record_id": retest_id,
+                    "runtime_identity": identity,
+                }
+            )
+        )
+        self.assertEqual(self.review().checklist_digest, decision.checklist_digest)
+        self.assertTrue(self.advance())
+        self.assertEqual(
+            self.provider.deployed_artifacts, [decision.checklist.candidate.artifact_id]
+        )
+        self.assertEqual(
+            self.store.read_release_review_decision_record(
+                product=self.profile.product, record_id=decision.record_id
+            ),
+            decision,
+        )
+
     def test_testing_context_rebound_during_source_health_wait_never_dispatches(self) -> None:
         self._source_changed_during_health_wait("context_rebound")
 
@@ -466,9 +533,7 @@ class GenericWebClientReleaseTests(unittest.TestCase):
             )
         )
         self.assertFalse(client_release_grant_allows(self.store, grant))
-        self.assertTrue(
-            client_release_grant_allows(self.store, grant, require_testing_source=False)
-        )
+        self.assertTrue(_generic_web_release_authority_allows(self.store, grant))
         self.store.write_deployment_record(record)
         assert inventory.runtime_identity is not None
         self.write_qualified_testing_inventory(
@@ -481,9 +546,7 @@ class GenericWebClientReleaseTests(unittest.TestCase):
             )
         )
         self.assertFalse(client_release_grant_allows(self.store, grant))
-        self.assertTrue(
-            client_release_grant_allows(self.store, grant, require_testing_source=False)
-        )
+        self.assertTrue(_generic_web_release_authority_allows(self.store, grant))
         for changed in (
             grant.model_copy(update={"context": "another-context"}),
             grant.model_copy(update={"release_decision_record_id": "another-decision"}),
@@ -491,13 +554,9 @@ class GenericWebClientReleaseTests(unittest.TestCase):
                 update={"caller": grant.caller.model_copy(update={"github_id": 12345})}
             ),
         ):
-            self.assertFalse(
-                client_release_grant_allows(self.store, changed, require_testing_source=False)
-            )
+            self.assertFalse(_generic_web_release_authority_allows(self.store, changed))
         self.switch("held")
-        self.assertFalse(
-            client_release_grant_allows(self.store, grant, require_testing_source=False)
-        )
+        self.assertFalse(_generic_web_release_authority_allows(self.store, grant))
 
     def test_rejection_rollback_ignores_failed_testing_qualification(self) -> None:
         self.rejection_rollback_without_testing(missing=False)
@@ -614,31 +673,7 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         record = self.store.read_deployment_record(inventory.deployment_record_id)
 
         def lose_qualification(**_kwargs: object) -> None:
-            if change == "post_deploy_failure":
-                self.store.write_deployment_record(
-                    record.model_copy(
-                        update={
-                            "post_deploy_update": PostDeployUpdateEvidence(
-                                attempted=True, status="fail"
-                            ),
-                        }
-                    )
-                )
-            else:
-                profile = self.store.read_product_profile_record(self.profile.product)
-                self.store.write_product_profile_record(
-                    profile.model_copy(
-                        update={
-                            "lanes": tuple(
-                                lane.model_copy(update={"context": lane.context + "-replacement"})
-                                if lane.instance == "testing"
-                                else lane
-                                for lane in profile.lanes
-                                if not (change == "lane_removed" and lane.instance == "testing")
-                            ),
-                        }
-                    )
-                )
+            self._lose_testing_source(change, inventory, record)
 
         with patch(
             "control_plane.workflows.generic_web_promotion._wait_for_healthcheck",
@@ -646,6 +681,46 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         ):
             self.advance()
         self.assertEqual(self.provider.deployed_artifacts, [])
+
+    def _lose_testing_source(
+        self, change: str, inventory: EnvironmentInventory, record: DeploymentRecord
+    ) -> None:
+        if change == "post_deploy_failure":
+            self.store.write_deployment_record(
+                record.model_copy(
+                    update={
+                        "post_deploy_update": PostDeployUpdateEvidence(
+                            attempted=True, status="fail"
+                        ),
+                    }
+                )
+            )
+        elif change == "new_testing":
+            assert inventory.runtime_identity is not None
+            identity = inventory.runtime_identity.model_copy(
+                update={
+                    "artifact_id": self.profile.image.repository + "@sha256:" + "e" * 64,
+                    "source_git_ref": "e" * 40,
+                }
+            )
+            self.write_qualified_testing_inventory(
+                inventory.model_copy(update={"runtime_identity": identity})
+            )
+        else:
+            profile = self.store.read_product_profile_record(self.profile.product)
+            self.store.write_product_profile_record(
+                profile.model_copy(
+                    update={
+                        "lanes": tuple(
+                            lane.model_copy(update={"context": lane.context + "-replacement"})
+                            if lane.instance == "testing"
+                            else lane
+                            for lane in profile.lanes
+                            if not (change == "lane_removed" and lane.instance == "testing")
+                        ),
+                    }
+                )
+            )
 
     def test_held_and_changed_candidate_progress_uses_local_records_only(self) -> None:
         accepted = self.accept()
@@ -808,6 +883,87 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         self.assertEqual(len({record.backup_record_id for record in promotions}), 2)
         later = self.accept(suffix="-later")
         self.assertEqual(later.release_start, "promote")
+
+    def test_drill_restores_baseline_without_testing_then_requalifies_repromotion(self) -> None:
+        self.switch("promote_with_rollback_drill")
+        decision = self.accept()
+        self.advance()
+        self.capture()
+        self.advance()
+        inventory = self.store.read_environment_inventory(
+            context_name=self.context, instance_name="testing"
+        )
+        testing = self.store.read_deployment_record(inventory.deployment_record_id)
+        self.store.write_deployment_record(
+            testing.model_copy(
+                update={
+                    "post_deploy_update": PostDeployUpdateEvidence(attempted=True, status="fail")
+                }
+            )
+        )
+        run = read_client_release_run(store=self.store, profile=self.profile, decision=decision)
+        assert run is not None
+        self.assertEqual(run.blocked_reason, "")
+        self.assertTrue(self.advance())
+        assert self.provider.running is not None
+        self.assertEqual(
+            self.provider.running.artifact_id, decision.checklist.production.artifact_id
+        )
+        self.assertEqual(self.advance(), ())
+        self.assertEqual(len(self.store.list_verireel_prod_backup_gate_operation_records()), 1)
+        # Requalification of the same accepted source resumes the fresh second
+        # backup and promotion under the original decision.
+        self.store.write_deployment_record(testing)
+        self.assertTrue(self.advance())
+        self.capture()
+        self.assertTrue(self.advance())
+        run = read_client_release_run(store=self.store, profile=self.profile, decision=decision)
+        assert run is not None
+        self.assertEqual(run.state, "passed")
+        self.assertEqual(
+            self.store.read_release_review_decision_record(
+                product=self.profile.product, record_id=decision.record_id
+            ),
+            decision,
+        )
+
+    def test_testing_failure_mid_drill_does_not_interrupt_baseline_restore(self) -> None:
+        self.switch("promote_with_rollback_drill")
+        decision = self.accept()
+        self.advance()
+        self.capture()
+        self.advance()
+        execute = self.provider.execute_artifact_deploy
+
+        def fail_testing_after_rollback_image(**kwargs: Any) -> None:
+            execute(**kwargs)
+            inventory = self.store.read_environment_inventory(
+                context_name=self.context, instance_name="testing"
+            )
+            testing = self.store.read_deployment_record(inventory.deployment_record_id)
+            self.store.write_deployment_record(
+                testing.model_copy(
+                    update={
+                        "post_deploy_update": PostDeployUpdateEvidence(
+                            attempted=True, status="fail"
+                        )
+                    }
+                )
+            )
+            kwargs["before_provider_mutation"]("rollback_maintenance")
+
+        with patch.object(
+            self.provider, "execute_artifact_deploy", side_effect=fail_testing_after_rollback_image
+        ):
+            self.assertTrue(self.advance())
+        run = read_client_release_run(store=self.store, profile=self.profile, decision=decision)
+        assert run is not None
+        self.assertEqual(run.steps[2].status, "pass")
+        self.assertEqual(run.steps[3].status, "not_started")
+        assert self.provider.running is not None
+        self.assertEqual(
+            self.provider.running.artifact_id, decision.checklist.production.artifact_id
+        )
 
     def test_each_drill_failure_stops_remaining_steps_and_does_not_count_as_passed(self) -> None:
         for failure_step in ("backup-1", "promote-1", "rollback-1", "backup-2", "promote-2"):

@@ -88,6 +88,7 @@ def execute_web_cutover(
     record_id: str,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     checkpoint: Callable[[str], None] = lambda _step: None,
+    before_deployment_records: Callable[[], None] | None = None,
 ) -> GenericWebCutoverRecord:
     plan = GenericWebCutoverPlan.model_validate(plan.model_dump())
     require_candidate_deploy_reference(
@@ -96,16 +97,17 @@ def execute_web_cutover(
         deploy_reference=plan.new.deploy_reference,
     )
     with provider.exclusive(plan):
+        persisted = True
         try:
             record = store.load(record_id)
         except FileNotFoundError:
+            persisted = False
             record = GenericWebCutoverRecord(
                 record_id=record_id, plan=plan, began_at=clock(), updated_at=clock()
             )
             if plan.compatibility.classification == "compatible":
                 provider.preflight(plan)
                 require_route(provider.current_route(plan), plan, plan.old)
-            store.save(record)
         record = GenericWebCutoverRecord.model_validate(record.model_dump())
         if record.plan != plan:
             raise ValueError("cannot change a cutover's immutable release plan")
@@ -131,6 +133,13 @@ def execute_web_cutover(
                 return record
             if record.step == "preparing":
                 require_route(provider.current_route(plan), plan, plan.old)
+                if not persisted:
+                    # Pure admission precedes draft persistence; the baseline
+                    # must persist before marking or dispatching an effect.
+                    if before_deployment_records is not None:
+                        before_deployment_records()
+                    store.save(record)
+                    persisted = True
                 checkpoint("prepare_candidate")
                 provider.prepare_candidate(plan)
                 require_route(provider.current_route(plan), plan, plan.old)
@@ -160,7 +169,8 @@ def execute_web_cutover(
                     raise TimeoutError("old connections have not drained; both slots retained")
                 advance("complete", ended_at=clock(), old_connections_drained=True)
         except Exception as error:
-            store.save(store.load(record_id).model_copy(update={"error": type(error).__name__}))
+            if persisted:
+                store.save(store.load(record_id).model_copy(update={"error": type(error).__name__}))
             raise
         return store.load(record_id)
 

@@ -706,9 +706,9 @@ class RecipientCutoverAdapter:
     trace_id: str
     backup_record_id: str
     validate_release: Callable[[], None]
+    validate_source: Callable[[], None]
     rollback_observed: bool = False
     rollback_resume_pending: bool = False
-    validate_source: Callable[[], None] | None = None
 
     def target_key(self) -> str:
         return generic_web_provider_target_key(
@@ -965,7 +965,7 @@ class RecipientCutoverAdapter:
                 and attempt_identity.get("deployment_record_id")
                 == "recipient-release-" + canonical_sha256(provider_operation_key)[:24]
             )
-            if self.validate_source is not None and not attempt_started:
+            if not attempt_started:
                 self.validate_source()
             require_writer_exclusive(self.store, record)
             backup_check()

@@ -108,6 +108,7 @@ from control_plane.generic_web_promotion_http import (
 )
 from control_plane.generic_web_rollback_http import GENERIC_WEB_ROLLBACK_ROUTE
 from control_plane.generic_web_rollback_drill import run_generic_web_rollback_drill
+from control_plane.generic_web_source_qualification import GenericWebPromotionSourceRefused
 from control_plane.generic_web_promotion_provider_adapter import (
     GenericWebProdPromotionProviderMutationAdapter,
     require_generic_web_promotion_target,
@@ -502,23 +503,21 @@ def accepted_release_can_start(store: object, decision: ReleaseReviewDecisionRec
     )
 
 
-def client_release_grant_allows(
+def _client_release_authority(
     store: object,
     authorization: DurableOperationAuthorization,
-    *,
-    require_testing_source: bool = True,
-) -> bool:
-    """Recheck authority, and testing eligibility unless the attempt admits it separately."""
+) -> tuple[LaunchplaneProductProfileRecord, ReleaseReviewDecisionRecord] | None:
+    """Read the covering authority and its production boundary independently of testing."""
 
     if authorization.grant not in RELEASE_DECISION_GRANTS or authorization.instances != ("prod",):
-        return False
+        return None
     covered = _covering_decision(
         store,
         authorization.product,
         decision_record_id=authorization.release_decision_record_id,
     )
     if covered is None:
-        return False
+        return None
     profile, decision = covered
     context = _prod_context(profile)
     checklist = decision.checklist
@@ -527,7 +526,7 @@ def client_release_grant_allows(
         record_store = cast(PostgresRecordStore, store)
         production = release_version(store=record_store, profile=profile, instance="prod")
     except (FileNotFoundError, ValueError):
-        return False
+        return None
     if (
         authorization.context != context
         or authorization.grant
@@ -535,28 +534,57 @@ def client_release_grant_allows(
         or authorization.caller.github_id != expected.github_id
         or authorization.caller.role != expected.role
     ):
-        return False
+        return None
     if decision.release_start == "rollback":
         # The rejected hotfix's candidate is live until the rollback restores the
         # Client's last accepted release; testing may already carry newer work.
         target = rejection_rollback_target(record_store, profile)
-        return target is not None and production.artifact_id in (
-            checklist.candidate.artifact_id,
-            target.artifact_identity.artifact_id if target.artifact_identity else "",
+        return (
+            covered
+            if target is not None
+            and production.artifact_id
+            in (
+                checklist.candidate.artifact_id,
+                target.artifact_identity.artifact_id if target.artifact_identity else "",
+            )
+            else None
         )
-    if require_testing_source:
-        try:
-            testing = release_version(store=record_store, profile=profile, instance="testing")
-        except (FileNotFoundError, ValueError):
-            return False
-        if testing != checklist.candidate:
-            return False
-    # Only generic-web attempt checkpoints omit testing after separately admitting
-    # the exact source. They still retain the accepted production-version boundary.
-    return production in (
-        checklist.production,
-        checklist.candidate,
+    return (
+        covered
+        if production
+        in (
+            checklist.production,
+            checklist.candidate,
+        )
+        else None
     )
+
+
+def client_release_grant_allows(
+    store: object, authorization: DurableOperationAuthorization
+) -> bool:
+    """Validate external/queued release work against its authority and current source."""
+    covered = _client_release_authority(store, authorization)
+    if covered is None:
+        return False
+    profile, decision = covered
+    if decision.release_start == "rollback":
+        return True
+    try:
+        testing = release_version(
+            store=cast(PostgresRecordStore, store), profile=profile, instance="testing"
+        )
+    except (FileNotFoundError, ValueError):
+        return False
+    return testing == decision.checklist.candidate
+
+
+def _generic_web_release_authority_allows(
+    store: object, authorization: DurableOperationAuthorization
+) -> bool:
+    """Ongoing authority for an admitted web attempt or its accepted baseline inverse."""
+    covered = _client_release_authority(store, authorization)
+    return covered is not None and covered[0].driver_id == "generic-web"
 
 
 def _step_status(
@@ -732,17 +760,29 @@ def _release_run_blocked_reason(
                 "Releases are on hold. This release cannot advance until an admin lifts the hold."
             )
         return "This decision no longer covers the product's release. The current Client and release decision must be reviewed before it can advance."
+    next_step = next(view for view in views if view.status != "pass")
+    needs_testing = not (
+        profile.driver_id == "generic-web"
+        and (
+            next_step.kind == "rollback"
+            or next_step.kind == "promote"
+            and next_step.status in {"pending", "running"}
+        )
+    )
     try:
         production = release_version(store=store, profile=profile, instance="prod")
         # A rejected hotfix rolls back even if testing has moved on.
         if decision.release_start == "rollback":
             return ""
-        candidate = release_version(store=store, profile=profile, instance="testing")
+        candidate = (
+            release_version(store=store, profile=profile, instance="testing")
+            if needs_testing
+            else None
+        )
     except (FileNotFoundError, ValueError):
         return "The current release's lane records are unavailable. An admin must reconcile them before this release can advance."
-    if candidate != decision.checklist.candidate:
+    if candidate is not None and candidate != decision.checklist.candidate:
         return "The testing version has changed since this release was accepted. The Client must review the current candidate before it can go live."
-    next_step = next(view for view in views if view.status != "pass")
     expected_production = (
         decision.checklist.candidate
         if next_step.kind == "rollback"
@@ -972,7 +1012,7 @@ def _run_generic_web_promotion(
     )
 
     def validate_checkpoint() -> None:
-        if not client_release_grant_allows(store, grant, require_testing_source=False):
+        if not _generic_web_release_authority_allows(store, grant):
             raise click.ClickException("The release is no longer accepted.")
 
     def validate_before_effect(target: GenericWebResolvedDeployTarget) -> None:
@@ -1132,7 +1172,11 @@ def advance_client_releases(
             continue
         try:
             operation_id = _advance(store, control_plane_root, *covered)
-        except (ClientReleaseNotReady, BusinessHoursHeld) as reason:
+        except (
+            ClientReleaseNotReady,
+            BusinessHoursHeld,
+            GenericWebPromotionSourceRefused,
+        ) as reason:
             _LOGGER.info(
                 "client release not advanced product=%s reason=%s", profile.product, reason
             )
@@ -1377,12 +1421,15 @@ def _queue_rollback(
     checklist = decision.checklist
     try:
         production = release_version(store=store, profile=profile, instance="prod")
-        testing = release_version(store=store, profile=profile, instance="testing")
+        testing = (
+            release_version(store=store, profile=profile, instance="testing")
+            if profile.driver_id != "generic-web"
+            else None
+        )
     except (FileNotFoundError, ValueError) as error:
         raise ClientReleaseNotReady("release_record_missing") from error
-    if (production.artifact_id, testing.artifact_id) != (
-        checklist.candidate.artifact_id,
-        checklist.candidate.artifact_id,
+    if production.artifact_id != checklist.candidate.artifact_id or (
+        testing is not None and testing.artifact_id != checklist.candidate.artifact_id
     ):
         raise ClientReleaseNotReady("release_changed")
     target_artifact_id = checklist.production.artifact_id
@@ -1419,7 +1466,7 @@ def _queue_rollback(
         )
 
         def validate_checkpoint() -> None:
-            if not client_release_grant_allows(store, grant):
+            if not _generic_web_release_authority_allows(store, grant):
                 raise click.ClickException("The release is no longer accepted.")
 
         operation_id = run_generic_web_rollback_drill(
@@ -1571,7 +1618,7 @@ def _queue_rejection_rollback(
             raise ClientReleaseNotReady("rollback_not_ready")
 
         def validate_checkpoint() -> None:
-            if not client_release_grant_allows(store, grant):
+            if not _generic_web_release_authority_allows(store, grant):
                 raise click.ClickException("The Client's request for changes no longer applies.")
 
         operation_id = run_generic_web_rollback_drill(
@@ -1656,7 +1703,7 @@ def _queue_recipient_inverse(
     )
 
     def validate() -> None:
-        if not client_release_grant_allows(store, grant):
+        if not _generic_web_release_authority_allows(store, grant):
             raise click.ClickException("The Client release no longer authorizes this inverse.")
 
     actual = run_recipient_inverse(

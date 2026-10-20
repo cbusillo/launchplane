@@ -13,6 +13,7 @@ from control_plane.client_release import (
     advance_client_releases,
     client_release_grant,
     client_release_grant_allows,
+    _generic_web_release_authority_allows,
     client_release_step_operation_id,
     client_release_steps,
     read_client_release_run,
@@ -936,6 +937,7 @@ class ClientReleaseTests(unittest.TestCase):
             authorized_at="2026-09-23T03:00:00Z",
         )
         self.assertTrue(client_release_grant_allows(self.store, grant))
+        self.assertFalse(_generic_web_release_authority_allows(self.store, grant))
         self.assertFalse(
             client_release_grant_allows(
                 self.store, grant.model_copy(update={"release_decision_record_id": "other"})

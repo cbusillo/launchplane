@@ -928,6 +928,20 @@ rollback outcome stops the run for reconciliation. A failed drill or second
 backup never starts re-promotion. Automatic rollback after a failed promotion
 remains permitted even when the Client's forward release authority is revoked.
 
+Generic-web testing qualification admits each fresh forward production attempt.
+After that attempt starts, a newer or failed testing deployment does not interrupt
+its accepted production work. The drill's rollback, recipient inverse and their
+original-key recovery check the accepted production boundary and ongoing Client
+release authority, without depending on testing. The second backup and promotion
+still require the accepted artifact and source to qualify in testing again. A
+same-artifact qualified retest uses the existing acceptance and checklist digest.
+
+A source refusal before any provider effect leaves the accepted step unstarted.
+The service can retry it after testing qualifies, including after repeated
+refusals. Repeated refusals do not turn an unstarted step into an interrupted
+deployment. An existing or dispatched attempt keeps its original recovery fence;
+a qualified retest cannot stand in for proof that its uncertain effects ended.
+
 Before the first backup, a generic-web drill requires a deployable passing
 production record for the checklist's exact artifact and source commit. A
 missing target is shown as a release blocker without changing production.
@@ -942,7 +956,7 @@ stay held; a completed adoption replays. Normal acceptance and hold checks
 still gate the second backup and re-promotion.
 
 Each step runs under a `client_release_acceptance` grant that names the
-decision. Before a step is queued, the worker checks all of the following:
+decision. Before a fresh backup or promotion is queued, the worker checks all of the following:
 
 - the decision is still the product's newest one, `accepted`, published, and by
   the product's recorded Client;
@@ -958,8 +972,9 @@ remains allowed to restore the admitted previous deployment even if acceptance
 is withdrawn. A crash or uncertain provider outcome keeps the provider operation
 fenced for reconciliation rather than repeating the release.
 
-A changed candidate, a newer decision, or a hold therefore stops the release
-before its next step and never falls back to a newer testing build. A failed or
+A changed testing candidate stops the next fresh backup or promotion, and never
+falls back to a newer testing build. A newer decision or a hold stops planned
+release work at its next authority checkpoint. A failed or
 cancelled step stops forward progress; the successful rollback drill never runs
 for a failed promotion. An admin override never starts a release; it stays a hand
 promotion from the Release panel. No automated identity gains a promote right,

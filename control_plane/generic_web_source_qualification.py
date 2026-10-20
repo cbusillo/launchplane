@@ -2,6 +2,8 @@
 
 from typing import Protocol
 
+import click
+
 from control_plane.contracts.deployment_record import DeploymentRecord, deployment_record_passed
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.product_profile_record import (
@@ -22,6 +24,12 @@ class GenericWebSourceQualificationStore(Protocol):
 
 class GenericWebSourceUnqualified(ValueError):
     """Testing no longer proves that the candidate passed its complete deployment."""
+
+
+class GenericWebPromotionSourceRefused(click.ClickException):
+    """Fresh forward admission refused; it is not a failed production attempt."""
+
+    failure_code = "generic_web.source_unqualified"
 
 
 def qualified_generic_web_source_inventory(

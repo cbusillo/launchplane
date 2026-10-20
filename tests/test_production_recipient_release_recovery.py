@@ -16,6 +16,7 @@ from control_plane.production_recipient_release_recovery import (
 )
 from control_plane.generic_web_promotion_http import GENERIC_WEB_PROD_PROMOTION_ROUTE
 from tests import test_production_recipient_cutover as fixtures
+from tests.support.profiles import _generic_site_profile_payload
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
@@ -35,7 +36,16 @@ from control_plane.workflows.inventory import build_environment_inventory
 class RecipientReleaseRecoveryTests(unittest.TestCase):
     def setUp(self) -> None:
         self.fixture = fixtures.RecipientCutoverTests()
-        self.fixture.setUp()
+        payload = _generic_site_profile_payload()
+        payload.update(
+            production_use="live",
+            release_on_acceptance="promote_with_rollback_drill",
+            owner={"github_id": "123", "github_login": "fixture"},
+        )
+        with patch(
+            "tests.test_production_recipient._generic_site_profile_payload", return_value=payload
+        ):
+            self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
         f = self.fixture
         checklist = ReleaseChecklist(
@@ -43,7 +53,7 @@ class RecipientReleaseRecoveryTests(unittest.TestCase):
             repository=f.fixture.profile.repository,
             owner_github_id="123",
             testing_url="",
-            production=ReleaseVersion(artifact_id="old", source_commit="b" * 40),
+            production=ReleaseVersion(artifact_id="old-artifact", source_commit="b" * 40),
             candidate=ReleaseVersion(
                 artifact_id=f.record.image_reference, source_commit=f.record.request.source_commit
             ),
@@ -69,12 +79,6 @@ class RecipientReleaseRecoveryTests(unittest.TestCase):
             reason="Reconcile original outcome",
         )
         f.store.write_release_review_decision_record(self.decision)
-        replacement = patch(
-            "control_plane.production_recipient_release_recovery.releases._covering_decision",
-            return_value=(f.fixture.profile, self.decision),
-        )
-        replacement.start()
-        self.addCleanup(replacement.stop)
         self.key = releases._step_key(self.decision, releases.ClientReleaseStep("promote", 1))
 
     def recover(self, request: Any = None, key: str | None = None) -> Any:
@@ -139,7 +143,6 @@ class RecipientReleaseRecoveryTests(unittest.TestCase):
         hotfix = self.decision.model_copy(update={"decision": "temporary_hotfix"})
         with (
             patch("control_plane.client_release._require_current_release"),
-            patch("control_plane.client_release.client_release_grant_allows", return_value=True),
         ):
             with self.assertRaises(click.ClickException):
                 releases._run_generic_web_promotion(
@@ -236,11 +239,6 @@ class RecipientReleaseRecoveryTests(unittest.TestCase):
 
         with (
             patch("control_plane.client_release._require_current_release"),
-            patch(
-                "control_plane.client_release._covering_decision",
-                return_value=(profile, self.decision),
-            ),
-            patch("control_plane.client_release.client_release_grant_allows", return_value=True),
             patch.object(
                 RecipientCutoverAdapter,
                 "verify_upstreams",
@@ -285,6 +283,98 @@ class RecipientReleaseRecoveryTests(unittest.TestCase):
     def test_resumed_started_recipient_keeps_original_source_admission(self) -> None:
         self.started_recipient_with_new_testing(resume=True)
 
+    def test_inverse_original_key_recovery_uses_real_authority_without_testing(self) -> None:
+        from control_plane.generic_web_rollback_http import GENERIC_WEB_ROLLBACK_ROUTE
+
+        self.started_recipient_with_new_testing(resume=False)
+        f = self.fixture
+        profile = f.store.read_product_profile_record(f.record.product)
+        inventory = f.store.read_environment_inventory(
+            context_name=next(lane.context for lane in profile.lanes if lane.instance == "testing"),
+            instance_name="testing",
+        )
+        testing = f.store.read_deployment_record(inventory.deployment_record_id)
+        f.store.write_deployment_record(
+            testing.model_copy(
+                update={
+                    "post_deploy_update": PostDeployUpdateEvidence(attempted=True, status="fail")
+                }
+            )
+        )
+        step = releases.ClientReleaseStep("rollback", 1)
+        key = releases._step_key(self.decision, step)
+        grant = releases.client_release_grant(
+            decision=self.decision,
+            action="generic_web_rollback.execute",
+            context=f.record.context,
+            authorized_at=self.decision.decided_at,
+        )
+        self.assertFalse(releases.client_release_grant_allows(f.store, grant))
+
+        def lose_pause_reply(*args: Any, **kwargs: Any) -> None:
+            f.writer(*args, **kwargs)
+            if not kwargs.get("old") and kwargs.get("action") == "pause":
+                raise TimeoutError("replacement writer pause reply lost")
+
+        with (
+            patch(
+                "control_plane.production_recipient_inverse.writer_action",
+                side_effect=lose_pause_reply,
+            ),
+            patch(
+                "control_plane.production_recipient_inverse._verify_health_evidence_with_identity",
+                side_effect=f.health,
+            ),
+        ):
+            self.assertTrue(
+                releases._queue_recipient_inverse(
+                    f.store,
+                    f.fixture.root,
+                    profile,
+                    self.decision,
+                    step,
+                    f.record.context,
+                    self.decision.decided_at,
+                )
+            )
+        original = f.store.read_idempotency_record(
+            scope=releases.CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
+            route_path=GENERIC_WEB_ROLLBACK_ROUTE,
+            idempotency_key=key,
+        )
+        assert original is not None
+        self.assertEqual(original.state, "reconcile_required")
+        request = self.request.model_copy(update={"kind": "rollback"})
+        plan = self.recover(request, key="")
+        with (
+            patch("control_plane.production_recipient_inverse.writer_action", side_effect=f.writer),
+            patch(
+                "control_plane.production_recipient_inverse._verify_health_evidence_with_identity",
+                side_effect=f.health,
+            ),
+        ):
+            result = self.recover(
+                request.model_copy(
+                    update={
+                        "mode": "apply",
+                        "reviewed_plan_sha256": plan.plan_sha256,
+                    }
+                ),
+                key=key,
+            )
+        self.assertEqual(result.operation_id, original.record_id)
+        self.assertEqual(result.original_key, key)
+        self.assertEqual(result.state, "completed")
+        current = custody(f.store, f.record.product, f.record.context)
+        assert current is not None
+        self.assertEqual(current.phase, "rolled_back")
+        self.assertTrue(f.old_running)
+        self.assertFalse(f.new_running)
+        self.assertEqual(
+            f.store.read_environment_inventory(context_name=f.record.context, instance_name="prod"),
+            f.publication_case.inventory,
+        )
+
     def started_recipient_with_new_testing(self, *, resume: bool) -> None:
         f = self.fixture
         profile, testing = self.qualified_testing_source()
@@ -311,7 +401,6 @@ class RecipientReleaseRecoveryTests(unittest.TestCase):
 
         with (
             patch("control_plane.client_release._require_current_release"),
-            patch("control_plane.client_release.client_release_grant_allows", return_value=True),
             patch.object(RecipientCutoverAdapter, "verify_runtime"),
             patch("control_plane.production_recipient_cutover.writer_action", side_effect=writer),
             patch(

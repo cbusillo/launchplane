@@ -99,6 +99,7 @@ class RecipientCutoverTests(unittest.TestCase):
             "client-release-fixture",
             self.old_backup,
             self.validate_release,
+            validate_source=self.validate_release,
         )
         for replacement in (
             patch(
@@ -509,6 +510,7 @@ class RecipientCutoverTests(unittest.TestCase):
             self.adapter.trace_id,
             backup,
             self.validate_release,
+            validate_source=self.validate_release,
         )
         source_qualified = False
 
