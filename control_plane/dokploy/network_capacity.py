@@ -84,6 +84,9 @@ import json, subprocess, sys, time
 
 deadline = time.monotonic() + 45
 
+class DaemonReadDenied(Exception):
+    pass
+
 def checked(arguments):
     remaining = deadline - time.monotonic()
     if remaining <= 0:
@@ -91,7 +94,7 @@ def checked(arguments):
     result = subprocess.run(arguments, capture_output=True, check=False, timeout=min(10, remaining))
     if result.returncode:
         if arguments[0] == 'docker' and docker_daemon_authorization_denied(result.stderr):
-            raise PermissionError('Existing provider reader refused the read')
+            raise DaemonReadDenied('Existing provider reader refused the read')
         raise ValueError('Capacity read unavailable')
     if len(result.stdout) > 8 * 1024 * 1024:
         raise ValueError('Capacity read exceeds bound')
@@ -148,7 +151,7 @@ def capacity():
 
 try:
     frame = {'type': 'complete', 'result': capacity()}
-except PermissionError:
+except DaemonReadDenied:
     frame = {'type': 'denied'}
 except Exception:
     frame = {'type': 'failed'}

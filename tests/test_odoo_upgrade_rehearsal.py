@@ -129,6 +129,7 @@ class RehearsalScenario(unittest.TestCase):
                 credentials.assert_not_called()
 
     def test_missing_config_is_clean_but_existing_placement_requires_recovery(self) -> None:
+        from control_plane.dokploy.sandbox_placement import IsolatedPlacementObservationRequired
         from control_plane.provider_operations import (
             ProviderMutationRejectedError,
             ProviderOperationLease,
@@ -159,22 +160,56 @@ class RehearsalScenario(unittest.TestCase):
                 self.assertEqual(
                     refused.exception.prerequisite, RehearsalPrerequisite.PLACEMENT_UNAVAILABLE
                 )
-        with (
-            patch(
-                "control_plane.dokploy.sandbox_placement.created_placement",
-                return_value=("existing-project", "", ""),
-            ),
-            patch(
-                "control_plane.odoo_upgrade_rehearsal.require_bridge_network_capacity",
-                side_effect=AssertionError("Recovery takes precedence"),
-            ) as capacity,
-            self.assertRaises(ProviderMutationRejectedError) as rejected,
-        ):
-            self.adapter("prepare").apply("original-operation", Mock(spec=ProviderOperationLease))
-        cause = rejected.exception.cause
-        assert isinstance(cause, RehearsalRefused)
-        self.assertEqual(cause.prerequisite, RehearsalPrerequisite.RECOVERY_REQUIRED)
-        capacity.assert_not_called()
+        for ambiguity in (False, True):
+            with (
+                self.subTest(ambiguity=ambiguity),
+                patch(
+                    "control_plane.dokploy.sandbox_placement.created_placement",
+                    return_value=("existing-project", "", ""),
+                    side_effect=IsolatedPlacementObservationRequired("ambiguous")
+                    if ambiguity
+                    else None,
+                ),
+                patch(
+                    "control_plane.odoo_upgrade_rehearsal.require_bridge_network_capacity",
+                    side_effect=AssertionError("Recovery takes precedence"),
+                ) as capacity,
+                self.assertRaises(ProviderMutationRejectedError) as rejected,
+            ):
+                self.adapter("prepare").apply(
+                    "original-operation", Mock(spec=ProviderOperationLease)
+                )
+            cause = rejected.exception.cause
+            assert isinstance(cause, RehearsalRefused)
+            self.assertEqual(cause.prerequisite, RehearsalPrerequisite.RECOVERY_REQUIRED)
+            capacity.assert_not_called()
+
+    def test_initial_target_read_refusal_releases_fresh_operation(self) -> None:
+        from control_plane.dokploy import api
+        from control_plane.odoo_upgrade_rehearsal import RehearsalPreparationReadRefused
+
+        adapter = self.adapter("prepare")
+        for status in (403, 503):
+            with (
+                self.subTest(status=status),
+                patch.object(
+                    api,
+                    "fetch_dokploy_target_payload",
+                    side_effect=api.DokployRequestFailed(
+                        method="GET", path="/api/compose.one", status_code=status, detail="private"
+                    ),
+                ) as read,
+                patch(
+                    "control_plane.testing_local_credentials.prepare_rehearsal_local_credentials"
+                ) as credentials,
+            ):
+                for _ in range(2):
+                    with self.assertRaises(RehearsalPreparationReadRefused) as refused:
+                        self.run_operation(adapter, "target-read-" + str(status))
+                    self.assertEqual(refused.exception.status_code, status)
+                    self.assertNotIn("private", str(refused.exception))
+                self.assertEqual(read.call_count, 2)
+                credentials.assert_not_called()
 
     def test_diagnostic_result_survives_real_marker_budget_and_adapter(self) -> None:
         import io

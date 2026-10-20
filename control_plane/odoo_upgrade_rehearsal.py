@@ -1339,6 +1339,10 @@ class OdooRehearsalAdapter:
                 record, _, _ = self.inputs()
                 require_rehearsal_transition(record, self.request.action)
                 require_unaliased_rehearsal(self.store, record)
+            except api.DokployRequestFailed as error:
+                raise ProviderMutationRejectedError(
+                    RehearsalPreparationReadRefused(error)
+                ) from None
             except RehearsalRefused as error:
                 raise ProviderMutationRejectedError(
                     RehearsalRefused(

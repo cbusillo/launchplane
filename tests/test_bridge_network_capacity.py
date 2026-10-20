@@ -130,8 +130,12 @@ class CapacityHostProgramTests(unittest.TestCase):
         self.list_calls = 0
         self.changed = False
 
-    def run_program(self, *, denial: bytes = b"", denial_command: str = "docker") -> dict[str, Any]:
+    def run_program(
+        self, *, denial: bytes = b"", denial_command: str = "docker", spawn_failure: str = ""
+    ) -> dict[str, Any]:
         def provider(arguments: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+            if spawn_failure == arguments[0]:
+                raise PermissionError("executable permission failure")
             if denial and arguments[0] == denial_command:
                 return subprocess.CompletedProcess(arguments, 1, stdout=b"", stderr=denial)
             if arguments[:2] == ["docker", "info"]:
@@ -206,3 +210,8 @@ class CapacityHostProgramTests(unittest.TestCase):
         self.assertEqual(
             self.run_program(denial=b"permission denied", denial_command="ip"), {"type": "failed"}
         )
+
+    def test_executable_permission_failure_is_unavailable_without_a_daemon_denial(self) -> None:
+        for binary in ("docker", "ip"):
+            with self.subTest(binary=binary):
+                self.assertEqual(self.run_program(spawn_failure=binary), {"type": "failed"})
