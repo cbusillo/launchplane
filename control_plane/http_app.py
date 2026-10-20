@@ -29266,6 +29266,15 @@ def create_launchplane_fastapi_app(
             read_human_mutation_identity=read_owner_review_browser_mutation_identity,
         ),
     )
+    from control_plane.http_routes.product_review_withdrawal import (
+        register_product_review_withdrawal_route,
+    )
+
+    register_product_review_withdrawal_route(
+        app,
+        dependencies=replace(read_route_dependencies, read_identity=read_browser_mutation_identity),
+        control_plane_root=resolved_control_plane_root,
+    )
     register_product_review_routes(
         app,
         dependencies=ProductReviewRouteDependencies(

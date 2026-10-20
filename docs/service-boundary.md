@@ -4225,6 +4225,17 @@ context. A scoped admin or agent can inspect the preview and latest decision;
 it receives `viewer_is_owner=false` and `can_decide=false`. Reading never grants
 the ability to record a Client decision.
 
+`POST /v1/product-review/withdrawal` supports `dry-run`, `apply` and `readback`
+for the Director's recorded decision to withdraw a pending labeled request.
+The request names `{product, repository, pull_request, expected_head_sha,
+reason, director_decision_url, mode, reviewed_plan_sha256}`. Apply and readback
+require the same original `Idempotency-Key`; apply binds the reviewed dry-run
+plan. Only an authenticated Director agent or admin may apply it; dry-run and readback use product read authority. The service
+refuses any current-head Client decision before removing the configured label,
+records withdrawal history, and never supplies acceptance or changes release
+acceptance. See [pending request withdrawal](owner-acceptance.md#withdrawing-a-pending-request)
+for replay, readback and later-request behavior.
+
 `POST /v1/product-review/decisions` takes `{repository, pull_request, decision,
 reason, reviewed_head_sha, reviewed_preview_url, reviewed_generation_id}` with
 `decision` of `accepted` or `changes_requested` (reason required). The three
