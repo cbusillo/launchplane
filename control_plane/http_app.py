@@ -764,7 +764,10 @@ from control_plane.contracts.preview_pr_feedback_remediation import (
     PreviewPrFeedbackRemediationRequest,
 )
 from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
-from control_plane.contracts.testing_route_refresh import TestingRouteRefreshSources
+from control_plane.contracts.testing_route_refresh import (
+    TestingRouteRefreshSources,
+    is_native_testing_binding,
+)
 from control_plane.native_testing_route_refresh import plan_native_testing_route_refresh
 from control_plane.contracts.route_binding_record import (
     route_binding_record_sha256,
@@ -23366,7 +23369,6 @@ def create_launchplane_fastapi_app(
                     record_store=controller_store,
                     evaluated_at=utc_now_timestamp(),
                     target_limit=_ODOO_TESTING_ROUTE_BINDING_REFRESH_TARGET_LIMIT,
-                    native_refresh=refresh_native_binding,
                 )
         except (
             control_plane_route_binding_refresh_controller.RouteBindingRefreshTargetLimitExceeded
@@ -23515,6 +23517,18 @@ def create_launchplane_fastapi_app(
 
         result_outcomes: list[dict[str, object]] = []
         for outcome in controller_plan.outcomes:
+            native_current = (
+                outcome.reconcile_plan.current_record if outcome.reconcile_plan else None
+            )
+            if native_current is not None and is_native_testing_binding(native_current):
+                native_plan = await run_in_threadpool(
+                    refresh_native_binding, native_current, utc_now_timestamp()
+                )
+                outcome = (
+                    control_plane_route_binding_refresh_controller.route_binding_refresh_outcome(
+                        native_current, native_plan
+                    )
+                )
             outcome_payload = outcome.model_dump(mode="json", exclude_none=True)
             outcome_payload.pop("reconcile_plan", None)
             if refresh_request.mode == "dry-run" or outcome.status != "planned_refresh":

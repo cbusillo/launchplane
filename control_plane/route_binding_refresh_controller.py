@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -24,9 +23,7 @@ from control_plane.route_binding_external_reconcile import (
     ExternalRouteBindingReconcileStore,
     plan_external_route_binding_reconcile,
 )
-from control_plane.native_testing_route_refresh import is_native_testing_binding
-
-NativeRouteRefresh = Callable[[EnvironmentRouteBindingRecord, str], RouteBindingReconcilePlan]
+from control_plane.contracts.testing_route_refresh import is_native_testing_binding
 
 
 class RouteBindingRefreshControllerStore(RouteBindingReconcileStore, Protocol):
@@ -172,7 +169,6 @@ def plan_odoo_testing_route_binding_refresh(
     record_store: RouteBindingRefreshControllerStore,
     evaluated_at: str,
     target_limit: int,
-    native_refresh: NativeRouteRefresh | None = None,
 ) -> RouteBindingRefreshControllerPlan:
     targets = discover_active_odoo_testing_route_bindings(
         record_store,
@@ -182,7 +178,6 @@ def plan_odoo_testing_route_binding_refresh(
         record_store=record_store,
         targets=targets,
         evaluated_at=evaluated_at,
-        native_refresh=native_refresh,
     )
 
 
@@ -207,7 +202,6 @@ def _plan_refresh(
     targets: tuple[RouteBindingRefreshTarget, ...],
     evaluated_at: str,
     external_store: ExternalRouteBindingReconcileStore | None = None,
-    native_refresh: NativeRouteRefresh | None = None,
 ) -> RouteBindingRefreshControllerPlan:
     if not targets:
         return RouteBindingRefreshControllerPlan(
@@ -223,20 +217,16 @@ def _plan_refresh(
         )
         reconcile_plan: RouteBindingReconcilePlan | ExternalRouteBindingReconcilePlan
         if is_native_testing_binding(target.record):
-            reconcile_plan = (
-                native_refresh(target.record, evaluated_at)
-                if native_refresh is not None
-                else RouteBindingReconcilePlan(
-                    status="blocked",
-                    current_record=target.record,
-                    current_record_sha256=target.current_record_sha256,
-                    findings=(
-                        RouteBindingReconcileFinding(
-                            code="native_testing_route_observer_unavailable",
-                            detail="Native testing routes require a fresh managed-proxy observation.",
-                        ),
+            reconcile_plan = RouteBindingReconcilePlan(
+                status="blocked",
+                current_record=target.record,
+                current_record_sha256=target.current_record_sha256,
+                findings=(
+                    RouteBindingReconcileFinding(
+                        code="native_testing_route_observation_required",
+                        detail="Native testing routes require a fresh managed-proxy observation.",
                     ),
-                )
+                ),
             )
         elif target.record.ingress.provider == "external" and external_store is not None:
             reconcile_plan = plan_external_route_binding_reconcile(
@@ -262,46 +252,7 @@ def _plan_refresh(
                     evaluated_at=evaluated_at,
                 ),
             )
-        status: RouteBindingRefreshOutcomeStatus
-        operation: Literal["refresh", "none"] = "none"
-        if reconcile_plan.status == "unchanged":
-            status = "unchanged"
-        elif reconcile_plan.status == "ready" and reconcile_plan.operation == "refresh":
-            status = "planned_refresh"
-            operation = "refresh"
-        elif reconcile_plan.status == "blocked":
-            status = "blocked"
-        else:
-            status = "conflict"
-        findings = reconcile_plan.findings
-        if reconcile_plan.status == "ready" and reconcile_plan.operation != "refresh":
-            findings = (
-                RouteBindingReconcileFinding(
-                    code="route_binding_refresh_requires_manual_reconcile",
-                    detail=(
-                        f"The refresh-only controller refuses {reconcile_plan.operation}. "
-                        "Use separately reviewed exact-lane reconciliation to change authority."
-                    ),
-                ),
-            )
-        outcomes.append(
-            RouteBindingRefreshOutcome(
-                product=target.product,
-                context=target.context,
-                instance=target.instance,
-                status=status,
-                operation=operation,
-                findings=findings,
-                current_record_sha256=reconcile_plan.current_record_sha256,
-                candidate_record_sha256=reconcile_plan.candidate_record_sha256,
-                stale_after=(
-                    reconcile_plan.record.source.stale_after
-                    if reconcile_plan.record is not None
-                    else target.record.source.stale_after
-                ),
-                reconcile_plan=reconcile_plan,
-            )
-        )
+        outcomes.append(route_binding_refresh_outcome(target.record, reconcile_plan))
     return RouteBindingRefreshControllerPlan(
         status=(
             "attention"
@@ -311,4 +262,48 @@ def _plan_refresh(
         evaluated_at=evaluated_at,
         target_count=len(outcomes),
         outcomes=tuple(outcomes),
+    )
+
+
+def route_binding_refresh_outcome(
+    record: EnvironmentRouteBindingRecord,
+    reconcile_plan: RouteBindingReconcilePlan | ExternalRouteBindingReconcilePlan,
+) -> RouteBindingRefreshOutcome:
+    status: RouteBindingRefreshOutcomeStatus
+    operation: Literal["refresh", "none"] = "none"
+    if reconcile_plan.status == "unchanged":
+        status = "unchanged"
+    elif reconcile_plan.status == "ready" and reconcile_plan.operation == "refresh":
+        status = "planned_refresh"
+        operation = "refresh"
+    elif reconcile_plan.status == "blocked":
+        status = "blocked"
+    else:
+        status = "conflict"
+    findings = reconcile_plan.findings
+    if reconcile_plan.status == "ready" and reconcile_plan.operation != "refresh":
+        findings = (
+            RouteBindingReconcileFinding(
+                code="route_binding_refresh_requires_manual_reconcile",
+                detail=(
+                    f"The refresh-only controller refuses {reconcile_plan.operation}. "
+                    "Use separately reviewed exact-lane reconciliation to change authority."
+                ),
+            ),
+        )
+    return RouteBindingRefreshOutcome(
+        product=record.product,
+        context=record.context,
+        instance="testing" if record.instance == "testing" else "prod",
+        status=status,
+        operation=operation,
+        findings=findings,
+        current_record_sha256=reconcile_plan.current_record_sha256,
+        candidate_record_sha256=reconcile_plan.candidate_record_sha256,
+        stale_after=(
+            reconcile_plan.record.source.stale_after
+            if reconcile_plan.record is not None
+            else record.source.stale_after
+        ),
+        reconcile_plan=reconcile_plan,
     )

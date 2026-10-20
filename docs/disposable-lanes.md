@@ -931,7 +931,9 @@ actual owned file and applied managed-proxy routing, including runs before the
 attestation is due. The route must still select the published copy at the same
 address with unchanged ingress/TLS ownership and canonical target. The runtime
 identity comes from the current inventory, so an ordinary deployment can update
-the build without replacing the original route provenance.
+the build without replacing the original route provenance. A stopped or missing
+web process, a mismatched runtime identity or an absent private alias cannot renew
+the attestation even if the proxy still contains the expected route file.
 
 A successful due refresh retains the publication key and route digest and records
 a new observation digest and 24-hour expiry. Historical publication/readiness
@@ -942,9 +944,20 @@ remain explicit denials; there is no alternate caller or transport.
 
 The existing exact-lane authorization is checked before observation. The final
 CAS write locks product authority and the binding and rechecks the observed source
-records and target aliases. Concurrent rebuild, deployment or source changes
-produce a conflict for a later fresh run. Legacy managed and external bindings
-keep their existing refresh paths and the same bounded failure reporting.
+records and target aliases. An authority change can make a refresh conflict for a
+later fresh run. Freshness-only changes preserve publication, rebuild guards and
+the original inverse: their comparisons retain the publication key, route digest
+and all serving authority, while excluding the observation clock and digest.
+
+Native observations run in the service thread pool, one lane immediately before
+its own write. They do not block the HTTP event loop or expire earlier lanes'
+observations while planning a batch. The existing shared half-life/expiry policy
+owns renewal timing. Completed-key replay returns its receipt before remote IO.
+Dry-run observes without writing. A provider authorization denial ends the batch
+with its trace; any earlier per-lane writes retain their original child receipts.
+Legacy managed and external bindings keep their existing paths and bounded failure
+reporting. Manual/browser single-binding reconcile identifies the native controller
+as the supported renewal path rather than returning a provider-domain error.
 
 ## Native testing worker integration
 

@@ -1783,28 +1783,64 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertEqual(self.current().target.policies.staff_testing_hold, hold)
         self.assertFalse(self.retained["stopped"])
 
-    def test_second_rebuild_uses_published_copy_and_preserves_later_deployment_route(self) -> None:
-        self.complete_second_rebuild()
-        from control_plane.native_testing_route_refresh import plan_native_testing_route_refresh
+    def refresh_through_http(self, key: str) -> dict[str, Any]:
+        import asyncio
+        from tests.test_native_testing_route_refresh import refresh_testing_binding_http
 
-        before = self.current()
-        for _ in range(2):
-            refresh = plan_native_testing_route_refresh(
-                self.store,
-                root=self.root,
-                current=self.current().binding,
-                evaluated_at=datetime.now(UTC).isoformat(),
+        current = self.current()
+        publication = published_testing_copy(
+            self.store, product=self.operation.product, context=self.operation.context
+        )
+        assert publication is not None and current.inventory is not None
+        assert current.inventory.runtime_identity is not None
+        frame = {
+            "raw": deepcopy(self.raw),
+            "owned_file": json.dumps(self.owned),
+            "old_endpoints": (publication.plan.route.new_backend,),
+            "old_identity": current.inventory.runtime_identity.model_dump(mode="json"),
+        }
+        with patch.object(DokployTestingRouteTransport, "read", return_value=frame):
+            response = asyncio.run(
+                refresh_testing_binding_http(
+                    self.store,
+                    self.root,
+                    self.operation.product,
+                    self.operation.context,
+                    datetime.now(UTC),
+                    key,
+                )
             )
-            self.assertIn(refresh.status, {"ready", "unchanged"}, refresh.model_dump())
-            assert refresh.record is not None
-            self.store.write_route_binding_record(refresh.record)
+        self.assertEqual(response.status_code, 202, response.text)
+        return dict(response.json()["result"])
+
+    def test_refresh_between_publication_and_retirement_does_not_interrupt_rebuild(self) -> None:
+        publish = service.NativeTestingRebuildExecution.publish
+
+        def interleave(execution: Any, *args: Any, **kwargs: Any) -> None:
+            publish(execution, *args, **kwargs)
+            result = self.refresh_through_http("during-publication")
+            self.assertEqual(result["refreshed_count"], 1, result)
+
+        with patch.object(service.NativeTestingRebuildExecution, "publish", new=interleave):
+            self.assertEqual(self.execute().deploy_status, "pass")
+        self.assertEqual(self.effects, ["switch-new", "stop-old"])
+
+    def test_second_rebuild_uses_published_copy_and_preserves_later_deployment_route(self) -> None:
+        self.complete_second_rebuild(refresh_during_prepare=True)
+        before = self.current()
+        result = self.refresh_through_http("after-second-rebuild")
+        self.assertEqual(result["refreshed_count"], 1, result)
+        result = self.refresh_through_http("after-second-rebuild-again")
+        self.assertEqual(result["unchanged_count"], 1, result)
         self.assertEqual(self.current().binding.domains, before.binding.domains)
         self.assertEqual(self.current().target_id, before.target_id)
 
     def test_next_rebuild_moves_to_desired_port_without_reverting_the_profile(self) -> None:
         self.complete_second_rebuild(change_port=True)
 
-    def complete_second_rebuild(self, *, change_port: bool = False) -> None:
+    def complete_second_rebuild(
+        self, *, change_port: bool = False, refresh_during_prepare: bool = False
+    ) -> None:
         import yaml
 
         self.assertEqual(self.execute().deploy_status, "pass")
@@ -1927,7 +1963,17 @@ class NativeTestingWorkerTests(unittest.TestCase):
                 return app_fixture.configure(**kw)
             return self.provider_request(**kw)
 
+        prepare = service.NativeTestingRebuildExecution.prepare
+
+        def interleave_prepare(execution: Any, *args: Any, **kwargs: Any) -> Any:
+            result = prepare(execution, *args, **kwargs)
+            if refresh_during_prepare:
+                refresh = self.refresh_through_http("during-next-preparation")
+                self.assertEqual(refresh["refreshed_count"], 1, refresh)
+            return result
+
         with (
+            patch.object(service.NativeTestingRebuildExecution, "prepare", new=interleave_prepare),
             patch.object(api, "dokploy_request", side_effect=request),
             patch.object(candidate_application, "candidate_private_readiness", side_effect=ready),
             patch.object(service, "candidate_private_readiness", side_effect=ready),

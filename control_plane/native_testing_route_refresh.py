@@ -14,6 +14,7 @@ from control_plane.contracts.route_binding_record import (
     route_binding_record_sha256,
 )
 from control_plane.contracts.testing_route_refresh import TestingRouteRefreshSources
+from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.dokploy import api, source
 from control_plane.dokploy.native_copy_stream import (
     NativeSourceAuthorizationDenied,
@@ -26,6 +27,8 @@ from control_plane.route_binding_reconcile import (
     RouteBindingReconcileFinding,
     RouteBindingReconcilePlan,
     RouteBindingSourceChanged,
+    _route_binding_refresh_due,
+    _EVIDENCE_FRESHNESS_WINDOW,
 )
 from control_plane.storage import postgres as db
 from control_plane.storage.product_authority_bundle import (
@@ -40,13 +43,6 @@ from control_plane.testing_publication_storage import (
     read_snapshot,
 )
 from control_plane.testing_serving_copy import published_testing_copy
-
-
-def is_native_testing_binding(record: EnvironmentRouteBindingRecord) -> bool:
-    return record.instance == "testing" and (
-        record.source.source_label == "service:testing-rebuild"
-        or bool({"testing_publication", "testing_route"} & record.source.source_versions.keys())
-    )
 
 
 def plan_native_testing_route_refresh(
@@ -108,13 +104,16 @@ def plan_native_testing_route_refresh(
         started = datetime.now(UTC)
         frame = transport.read()
         observed_at = datetime.now(UTC)
+        observed_identity = RuntimeIdentity.model_validate(frame.get("old_identity"))
+        if route.new_backend not in frame.get("old_endpoints", ()) or observed_identity.model_dump(
+            exclude={"deployed_at"}
+        ) != snapshot.inventory.runtime_identity.model_dump(exclude={"deployed_at"}):
+            raise ValueError("The route backend is not the current running testing copy.")
         evaluation = datetime.fromisoformat(evaluated_at.replace("Z", "+00:00"))
         refreshed = datetime.fromisoformat(current.source.refreshed_at.replace("Z", "+00:00"))
         if evaluation.utcoffset() is None or refreshed.utcoffset() is None:
             raise ValueError("Native route evidence requires aware timestamps.")
-        if not timedelta(0) <= observed_at - started <= timedelta(minutes=2) or not (
-            timedelta(minutes=-2) <= observed_at - evaluation <= timedelta(minutes=2)
-        ):
+        if not timedelta(0) <= observed_at - started <= timedelta(minutes=2):
             raise ValueError("The current testing route observation is not fresh.")
         if (
             frame["owned_file"] is None
@@ -145,7 +144,9 @@ def plan_native_testing_route_refresh(
             store._lock_product_authority_bundle_write(session)
             store._lock_route_binding_write(session, binding_key=current.binding_key)
             check_native_testing_route_sources(store, session, sources)
-        due = not current.source.stale_after or evaluation - refreshed >= timedelta(hours=12)
+        due = _route_binding_refresh_due(
+            current_record=current, evaluated_at=observed_at.isoformat()
+        )
         if not due:
             return RouteBindingReconcilePlan(
                 status="unchanged",
@@ -173,7 +174,7 @@ def plan_native_testing_route_refresh(
                         },
                         "refreshed_at": stamp,
                         "freshness_status": "verified",
-                        "stale_after": (observed_at + timedelta(hours=24)).isoformat(),
+                        "stale_after": (observed_at + _EVIDENCE_FRESHNESS_WINDOW).isoformat(),
                     }
                 ),
                 "updated_at": stamp,
