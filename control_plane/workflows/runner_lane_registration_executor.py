@@ -152,8 +152,8 @@ def execute_runner_lane_registration_executor(
     post_inventory: RunnerLaneInventory | None = None
     try:
         _validate_runner_package_url_for_create(request)
-        token, token_record = token_fetcher.fetch_registration_token(repository=request.repository)
         _prepare_runner_directory(request=request, remote_runner=remote_runner)
+        token, token_record = token_fetcher.fetch_registration_token(repository=request.repository)
         _configure_runner(request=request, token=token, remote_runner=remote_runner)
         _start_supervised_runner(request=request, remote_runner=remote_runner)
         post_inventory = _read_verified_post_inventory(
@@ -237,6 +237,28 @@ class RunnerLaneRegistrationCommandError(ValueError):
     pass
 
 
+def _registration_root_identity_checks() -> tuple[str, ...]:
+    return (
+        'registration_root="$RUNNER_REGISTRATION_ROOT"',
+        'test -d "$registration_root"',
+        'test ! -L "$registration_root"',
+        'test "$(realpath -e "$registration_root")" = "$registration_root"',
+        'test "$(stat -c %U "$registration_root")" = "$RUNNER_SERVICE_USER"',
+    )
+
+
+def runner_directory_identity_checks() -> tuple[str, ...]:
+    return (
+        *_registration_root_identity_checks(),
+        'runner_dir="$RUNNER_DIRECTORY"',
+        'test -d "$runner_dir"',
+        'test ! -L "$runner_dir"',
+        'case "$runner_dir" in "$registration_root"/*) ;; *) exit 1 ;; esac',
+        'test "$(realpath -e "$runner_dir")" = "$runner_dir"',
+        'test "$(stat -c %U "$runner_dir")" = "$RUNNER_SERVICE_USER"',
+    )
+
+
 def _prepare_runner_directory(
     *,
     request: RunnerLaneRegistrationExecutorRequest,
@@ -252,16 +274,33 @@ def _prepare_runner_directory(
                 f"runner_dir={quote(runner_directory)}",
                 f"runner_package_url={quote(request.runner_package_url)}",
                 f"registration_root={quote(request.registration_root)}",
-                'mkdir -p "$registration_root"',
-                'if [ -e "$runner_dir" ]; then',
+                'if [ -e "$runner_dir" ] || [ -L "$runner_dir" ]; then',
                 '  echo "runner directory already exists" >&2',
                 "  exit 1",
                 "fi",
+                'existing_ancestor="$registration_root"',
+                'while [ ! -e "$existing_ancestor" ]; do',
+                '  test ! -L "$existing_ancestor"',
+                '  existing_ancestor="${existing_ancestor%/*}"',
+                '  if [ -z "$existing_ancestor" ]; then existing_ancestor=/; fi',
+                "done",
+                'test -d "$existing_ancestor"',
+                'test ! -L "$existing_ancestor"',
+                'test "$(realpath -e "$existing_ancestor")" = "$existing_ancestor"',
+                'if [ ! -e "$registration_root" ]; then mkdir -p "$registration_root"; fi',
+                *_registration_root_identity_checks(),
                 'mkdir "$runner_dir"',
+                *runner_directory_identity_checks(),
                 'temp_dir="$(mktemp -d)"',
                 "trap 'rm -rf \"$temp_dir\"' EXIT",
                 'curl --fail --silent --show-error --location "$runner_package_url" --output "$temp_dir/actions-runner.tar.gz"',
-                'tar -xzf "$temp_dir/actions-runner.tar.gz" -C "$runner_dir"',
+                *runner_directory_identity_checks(),
+                "(",
+                '  cd "$runner_dir"',
+                '  test "$(pwd -P)" = "$runner_dir"',
+                '  tar -xzf "$temp_dir/actions-runner.tar.gz" -C .',
+                ")",
+                *runner_directory_identity_checks(),
                 'test -x "$runner_dir/config.sh"',
             )
         ),
@@ -286,7 +325,9 @@ def _configure_runner(
         "-c",
         "\n".join(
             (
+                *runner_directory_identity_checks(),
                 'cd "$RUNNER_DIRECTORY"',
+                'test "$(pwd -P)" = "$RUNNER_DIRECTORY"',
                 './config.sh --unattended --url "$RUNNER_REPOSITORY_URL" --token "$RUNNER_REGISTRATION_TOKEN" --name "$RUNNER_NAME" --labels "$RUNNER_LABELS"',
             )
         ),
@@ -388,6 +429,8 @@ def _run_registration_command(
         request.timeout_seconds,
         {
             "RUNNER_DIRECTORY": _runner_directory(request),
+            "RUNNER_REGISTRATION_ROOT": request.registration_root,
+            "RUNNER_SERVICE_USER": request.service_user,
             "RUNNER_LABELS": ",".join(request.labels),
             "RUNNER_NAME": request.lane_name,
             "RUNNER_REPOSITORY_URL": f"https://github.com/{request.repository}",
@@ -397,6 +440,9 @@ def _run_registration_command(
     if result.returncode != 0:
         message = f"runner lane registration command failed during {step}: exit {result.returncode}"
         stderr = result.stderr.strip()
+        token = (extra_env or {}).get("RUNNER_REGISTRATION_TOKEN", "")
+        if token:
+            stderr = stderr.replace(token, "[redacted]")
         if stderr:
             message = f"{message}: {_redacted_command_output(stderr)}"
         raise RunnerLaneRegistrationCommandError(message)

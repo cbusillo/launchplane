@@ -533,7 +533,29 @@ the verified inactive directory. All lifecycle roots must be scoped absolute
 paths rather than bare `/` and reject explicit parent-directory (`..`)
 components. Benign `.` components, duplicate separators, and trailing separators
 remain supported when the normalized path stays scoped. Malformed roots fail
-model validation before a planned audit is written. The shared lock prevents
+model validation before a planned audit is written.
+
+Before creating an absent registration root, registration proves its nearest
+existing ancestor is a directory whose exact canonical path matches the approved
+lexical path. Symlinked ancestors, including dangling links, are refused before
+directory creation can follow them. The resulting root and new runner directory
+must be directories, non-symlinks, exactly canonical, owned by the requested
+service user, and within the approved root. Existing runner entries, including
+dangling symlinks, are refused rather than adopted or overwritten. Valid absent
+roots remain supported without privileged ownership changes.
+
+Registration prepares the verified directory before acquiring its short-lived
+GitHub token. It repeats the shared registration/retirement identity checks
+before extraction, after extraction, and before configuration, and extracts and
+configures from a verified physical working directory. A detected path change
+fails the operation; these boundary checks are not a guarantee against arbitrary
+concurrent filesystem replacement. Failed command evidence redacts the known
+registration token before truncating or persisting it. File-backed lifecycle
+audits use bounded ASCII filenames below the filesystem component limit, retain
+ordinary short-key filename identity, and preserve the original audit key in the
+record. PostgreSQL key semantics are unchanged.
+
+The shared lock prevents
 runner lifecycle and Docker hygiene mutations from interleaving. Existing-lane
 adoption, remove/recreate, generic restarts, and scaling remain outside this
 slice.

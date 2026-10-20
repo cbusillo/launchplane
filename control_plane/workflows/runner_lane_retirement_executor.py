@@ -16,6 +16,9 @@ from control_plane.contracts.runner_lane_registration import plan_runner_lane_re
 from control_plane.github_payload import repository_full_name
 from control_plane.workflows.runner_lane_registration_executor import AuditPoster
 from control_plane.workflows.runner_lane_registration_executor import RemoteCommandRunner
+from control_plane.workflows.runner_lane_registration_executor import (
+    runner_directory_identity_checks,
+)
 
 
 ActiveRunReader = Callable[[str], tuple[int, ...]]
@@ -322,21 +325,7 @@ def _verify_runner_directory(
     request: RunnerLaneRetirementExecutorRequest,
     remote_runner: RemoteCommandRunner,
 ) -> None:
-    script = "\n".join(
-        (
-            'runner_dir="$RUNNER_DIRECTORY"',
-            'registration_root="$RUNNER_REGISTRATION_ROOT"',
-            'test -d "$registration_root"',
-            'test ! -L "$registration_root"',
-            'test "$(realpath -e "$registration_root")" = "$registration_root"',
-            'test "$(stat -c %U "$registration_root")" = "$RUNNER_SERVICE_USER"',
-            'test -d "$runner_dir"',
-            'test ! -L "$runner_dir"',
-            'case "$runner_dir" in "$registration_root"/*) ;; *) exit 1 ;; esac',
-            'test "$(realpath -e "$runner_dir")" = "$runner_dir"',
-            'test "$(stat -c %U "$runner_dir")" = "$RUNNER_SERVICE_USER"',
-        )
-    )
+    script = "\n".join(runner_directory_identity_checks())
     _run_retirement_command(
         step="verify runner directory identity",
         command=("sh", "-eu", "-c", script),
@@ -440,15 +429,7 @@ def _remove_runner_directory(
 ) -> None:
     script = "\n".join(
         (
-            'runner_dir="$RUNNER_DIRECTORY"',
-            'registration_root="$RUNNER_REGISTRATION_ROOT"',
-            'test -d "$runner_dir"',
-            'test ! -L "$runner_dir"',
-            'case "$runner_dir" in "$registration_root"/*) ;; *) exit 1 ;; esac',
-            'test "$(realpath -e "$registration_root")" = "$registration_root"',
-            'test "$(realpath -e "$runner_dir")" = "$runner_dir"',
-            'test "$(stat -c %U "$registration_root")" = "$RUNNER_SERVICE_USER"',
-            'test "$(stat -c %U "$runner_dir")" = "$RUNNER_SERVICE_USER"',
+            *runner_directory_identity_checks(),
             "command -v lsof >/dev/null 2>&1",
             "lsof_status=0",
             'lsof -t +D "$runner_dir" >/dev/null 2>&1 || lsof_status=$?',
