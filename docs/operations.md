@@ -5064,8 +5064,7 @@ verify that every earlier HTTP replica and worker has been replaced, and retain
 that qualified image as activation's previous-image rollback target. A drain
 marker alone does not prove older hostname writers have gone. Both new migration
 files remain byte-identical between the compatibility and activation changes.
-Merging #4005 triggers deployment after successful main-push CI and startup
-applies its new default, so its native #4229 blocker must be satisfied before
-merge. Leave its source unopened or its PR draft/held without ready/enqueue
-until the deployed-image evidence exists. Image rollback then returns to this
-qualified compatibility image without downgrading the hostname schema.
+A release that changes startup's migration target can activate the transition
+during automatic deployment. Complete the deployed-image qualification before
+that release reaches main. Image rollback then returns to this qualified
+compatibility image without downgrading the hostname schema.

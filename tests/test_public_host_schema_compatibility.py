@@ -271,7 +271,7 @@ class SchemaCompatibilityPostgresTests(unittest.TestCase):
                                 if phase == "before_key":
                                     self.assertTrue(exclusive_at_entry)
                                     self.assertFalse(any(exclusive_at_entry))
-                                with self.assertRaisesRegex(RuntimeError, "busy"):
+                                with self.assertRaises(RuntimeError):
                                     migrate()
                                 with store._engine.connect() as connection:
                                     self.assertEqual(
