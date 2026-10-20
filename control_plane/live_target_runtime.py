@@ -1012,6 +1012,7 @@ def apply_live_target_runtime_environment(
                 updated_env_map,
                 target_type=target_definition.target_type,
                 compose_type=str(refreshed_payload.get("composeType") or "docker-compose"),
+                current_env_text=str(refreshed_payload.get("env") or ""),
             )
             with provider_mutation_guard() if provider_mutation_guard else nullcontext():
                 if before_provider_mutation is not None:

@@ -712,7 +712,12 @@ def execute_odoo_prod_backup_restore_apply(
         desired_env["PLATFORM_INSTANCE"] = plan.instance
         desired_env["DOCKER_IMAGE_REFERENCE"] = plan.image_reference
         desired_env.update(runtime_identity_env(runtime_identity))
-        env_text = dokploy_api.serialize_dokploy_env_text(desired_env, target_type="compose")
+        env_text = dokploy_api.serialize_dokploy_env_text(
+            desired_env,
+            target_type="compose",
+            compose_type=str(target_payload.get("composeType") or "docker-compose"),
+            current_env_text=str(target_payload.get("env") or ""),
+        )
         provider_effect_checkpoint("target_env_update_started", "target_env_update")
         dokploy_api.update_dokploy_target_env(
             host=host,

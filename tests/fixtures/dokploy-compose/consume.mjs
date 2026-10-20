@@ -19,7 +19,7 @@ for (const file of ['prepare-environment.ts', 'create-env-file.ts']) {
 }
 context.compose = {
   env: input.env, appName: 'synthetic', composePath: 'compose.json',
-  environment: { env: '', project: { env: '' } },
+  environment: { env: input.environmentEnv ?? '', project: { env: input.projectEnv ?? '' } },
 };
 mkdirSync(join(input.root, 'synthetic', 'code'), { recursive: true });
 const command = vm.runInContext('getCreateEnvFileCommand(compose)', context);

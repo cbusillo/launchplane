@@ -19,6 +19,7 @@ import hashlib
 from control_plane import runtime_platform_credentials
 from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_COPY_CHUNK_BYTES
 from control_plane.dokploy.environment import (
+    compose_environment_is_encoded as compose_environment_is_encoded,
     DokployEnvironmentEncodingError as DokployEnvironmentEncodingError,
     parse_dokploy_env_text as parse_dokploy_env_text,
     serialize_dokploy_env_text as serialize_dokploy_env_text,
@@ -840,7 +841,9 @@ def render_dokploy_env_text_with_overrides(
     if updates is not None:
         for env_key, env_value in updates.items():
             env_map[env_key] = env_value
-    return serialize_dokploy_env_text(env_map, target_type=target_type, compose_type=compose_type)
+    return serialize_dokploy_env_text(
+        env_map, target_type=target_type, compose_type=compose_type, current_env_text=raw_env_text
+    )
 
 
 def refuse_app_runtime_env_write(*, env_text: str, current_env_text: str, target: str) -> None:
@@ -881,6 +884,9 @@ def update_dokploy_target_env(
             parse_dokploy_env_text(env_text),
             target_type="compose",
             compose_type=str(target_payload.get("composeType") or "docker-compose"),
+            current_env_text=env_text
+            if compose_environment_is_encoded(env_text)
+            else str(target_payload.get("env") or ""),
         )
         dokploy_request(
             host=host,

@@ -959,7 +959,7 @@ class ArtifactImageOverrideTests(unittest.TestCase):
                             )
                         },
                     ],
-                ),
+                ) as fetch_payload,
                 patch(
                     "control_plane.dokploy.compose.sync_dokploy_compose_raw_source",
                     return_value={"source_type": "raw", "compose_sha256": "abc123"},
@@ -992,11 +992,23 @@ class ArtifactImageOverrideTests(unittest.TestCase):
                     artifact_manifest=artifact_manifest,
                     resolved_target=resolved_target,
                 )
+                raw_compose_sync.assert_called_once()
+                rendered_source = raw_compose_sync.call_args.kwargs["compose_file"]
+                raw_compose_sync.reset_mock()
+                fetch_payload.side_effect = None
+                fetch_payload.return_value = {"env": "APP=invalid\x00value"}
+                with self.assertRaises(control_plane_dokploy.api.DokployEnvironmentEncodingError):
+                    _sync_artifact_image_reference_for_target(
+                        context_name="opw",
+                        instance_name="prod",
+                        artifact_manifest=artifact_manifest,
+                        resolved_target=resolved_target,
+                    )
+                raw_compose_sync.assert_not_called()
 
-        raw_compose_sync.assert_called_once()
         self.assertIn(
             "Host(`opw-prod.shinycomputers.com`)",
-            raw_compose_sync.call_args.kwargs["compose_file"],
+            rendered_source,
         )
         self.assertEqual(captured_update["target_type"], "compose")
         self.assertEqual(captured_update["target_id"], "compose-123")

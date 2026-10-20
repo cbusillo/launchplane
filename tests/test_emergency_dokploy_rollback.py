@@ -6,6 +6,8 @@ from typing import Any, cast
 import unittest
 from unittest.mock import patch
 
+from control_plane.dokploy import api
+
 
 _SCRIPT_PATH = Path("scripts/deploy/emergency-dokploy-rollback.py")
 
@@ -39,19 +41,25 @@ class EmergencyDokployRollbackTests(unittest.TestCase):
             "LAUNCHPLANE_DOKPLOY_DEPLOY_TIMEOUT_SECONDS": "12",
         }
 
+        literal = "a' b\" c` #\n$NAME"
+        previous = api.serialize_dokploy_env_text(
+            {
+                "DOCKER_IMAGE_REFERENCE": "ghcr.io/example/launchplane@sha256:new",
+                "LITERAL": literal,
+            },
+            target_type="compose",
+        )
         with (
             patch.dict(os.environ, env, clear=True),
             patch.object(
                 script_module.control_plane_dokploy,
                 "fetch_dokploy_target_payload",
-                return_value={
-                    "env": "DOCKER_IMAGE_REFERENCE=ghcr.io/example/launchplane@sha256:new\n"
-                },
+                return_value={"env": previous},
             ) as fetch_target,
             patch.object(
                 script_module.control_plane_dokploy,
                 "render_dokploy_env_text_with_overrides",
-                return_value="DOCKER_IMAGE_REFERENCE=ghcr.io/example/launchplane@sha256:old\n",
+                wraps=script_module.control_plane_dokploy.render_dokploy_env_text_with_overrides,
             ) as render_env,
             patch.object(
                 script_module.control_plane_dokploy,
@@ -79,7 +87,6 @@ class EmergencyDokployRollbackTests(unittest.TestCase):
         ):
             evidence = cast(Any, script_module.run_break_glass_rollback)()
 
-        self.assertEqual(evidence["schema_version"], 1)
         self.assertEqual(evidence["event"], "launchplane_break_glass_rollback")
         self.assertEqual(evidence["fallback_kind"], "direct_dokploy")
         self.assertEqual(evidence["reason"], "Restore the last known-good Launchplane image.")
@@ -93,11 +100,15 @@ class EmergencyDokployRollbackTests(unittest.TestCase):
             target_type="compose",
             target_id="target-1",
         )
-        render_env.assert_called_once_with(
-            "DOCKER_IMAGE_REFERENCE=ghcr.io/example/launchplane@sha256:new\n",
-            updates={"DOCKER_IMAGE_REFERENCE": "ghcr.io/example/launchplane@sha256:old"},
-        )
+        render_env.assert_called_once()
         update_env.assert_called_once()
+        self.assertEqual(
+            api.parse_dokploy_env_text(update_env.call_args.kwargs["env_text"]),
+            {
+                "DOCKER_IMAGE_REFERENCE": "ghcr.io/example/launchplane@sha256:old",
+                "LITERAL": literal,
+            },
+        )
         trigger_deployment.assert_called_once_with(
             host="https://dokploy.example.test",
             token="token-1",

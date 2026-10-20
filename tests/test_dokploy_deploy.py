@@ -24,7 +24,7 @@ class DokployDeployRegistryTests(unittest.TestCase):
         effect = Mock()
         with (
             patch.object(
-                api, "fetch_dokploy_target_payload", return_value={"env": "APP=${{INPUT}}"}
+                api, "fetch_dokploy_target_payload", return_value={"env": "APP=bad\x00value"}
             ),
             patch.object(api, "dokploy_request") as request,
             self.assertRaises(api.DokployEnvironmentEncodingError),

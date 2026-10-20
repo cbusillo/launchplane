@@ -35,6 +35,11 @@ from control_plane.testing_candidate_runtime import (
 )
 from tests import test_testing_candidate_allocation as allocation_tests
 from tests.support.stores import _write_runtime_key_safety_policy
+from tests.test_dokploy_compose_environment import (
+    VALUES,
+    consumer_commands_available,
+    consume_compose_environment,
+)
 
 
 class CandidateApplicationTests(unittest.TestCase):
@@ -361,6 +366,35 @@ class CandidateApplicationTests(unittest.TestCase):
         self.fixture.assert_serving_unchanged()
         self.prepare_application()
         self.assertEqual(self.effects, ["configure", "deploy", "restore"])
+
+    def test_candidate_environment_reaches_final_consumer(self) -> None:
+        self.execution()
+        self.compiled.runtime_environment.update(VALUES)
+        result = self.prepare_application()
+        self.assertIsNotNone(result.application)
+        wire = self.provider_state["env"]
+        self.assertEqual(api.parse_dokploy_env_text(wire), self.compiled.runtime_environment)
+        legacy = api.serialize_dokploy_env_text({"APP": '"literal" $NAME'})
+        encoded = api.serialize_dokploy_env_text({"APP": '"literal" $NAME'}, target_type="compose")
+        self.assertNotEqual(
+            application.candidate_configuration_sha256({"env": legacy}),
+            application.candidate_configuration_sha256({"env": encoded}),
+        )
+        if consumer_commands_available():
+            consumed, _ = consume_compose_environment(wire, tuple(VALUES))
+            for service in consumed.values():
+                self.assertEqual(
+                    service, {key: value.replace("$", "$$") for key, value in VALUES.items()}
+                )
+        self.fixture.assert_serving_unchanged()
+
+    def test_invalid_candidate_environment_refuses_before_configuration_checkpoint(self) -> None:
+        self.execution()
+        self.compiled.runtime_environment["APP"] = "invalid\x00value"
+        with self.assertRaises(api.DokployEnvironmentEncodingError):
+            self.prepare_application()
+        self.assertEqual(self.effects, [])
+        self.execution_lease.checkpoint_effect.assert_not_called()
 
     def test_lost_effect_reply_reconciles_without_duplicate_dispatch(self) -> None:
         for phase in ("configure", "deploy", "restore"):

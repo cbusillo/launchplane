@@ -5588,7 +5588,7 @@ class OdooStableTargetReplacementSiteEnvironmentTests(unittest.TestCase):
         return result, persisted_env, sync_source
 
     def test_compose_refuses_unsupported_inputs_before_provider_writes(self) -> None:
-        for value in ("fixture\x00value", "${{project.INPUT}}"):
+        for value in ("fixture\x00value",):
             with self.subTest(value=value):
 
                 def write_records(record_store: PostgresRecordStore) -> None:

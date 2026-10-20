@@ -2820,7 +2820,12 @@ def execute_odoo_stable_target_replacement_apply(
             target_type="compose",
             target_id=target_id_record.target_id,
             target_payload=target_payload,
-            env_text=dokploy_api.serialize_dokploy_env_text(desired_env_map, target_type="compose"),
+            env_text=dokploy_api.serialize_dokploy_env_text(
+                desired_env_map,
+                target_type="compose",
+                compose_type=str(target_payload.get("composeType") or "docker-compose"),
+                current_env_text=str(target_payload.get("env") or ""),
+            ),
         )
         refreshed_payload = dokploy_api.fetch_dokploy_target_payload(
             host=host,

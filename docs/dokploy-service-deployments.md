@@ -56,22 +56,33 @@ surface does not become a second implementation authority.
 Dokploy application targets consume one dotenv layer. Docker Compose targets
 consume two: Dokploy parses the stored environment and writes those values to
 the generated `.env`, which Compose then reads for interpolation and `env_file`.
-The adapter adds the second layer of quoting and dollar escaping for Compose,
-with a format comment so readback, merges, credential checks and retirement
-recover the literal values. Legacy unmarked environments keep their first-stage
-meaning and move to this encoding on the next ordinary environment write. The
-wire quotes are transport data, not extra quotes in product settings. Swarm
+The adapter quotes new or changed literal inputs for both stages, with a
+format comment naming the encoded keys. Readback, merges, credential checks and
+retirement recover their literal values. Untouched legacy values retain their
+original wire meaning, including existing provider references: an unrelated
+image or startup update must not change a password that initialized a retained
+database. This repair does not retroactively qualify or rewrite a legacy value
+that Compose previously transformed. Existing lane replacement/rebuild paths
+create their environment from canonical records; retained databases keep their
+existing credential and recovery checks.
+
+The wire quotes and Compose-supported escapes are transport data, not a product
+storage convention. Metadata survives comment movement and CRLF normalization;
+new provider-only fields and edits that cease to match the encoding remain
+legacy fields rather than making the record unreadable. Canonical reconciliation
+can then replace or retire them through the existing runtime-input path. Swarm
 stack targets retain their separate shell-export format.
 
-Render the target-specific environment before recording its write checkpoint.
-Multiline text, surrounding quotes, whitespace, backslashes and ordinary dollar
-expressions are supported when both provider stages can represent them. NUL,
-some combinations of quote delimiters and escape sequences, and literal
-Dokploy substitution expressions are refused without printing values or issuing
-the environment write. For a Compose-only encoding refusal, use an application
-target through the supported lane setup; do not flatten or encode product
-settings. Dokploy's reserved substitution expressions require a provider that
-can consume them literally if they are intended as literal input.
+Render the target-specific environment before recording its write checkpoint
+or changing its Compose source. New literal inputs support multiline text,
+surrounding/mixed quotes, whitespace, backslashes, controls and dollar expressions,
+including text that resembles provider substitutions. The adapter hides that
+syntax until Compose's own escape/interpolation pass, where dollars become
+literal. NUL remains invalid for container environments and is refused before
+the corresponding effect, without including values in the error; remove NUL
+from the input. New testing-candidate configuration custody also binds the
+wire representation, while historical unmarked hashes retain their recovery
+contract.
 
 `scripts/qualify-dokploy-compose-environment.sh` exercises the tracked pinned
 Dokploy generated-file functions and actual Compose `config`, covering both
