@@ -488,6 +488,38 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
             )
         self.transport.request.assert_not_called()
 
+    def test_committed_reservation_stops_competing_record_after_failed_recheck(self) -> None:
+        self.setup_missing_store_failure()
+        competing = self.record.model_copy(update={"record_id": "competing-failure"})
+        read = Mock(wraps=self.client.read_setup_failure_recovery)
+        self.client.read_setup_failure_recovery = read  # type: ignore[method-assign]
+        request = self.request
+        log_reads = 0
+
+        def recheck_unavailable(**kwargs: Any) -> object:
+            nonlocal log_reads
+            if kwargs["path"].endswith("/logs"):
+                log_reads += 1
+                if log_reads == 2:
+                    return None
+            return request(**kwargs)
+
+        self.transport.request.side_effect = recheck_unavailable
+        with patch.object(
+            self.store,
+            "list_merge_train_batch_candidate_records",
+            return_value=(self.record, competing),
+        ):
+            self.assertNotEqual(
+                self.advance(mutate=True)["controller_action"], "recover_candidate_block"
+            )
+        self.assertEqual(self.mutations, [])
+        self.assertEqual(read.call_count, 1)
+        # The next pass requalifies the owning record and finishes the saved reservation.
+        self.transport.request.side_effect = request
+        self.assertEqual(self.advance(mutate=True)["controller_action"], "recover_candidate_block")
+        self.assertEqual(len(self.mutations), 1)
+
     def test_unblocked_legacy_history_needs_no_receipt_reads(self) -> None:
         self.setup_missing_store_failure()
         self.comments = []

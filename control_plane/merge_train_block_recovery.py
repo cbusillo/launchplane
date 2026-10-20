@@ -196,19 +196,20 @@ def recover_candidate_block(
 
         def load_setup_evidence() -> MergeTrainSetupFailureRecovery | None:
             nonlocal setup_failure_evidence
-            setup_failure_evidence = client.read_setup_failure_recovery(candidate=failed)
-            if setup_failure_evidence is None:
+            evidence = client.read_setup_failure_recovery(candidate=failed)
+            if evidence is None:
                 return None
             if reservation is not None:
-                setup_failure_evidence = setup_failure_evidence.model_copy(
+                evidence = evidence.model_copy(
                     update={"ready_comment_floor": reservation.evidence.ready_comment_floor}
                 )
-                if reservation.evidence != setup_failure_evidence:
+                if reservation.evidence != evidence:
                     return None
+            setup_failure_evidence = evidence
             cast(dict[str, object], result["details"])["setup_failure_evidence"] = (
-                setup_failure_evidence.model_dump(mode="json")
+                evidence.model_dump(mode="json")
             )
-            return setup_failure_evidence
+            return evidence
 
         result: dict[str, object] = {
             "repository": snapshot.repository,
@@ -246,6 +247,11 @@ def recover_candidate_block(
                     policy=policy,
                     evidence=setup_failure_evidence,
                     recorded_at=recorded_at,
+                )
+                reservation_cache[(entry.pull_request_number, entry.head_sha)] = (
+                    SetupRecoveryReceipt(
+                        failed_record_id=candidate.record_id, evidence=setup_failure_evidence
+                    )
                 )
 
         if client.recover_candidate_block(
