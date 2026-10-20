@@ -8,7 +8,7 @@ from typing import Any, Literal, cast
 import unittest
 from unittest.mock import patch
 
-from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.generic_web_cutover import (
     GenericWebCutoverLane,
     GenericWebCutoverPlan,
@@ -917,16 +917,33 @@ class WebCutoverReviewRecoveryTests(unittest.TestCase):
                 old_inventory = store.read_environment_inventory(
                     context_name="fixture", instance_name="prod"
                 )
-                testing = old_inventory.model_copy(
-                    update={
-                        "instance": "testing",
-                        "artifact_identity": ArtifactIdentityReference(
-                            artifact_id=intent.candidate.artifact_id
-                        ),
-                        "source_git_ref": intent.candidate.source_commit,
-                    }
+                testing_record = DeploymentRecord(
+                    record_id="qualified-testing",
+                    context="fixture",
+                    instance="testing",
+                    artifact_identity=ArtifactIdentityReference(
+                        artifact_id=intent.candidate.artifact_id
+                    ),
+                    source_git_ref=intent.candidate.source_commit,
+                    runtime_identity=intent.new.runtime_identity.model_copy(
+                        update={"instance": "testing", "deployment_record_id": "qualified-testing"}
+                    ),
+                    deploy=DeploymentEvidence(
+                        deploy_mode="seed",
+                        status="pass",
+                        target_name="testing",
+                        target_type="application",
+                    ),
+                    resolved_target=ResolvedTargetEvidence(
+                        target_type="application", target_id="testing-target", target_name="testing"
+                    ),
                 )
-                store.write_environment_inventory(testing)
+                store.write_deployment_record(testing_record)
+                store.write_environment_inventory(
+                    build_environment_inventory(
+                        deployment_record=testing_record, updated_at=old_inventory.updated_at
+                    )
+                )
                 original_handoff = provider.handoff_writers
 
                 def handoff(p: GenericWebCutoverPlan, slot: WebSlot) -> None:

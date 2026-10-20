@@ -1014,6 +1014,15 @@ def _run_generic_web_promotion(
             )
             if covered is None:
                 raise click.ClickException("The release is no longer accepted.")
+            # A persisted execution is resumable, but it cannot start another
+            # forward effect after testing loses qualification. Recipient rollback
+            # uses a separate checkpoint and retains its recovery authority.
+            try:
+                candidate = release_version(store=store, profile=profile, instance="testing")
+            except (FileNotFoundError, ValueError) as error:
+                raise click.ClickException("Testing is no longer qualified for release.") from error
+            if candidate != decision.checklist.candidate:
+                raise click.ClickException("The accepted testing release changed.")
 
         if recipient.phase != "published" and not recipient.execution:
             _require_current_release(store, control_plane_root, profile, decision)

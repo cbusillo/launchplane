@@ -8,6 +8,10 @@ from typing import Literal, Protocol, cast
 from urllib.parse import quote
 
 import click
+from control_plane.generic_web_source_qualification import (
+    GenericWebSourceUnqualified,
+    qualified_generic_web_source_inventory,
+)
 from control_plane.release_review import require_release_approval
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -405,6 +409,11 @@ def execute_generic_web_prod_promotion(
     ) as backup_checkpoint:
 
         def promotion_checkpoint(phase: str) -> None:
+            # Fresh qualification at each forward effect, including after health
+            # and backup waits. Automatic rollback has its own recovery checkpoint.
+            _resolve_source_inventory_inputs(
+                record_store=record_store, profile=profile, request=request, source_lane=source_lane
+            )
             backup_checkpoint(phase)
             if provider_effect_checkpoint is not None:
                 provider_effect_checkpoint(phase)
@@ -850,15 +859,11 @@ def _resolve_source_inventory_inputs(
     source_lane: ProductLaneProfile,
 ) -> GenericWebProdPromotionRequest:
     try:
-        source_inventory = record_store.read_environment_inventory(
-            context_name=source_lane.context,
-            instance_name=source_lane.instance,
+        source_inventory = qualified_generic_web_source_inventory(
+            store=record_store, profile=profile, lane=source_lane
         )
-    except FileNotFoundError as exc:
-        raise click.ClickException(
-            "Generic web prod promotion requires current source environment inventory. "
-            f"No inventory was found for {source_lane.context}/{source_lane.instance}."
-        ) from exc
+    except GenericWebSourceUnqualified as exc:
+        raise click.ClickException(str(exc)) from exc
     inventory_artifact_id = ""
     if source_inventory.artifact_identity is not None:
         inventory_artifact_id = source_inventory.artifact_identity.artifact_id.strip()

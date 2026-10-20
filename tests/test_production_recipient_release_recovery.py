@@ -16,6 +16,17 @@ from control_plane.production_recipient_release_recovery import (
 )
 from control_plane.generic_web_promotion_http import GENERIC_WEB_PROD_PROMOTION_ROUTE
 from tests import test_production_recipient_cutover as fixtures
+from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
+from control_plane.contracts.product_profile_record import ProductOwnerProfile
+from control_plane.contracts.promotion_record import (
+    ArtifactIdentityReference,
+    DeploymentEvidence,
+    PostDeployUpdateEvidence,
+)
+from control_plane.contracts.runtime_identity import RuntimeIdentity
+from control_plane.production_recipient import custody
+from control_plane.production_recipient_cutover import RecipientCutoverAdapter
+from control_plane.workflows.inventory import build_environment_inventory
 
 
 class RecipientReleaseRecoveryTests(unittest.TestCase):
@@ -136,5 +147,99 @@ class RecipientReleaseRecoveryTests(unittest.TestCase):
                     releases.ClientReleaseStep("promote", 1),
                     f.old_backup,
                 )
+        self.assertEqual(f.actions, [])
+        self.assertEqual(f.deploys, 0)
+
+    def test_resumed_recipient_rechecks_testing_before_forward_bootstrap(self) -> None:
+        f = self.fixture
+        profile = f.fixture.profile.model_copy(
+            update={
+                "owner": ProductOwnerProfile(github_id="123", github_login="fixture"),
+            }
+        )
+        testing_context = next(lane.context for lane in profile.lanes if lane.instance == "testing")
+        testing = DeploymentRecord(
+            record_id="qualified-recipient-testing",
+            context=testing_context,
+            instance="testing",
+            artifact_identity=ArtifactIdentityReference(
+                artifact_id=self.decision.checklist.candidate.artifact_id
+            ),
+            source_git_ref=self.decision.checklist.candidate.source_commit,
+            runtime_identity=RuntimeIdentity(
+                product=profile.product,
+                context=testing_context,
+                instance="testing",
+                deployment_record_id="qualified-recipient-testing",
+                artifact_id=self.decision.checklist.candidate.artifact_id,
+                source_git_ref=self.decision.checklist.candidate.source_commit,
+            ),
+            deploy=DeploymentEvidence(
+                target_name="testing",
+                target_type="application",
+                deploy_mode="fixture",
+                status="pass",
+            ),
+            resolved_target=ResolvedTargetEvidence(
+                target_type="application", target_id="testing", target_name="testing"
+            ),
+        )
+        f.store.write_deployment_record(testing)
+        f.store.write_environment_inventory(
+            build_environment_inventory(deployment_record=testing, updated_at=profile.updated_at)
+        )
+
+        def run() -> None:
+            releases._run_generic_web_promotion(
+                f.store,
+                f.fixture.root,
+                profile,
+                self.decision,
+                releases.ClientReleaseStep("promote", 1),
+                f.old_backup,
+            )
+
+        with (
+            patch("control_plane.client_release._require_current_release"),
+            patch(
+                "control_plane.client_release._covering_decision",
+                return_value=(profile, self.decision),
+            ),
+            patch("control_plane.client_release.client_release_grant_allows", return_value=True),
+            patch.object(
+                RecipientCutoverAdapter,
+                "verify_upstreams",
+                side_effect=ValueError("interrupt before provider dispatch"),
+            ) as upstreams,
+        ):
+            with self.assertRaises(ValueError):
+                run()
+            upstreams.assert_called_once()
+            saved = custody(f.store, f.record.product, f.record.context)
+            assert saved is not None
+            self.assertTrue(saved.execution)
+            f.store.write_deployment_record(
+                testing.model_copy(
+                    update={
+                        "post_deploy_update": PostDeployUpdateEvidence(
+                            attempted=True, status="fail"
+                        )
+                    }
+                )
+            )
+            upstreams.reset_mock()
+            with patch(
+                "control_plane.client_release._require_current_release",
+                side_effect=AssertionError(
+                    "Resumption must not compare the changed production baseline"
+                ),
+            ):
+                with self.assertRaises(ValueError):
+                    run()
+            upstreams.assert_not_called()
+            f.store.write_deployment_record(testing)
+            with self.assertRaises(ValueError):
+                run()
+            upstreams.assert_called_once()
         self.assertEqual(f.actions, [])
         self.assertEqual(f.deploys, 0)

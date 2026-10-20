@@ -104,6 +104,26 @@ class _GenericWebPromotionStore:
     def write_environment_inventory(self, record: EnvironmentInventory) -> None:
         self.inventories[(record.context, record.instance)] = record
 
+    def write_qualified_testing_inventory(self, inventory: EnvironmentInventory) -> None:
+        """Seed complete matching source evidence, as a successful deploy would."""
+        assert inventory.runtime_identity is not None
+        self.write_deployment_record(
+            _deployment_record().model_copy(
+                update={
+                    "record_id": inventory.deployment_record_id,
+                    "context": inventory.context,
+                    "instance": inventory.instance,
+                    "artifact_identity": inventory.artifact_identity,
+                    "source_git_ref": inventory.source_git_ref,
+                    "runtime_identity": inventory.runtime_identity,
+                    "deploy": inventory.deploy,
+                    "post_deploy_update": inventory.post_deploy_update,
+                    "destination_health": inventory.destination_health,
+                }
+            )
+        )
+        self.write_environment_inventory(inventory)
+
 
 def _profile(
     *,
@@ -234,6 +254,17 @@ def _testing_inventory(**overrides: object) -> EnvironmentInventory:
         deployment_record_id="deployment-syo-testing",
     ).model_dump(mode="python")
     payload.update(overrides)
+    if "runtime_identity" not in overrides:
+        payload["runtime_identity"] = RuntimeIdentity(
+            product="sellyouroutboard",
+            context=str(payload["context"]),
+            instance=str(payload["instance"]),
+            deployment_record_id=str(payload["deployment_record_id"]),
+            artifact_id=ArtifactIdentityReference.model_validate(
+                payload["artifact_identity"]
+            ).artifact_id,
+            source_git_ref=str(payload["source_git_ref"]),
+        )
     return EnvironmentInventory.model_validate(payload)
 
 
@@ -261,7 +292,7 @@ class GenericWebProdPromotionTests(unittest.TestCase):
 
     def test_backup_refusal_precedes_provider_effect_recording(self) -> None:
         store = _GenericWebPromotionStore(_profile())
-        store.write_environment_inventory(_testing_inventory())
+        store.write_qualified_testing_inventory(_testing_inventory())
         effect_checkpoint = Mock()
         backup_checkpoint = Mock(side_effect=click.ClickException("backup refused"))
 
@@ -293,7 +324,7 @@ class GenericWebProdPromotionTests(unittest.TestCase):
 
     def test_execute_accepts_based_driver_product_profile(self) -> None:
         store = _GenericWebPromotionStore(_profile(driver_id="odoo"))
-        store.write_environment_inventory(_testing_inventory())
+        store.write_qualified_testing_inventory(_testing_inventory())
 
         def fake_deploy(**kwargs: object) -> GenericWebDeployResult:
             store.write_deployment_record(_deployment_record())
@@ -328,7 +359,7 @@ class GenericWebProdPromotionTests(unittest.TestCase):
 
     def test_execute_records_source_destination_health_promotion_and_inventory(self) -> None:
         store = _GenericWebPromotionStore(_profile())
-        store.write_environment_inventory(_testing_inventory())
+        store.write_qualified_testing_inventory(_testing_inventory())
 
         def fake_deploy(**_kwargs: object) -> GenericWebDeployResult:
             store.write_deployment_record(_deployment_record())
@@ -385,7 +416,7 @@ class GenericWebProdPromotionTests(unittest.TestCase):
             }
         )
         store = _GenericWebPromotionStore(profile)
-        store.write_environment_inventory(_testing_inventory())
+        store.write_qualified_testing_inventory(_testing_inventory())
 
         result = execute_generic_web_prod_promotion(
             control_plane_root=Path("."),
@@ -405,7 +436,7 @@ class GenericWebProdPromotionTests(unittest.TestCase):
         expected_artifact_id = (
             "ghcr.io/cbusillo/sellyouroutboard:sha-2da6435e10cade0870ed5cbdf40c8048594f8b1c"
         )
-        store.write_environment_inventory(
+        store.write_qualified_testing_inventory(
             _testing_inventory(
                 artifact_identity=ArtifactIdentityReference(artifact_id=expected_artifact_id),
                 source_git_ref="2da6435e10cade0870ed5cbdf40c8048594f8b1c",
@@ -465,7 +496,7 @@ class GenericWebProdPromotionTests(unittest.TestCase):
 
     def test_execute_prod_promotion_creates_github_release(self) -> None:
         store = _GenericWebPromotionStore(_profile())
-        store.write_environment_inventory(_testing_inventory())
+        store.write_qualified_testing_inventory(_testing_inventory())
         github_requests: list[tuple[str, str, dict[str, object] | None]] = []
 
         def fake_deploy(**_kwargs: object) -> GenericWebDeployResult:
@@ -552,7 +583,8 @@ class GenericWebProdPromotionTests(unittest.TestCase):
 
     def test_execute_prod_promotion_rejects_release_tag_mismatch(self) -> None:
         store = _GenericWebPromotionStore(_profile())
-        store.write_environment_inventory(_testing_inventory())
+        store.write_qualified_testing_inventory(_testing_inventory())
+        initial_deployments = store.deployments.copy()
         deploy_called = False
 
         def fake_deploy(**kwargs: object) -> GenericWebDeployResult:
@@ -600,13 +632,14 @@ class GenericWebProdPromotionTests(unittest.TestCase):
                 )
 
         self.assertFalse(deploy_called)
-        self.assertEqual(store.deployments, {})
+        self.assertEqual(store.deployments, initial_deployments)
         self.assertEqual(store.promotions, {})
         self.assertIn("not promoted revision", str(caught.exception))
 
     def test_dry_run_returns_pending_evidence_without_mutation(self) -> None:
         store = _GenericWebPromotionStore(_profile())
-        store.write_environment_inventory(_testing_inventory())
+        store.write_qualified_testing_inventory(_testing_inventory())
+        initial_deployments = store.deployments.copy()
 
         result = execute_generic_web_prod_promotion(
             control_plane_root=Path("."),
@@ -618,12 +651,12 @@ class GenericWebProdPromotionTests(unittest.TestCase):
         self.assertEqual(result.promotion_status, "pending")
         self.assertEqual(result.source_health_status, "pending")
         self.assertEqual(result.destination_health_status, "pending")
-        self.assertEqual(store.deployments, {})
+        self.assertEqual(store.deployments, initial_deployments)
         self.assertEqual(store.promotions, {})
 
     def test_dry_run_defaults_artifact_and_source_from_inventory(self) -> None:
         store = _GenericWebPromotionStore(_profile())
-        store.write_environment_inventory(_testing_inventory())
+        store.write_qualified_testing_inventory(_testing_inventory())
 
         result = execute_generic_web_prod_promotion(
             control_plane_root=Path("."),
@@ -643,7 +676,7 @@ class GenericWebProdPromotionTests(unittest.TestCase):
         artifact_id = f"ghcr.io/cbusillo/sellyouroutboard@sha256:{'a' * 64}"
         inventory_reference = "ghcr.io/cbusillo/sellyouroutboard:sha-inventory"
         request_reference = "ghcr.io/cbusillo/sellyouroutboard:sha-request"
-        store.write_environment_inventory(
+        store.write_qualified_testing_inventory(
             _testing_inventory(
                 artifact_identity=ArtifactIdentityReference(artifact_id=artifact_id),
                 runtime_identity=RuntimeIdentity(
@@ -674,7 +707,7 @@ class GenericWebProdPromotionTests(unittest.TestCase):
         store = _GenericWebPromotionStore(_profile())
         artifact_id = f"ghcr.io/cbusillo/sellyouroutboard@sha256:{'a' * 64}"
         deploy_reference = "ghcr.io/cbusillo/sellyouroutboard:sha-request"
-        store.write_environment_inventory(
+        store.write_qualified_testing_inventory(
             _testing_inventory(
                 artifact_identity=ArtifactIdentityReference(artifact_id=artifact_id),
                 runtime_identity=RuntimeIdentity(
@@ -735,7 +768,8 @@ class GenericWebProdPromotionTests(unittest.TestCase):
 
     def test_dry_run_rejects_release_tag_mismatch_before_mutation(self) -> None:
         store = _GenericWebPromotionStore(_profile())
-        store.write_environment_inventory(_testing_inventory())
+        store.write_qualified_testing_inventory(_testing_inventory())
+        initial_deployments = store.deployments.copy()
 
         def fake_github_api_request(
             *, path: str, token: str, method: str = "GET", body: dict[str, object] | None = None
@@ -761,7 +795,7 @@ class GenericWebProdPromotionTests(unittest.TestCase):
                 request=_request(dry_run=True, release_tag="v0.3.0"),
             )
 
-        self.assertEqual(store.deployments, {})
+        self.assertEqual(store.deployments, initial_deployments)
         self.assertEqual(store.promotions, {})
         self.assertIn("not promoted revision", str(caught.exception))
 
@@ -771,7 +805,7 @@ class GenericWebProdPromotionTests(unittest.TestCase):
 
     def test_execute_refreshes_inventory_when_health_is_skipped(self) -> None:
         store = _GenericWebPromotionStore(_profile())
-        store.write_environment_inventory(_testing_inventory())
+        store.write_qualified_testing_inventory(_testing_inventory())
 
         def fake_deploy(**_kwargs: object) -> GenericWebDeployResult:
             store.write_deployment_record(_deployment_record())
@@ -796,7 +830,7 @@ class GenericWebProdPromotionTests(unittest.TestCase):
         store = _GenericWebPromotionStore(
             _profile(health_path="/healthz", explicit_health_urls=False)
         )
-        store.write_environment_inventory(_testing_inventory())
+        store.write_qualified_testing_inventory(_testing_inventory())
 
         def fake_deploy(**_kwargs: object) -> GenericWebDeployResult:
             store.write_deployment_record(_deployment_record())
@@ -838,7 +872,8 @@ class GenericWebProdPromotionTests(unittest.TestCase):
 
     def test_source_health_failure_records_failed_promotion_without_deploy(self) -> None:
         store = _GenericWebPromotionStore(_profile())
-        store.write_environment_inventory(_testing_inventory())
+        store.write_qualified_testing_inventory(_testing_inventory())
+        initial_deployments = store.deployments.copy()
 
         with (
             patch(
@@ -859,7 +894,7 @@ class GenericWebProdPromotionTests(unittest.TestCase):
         self.assertEqual(result.source_health_status, "fail")
         self.assertEqual(result.destination_health_status, "skipped")
         self.assertIn("source unhealthy", result.error_message)
-        self.assertEqual(store.deployments, {})
+        self.assertEqual(store.deployments, initial_deployments)
         self.assertEqual(len(store.promotions), 1)
         failure = next(iter(store.promotions.values())).failure
         assert failure is not None
@@ -869,7 +904,7 @@ class GenericWebProdPromotionTests(unittest.TestCase):
 
     def test_deploy_failure_marks_destination_health_skipped(self) -> None:
         store = _GenericWebPromotionStore(_profile())
-        store.write_environment_inventory(_testing_inventory())
+        store.write_qualified_testing_inventory(_testing_inventory())
 
         def fake_deploy(**kwargs: object) -> GenericWebDeployResult:
             deployment_record = _deployment_record().model_copy(
@@ -910,7 +945,7 @@ class GenericWebProdPromotionTests(unittest.TestCase):
 
     def test_missing_runtime_identity_fails_promotion_without_inventory_refresh(self) -> None:
         store = _GenericWebPromotionStore(_profile())
-        store.write_environment_inventory(_testing_inventory())
+        store.write_qualified_testing_inventory(_testing_inventory())
 
         def fake_deploy(**_kwargs: object) -> GenericWebDeployResult:
             store.write_deployment_record(_deployment_record())
@@ -949,7 +984,7 @@ class GenericWebProdPromotionTests(unittest.TestCase):
 
     def test_runtime_identity_mismatch_fails_promotion_without_inventory_refresh(self) -> None:
         store = _GenericWebPromotionStore(_profile())
-        store.write_environment_inventory(_testing_inventory())
+        store.write_qualified_testing_inventory(_testing_inventory())
         observed_identity = RuntimeIdentity(
             product="sellyouroutboard",
             context="sellyouroutboard-testing",
@@ -996,7 +1031,7 @@ class GenericWebProdPromotionTests(unittest.TestCase):
 
     def test_execute_rejects_stale_source_inventory(self) -> None:
         store = _GenericWebPromotionStore(_profile())
-        store.write_environment_inventory(
+        store.write_qualified_testing_inventory(
             _testing_inventory(
                 artifact_identity=ArtifactIdentityReference(
                     artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:newer"
@@ -1004,6 +1039,7 @@ class GenericWebProdPromotionTests(unittest.TestCase):
                 source_git_ref="newer",
             )
         )
+        initial_deployments = store.deployments.copy()
 
         with self.assertRaises(click.ClickException) as caught:
             execute_generic_web_prod_promotion(
@@ -1013,11 +1049,12 @@ class GenericWebProdPromotionTests(unittest.TestCase):
             )
 
         self.assertIn("does not match current source inventory", str(caught.exception))
-        self.assertEqual(store.deployments, {})
+        self.assertEqual(store.deployments, initial_deployments)
         self.assertEqual(store.promotions, {})
 
     def test_execute_rejects_missing_source_inventory(self) -> None:
         store = _GenericWebPromotionStore(_profile())
+        initial_deployments = store.deployments.copy()
 
         with self.assertRaises(click.ClickException) as caught:
             execute_generic_web_prod_promotion(
@@ -1026,8 +1063,8 @@ class GenericWebProdPromotionTests(unittest.TestCase):
                 request=_request(),
             )
 
-        self.assertIn("requires current source environment inventory", str(caught.exception))
-        self.assertEqual(store.deployments, {})
+        self.assertIn("current source inventory", str(caught.exception))
+        self.assertEqual(store.deployments, initial_deployments)
         self.assertEqual(store.promotions, {})
 
 
@@ -1114,7 +1151,7 @@ def _store_with_production(
     *, previous_deploy_reference: str = f"ghcr.io/cbusillo/sellyouroutboard:sha-{'e' * 40}"
 ) -> _GenericWebPromotionStore:
     store = _GenericWebPromotionStore(_profile())
-    store.write_environment_inventory(_testing_inventory())
+    store.write_qualified_testing_inventory(_testing_inventory())
     previous = _deployment_record(
         artifact_id=_PREVIOUS_ARTIFACT, deploy_reference=previous_deploy_reference
     ).model_copy(update={"record_id": _PREVIOUS_DEPLOYMENT, "source_git_ref": "previous"})
@@ -1166,17 +1203,31 @@ class GenericWebProdPromotionRollbackTests(unittest.TestCase):
         provider_effect_checkpoint: Callable[[str], None] | None = None,
     ) -> GenericWebProdPromotionResult:
         inventory = store.inventories[("sellyouroutboard-testing", "prod")]
+        assert inventory.runtime_identity is not None
         store.inventories[("sellyouroutboard-testing", "prod")] = inventory.model_copy(
-            update={"source_git_ref": "1" * 40}
-        )
-        testing = store.inventories[("sellyouroutboard-testing", "testing")]
-        store.inventories[("sellyouroutboard-testing", "testing")] = testing.model_copy(
             update={
-                "source_git_ref": "2" * 40,
-                "artifact_identity": ArtifactIdentityReference(
-                    artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:" + "b" * 64
+                "source_git_ref": "1" * 40,
+                "runtime_identity": inventory.runtime_identity.model_copy(
+                    update={"source_git_ref": "1" * 40}
                 ),
             }
+        )
+        testing = store.inventories[("sellyouroutboard-testing", "testing")]
+        assert testing.runtime_identity is not None
+        artifact_id = "ghcr.io/cbusillo/sellyouroutboard@sha256:" + "b" * 64
+        store.write_qualified_testing_inventory(
+            testing.model_copy(
+                update={
+                    "source_git_ref": "2" * 40,
+                    "artifact_identity": ArtifactIdentityReference(artifact_id=artifact_id),
+                    "runtime_identity": testing.runtime_identity.model_copy(
+                        update={
+                            "source_git_ref": "2" * 40,
+                            "artifact_id": artifact_id,
+                        }
+                    ),
+                }
+            )
         )
         with patch(
             "control_plane.workflows.generic_web_promotion.wait_for_runtime_identity_healthcheck_with_retry",
@@ -1197,6 +1248,9 @@ class GenericWebProdPromotionRollbackTests(unittest.TestCase):
 
     def test_failed_maintenance_rolls_back_without_running_new_commands_on_old_image(self) -> None:
         self._check_maintenance_failure("command")
+
+    def test_testing_qualification_loss_after_image_effect_still_rolls_back(self) -> None:
+        self._check_maintenance_failure("testing_qualification")
 
     def test_maintenance_read_refusal_retains_receipt_for_first_rollback(self) -> None:
         self._check_maintenance_failure("read")
@@ -1249,6 +1303,19 @@ class GenericWebProdPromotionRollbackTests(unittest.TestCase):
                     effect_started=effect_started,
                     **kwargs,
                 )
+                if (
+                    failure == "testing_qualification"
+                    and runtime_identity.artifact_id != _PREVIOUS_ARTIFACT
+                ):
+                    testing = store.read_environment_inventory(
+                        context_name=runtime_identity.context, instance_name="testing"
+                    )
+                    record = store.read_deployment_record(testing.deployment_record_id)
+                    store.write_deployment_record(
+                        record.model_copy(
+                            update={"deploy": record.deploy.model_copy(update={"status": "fail"})}
+                        )
+                    )
 
             def healthcheck(self, **kwargs: object) -> HealthcheckPass:
                 # Even a healthy new image must not hide failed maintenance.
@@ -1372,6 +1439,9 @@ class GenericWebProdPromotionRollbackTests(unittest.TestCase):
             if failure == "read":
                 self.assertEqual(executed, [])
                 self.assertNotIn("billing", schedules)
+            elif failure == "testing_qualification":
+                self.assertEqual([command for command, _ in executed], ["./old-billing"])
+                self.assertEqual(schedules["billing"], original)
             else:
                 self.assertEqual(
                     [command for command, _ in executed], ["./new-migration", "./old-billing"]

@@ -64,6 +64,27 @@ testing site and the **`Client test notes`** from every merged pull request in t
 commit range at `/ui/owner-review?product=<product>`. No GitHub interaction is
 required to read the checklist, accept it, or request changes.
 
+For generic-web testing lanes, candidate construction reads the inventory's
+referenced deployment record as well as the inventory. That record must pass
+deployment, post-deploy and destination-health qualification and match the
+lane, artifact, source revision, runtime identity and provider target evidence.
+A copied passing inventory cannot qualify a missing, mismatched or failed
+deployment. The accepted-release worker and direct promotion path recheck this
+source evidence after backup waits and before forward production effects,
+including resumed recipient cutover. An already started gated rollback keeps
+its existing recovery authority.
+The testing lane must still name the current stored context and instance under
+an applicable generic-web driver; a removed or rebound source cannot keep
+using a cached inventory from its former lane.
+
+Losing qualification holds execution without changing the saved Client or
+Director acceptance, including `director_standing`. Run the normal supported
+testing deployment and qualification again. A qualified retest of the same
+accepted artifact and revision can continue under that acceptance; a different
+release still needs its own acceptance. No manual record repair is needed.
+The source check does not impose testing qualification on production baselines
+or replace Odoo's release-tuple contract.
+
 Checklist reads retry an individual GitHub GET once after a transport failure,
 invalid JSON response, timeout, or HTTP 408/500/502/503/504. Authorization,
 not-found, and rate-limit responses are not retried. Each failed attempt logs

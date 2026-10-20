@@ -17,6 +17,7 @@ from control_plane.client_release import (
 )
 from control_plane.contracts.product_profile_record import ProductOwnerProfile
 from control_plane.contracts.production_backup_authority import ProductionBackupPolicyRecord
+from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.release_review import (
     ReleaseReviewDecisionRecord,
     ReleaseReviewStatus,
@@ -31,6 +32,8 @@ from control_plane.generic_web_promotion_http import GENERIC_WEB_PROD_PROMOTION_
 from datetime import timedelta
 from control_plane.product_owner_setting import ProductOwnerIdentity, updated_product_owner_profile
 from control_plane.release_review import build_release_review
+from control_plane.release_review import ReleaseEvidenceUnavailable
+from control_plane.contracts.promotion_record import PostDeployUpdateEvidence
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.production_promotion_backup import GENERIC_WEB_PROMOTION_BACKUP_ACTION
 from control_plane.workflows.production_backup_gate_operation_worker import (
@@ -66,7 +69,7 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         self.store.write_product_profile_record(self.profile)
         for inventory in source.inventories.values():
             sha = BASE if inventory.instance == "prod" else HEAD
-            deployment = next(iter(source.deployments.values()))
+            deployment = source.deployments[inventory.deployment_record_id]
             identity = deployment.runtime_identity
             assert identity is not None and inventory.artifact_identity is not None
             identity = identity.model_copy(
@@ -97,15 +100,15 @@ class GenericWebClientReleaseTests(unittest.TestCase):
                     }
                 )
             )
-            if inventory.instance == "prod":
-                self.store.write_deployment_record(
-                    deployment.model_copy(
-                        update={
-                            "source_git_ref": BASE,
-                            "runtime_identity": identity,
-                        }
-                    )
+            self.store.write_deployment_record(
+                deployment.model_copy(
+                    update={
+                        "artifact_identity": inventory.artifact_identity,
+                        "source_git_ref": sha,
+                        "runtime_identity": identity,
+                    }
                 )
+            )
         original = _binding()
         policy = original.policy.model_dump()
         policy.update(
@@ -250,6 +253,32 @@ class GenericWebClientReleaseTests(unittest.TestCase):
     def advance(self) -> tuple[str, ...]:
         return advance_client_releases(store=self.store, control_plane_root=self.root)
 
+    def write_qualified_testing_inventory(self, inventory: EnvironmentInventory) -> None:
+        """Represent a complete testing deployment when moving this fixture's candidate."""
+        identity = inventory.runtime_identity
+        assert identity is not None and inventory.artifact_identity is not None
+        artifact = inventory.artifact_identity.model_copy(
+            update={"artifact_id": identity.artifact_id}
+        )
+        record = self.store.read_deployment_record(inventory.deployment_record_id)
+        self.store.write_deployment_record(
+            record.model_copy(
+                update={
+                    "artifact_identity": artifact,
+                    "source_git_ref": identity.source_git_ref,
+                    "runtime_identity": identity,
+                }
+            )
+        )
+        self.store.write_environment_inventory(
+            inventory.model_copy(
+                update={
+                    "artifact_identity": artifact,
+                    "source_git_ref": identity.source_git_ref,
+                }
+            )
+        )
+
     def capture(self) -> None:
         with (
             # Real backup captures take longer than a second. Preserve ordering
@@ -280,6 +309,116 @@ class GenericWebClientReleaseTests(unittest.TestCase):
             self.store.read_backup_gate_record(operation.backup_record_id).status, "pass"
         )
 
+    def _qualification_lost_after_acceptance(self, *, backup_completed: bool) -> None:
+        decision = self.accept()
+        if backup_completed:
+            self.assertTrue(self.advance())
+            self.capture()
+        inventory = self.store.read_environment_inventory(
+            context_name=self.context, instance_name="testing"
+        )
+        record = self.store.read_deployment_record(inventory.deployment_record_id)
+        self.store.write_deployment_record(
+            record.model_copy(
+                update={
+                    "deploy": record.deploy.model_copy(update={"status": "fail"}),
+                    "post_deploy_update": PostDeployUpdateEvidence(attempted=True, status="fail"),
+                    "runtime_identity": None,
+                }
+            )
+        )
+        with self.assertRaises(ReleaseEvidenceUnavailable):
+            self.review()
+        self.assertEqual(self.advance(), ())
+        self.assertEqual(self.provider.deployed_artifacts, [])
+        self.assertEqual(
+            self.store.read_release_review_decision_record(
+                product=self.profile.product, record_id=decision.record_id
+            ),
+            decision,
+        )
+
+        # Another qualified deployment of the accepted artifact restores its
+        # engineering evidence without asking the Client to accept it again.
+        assert record.runtime_identity is not None
+        retest_id = record.record_id + "-retest"
+        identity = record.runtime_identity.model_copy(update={"deployment_record_id": retest_id})
+        self.store.write_deployment_record(
+            record.model_copy(update={"record_id": retest_id, "runtime_identity": identity})
+        )
+        self.store.write_environment_inventory(
+            inventory.model_copy(
+                update={"deployment_record_id": retest_id, "runtime_identity": identity}
+            )
+        )
+        self.assertTrue(self.review().approved)
+        self.assertEqual(self.review().checklist_digest, decision.checklist_digest)
+        if not backup_completed:
+            self.assertTrue(self.advance())
+            self.capture()
+        self.assertTrue(self.advance())
+        self.assertEqual(
+            self.provider.deployed_artifacts, [decision.checklist.candidate.artifact_id]
+        )
+
+    def test_failed_testing_record_blocks_accepted_release_until_same_artifact_retest(self) -> None:
+        self._qualification_lost_after_acceptance(backup_completed=False)
+
+    def test_failed_testing_record_after_backup_blocks_production_until_retest(self) -> None:
+        self._qualification_lost_after_acceptance(backup_completed=True)
+
+    def test_qualification_lost_during_source_health_wait_never_dispatches(self) -> None:
+        self._source_changed_during_health_wait("post_deploy_failure")
+
+    def test_testing_context_rebound_during_source_health_wait_never_dispatches(self) -> None:
+        self._source_changed_during_health_wait("context_rebound")
+
+    def test_testing_lane_removed_during_source_health_wait_never_dispatches(self) -> None:
+        self._source_changed_during_health_wait("lane_removed")
+
+    def _source_changed_during_health_wait(self, change: str) -> None:
+        self.accept()
+        self.advance()
+        self.capture()
+        inventory = self.store.read_environment_inventory(
+            context_name=self.context, instance_name="testing"
+        )
+        record = self.store.read_deployment_record(inventory.deployment_record_id)
+
+        def lose_qualification(**_kwargs: object) -> None:
+            if change == "post_deploy_failure":
+                self.store.write_deployment_record(
+                    record.model_copy(
+                        update={
+                            "post_deploy_update": PostDeployUpdateEvidence(
+                                attempted=True, status="fail"
+                            ),
+                        }
+                    )
+                )
+            else:
+                profile = self.store.read_product_profile_record(self.profile.product)
+                self.store.write_product_profile_record(
+                    profile.model_copy(
+                        update={
+                            "lanes": tuple(
+                                lane.model_copy(update={"context": lane.context + "-replacement"})
+                                if lane.instance == "testing"
+                                else lane
+                                for lane in profile.lanes
+                                if not (change == "lane_removed" and lane.instance == "testing")
+                            ),
+                        }
+                    )
+                )
+
+        with patch(
+            "control_plane.workflows.generic_web_promotion._wait_for_healthcheck",
+            side_effect=lose_qualification,
+        ):
+            self.advance()
+        self.assertEqual(self.provider.deployed_artifacts, [])
+
     def test_held_and_changed_candidate_progress_uses_local_records_only(self) -> None:
         accepted = self.accept()
         self.switch("held")
@@ -300,7 +439,7 @@ class GenericWebClientReleaseTests(unittest.TestCase):
                 context_name=self.context, instance_name="testing"
             )
             assert testing.runtime_identity is not None
-            self.store.write_environment_inventory(
+            self.write_qualified_testing_inventory(
                 testing.model_copy(
                     update={
                         "runtime_identity": testing.runtime_identity.model_copy(
@@ -758,7 +897,7 @@ class GenericWebClientReleaseTests(unittest.TestCase):
             context_name=self.context, instance_name="testing"
         )
         assert inventory.runtime_identity is not None
-        self.store.write_environment_inventory(
+        self.write_qualified_testing_inventory(
             inventory.model_copy(
                 update={
                     "runtime_identity": inventory.runtime_identity.model_copy(
@@ -812,7 +951,7 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         )
         assert inventory.runtime_identity is not None and inventory.artifact_identity is not None
         next_artifact = self.profile.image.repository + "@" + next_digest
-        self.store.write_environment_inventory(
+        self.write_qualified_testing_inventory(
             inventory.model_copy(
                 update={
                     "source_git_ref": next_commit,
@@ -885,7 +1024,7 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         )
         assert inventory.runtime_identity is not None
         next_commit = "d" * 40
-        self.store.write_environment_inventory(
+        self.write_qualified_testing_inventory(
             inventory.model_copy(
                 update={
                     "source_git_ref": next_commit,
@@ -1012,7 +1151,7 @@ class GenericWebClientReleaseTests(unittest.TestCase):
             context_name=self.context, instance_name="testing"
         )
         assert prior_inventory.runtime_identity is not None
-        self.store.write_environment_inventory(
+        self.write_qualified_testing_inventory(
             prior_inventory.model_copy(
                 update={
                     "runtime_identity": prior_inventory.runtime_identity.model_copy(
@@ -1022,7 +1161,7 @@ class GenericWebClientReleaseTests(unittest.TestCase):
             )
         )
         self.accept()
-        self.store.write_environment_inventory(prior_inventory)
+        self.write_qualified_testing_inventory(prior_inventory)
         backoff = StandingReleaseReviewBackoff()
         with patch(
             "control_plane.client_release.current_release_review", side_effect=self.review
@@ -1079,7 +1218,7 @@ class GenericWebClientReleaseTests(unittest.TestCase):
             context_name=self.context, instance_name="testing"
         )
         assert inventory.runtime_identity is not None
-        self.store.write_environment_inventory(
+        self.write_qualified_testing_inventory(
             inventory.model_copy(
                 update={
                     "runtime_identity": inventory.runtime_identity.model_copy(
@@ -1130,7 +1269,7 @@ class GenericWebClientReleaseTests(unittest.TestCase):
             context_name=self.context, instance_name="testing"
         )
         assert inventory.runtime_identity is not None
-        self.store.write_environment_inventory(
+        self.write_qualified_testing_inventory(
             inventory.model_copy(
                 update={
                     "runtime_identity": inventory.runtime_identity.model_copy(
@@ -1201,7 +1340,7 @@ class GenericWebClientReleaseTests(unittest.TestCase):
                 context_name=self.context, instance_name="testing"
             )
             assert inventory.runtime_identity is not None
-            self.store.write_environment_inventory(
+            self.write_qualified_testing_inventory(
                 inventory.model_copy(
                     update={
                         "runtime_identity": inventory.runtime_identity.model_copy(
