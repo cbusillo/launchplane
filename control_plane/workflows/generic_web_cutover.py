@@ -98,6 +98,8 @@ def execute_web_cutover(
     )
     with provider.exclusive(plan):
         persisted = True
+        created_here = False
+        effect_admitted = False
         try:
             record = store.load(record_id)
         except FileNotFoundError:
@@ -140,7 +142,9 @@ def execute_web_cutover(
                         before_deployment_records()
                     store.save(record)
                     persisted = True
+                    created_here = True
                 checkpoint("prepare_candidate")
+                effect_admitted = True
                 provider.prepare_candidate(plan)
                 require_route(provider.current_route(plan), plan, plan.old)
                 advance("ready")
@@ -170,7 +174,10 @@ def execute_web_cutover(
                 advance("complete", ended_at=clock(), old_connections_drained=True)
         except Exception as error:
             if persisted:
-                store.save(store.load(record_id).model_copy(update={"error": type(error).__name__}))
+                updates: dict[str, object] = {"error": type(error).__name__}
+                if created_here and not effect_admitted:
+                    updates.update(step="blocked", updated_at=clock())
+                store.save(store.load(record_id).model_copy(update=updates))
             raise
         return store.load(record_id)
 

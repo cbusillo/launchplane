@@ -97,6 +97,7 @@ from control_plane.odoo_release_recovery import (
 )
 from control_plane.odoo_stable_lane import OdooStableLaneOperationConflictError
 from control_plane.release_review import (
+    ReleaseEvidenceUnavailable,
     current_release_review,
     release_version,
     checklist_blockers,
@@ -568,7 +569,7 @@ def client_release_grant_allows(
     if covered is None:
         return False
     profile, decision = covered
-    if decision.release_start == "rollback":
+    if decision.release_start == "rollback" and profile.driver_id == "generic-web":
         return True
     try:
         testing = release_version(
@@ -576,7 +577,7 @@ def client_release_grant_allows(
         )
     except (FileNotFoundError, ValueError):
         return False
-    return testing == decision.checklist.candidate
+    return decision.release_start == "rollback" or testing == decision.checklist.candidate
 
 
 def _generic_web_release_authority_allows(
@@ -774,15 +775,22 @@ def _release_run_blocked_reason(
         # A rejected hotfix rolls back even if testing has moved on.
         if decision.release_start == "rollback":
             return ""
+    except (FileNotFoundError, ValueError):
+        return "The current release's lane records are unavailable. An admin must reconcile them before this release can advance."
+    try:
         candidate = (
             release_version(store=store, profile=profile, instance="testing")
             if needs_testing
             else None
         )
+    except ReleaseEvidenceUnavailable as error:
+        if error.code == "candidate_identity_missing":
+            return "Testing must qualify this accepted artifact and revision again before a fresh release step can start. Run its normal testing deployment."
+        return "The testing release evidence is unavailable. Restore the testing lane and qualify this accepted artifact and revision before starting a fresh release step."
     except (FileNotFoundError, ValueError):
-        return "The current release's lane records are unavailable. An admin must reconcile them before this release can advance."
+        return "The testing release evidence is unavailable. Restore the testing lane and qualify this accepted artifact and revision before starting a fresh release step."
     if candidate is not None and candidate != decision.checklist.candidate:
-        return "The testing version has changed since this release was accepted. The Client must review the current candidate before it can go live."
+        return "Testing has moved to a different version. Qualify this accepted artifact and revision again, or accept the new candidate for its own release."
     expected_production = (
         decision.checklist.candidate
         if next_step.kind == "rollback"
@@ -872,6 +880,34 @@ class ClientReleaseNotReady(Exception):
     """The next step cannot be queued now; nothing was queued."""
 
 
+def _require_standing_release_available(store: PostgresRecordStore, product: str) -> None:
+    """Automatic acceptance cannot supersede an outstanding admitted production attempt."""
+    covered = _covering_decision(store, product)
+    if covered is None:
+        return
+    profile, decision = covered
+    if profile.driver_id != "generic-web":
+        return
+    steps = client_release_steps(decision.release_start)
+    statuses: dict[str, ClientReleaseStepStatus] = {}
+    for step in steps:
+        status, operation = _step_status(store, profile, decision, step)
+        statuses[step.name] = status
+        if step.kind in {"promote", "rollback"} and (
+            status == "reconciliation_required"
+            or status == "running"
+            and bool(getattr(operation, "provider_effect_started_at", ""))
+        ):
+            raise ClientReleaseNotReady("standing_release_effects_outstanding")
+    if (
+        decision.release_start == "promote_with_rollback_drill"
+        and statuses.get("promote-1") == "pass"
+        and statuses.get("rollback-1")
+        in {"not_started", "pending", "running", "reconciliation_required"}
+    ):
+        raise ClientReleaseNotReady("standing_release_inverse_outstanding")
+
+
 def _record_standing_acceptance(
     store: PostgresRecordStore,
     control_plane_root: Path,
@@ -892,6 +928,7 @@ def _record_standing_acceptance(
         or profile.production_use == "prelaunch"
     ):
         return
+    _require_standing_release_available(store, profile.product)
     production = release_version(store=store, profile=profile, instance="prod")
     candidate = release_version(store=store, profile=profile, instance="testing")
     if production == candidate:
@@ -967,7 +1004,10 @@ def _record_standing_acceptance(
             release_start=release_start_for_acceptance(store=store, profile=profile),
             acceptance_source="director_standing",
         )
-    decision = store.create_release_review_decision_record_if_absent(decision)
+    decision = store.create_release_review_decision_record_if_absent(
+        decision,
+        validate_before_insert=lambda: _require_standing_release_available(store, profile.product),
+    )
     # Use the existing publication/recovery path. An unpublished decision cannot
     # queue a backup or promotion, and a retry keeps the same decision id.
     issue_url = decision.release_issue_url or publish_release_decision(
@@ -1070,9 +1110,11 @@ def _run_generic_web_promotion(
             try:
                 candidate = release_version(store=store, profile=profile, instance="testing")
             except (FileNotFoundError, ValueError) as error:
-                raise click.ClickException("Testing is no longer qualified for release.") from error
+                raise GenericWebPromotionSourceRefused(
+                    "Testing is no longer qualified for release."
+                ) from error
             if candidate != decision.checklist.candidate:
-                raise click.ClickException("The accepted testing release changed.")
+                raise GenericWebPromotionSourceRefused("The accepted testing release changed.")
 
         if recipient.phase != "published" and not recipient.execution:
             _require_current_release(store, control_plane_root, profile, decision)
@@ -1164,9 +1206,8 @@ def advance_client_releases(
             continue
         try:
             _record_standing_acceptance(store, control_plane_root, profile, standing_review_backoff)
-        except (FileNotFoundError, ValueError, click.ClickException):
+        except (ClientReleaseNotReady, FileNotFoundError, ValueError, click.ClickException):
             _LOGGER.info("standing acceptance not ready product=%s", profile.product)
-            continue
         covered = _covering_decision(store, profile.product)
         if covered is None:
             continue

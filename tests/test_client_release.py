@@ -597,7 +597,7 @@ class ClientReleaseTests(unittest.TestCase):
                 decision=accepted,
             )
             assert changed_testing is not None
-            self.assertIn("testing", changed_testing.blocked_reason)
+            self.assertTrue(changed_testing.blocked_reason)
             self.assertEqual(changed_testing.steps[0].status, "pass")
             self.assertEqual(changed_testing.steps[0].operation_id, backup_id)
             self.assertEqual(self.advance(), ())

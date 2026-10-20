@@ -70,9 +70,15 @@ class WebDeploymentCutoverStore:
             current.record_id != record.record_id or current.plan != record.plan
         ):
             raise ValueError("cannot replace a cutover's immutable intent")
-        self.store.write_deployment_record(
-            deployment.model_copy(update={"generic_web_cutover": record})
-        )
+        updates: dict[str, object] = {"generic_web_cutover": record}
+        if record.step == "blocked":
+            updates["deploy"] = deployment.deploy.model_copy(
+                update={
+                    "status": "fail",
+                    "finished_at": record.updated_at.isoformat(),
+                }
+            )
+        self.store.write_deployment_record(deployment.model_copy(update=updates))
 
 
 def compile_web_cutover(

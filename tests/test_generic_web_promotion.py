@@ -1029,6 +1029,8 @@ class GenericWebProdPromotionTests(unittest.TestCase):
         self.assertEqual(promotion.destination_health.observed_runtime_identity, observed_identity)
 
     def test_execute_rejects_stale_source_inventory(self) -> None:
+        from control_plane.generic_web_source_qualification import GenericWebPromotionSourceRefused
+
         store = _GenericWebPromotionStore(_profile())
         store.write_qualified_testing_inventory(
             _testing_inventory(
@@ -1040,7 +1042,7 @@ class GenericWebProdPromotionTests(unittest.TestCase):
         )
         initial_deployments = store.deployments.copy()
 
-        with self.assertRaises(click.ClickException):
+        with self.assertRaises(GenericWebPromotionSourceRefused):
             execute_generic_web_prod_promotion(
                 control_plane_root=Path("."),
                 record_store=store,
@@ -1051,10 +1053,12 @@ class GenericWebProdPromotionTests(unittest.TestCase):
         self.assertEqual(store.promotions, {})
 
     def test_execute_rejects_missing_source_inventory(self) -> None:
+        from control_plane.generic_web_source_qualification import GenericWebPromotionSourceRefused
+
         store = _GenericWebPromotionStore(_profile())
         initial_deployments = store.deployments.copy()
 
-        with self.assertRaises(click.ClickException):
+        with self.assertRaises(GenericWebPromotionSourceRefused):
             execute_generic_web_prod_promotion(
                 control_plane_root=Path("."),
                 record_store=store,

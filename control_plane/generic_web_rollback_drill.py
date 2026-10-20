@@ -117,7 +117,9 @@ def run_generic_web_rollback_drill(
                 )
                 if not isinstance(lease, ProviderEvidenceLease):
                     raise ValueError("Rollback drill requires an evidence-bound provider lease.")
-                with store.provider_evidence_guard(lease.evidence_reservation):
+                with store.provider_evidence_guard(
+                    lease.evidence_reservation, authority_checkpoint=validate_checkpoint
+                ):
                     outcome = _roll_back_production(
                         control_plane_root=control_plane_root,
                         record_store=store,

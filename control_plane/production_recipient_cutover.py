@@ -60,6 +60,7 @@ from control_plane.workflows.production_promotion_backup import (
     require_production_promotion_backup,
 )
 from control_plane.dokploy import api, source
+from control_plane.generic_web_source_qualification import GenericWebPromotionSourceRefused
 
 from control_plane.production_recipient_evidence import (
     WRITER_ACTION_MARKER,
@@ -900,14 +901,27 @@ class RecipientCutoverAdapter:
                     + canonical_sha256(provider_operation_key)[:24],
                 )
 
-            with self.store.provider_evidence_guard(lease.evidence_reservation):
-                return self._apply(provider_operation_key, lease, backup_check)
+            automatic_recovery = False
+
+            def validate_authority() -> None:
+                if not automatic_recovery:
+                    self.validate_release()
+
+            def begin_recovery() -> None:
+                nonlocal automatic_recovery
+                automatic_recovery = True
+
+            with self.store.provider_evidence_guard(
+                lease.evidence_reservation, authority_checkpoint=validate_authority
+            ):
+                return self._apply(provider_operation_key, lease, backup_check, begin_recovery)
 
     def _apply(
         self,
         provider_operation_key: str,
         lease: ProviderOperationLease,
         backup_check: Callable[[], BackupGateEvidence],
+        begin_recovery: Callable[[], None],
     ) -> ProviderMutationOutcome:
         record = self.record
         repromote = bool(record.publication.get("inverse_backup_policies")) and record.phase in {
@@ -925,6 +939,7 @@ class RecipientCutoverAdapter:
         started = False
         terminal_deployment = False
         old_paused = False
+        source_admitted = False
         preparation = ProductionRecipientAdapter(
             self.root,
             self.store,
@@ -951,6 +966,7 @@ class RecipientCutoverAdapter:
             self.record = record
 
         def check_local() -> None:
+            nonlocal source_admitted
             self.validate_release()
             # Historical generic markers can belong to an earlier release or
             # repromotion. Only this attempt's pause dispatch or its original
@@ -965,8 +981,16 @@ class RecipientCutoverAdapter:
                 and attempt_identity.get("deployment_record_id")
                 == "recipient-release-" + canonical_sha256(provider_operation_key)[:24]
             )
-            if not attempt_started:
+            # The exact current reservation includes resource/schedule effects
+            # that precede writer pause. An older attempt's execution dictionary
+            # cannot supply this witness for a fresh repromotion.
+            if isinstance(lease, ProviderEvidenceLease):
+                attempt_started = attempt_started or bool(
+                    lease.evidence_reservation().provider_effect_started_at
+                )
+            if not source_admitted and not attempt_started:
                 self.validate_source()
+            source_admitted = True
             require_writer_exclusive(self.store, record)
             backup_check()
 
@@ -1271,8 +1295,11 @@ class RecipientCutoverAdapter:
         except Exception as error:
             if not started and not record.execution:
                 raise ProviderMutationRejectedError(
-                    ValueError("Recipient release gates refused bootstrap.")
+                    error
+                    if isinstance(error, GenericWebPromotionSourceRefused)
+                    else ValueError("Recipient release gates refused bootstrap.")
                 ) from error
+            begin_recovery()
             terminal_deployment = (
                 terminal_deployment
                 or isinstance(error, api.DokployDeploymentFailed)

@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import cast
 from unittest.mock import Mock, patch
 
-import click
+from control_plane.generic_web_source_qualification import GenericWebPromotionSourceRefused
 
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
@@ -115,6 +115,7 @@ class GenericWebSourceQualificationTests(unittest.TestCase):
             "inventory_target",
             "record_target_id",
             "record_target_provider",
+            "record_target_missing",
         )
         for case in cases:
             with self.subTest(case=case):
@@ -243,6 +244,13 @@ class GenericWebSourceQualificationTests(unittest.TestCase):
                             }
                         )
                     )
+                elif case == "record_target_missing":
+                    # Real historical payloads without either target evidence
+                    # form cannot manufacture authority from a passing inventory.
+                    payload = record.model_dump(mode="json")
+                    payload.pop("deployed_target", None)
+                    payload.pop("resolved_target", None)
+                    store.write_deployment_record(type(record).model_validate(payload))
                 elif case.startswith("record_target_"):
                     field = "target_id" if case == "record_target_id" else "provider_id"
                     store.write_deployment_record(
@@ -263,7 +271,7 @@ class GenericWebSourceQualificationTests(unittest.TestCase):
                         instance="testing",
                     )
                 provider = Mock()
-                with self.assertRaises(click.ClickException):
+                with self.assertRaises(GenericWebPromotionSourceRefused):
                     execute_generic_web_prod_promotion(
                         control_plane_root=Path("."),
                         record_store=store,

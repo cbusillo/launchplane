@@ -757,7 +757,7 @@ class GenericWebClientReleaseTests(unittest.TestCase):
                 decision=accepted,
             )
             assert stale is not None
-            self.assertIn("testing", stale.blocked_reason)
+            self.assertTrue(stale.blocked_reason)
             self.assertEqual(stale.steps, held.steps)
             self.assertEqual(self.advance(), ())
             self.assertEqual(self.provider.deployed_artifacts, [])
@@ -958,12 +958,102 @@ class GenericWebClientReleaseTests(unittest.TestCase):
             self.assertTrue(self.advance())
         run = read_client_release_run(store=self.store, profile=self.profile, decision=decision)
         assert run is not None
-        self.assertEqual(run.steps[2].status, "pass")
-        self.assertEqual(run.steps[3].status, "not_started")
+        self.assertEqual(
+            next(step for step in run.steps if step.step == "rollback-1").status, "pass"
+        )
+        self.assertEqual(
+            next(step for step in run.steps if step.step == "backup-2").status, "not_started"
+        )
         assert self.provider.running is not None
         self.assertEqual(
             self.provider.running.artifact_id, decision.checklist.production.artifact_id
         )
+
+    def test_standing_failed_testing_cannot_starve_admitted_drill_inverse(self) -> None:
+        self.standing_testing_change_after_admission(new_candidate=False)
+
+    def test_standing_new_candidate_waits_for_admitted_drill_inverse(self) -> None:
+        self.standing_testing_change_after_admission(new_candidate=True)
+
+    def standing_testing_change_after_admission(self, *, new_candidate: bool) -> None:
+        from tests.support.lane_builds import LaneBuildGitHub
+
+        next_commit = "d" * 40
+        next_digest = "sha256:" + "c" * 64
+        self.enterContext(
+            patch(
+                "control_plane.product_reconcile.resolve_build_provenance_transport",
+                return_value=LaneBuildGitHub(
+                    self.profile.repository,
+                    self.profile.image.repository,
+                    {
+                        BASE: "sha256:" + "f" * 64,
+                        HEAD: "sha256:" + "b" * 64,
+                        next_commit: next_digest,
+                    },
+                ),
+            )
+        )
+        self.switch("director_standing")
+        self.advance()
+        self.capture()
+        self.advance()
+        decision = self.store.list_release_review_decision_records(product=self.profile.product)[0]
+        inventory = self.store.read_environment_inventory(
+            context_name=self.context, instance_name="testing"
+        )
+        testing = self.store.read_deployment_record(inventory.deployment_record_id)
+        if new_candidate:
+            assert inventory.runtime_identity is not None
+            self.write_qualified_testing_inventory(
+                inventory.model_copy(
+                    update={
+                        "runtime_identity": inventory.runtime_identity.model_copy(
+                            update={
+                                "artifact_id": self.profile.image.repository + "@" + next_digest,
+                                "source_git_ref": next_commit,
+                                "image_reference": "",
+                            }
+                        )
+                    }
+                )
+            )
+        else:
+            self.store.write_deployment_record(
+                testing.model_copy(
+                    update={
+                        "post_deploy_update": PostDeployUpdateEvidence(
+                            attempted=True, status="fail"
+                        )
+                    }
+                )
+            )
+        self.assertTrue(self.advance())
+        self.assertEqual(
+            self.store.list_release_review_decision_records(product=self.profile.product),
+            (decision,),
+        )
+        assert self.provider.running is not None
+        self.assertEqual(
+            self.provider.running.artifact_id, decision.checklist.production.artifact_id
+        )
+        run = read_client_release_run(store=self.store, profile=self.profile, decision=decision)
+        assert run is not None
+        self.assertEqual(
+            next(step for step in run.steps if step.step == "rollback-1").status, "pass"
+        )
+        if new_candidate:
+            # The settled inverse no longer pins an obsolete A's fresh second attempt.
+            self.assertTrue(self.advance())
+            latest = self.store.list_release_review_decision_records(product=self.profile.product)[
+                0
+            ]
+            self.assertNotEqual(latest.record_id, decision.record_id)
+            self.assertEqual(latest.checklist.candidate.source_commit, next_commit)
+        else:
+            self.assertEqual(self.advance(), ())
+            self.store.write_deployment_record(testing)
+            self.assertTrue(self.advance())
 
     def test_each_drill_failure_stops_remaining_steps_and_does_not_count_as_passed(self) -> None:
         for failure_step in ("backup-1", "promote-1", "rollback-1", "backup-2", "promote-2"):
@@ -1429,7 +1519,9 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         create = self.store.create_release_review_decision_record_if_absent
         winner: ReleaseReviewDecisionRecord | None = None
 
-        def race(contender: ReleaseReviewDecisionRecord) -> ReleaseReviewDecisionRecord:
+        def race(
+            contender: ReleaseReviewDecisionRecord, **_options: Any
+        ) -> ReleaseReviewDecisionRecord:
             nonlocal winner
             earlier = contender.model_copy(
                 update={

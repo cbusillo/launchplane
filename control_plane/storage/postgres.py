@@ -8836,6 +8836,13 @@ class PostgresRecordStore(HumanSessionStore):
             from control_plane.production_recipient_budget import require_budget_checkpoint
 
             require_budget_checkpoint(self, session, reservation)
+            authority_checkpoint = getattr(
+                self._provider_evidence_context, "authority_checkpoint", None
+            )
+            if authority_checkpoint is not None:
+                # Reads only, before locking the reservation against its heartbeat.
+                # Decision insertion uses this same authority transaction lock.
+                authority_checkpoint()
             row = session.scalar(
                 self._idempotency_statement(
                     scope=reservation.scope,
@@ -23872,12 +23879,20 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
     def create_release_review_decision_record_if_absent(
-        self, record: ReleaseReviewDecisionRecord
+        self,
+        record: ReleaseReviewDecisionRecord,
+        *,
+        validate_before_insert: Callable[[], None] | None = None,
     ) -> ReleaseReviewDecisionRecord:
         """Insert once; a competing replica receives the stored decision unchanged."""
         with self._session_factory() as session:
             self._begin_serialized_write(session)
             self._lock_product_authority_bundle_write(session)
+            existing = session.get(LaunchplaneReleaseReviewDecisionRow, record.record_id)
+            if existing is not None:
+                return ReleaseReviewDecisionRecord.model_validate(existing.payload)
+            if validate_before_insert is not None:
+                validate_before_insert()
             row = LaunchplaneReleaseReviewDecisionRow(
                 record_id=record.record_id,
                 product=record.product,

@@ -225,7 +225,12 @@ class RecipientInverseAdapter:
 
         def checkpoint(phase: str) -> None:
             lease.assert_current()
-            lease.checkpoint_effect("recipient_inverse_" + phase)
+            if not isinstance(lease, ProviderEvidenceLease):
+                raise ValueError("Inverse checkpoint requires an evidence-bound lease.")
+            with self.store.provider_evidence_guard(
+                lease.evidence_reservation, authority_checkpoint=self.validate_release
+            ):
+                lease.checkpoint_effect("recipient_inverse_" + phase)
 
         def stop_checkpoint(phase: str) -> None:
             from control_plane.dokploy.post_deploy import ODOO_POST_DEPLOY_SCHEDULE_TRIGGER

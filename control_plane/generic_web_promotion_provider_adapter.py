@@ -192,12 +192,17 @@ class GenericWebProdPromotionProviderMutationAdapter:
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
         provider_effect_attempted = False
+        automatic_rollback = False
+
+        def validate_current_authority() -> None:
+            if self._validate_before_checkpoint is not None and not automatic_rollback:
+                self._validate_before_checkpoint()
 
         def checkpoint_provider_effect(phase: str) -> None:
-            nonlocal provider_effect_attempted
+            nonlocal provider_effect_attempted, automatic_rollback
             # Recovery must finish even if acceptance is withdrawn after deployment.
-            if self._validate_before_checkpoint is not None and not phase.startswith("rollback_"):
-                self._validate_before_checkpoint()
+            automatic_rollback = phase.startswith("rollback_")
+            validate_current_authority()
             lease.checkpoint_effect(phase)
             provider_effect_attempted = True
 
@@ -208,7 +213,7 @@ class GenericWebProdPromotionProviderMutationAdapter:
                 if not isinstance(lease, ProviderEvidenceLease):
                     raise ValueError("Promotion requires an evidence-bound provider lease.")
                 evidence_guard = self._record_store.provider_evidence_guard(
-                    lease.evidence_reservation
+                    lease.evidence_reservation, authority_checkpoint=validate_current_authority
                 )
             else:
                 evidence_guard = nullcontext()

@@ -81,11 +81,15 @@ The testing lane must still name the current stored context and instance under
 an applicable generic-web driver; a removed or rebound source cannot keep
 using a cached inventory from its former lane.
 
-Losing qualification holds execution without changing the saved Client or
-Director acceptance, including `director_standing`. Run the normal supported
-testing deployment and qualification again. A qualified retest of the same
-accepted artifact and revision can continue under that acceptance; a different
-release still needs its own acceptance. No manual record repair is needed.
+Losing qualification before a fresh promotion's first provider effect holds
+that step without changing the saved Client or Director acceptance, including
+`director_standing`. Run the normal supported testing deployment and
+qualification again. A qualified retest of the same accepted artifact and
+revision can retry that unstarted promotion while its verified backup remains
+current, unconsumed and bound to unchanged production authority. A different
+release needs its own acceptance. This does not restart a failed backup or
+replace expired backup evidence; the separate continuation capability is
+tracked in [#4236](https://github.com/cbusillo/launchplane/issues/4236).
 The source check does not impose testing qualification on production baselines
 or replace Odoo's release-tuple contract.
 
@@ -934,9 +938,13 @@ its accepted production work. The drill's rollback, recipient inverse and their
 original-key recovery check the accepted production boundary and ongoing Client
 release authority, without depending on testing. The second backup and promotion
 still require the accepted artifact and source to qualify in testing again. A
-same-artifact qualified retest uses the existing acceptance and checklist digest.
+same-artifact qualified retest uses the existing acceptance and checklist digest
+for an unstarted source-held promotion with still-current backup evidence.
+Failed backup operations and expired or consumed captures retain their existing
+fail-closed outcomes; a retest does not recapture or restart them.
 
-A source refusal before any provider effect leaves the accepted step unstarted.
+A typed source refusal before any promotion provider effect leaves that accepted
+promotion step unstarted.
 The service can retry it after testing qualifies, including after repeated
 refusals. Repeated refusals do not turn an unstarted step into an interrupted
 deployment. An existing or dispatched attempt keeps its original recovery fence;

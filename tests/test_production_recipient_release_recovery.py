@@ -31,6 +31,7 @@ from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.production_recipient import custody
 from control_plane.production_recipient_cutover import RecipientCutoverAdapter
 from control_plane.workflows.inventory import build_environment_inventory
+from control_plane.generic_web_source_qualification import GenericWebPromotionSourceRefused
 
 
 class RecipientReleaseRecoveryTests(unittest.TestCase):
@@ -276,6 +277,99 @@ class RecipientReleaseRecoveryTests(unittest.TestCase):
             upstreams.assert_called_once()
         self.assertEqual(f.actions, [])
         self.assertEqual(f.deploys, 0)
+
+    def test_fresh_source_refusal_preserves_type_and_original_step_retry(self) -> None:
+        f = self.fixture
+        profile, testing = self.qualified_testing_source()
+        f.store.write_deployment_record(
+            testing.model_copy(
+                update={
+                    "post_deploy_update": PostDeployUpdateEvidence(attempted=True, status="fail")
+                }
+            )
+        )
+        with (
+            patch("control_plane.client_release._require_current_release"),
+            patch.object(RecipientCutoverAdapter, "verify_runtime"),
+        ):
+            for _ in range(2):
+                with self.assertRaises(GenericWebPromotionSourceRefused):
+                    releases._run_generic_web_promotion(
+                        f.store,
+                        f.fixture.root,
+                        profile,
+                        self.decision,
+                        releases.ClientReleaseStep("promote", 1),
+                        f.old_backup,
+                    )
+                self.assertIsNone(
+                    f.store.read_idempotency_record(
+                        scope=releases.CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
+                        route_path=GENERIC_WEB_PROD_PROMOTION_ROUTE,
+                        idempotency_key=self.key,
+                    )
+                )
+                self.assertEqual(f.actions, [])
+                self.assertEqual(f.deploys, 0)
+            f.store.write_deployment_record(testing)
+            self.assertTrue(
+                releases._run_generic_web_promotion(
+                    f.store,
+                    f.fixture.root,
+                    profile,
+                    self.decision,
+                    releases.ClientReleaseStep("promote", 1),
+                    f.old_backup,
+                )
+            )
+        saved = custody(f.store, f.record.product, f.record.context)
+        assert saved is not None
+        self.assertEqual(saved.phase, "published")
+
+    def test_source_change_after_resource_effect_does_not_abort_admitted_recipient(self) -> None:
+        f = self.fixture
+        profile, testing = self.qualified_testing_source()
+
+        def upstreams(_record: Any, checkpoint: Any, _lease: Any) -> None:
+            checkpoint("resource_schedule_upsert")
+            f.store.write_deployment_record(
+                testing.model_copy(
+                    update={
+                        "post_deploy_update": PostDeployUpdateEvidence(
+                            attempted=True, status="fail"
+                        )
+                    }
+                )
+            )
+            checkpoint("resource_schedule_trigger")
+
+        with (
+            patch("control_plane.client_release._require_current_release"),
+            patch.object(RecipientCutoverAdapter, "verify_runtime"),
+            patch.object(RecipientCutoverAdapter, "verify_upstreams", side_effect=upstreams),
+        ):
+            self.assertTrue(
+                releases._run_generic_web_promotion(
+                    f.store,
+                    f.fixture.root,
+                    profile,
+                    self.decision,
+                    releases.ClientReleaseStep("promote", 1),
+                    f.old_backup,
+                )
+            )
+        reservation = f.store.read_idempotency_record(
+            scope=releases.CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
+            route_path=GENERIC_WEB_PROD_PROMOTION_ROUTE,
+            idempotency_key=self.key,
+        )
+        assert reservation is not None
+        self.assertEqual(reservation.state, "completed")
+        saved = custody(f.store, f.record.product, f.record.context)
+        assert saved is not None
+        self.assertEqual(saved.phase, "published")
+        self.assertTrue(f.new_running)
+        self.assertFalse(f.old_running)
 
     def test_started_recipient_finishes_accepted_artifact_after_testing_advances(self) -> None:
         self.started_recipient_with_new_testing(resume=False)

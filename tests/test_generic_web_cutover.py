@@ -1033,6 +1033,66 @@ class WebCutoverReviewRecoveryTests(unittest.TestCase):
     def test_first_checkpoint_refusal_never_rolls_back_a_new_cutover(self) -> None:
         self.cutover_checkpoint_failure(prior_dispatch=False)
 
+    def test_non_source_first_checkpoint_refusal_does_not_hold_next_release(self) -> None:
+        from control_plane.workflows.generic_web_promotion import (
+            GenericWebProdPromotionRequest,
+            execute_generic_web_prod_promotion,
+        )
+        from tests.support.promotion_backup import stub_verified_promotion_backup
+
+        stub_verified_promotion_backup(self, "control_plane.workflows.generic_web_promotion")
+        for target in ("application", "compose"):
+            with self.subTest(target=target), TemporaryDirectory() as folder:
+                root = Path(folder)
+                store, intent, provider = self.promotion_fixture(root, target)
+                selected = DokployGenericWebDeployProvider(
+                    cutover_provider_factory=lambda _p: provider
+                )
+                request = GenericWebProdPromotionRequest(
+                    product="fixture",
+                    artifact_id=intent.candidate.artifact_id,
+                    deploy_reference=intent.new.deploy_reference,
+                    source_git_ref=intent.candidate.source_commit,
+                    backup_record_id="infrastructure-example",
+                    verify_health=False,
+                )
+
+                def refuse(_phase: str) -> None:
+                    raise ValueError("Synthetic current authority changed")
+
+                with (
+                    patch("control_plane.workflows.generic_web_deploy.require_forward_lane_build"),
+                    patch("control_plane.workflows.generic_web_promotion.require_release_approval"),
+                ):
+                    with self.assertRaises(ValueError):
+                        execute_generic_web_prod_promotion(
+                            control_plane_root=root,
+                            record_store=store,
+                            request=request,
+                            deploy_provider=selected,
+                            deployment_record_id="refused-attempt",
+                            provider_effect_checkpoint=refuse,
+                        )
+                    saved = store.read_deployment_record("refused-attempt")
+                    assert saved.generic_web_cutover is not None
+                    self.assertEqual(saved.generic_web_cutover.step, "blocked")
+                    self.assertEqual(saved.deploy.status, "fail")
+                    self.assertEqual(provider.actions, [])
+                    result = execute_generic_web_deploy(
+                        control_plane_root=root,
+                        record_store=store,
+                        request=GenericWebDeployRequest(
+                            product="fixture",
+                            instance="prod",
+                            artifact_id=intent.candidate.artifact_id,
+                            deploy_reference=intent.new.deploy_reference,
+                            source_git_ref=intent.candidate.source_commit,
+                        ),
+                        deploy_provider=selected,
+                        deployment_record_id="next-attempt",
+                    )
+                    self.assertEqual(result.deploy_status, "pass")
+
     def test_preexisting_preparing_cutover_keeps_recovery_after_checkpoint_refusal(self) -> None:
         self.cutover_checkpoint_failure(prior_dispatch=True)
 
