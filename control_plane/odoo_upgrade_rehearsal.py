@@ -9,6 +9,7 @@ import gzip
 import json
 from pathlib import Path
 import re
+from typing import cast
 
 import click
 
@@ -656,11 +657,12 @@ class OdooRehearsalAdapter:
         }
 
     def failure_events(
-        self, record: OdooUpgradeRehearsalRecord, started_at: str
+        self, record: OdooUpgradeRehearsalRecord, started_at: str, *, operation_key: str = ""
     ) -> tuple[list[dict[str, object]], bool]:
-        """Read bounded event candidates without exporting provider prose or source data."""
+        """Read event candidates and exact-operation private diagnostic fallbacks."""
         import ast
         from control_plane.dokploy import post_deploy
+        from control_plane.contracts.odoo_upgrade_rehearsal import RehearsalChildFailure
 
         if not started_at:
             raise ValueError("Missing original checkpoint")
@@ -751,6 +753,27 @@ class OdooRehearsalAdapter:
             ]
             frames = sorted({str(location["function"]) for location in locations})
             status = api.deployment_status(deployment)
+            fallback: dict[str, object] = {}
+            if operation_key:
+                marker = post_deploy.extract_odoo_post_deploy_readback_markers({"logs": log}).get(
+                    "rehearsal_child_failure"
+                )
+                if marker:
+                    try:
+                        child = RehearsalChildFailure.model_validate_json(bytes.fromhex(marker))
+                    except ValueError:
+                        pass
+                    else:
+                        if (
+                            child.intent_sha256 == record.intent_sha256
+                            and child.record_binding_sha256 == record.binding_sha256
+                            and child.attempt_sha256
+                            == canonical_json_sha256({"operation_key": operation_key})
+                        ):
+                            fallback = {
+                                "child_failure": child.model_dump(mode="json"),
+                                "diagnostics_private": True,
+                            }
             events.append(
                 {
                     "deployment_id": identifier,
@@ -762,6 +785,7 @@ class OdooRehearsalAdapter:
                     "traceback_present": "Traceback (most recent call last):" in log,
                     "failure_frames": frames,
                     "failure_locations": locations,
+                    **fallback,
                 }
             )
         return events, complete
@@ -793,7 +817,9 @@ class OdooRehearsalAdapter:
             ):
                 try:
                     events, complete = self.failure_events(
-                        record, str(journal["provider_effect_started_at"])
+                        record,
+                        str(journal["provider_effect_started_at"]),
+                        operation_key=operation_key,
                     )
                     diagnostics["failure_events_after_checkpoint"] = events
                     if not complete:
@@ -815,7 +841,7 @@ class OdooRehearsalAdapter:
                 inspect_capture=(
                     journal_status == "bound"
                     and journal.get("operation_state") == "reconcile_required"
-                    and journal.get("provider_effect_phase") == "execute"
+                    and journal.get("provider_effect_phase") == self.request.action
                     and bool(journal.get("provider_effect_started_at"))
                 ),
             )
@@ -847,6 +873,19 @@ class OdooRehearsalAdapter:
             **diagnostics,
             "operation_journal_status": journal_status,
         }
+        if (
+            result.get("child_failure") is not None
+            or result.get("retained_upgrade_logs") is not None
+            or any(
+                event.get("child_failure") is not None
+                for event in cast(
+                    list[dict[str, object]], diagnostics.get("failure_events_after_checkpoint", [])
+                )
+            )
+        ):
+            result["diagnostics_private"] = True
+        else:
+            result.pop("diagnostics_private", None)
         stored_refusal = result.pop("_stored_refusal_code", "")
         if observation.get("completed") is not True:
             terminal = (
@@ -1102,6 +1141,27 @@ class OdooRehearsalAdapter:
             or result["capture_attachment_validation"] != mismatch["attachment"]["reason"]
         ):
             raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
+        child = result.get("child_failure")
+        if child is not None and (
+            not isinstance(child, dict)
+            or mode != "observe"
+            or not inspect_capture
+            or result["completed"] is not False
+            or child["intent_sha256"] != record.intent_sha256
+            or child["record_binding_sha256"] != record.binding_sha256
+            or child["attempt_sha256"] != canonical_json_sha256({"operation_key": operation_key})
+        ):
+            raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
+        if result.get("retained_upgrade_logs") is not None and (
+            mode != "observe"
+            or not inspect_capture
+            or self.request.action != "execute"
+            or record.state != "prepared"
+            or result["completed"] is not False
+        ):
+            raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
+        if child is not None or result.get("retained_upgrade_logs") is not None:
+            result["diagnostics_private"] = True
         return result
 
     def refusal_response(self, result: dict[str, object]) -> dict[str, object]:

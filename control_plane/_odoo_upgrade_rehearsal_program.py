@@ -10,11 +10,13 @@ from control_plane._odoo_rehearsal_attachment_validation import (
     ATTACHMENT_VALIDATION_PROGRAM,
 )
 from control_plane._odoo_rehearsal_capture_comparison import REHEARSAL_CAPTURE_COMPARISON_LIBRARY
+from control_plane._odoo_rehearsal_diagnostics import REHEARSAL_DIAGNOSTICS_LIBRARY
 
 ODOO_UPGRADE_REHEARSAL_PROGRAM = (
     REHEARSAL_SOURCE_READER_LIBRARY
     + REHEARSAL_CAPTURE_COMPARISON_LIBRARY
     + ATTACHMENT_MISMATCH_LIBRARY
+    + REHEARSAL_DIAGNOSTICS_LIBRARY
     + "\nATTACHMENT_VALIDATION_PROGRAM = "
     + repr(ATTACHMENT_VALIDATION_PROGRAM)
     + "\n"
@@ -38,14 +40,17 @@ from datetime import datetime, timezone
 
 
 class RehearsalCommandFailure(RuntimeError):
-    pass
+    def __init__(self, diagnostic=None):
+        self.diagnostic=diagnostic
+        super().__init__('Rehearsal command failed; preserve its private custody')
 
 
 def command(arguments, *, stdin=None, stdout=None, environment=None):
     result = subprocess.run(arguments, input=stdin, stdout=stdout or subprocess.PIPE,
         stderr=subprocess.PIPE, env=environment, check=False)
     if result.returncode:
-        raise RehearsalCommandFailure('Rehearsal command failed; preserve its private custody')
+        diagnostic=command_diagnostic(arguments,result,environment)
+        raise RehearsalCommandFailure(diagnostic)
     return result.stdout if stdout is None else b''
 
 
@@ -69,21 +74,36 @@ def digest(path):
 
 
 def bounded_capture(arguments,path,bound):
-    process=subprocess.Popen(arguments,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
+    process=subprocess.Popen(arguments,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+    errors=b''
     try:
         size=0
         with path.open('xb') as output:
             os.chmod(path,0o600)
-            while True:
-                chunk=process.stdout.read(1024*1024)
-                if not chunk: break
-                size+=len(chunk)
-                if size>bound: raise RuntimeError('Source copy exceeds its reviewed storage bound')
-                output.write(chunk)
-        if process.wait(timeout=30) or not size:
+            with selectors.DefaultSelector() as selector:
+                selector.register(process.stdout,selectors.EVENT_READ,'capture')
+                selector.register(process.stderr,selectors.EVENT_READ,'error')
+                while selector.get_map():
+                    for event,_ in selector.select():
+                        chunk=os.read(event.fd,65536)
+                        if not chunk:
+                            selector.unregister(event.fileobj)
+                        elif event.data=='error':
+                            errors=(errors+chunk)[-65536:]
+                        else:
+                            size+=len(chunk)
+                            if size>bound: raise RuntimeError('Source copy exceeds its reviewed storage bound')
+                            output.write(chunk)
+        status=process.wait(timeout=30)
+        if status:
+            diagnostic=command_diagnostic(arguments,subprocess.CompletedProcess(
+                arguments,status,stdout=b'',stderr=errors),None)
+            raise RehearsalCommandFailure(diagnostic)
+        if not size:
             raise RuntimeError('Incomplete source copy')
     finally:
         process.stdout.close()
+        process.stderr.close()
         if process.poll() is None:
             process.terminate()
             try: process.wait(timeout=15)
@@ -482,7 +502,7 @@ def observe(spec, root, receipt, lock_held=False):
         if not (root/(action+'.started')).exists():
             refused=read_refusal(spec,root)
             if refused is not None:
-                print('rehearsal_result='+json.dumps(refused).encode().hex())
+                emit_rehearsal_result(refused)
                 return
         copies=[]
         for database in database_names(spec).values():
@@ -509,6 +529,22 @@ def observe(spec, root, receipt, lock_held=False):
             'prepare_not_started':prepare_not_started,
             'custody':custody_observation(spec,root,action)}
         custody=result['custody']
+        if lock_held and spec.get('inspect_capture') is True and custody['effect_started']:
+            failure=read_command_failure(spec,root)
+            if failure is not None:
+                result['child_failure']=failure
+            names=database_names(spec)
+            if (action=='execute' and record['state']=='prepared'
+                    and {copy['database'] for copy in copies}=={names['source']}):
+                try:
+                    containers=inspection(spec,names['upgrade'],spec['target_image'])
+                    if containers['web'][1].get('State',{}).get('Running') is not False:
+                        raise RuntimeError('Failed upgrade writer is active')
+                    result['retained_upgrade_logs']=retained_upgrade_logs(spec,containers,root)
+                except (RuntimeError,OSError,ValueError,KeyError):
+                    result['retained_upgrade_logs_unavailable']=True
+            if result.get('child_failure') is not None or result.get('retained_upgrade_logs') is not None:
+                result['diagnostics_private']=True
         mismatch=None
         if (lock_held and spec.get('inspect_capture') is True and action=='execute'
                 and record['state']=='prepared' and not copies and custody['effect_started']):
@@ -526,7 +562,7 @@ def observe(spec, root, receipt, lock_held=False):
                 result['capture_attachment_validation']=capture_attachment_observation(spec,root,result)
             except RehearsalCommandFailure:
                 result['capture_attachment_validation']='runtime_unavailable'
-        print('rehearsal_result='+json.dumps(result).encode().hex())
+        emit_rehearsal_result(result)
         return
     result=json.loads(receipt.read_text())
     if result['intent_sha256']!=record['intent_sha256']:
@@ -542,11 +578,13 @@ def observe(spec, root, receipt, lock_held=False):
             raise RuntimeError('Rehearsal runtime retirement is not observed')
     elif observed_state in {'upgraded','switched'}:
         private_health(spec,containers)
-    print('rehearsal_result='+json.dumps(result).encode().hex())
+    emit_rehearsal_result(result)
     return
 
 
 def main():
+    global COMMAND_FAILURE_CONTEXT
+    COMMAND_FAILURE_CONTEXT=None
     spec=json.loads(base64.b64decode(sys.argv[1],validate=True))
     record=spec['record']
     namespace=record['rehearsal_id']
@@ -573,14 +611,14 @@ def main():
                 try:
                     fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
                 except BlockingIOError:
-                    print('rehearsal_result='+json.dumps({
-                        'intent_sha256':record['intent_sha256'],'host_busy':True}).encode().hex())
+                    emit_rehearsal_result({
+                        'intent_sha256':record['intent_sha256'],'host_busy':True})
                 else:
                     observe(spec,root,receipt,lock_held=True)
         return
     root.mkdir(mode=0o700,parents=True,exist_ok=True)
     os.chmod(root,0o700)
-    with (root/'.execution.lock').open('a') as lock:
+    with (root/'.execution.lock').open('a') as lock,command_failure_scope(spec,root):
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         if receipt.exists():
             raise RuntimeError('Completed effect requires observation, never replay')
@@ -588,7 +626,7 @@ def main():
             raise RuntimeError('Uncertain original effect retains its custody')
         refused=read_refusal(spec,root)
         if refused is not None:
-            print('rehearsal_result='+json.dumps(refused).encode().hex())
+            emit_rehearsal_result(refused)
             return
         started=time.monotonic()
         spec['phase_elapsed']={}
@@ -642,7 +680,7 @@ def main():
                 finally:
                     os.close(descriptor)
                 result=refusal_result(spec,code)
-                print('rehearsal_result='+json.dumps(result).encode().hex())
+                emit_rehearsal_result(result)
                 return
             (root/(action+'.started')).touch(mode=0o600)
             copies=list(record['copies'])
@@ -700,7 +738,7 @@ def main():
         result={'intent_sha256':record['intent_sha256'],'state':state,'copies':copies,'elapsed_seconds':elapsed,
             'resources_preserved':True,'public_route':False,'business_host_frozen':False}
         save(receipt,result)
-        print('rehearsal_result='+json.dumps(result).encode().hex())
+        emit_rehearsal_result(result)
 
 main()
 """
