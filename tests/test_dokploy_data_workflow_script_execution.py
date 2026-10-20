@@ -400,7 +400,7 @@ def _render_script(
         policies=policies or _policies(),
     )
     with (
-        patch("control_plane.dokploy.api._read_schedule_deployments", return_value=[]),
+        patch("control_plane.dokploy.api.read_dokploy_schedule_baseline", return_value=[]),
         patch(
             "control_plane.dokploy.api.fetch_dokploy_target_payload",
             return_value={
@@ -424,7 +424,6 @@ def _render_script(
         patch(
             "control_plane.dokploy.api.latest_deployment_for_schedule",
             side_effect=(
-                {"deploymentId": "schedule-before"},
                 {
                     "deploymentId": "schedule-after",
                     "logs": [
@@ -486,7 +485,7 @@ def _render_post_deploy_script(
         policies=policies or _policies(),
     )
     with (
-        patch("control_plane.dokploy.api._read_schedule_deployments", return_value=[]),
+        patch("control_plane.dokploy.api.read_dokploy_schedule_baseline", return_value=[]),
         patch(
             "control_plane.dokploy.api.fetch_dokploy_target_payload",
             return_value={
@@ -522,7 +521,6 @@ def _render_post_deploy_script(
         patch(
             "control_plane.dokploy.api.latest_deployment_for_schedule",
             side_effect=(
-                {"deploymentId": "schedule-before"},
                 {
                     "deploymentId": "schedule-after",
                     "logs": [

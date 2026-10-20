@@ -10,7 +10,7 @@ def _run_restore(log_lines: tuple[str, ...]) -> dict[str, str]:
         context="opw", instance="testing", target_id="compose-123", target_name="opw-testing"
     )
     with (
-        patch("control_plane.dokploy.api._read_schedule_deployments", return_value=[]),
+        patch("control_plane.dokploy.api.read_dokploy_schedule_baseline", return_value=[]),
         patch(
             "control_plane.dokploy.api.fetch_dokploy_target_payload",
             return_value={

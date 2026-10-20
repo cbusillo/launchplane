@@ -4109,7 +4109,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             return {"scheduleId": "fixture-restore"}
 
         with (
-            patch("control_plane.dokploy.api._read_schedule_deployments", return_value=[]),
+            patch("control_plane.dokploy.api.read_dokploy_schedule_baseline", return_value=[]),
             patch("control_plane.dokploy.api.dokploy_request") as trigger,
         ):
             with self.assertRaises(DurableOperationAuthorizationDeniedError) as caught:

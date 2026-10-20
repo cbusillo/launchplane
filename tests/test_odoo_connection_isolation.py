@@ -111,12 +111,12 @@ class ConnectionIsolationTests(unittest.TestCase):
             context="example", instance="testing", target_type="compose", target_id="fixture"
         )
         with (
-            patch("control_plane.dokploy.api._read_schedule_deployments", return_value=[]),
+            patch("control_plane.dokploy.api.read_dokploy_schedule_baseline", return_value=[]),
             patch.object(api, "upsert_dokploy_schedule", return_value={"scheduleId": "fixture"}),
             patch.object(
                 api,
-                "latest_deployment_for_schedule",
-                side_effect=[None, {"deploymentId": "failed-fixture", "status": "error"}],
+                "_read_schedule_deployments",
+                return_value=[{"deploymentId": "failed-fixture", "status": "error"}],
             ),
             patch.object(
                 api,
@@ -160,6 +160,8 @@ class ConnectionIsolationTests(unittest.TestCase):
             context="example", instance="testing", target_type="compose", target_id="fixture"
         )
         with (
+            patch.object(api, "read_dokploy_schedule_baseline", return_value=[]),
+            patch.object(api, "_read_schedule_deployments", return_value=[]),
             patch.object(
                 api, "upsert_dokploy_schedule", return_value={"scheduleId": "schedule-fixture"}
             ),

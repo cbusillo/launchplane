@@ -1104,12 +1104,28 @@ class ScheduleTriggerGuardOptions(ScheduleMutationGuardOptions, total=False):
     trigger_timeout_seconds: int
 
 
+def read_dokploy_schedule_baseline(*, host: str, token: str, schedule_id: str) -> list[JsonObject]:
+    """Read the full known history before any trigger checkpoint or dispatch."""
+    try:
+        return _read_schedule_deployments(host=host, token=token, schedule_id=schedule_id)
+    except click.ClickException as error:
+        raise DokployScheduleExecutionFailed(
+            schedule_id=schedule_id,
+            deployment_id="",
+            deployment_status="not_started",
+            cause="trigger_baseline_unavailable",
+            provider_detail=_bounded_provider_detail(
+                f"Pre-trigger deployment baseline failed: {error.message} The trigger was not sent."
+            ),
+        ) from error
+
+
 def trigger_dokploy_schedule_and_wait(
     *,
     host: str,
     token: str,
     schedule_id: str,
-    before_key: str,
+    baseline: list[JsonObject],
     execution_timeout_seconds: int,
     trigger_timeout_seconds: int = DEFAULT_DOKPLOY_SCHEDULE_TRIGGER_TIMEOUT_SECONDS,
     readback_grace_seconds: float = _DOKPLOY_SCHEDULE_READBACK_GRACE_SECONDS,
@@ -1130,20 +1146,8 @@ def trigger_dokploy_schedule_and_wait(
     """
     if execution_timeout_seconds < 1:
         raise ValueError("Dokploy schedule execution timeout must be positive.")
-    try:
-        baseline = _read_schedule_deployments(host=host, token=token, schedule_id=schedule_id)
-    except click.ClickException as error:
-        raise DokployScheduleExecutionFailed(
-            schedule_id=schedule_id,
-            deployment_id="",
-            deployment_status="not_started",
-            cause="trigger_baseline_unavailable",
-            provider_detail=_bounded_provider_detail(
-                f"Pre-trigger deployment baseline failed: {error.message} The trigger was not sent."
-            ),
-        ) from error
-    before_keys = {deployment_key(item) for item in baseline} | {before_key}
-    before_key = deployment_key(_latest_deployment_from_list(baseline)) or before_key
+    before_keys = {deployment_key(item) for item in baseline}
+    before_key = deployment_key(_latest_deployment_from_list(baseline))
     started_monotonic = time.monotonic()
     trigger_started_at = time.time()
     try:
@@ -1400,12 +1404,12 @@ def run_dokploy_schedule(
     provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
     before_trigger: Callable[[], None] | None = None,
 ) -> str:
-    latest_before = latest_deployment_for_schedule(
+    baseline = read_dokploy_schedule_baseline(
         host=host,
         token=token,
         schedule_id=schedule_id,
     )
-    before_key = deployment_key(latest_before)
+    before_keys = {deployment_key(item) for item in baseline}
     trigger_admitted = False
 
     def admit_trigger() -> None:
@@ -1426,7 +1430,7 @@ def run_dokploy_schedule(
             host=host,
             token=token,
             schedule_id=schedule_id,
-            before_key=before_key,
+            baseline=baseline,
             execution_timeout_seconds=timeout_seconds,
             **dispatch,
         )
@@ -1442,11 +1446,13 @@ def run_dokploy_schedule(
             provider_detail=error.provider_detail,
         ) from error
     except DokployRequestFailed as error:
+        if not trigger_admitted:
+            raise
         deployment = _latest_new_schedule_deployment(
             host=host,
             token=token,
             schedule_id=schedule_id,
-            before_key=before_key,
+            before_keys=before_keys,
         )
         cause = "remote_command_exit" if error.remote_command_failed else "trigger_request_failed"
         raise _schedule_execution_failure(
@@ -1462,7 +1468,7 @@ def run_dokploy_schedule(
             host=host,
             token=token,
             schedule_id=schedule_id,
-            before_key=before_key,
+            before_keys=before_keys,
         )
         if deployment_key(deployment) != error.deployment_id:
             deployment = {
@@ -1484,7 +1490,7 @@ def run_dokploy_schedule(
             host=host,
             token=token,
             schedule_id=schedule_id,
-            before_key=before_key,
+            before_keys=before_keys,
         )
         raise _schedule_execution_failure(
             host=host,
@@ -1501,20 +1507,19 @@ def _latest_new_schedule_deployment(
     host: str,
     token: str,
     schedule_id: str,
-    before_key: str,
+    before_keys: set[str],
 ) -> JsonObject | None:
     try:
-        deployment = latest_deployment_for_schedule(
+        deployments = _read_schedule_deployments(
             host=host,
             token=token,
             schedule_id=schedule_id,
         )
     except click.ClickException:
         return None
-    deployment_id = deployment_key(deployment)
-    if not deployment_id or deployment_id == before_key:
-        return None
-    return deployment
+    return _latest_deployment_from_list(
+        [item for item in deployments if deployment_key(item) not in before_keys]
+    )
 
 
 def _schedule_execution_failure(

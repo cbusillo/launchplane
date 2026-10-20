@@ -1145,7 +1145,7 @@ def run_compose_odoo_stable_bootstrap(
         raise click.ClickException(
             f"Dokploy Odoo bootstrap schedule for {target_definition.context}/{target_definition.instance} did not expose a schedule id."
         )
-    latest_schedule_deployment = api.latest_deployment_for_schedule(
+    schedule_baseline = api.read_dokploy_schedule_baseline(
         host=host,
         token=token,
         schedule_id=schedule_id,
@@ -1155,7 +1155,7 @@ def run_compose_odoo_stable_bootstrap(
             host=host,
             token=token,
             schedule_id=schedule_id,
-            before_key=api.deployment_key(latest_schedule_deployment),
+            baseline=schedule_baseline,
             execution_timeout_seconds=schedule_timeout_seconds,
         )
     )
@@ -1274,7 +1274,7 @@ def run_compose_odoo_backup_gate(
         raise click.ClickException(
             f"Dokploy Odoo backup gate schedule for {target_definition.context}/{target_definition.instance} did not expose a schedule id."
         )
-    latest_schedule_deployment = api.latest_deployment_for_schedule(
+    schedule_baseline = api.read_dokploy_schedule_baseline(
         host=host,
         token=token,
         schedule_id=schedule_id,
@@ -1283,7 +1283,7 @@ def run_compose_odoo_backup_gate(
         host=host,
         token=token,
         schedule_id=schedule_id,
-        before_key=api.deployment_key(latest_schedule_deployment),
+        baseline=schedule_baseline,
         execution_timeout_seconds=schedule_timeout_seconds,
         before_trigger=(lambda: before_provider_mutation("backup_schedule_trigger"))
         if before_provider_mutation
@@ -1415,7 +1415,7 @@ def run_compose_odoo_backup_verification(
     schedule_id = api.schedule_key(schedule)
     if not schedule_id:
         raise click.ClickException("Dokploy Odoo backup verification schedule has no schedule id.")
-    latest_schedule_deployment = api.latest_deployment_for_schedule(
+    schedule_baseline = api.read_dokploy_schedule_baseline(
         host=host,
         token=token,
         schedule_id=schedule_id,
@@ -1424,7 +1424,7 @@ def run_compose_odoo_backup_verification(
         host=host,
         token=token,
         schedule_id=schedule_id,
-        before_key=api.deployment_key(latest_schedule_deployment),
+        baseline=schedule_baseline,
         execution_timeout_seconds=schedule_timeout_seconds,
         before_trigger=(lambda: before_provider_mutation("backup_verification_schedule_trigger"))
         if before_provider_mutation
@@ -2298,7 +2298,7 @@ def _run_compose_odoo_backup_restore_phase(
     schedule_id = api.schedule_key(schedule)
     if not schedule_id:
         raise click.ClickException(f"Dokploy Odoo backup restore {phase} schedule has no id.")
-    latest_schedule_deployment = api.latest_deployment_for_schedule(
+    schedule_baseline = api.read_dokploy_schedule_baseline(
         host=host,
         token=token,
         schedule_id=schedule_id,
@@ -2307,7 +2307,7 @@ def _run_compose_odoo_backup_restore_phase(
         host=host,
         token=token,
         schedule_id=schedule_id,
-        before_key=api.deployment_key(latest_schedule_deployment),
+        baseline=schedule_baseline,
         execution_timeout_seconds=schedule_timeout_seconds,
         before_trigger=(lambda: before_provider_mutation(f"{phase}_schedule_trigger"))
         if before_provider_mutation

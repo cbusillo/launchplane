@@ -53,6 +53,7 @@ class FakeProvider:
         self._baseline = baseline
         self.trigger_calls: list[int | float] = []
         self.list_calls = 0
+        self.baseline_calls = 0
 
     def request(self, **kwargs: object) -> JsonValue:
         path = kwargs["path"]
@@ -61,6 +62,7 @@ class FakeProvider:
             return self._trigger()
         if path == LIST_PATH:
             if not self.trigger_calls:
+                self.baseline_calls += 1
                 return self._baseline()
             listing = self._listings[min(self.list_calls, len(self._listings) - 1)]
             self.list_calls += 1
@@ -94,7 +96,9 @@ def _run(provider: FakeProvider, *, execution_timeout_seconds: int = 7200) -> st
             host="https://dokploy.example.com",
             token="secret-token",
             schedule_id=SCHEDULE_ID,
-            before_key="deployment-before",
+            baseline=dokploy_api.read_dokploy_schedule_baseline(
+                host="https://dokploy.example.com", token="fixture", schedule_id=SCHEDULE_ID
+            ),
             execution_timeout_seconds=execution_timeout_seconds,
             readback_grace_seconds=0,
             readback_interval_seconds=0,
@@ -145,7 +149,11 @@ class ScheduleTriggerTests(unittest.TestCase):
                             host="https://provider.invalid",
                             token="fixture",
                             schedule_id=SCHEDULE_ID,
-                            before_key="deployment-before",
+                            baseline=dokploy_api.read_dokploy_schedule_baseline(
+                                host="https://dokploy.example.com",
+                                token="fixture",
+                                schedule_id=SCHEDULE_ID,
+                            ),
                             execution_timeout_seconds=60,
                             readback_grace_seconds=0,
                             before_trigger=checkpoint,
@@ -526,6 +534,7 @@ class GuardedScheduleDispatchTests(unittest.TestCase):
         self.assertEqual(len(provider.trigger_calls), 1)
         self.assertLess(provider.trigger_calls[0], 600)
         self.assertFalse(guarded)
+        self.assertEqual(provider.baseline_calls, 1)
 
 
 if __name__ == "__main__":
