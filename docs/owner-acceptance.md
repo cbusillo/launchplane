@@ -235,3 +235,32 @@ by this code deletion.
 The `product-owner-policy`, change-impact, manager/delegate, and ordinary-agent
 machinery still have separate remaining deletion work under [DIRECTION.md](../DIRECTION.md).
 Their historical presence grants no authority to the current review flows.
+
+## Withdrawing a pending request
+
+When the Director records a decision to reroute a change as engineering, use
+`POST /v1/product-review/withdrawal` through the bounded write-action helper's
+`product-review-withdrawal-dry-run`, `product-review-withdrawal-apply` and
+`product-review-withdrawal-readback` commands. Do not remove the review label by
+hand. Supply the product, repository, PR number, exact current head, a reason,
+and the recorded Director-decision comment URL. The authenticated Director
+agent or admin attests that the citation records that decision; a citation is
+not a Client decision or an authorization grant. Apply requires the reviewed
+plan digest and an original idempotency key. The helper binds saved dry-run
+evidence and follows apply with service readback.
+
+The service serializes with Client decision saves and refuses withdrawal if
+any Client decision for this product already names the current head. It
+removes only the product's configured review label, confirms the removal,
+and adds a withdrawal entry to the PR history. Its durable operation retains
+the actor, head, reason and Director-decision citation. An uncertain response
+keeps the same request, digest and key; read back before recovery. Recovery can
+finish undelivered history after the label is absent, but never removes a label
+again. A completed-key replay returns its original receipt; readback reports
+whether it still matches current state.
+
+Withdrawal records no acceptance or rejection, changes no saved Client decision,
+and changes no release acceptance. It does not rewrite test notes or publish a
+successful Client-review check. Set truthful engineering notes separately; real
+test notes or a later review label request review normally, including on the
+same head. The normal preview reconciler refreshes the check after those edits.

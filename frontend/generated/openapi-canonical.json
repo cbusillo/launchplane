@@ -44826,6 +44826,68 @@
         "title": "RestartContainerIdentity",
         "type": "object"
       },
+      "ReviewWithdrawalRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "director_decision_url": {
+            "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/(?:issues|pull)/[1-9][0-9]*#issuecomment-[1-9][0-9]*$",
+            "title": "Director Decision Url",
+            "type": "string"
+          },
+          "expected_head_sha": {
+            "pattern": "^[0-9a-f]{40}$",
+            "title": "Expected Head Sha",
+            "type": "string"
+          },
+          "mode": {
+            "default": "dry-run",
+            "enum": [
+              "dry-run",
+              "apply",
+              "readback"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "product": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Product",
+            "type": "string"
+          },
+          "pull_request": {
+            "minimum": 1.0,
+            "title": "Pull Request",
+            "type": "integer"
+          },
+          "reason": {
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "repository": {
+            "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+            "title": "Repository",
+            "type": "string"
+          },
+          "reviewed_plan_sha256": {
+            "default": "",
+            "title": "Reviewed Plan Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "repository",
+          "pull_request",
+          "expected_head_sha",
+          "reason",
+          "director_decision_url"
+        ],
+        "title": "ReviewWithdrawalRequest",
+        "type": "object"
+      },
       "RollbackExecutionEvidence": {
         "additionalProperties": false,
         "properties": {
@@ -88538,6 +88600,116 @@
         "tags": [
           "product-review"
         ]
+      }
+    },
+    "/v1/product-review/withdrawal": {
+      "post": {
+        "operationId": "withdraw_product_review",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReviewWithdrawalRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Withdraw one pending Client review request on a recorded Director decision"
       }
     },
     "/v1/production-backup-authority": {

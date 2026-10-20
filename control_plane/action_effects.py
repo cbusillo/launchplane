@@ -220,6 +220,9 @@ ACTION_DECLARATIONS: Mapping[str, ActionDeclaration] = MappingProxyType(
         "product_profile.preview_tls.apply": ActionDeclaration("write"),
         "product_profile.read": ActionDeclaration("read"),
         "product_profile.write": ActionDeclaration("write"),
+        # A pending-request withdrawal records the Director's routing decision.
+        # It cannot replace a Client decision, accept a release or change access.
+        "product_review.withdraw": ActionDeclaration("write", director_agent_write=True),
         "product_retirement.apply": ActionDeclaration("write"),
         "product_retirement.plan": ActionDeclaration("write"),
         "production_backup_authority.read": ActionDeclaration("read"),
