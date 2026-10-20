@@ -146,7 +146,6 @@ TESTING_COPY_RUNNER = (
 import logging
 import os
 from pathlib import Path
-import shlex
 import subprocess
 import sys
 sys.path.insert(0, '/volumes/scripts')
@@ -167,14 +166,40 @@ os.environ["NO_SANITIZE"] = "false"
 
 
 class CopyRunner(OdooDataWorkflowRunner):
+    _rehearsal_logging_arguments = ("--logfile=/dev/stderr", "--log-level=error", "--log-handler=:ERROR")
+
+    def _rehearsal_command(self, invoke, *arguments):
+        try:
+            return invoke(*arguments)
+        except Exception as error:
+            if expected_copy_instance == "rehearsal":
+                cause = error
+                while cause is not None:
+                    if isinstance(cause, subprocess.CalledProcessError):
+                        # Keep the bounded tail for Odoo's own exception, not
+                        # repeated argv and the artifact wrapper's chain.
+                        raise RuntimeError(f"Odoo command exited {cause.returncode}") from None
+                    cause = cause.__cause__
+            raise
+
     def run_command(self, command):
         if expected_copy_instance == "rehearsal":
-            arguments = shlex.split(command)
+            arguments = command.split(None, 2)
             if arguments[:1] == ["/odoo/odoo-bin"] or arguments[:2] == ["/venv/bin/python", "/odoo/odoo-bin"]:
                 # Config-directed logging must not hide the upgrade exception
                 # from the host's bounded, private original-operation receipt.
-                command += " --logfile=/dev/stderr --log-level=error --log-handler=:ERROR"
+                command += " " + " ".join(self._rehearsal_logging_arguments)
+                return self._rehearsal_command(super().run_command, command)
         return super().run_command(command)
+
+    def _odoo_shell_command(self):
+        command = super()._odoo_shell_command()
+        if expected_copy_instance == "rehearsal":
+            command += list(self._rehearsal_logging_arguments)
+        return command
+
+    def _run_odoo_shell(self, script, label):
+        return self._rehearsal_command(super()._run_odoo_shell, script, label)
 
     def overwrite_filestore(self, target_owner):
         # Host capture has already staged the fresh local filestore. No SSH key

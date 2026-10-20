@@ -2855,8 +2855,10 @@ that an event belongs to the original apply. The event projection withholds
 provider prose. A failed rehearsal child preserves `child_failure` in private host
 custody: the failing step, nonzero exit status and bounded redacted child output.
 The rehearsal copy runner sends each Odoo CLI command's error logging to its own
-stderr, overriding config-directed files and log levels. This makes the upgrade
-process's exception available to that same bounded receipt; container endpoint
+stderr, overriding config-directed files and log levels. This includes registry
+startup in post-upgrade Odoo shell steps. Only errors are requested, and failed
+command wrappers are terse so repeated arguments cannot displace the Odoo tail.
+This makes the upgrade process's exception available to that same bounded receipt; container endpoint
 logs alone do not retain a separate exec process's output. Ordinary testing copy
 commands keep their artifact's logging behavior. This cannot reconstruct output
 discarded by a historical execution, and absence of an exception remains unknown.

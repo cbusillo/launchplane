@@ -1767,21 +1767,44 @@ raise SystemExit(255)
 """)
         harness = f"""import shlex, subprocess, sys
 expected_copy_instance = 'rehearsal'
+class OdooRestorerError(Exception):
+    pass
 class OdooDataWorkflowRunner:
     def run_command(self, command):
-        subprocess.run([sys.executable, {str(child)!r}, *shlex.split(command)[1:]], check=True)
+        try:
+            subprocess.run([sys.executable, {str(child)!r}, *shlex.split(command)[1:]], check=True)
+        except subprocess.CalledProcessError as error:
+            raise OdooRestorerError(f'Command failed: {{command}}\\nError: {{error}}') from error
+    def _odoo_shell_command(self):
+        return ['/odoo/odoo-bin', 'shell', '--config', '/volumes/config/_generated.conf']
+    def _run_odoo_shell(self, script, label):
+        try:
+            subprocess.run([sys.executable, {str(child)!r}, *self._odoo_shell_command()[1:]], check=True)
+        except subprocess.CalledProcessError as error:
+            raise OdooRestorerError(f'Failed to execute Odoo shell for {{label}}') from error
 {ast.unparse(runner_class)}
-CopyRunner().run_command('/odoo/odoo-bin --stop-after-init --update all')
+print('testing_copy_pre_registry_sanitized=true', flush=True)
+if sys.argv[1] == 'upgrade':
+    CopyRunner().run_command('/odoo/odoo-bin --stop-after-init --update all --upgrade-path /opt/openupgrade_scripts/scripts,/opt/project/openupgrade,/opt/extra_addons/openupgrade --addons-path /opt/launchplane/addons,/opt/project/addons,/opt/extra_addons,/odoo/addons,/odoo/odoo/addons --db_host database --db_port 5432 --db_user odoo --database lp_rehearsal_fixture_upgrade --config /volumes/config/_generated.conf')
+else:
+    CopyRunner()._run_odoo_shell('fixture', 'settings')
 """
-        with self.assertRaises(self.host["RehearsalCommandFailure"]):
-            with self.host["command_failure_scope"](spec, root):
-                self.host["command"]([sys.executable, "-c", harness])
-        failure = self.host["read_command_failure"](spec, root)
-        self.assertIn("RuntimeError: synthetic upgrade failed", failure["error_text"])
-        self.assertNotIn("synthetic-private-value", str(failure))
-        self.assertLessEqual(len(failure["error_text"].encode()), REHEARSAL_DIAGNOSTIC_TEXT_LIMIT)
-        self.assertEqual(failure["attempt_sha256"], spec["attempt_sha256"])
-        self.assertEqual(failure["record_binding_sha256"], spec["record_binding_sha256"])
+        for phase in ("upgrade", "shell"):
+            with self.subTest(phase=phase):
+                custody = root / phase
+                custody.mkdir()
+                (custody / "execute.started").touch()
+                with self.assertRaises(self.host["RehearsalCommandFailure"]):
+                    with self.host["command_failure_scope"](spec, custody):
+                        self.host["command"]([sys.executable, "-c", harness, phase])
+                failure = self.host["read_command_failure"](spec, custody)
+                self.assertIn("RuntimeError: synthetic upgrade failed", failure["error_text"])
+                self.assertNotIn("synthetic-private-value", str(failure))
+                self.assertLessEqual(
+                    len(failure["error_text"].encode()), REHEARSAL_DIAGNOSTIC_TEXT_LIMIT
+                )
+                self.assertEqual(failure["attempt_sha256"], spec["attempt_sha256"])
+                self.assertEqual(failure["record_binding_sha256"], spec["record_binding_sha256"])
 
     def test_persistence_refusals_keep_bound_child_in_existing_job_output(self) -> None:
         import errno
