@@ -544,9 +544,12 @@ service user, and within the approved root. Existing runner entries, including
 dangling symlinks, are refused rather than adopted or overwritten. Valid absent
 roots remain supported without privileged ownership changes.
 
-Registration prepares the verified directory before acquiring its short-lived
-GitHub token. It repeats the shared registration/retirement identity checks
-before extraction, after extraction, and before configuration, and extracts and
+Registration validates the target without filesystem writes before acquiring its
+short-lived GitHub token, then repeats that validation before creating directories.
+A token-acquisition failure therefore leaves an absent root and lane absent, so
+the next dispatch can retry. Registration repeats the shared registration/retirement
+identity checks before and after extraction, before configuration, before service
+start, and before completed audit publication. It extracts and
 configures from a verified physical working directory. A detected path change
 fails the operation; these boundary checks are not a guarantee against arbitrary
 concurrent filesystem replacement. Failed command evidence redacts the known

@@ -152,14 +152,17 @@ def execute_runner_lane_registration_executor(
     post_inventory: RunnerLaneInventory | None = None
     try:
         _validate_runner_package_url_for_create(request)
-        _prepare_runner_directory(request=request, remote_runner=remote_runner)
+        _verify_registration_target(request=request, remote_runner=remote_runner)
         token, token_record = token_fetcher.fetch_registration_token(repository=request.repository)
+        _prepare_runner_directory(request=request, remote_runner=remote_runner)
         _configure_runner(request=request, token=token, remote_runner=remote_runner)
+        _verify_prepared_runner_directory(request=request, remote_runner=remote_runner)
         _start_supervised_runner(request=request, remote_runner=remote_runner)
         post_inventory = _read_verified_post_inventory(
             request=request,
             inventory_reader=inventory_reader,
         )
+        _verify_prepared_runner_directory(request=request, remote_runner=remote_runner)
     except Exception as error:  # noqa: BLE001 - convert any adapter failure into audit evidence.
         failure_message = _failure_message(error)
         terminal_audit = RunnerLaneRegistrationAuditRecord(
@@ -259,34 +262,68 @@ def runner_directory_identity_checks() -> tuple[str, ...]:
     )
 
 
+def _registration_target_checks() -> tuple[str, ...]:
+    return (
+        'runner_dir="$RUNNER_DIRECTORY"',
+        'registration_root="$RUNNER_REGISTRATION_ROOT"',
+        'if [ -e "$runner_dir" ] || [ -L "$runner_dir" ]; then',
+        '  echo "runner directory already exists" >&2',
+        "  exit 1",
+        "fi",
+        'existing_ancestor="$registration_root"',
+        'while [ ! -e "$existing_ancestor" ]; do',
+        '  test ! -L "$existing_ancestor"',
+        '  existing_ancestor="${existing_ancestor%/*}"',
+        '  if [ -z "$existing_ancestor" ]; then existing_ancestor=/; fi',
+        "done",
+        'test -d "$existing_ancestor"',
+        'test ! -L "$existing_ancestor"',
+        'test "$(realpath -e "$existing_ancestor")" = "$existing_ancestor"',
+        'if [ -e "$registration_root" ]; then',
+        *_registration_root_identity_checks(),
+        "fi",
+    )
+
+
+def _verify_registration_target(
+    *,
+    request: RunnerLaneRegistrationExecutorRequest,
+    remote_runner: RemoteCommandRunner,
+) -> None:
+    _run_registration_command(
+        step="verify registration target",
+        command=("sh", "-eu", "-c", "\n".join(_registration_target_checks())),
+        request=request,
+        remote_runner=remote_runner,
+    )
+
+
+def _verify_prepared_runner_directory(
+    *,
+    request: RunnerLaneRegistrationExecutorRequest,
+    remote_runner: RemoteCommandRunner,
+) -> None:
+    _run_registration_command(
+        step="verify prepared runner directory",
+        command=("sh", "-eu", "-c", "\n".join(runner_directory_identity_checks())),
+        request=request,
+        remote_runner=remote_runner,
+    )
+
+
 def _prepare_runner_directory(
     *,
     request: RunnerLaneRegistrationExecutorRequest,
     remote_runner: RemoteCommandRunner,
 ) -> None:
-    runner_directory = _runner_directory(request)
     command = (
         "sh",
         "-eu",
         "-c",
         "\n".join(
             (
-                f"runner_dir={quote(runner_directory)}",
                 f"runner_package_url={quote(request.runner_package_url)}",
-                f"registration_root={quote(request.registration_root)}",
-                'if [ -e "$runner_dir" ] || [ -L "$runner_dir" ]; then',
-                '  echo "runner directory already exists" >&2',
-                "  exit 1",
-                "fi",
-                'existing_ancestor="$registration_root"',
-                'while [ ! -e "$existing_ancestor" ]; do',
-                '  test ! -L "$existing_ancestor"',
-                '  existing_ancestor="${existing_ancestor%/*}"',
-                '  if [ -z "$existing_ancestor" ]; then existing_ancestor=/; fi',
-                "done",
-                'test -d "$existing_ancestor"',
-                'test ! -L "$existing_ancestor"',
-                'test "$(realpath -e "$existing_ancestor")" = "$existing_ancestor"',
+                *_registration_target_checks(),
                 'if [ ! -e "$registration_root" ]; then mkdir -p "$registration_root"; fi',
                 *_registration_root_identity_checks(),
                 'mkdir "$runner_dir"',
