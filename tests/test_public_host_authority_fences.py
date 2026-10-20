@@ -8,7 +8,17 @@ import unittest
 from unittest.mock import patch
 
 from alembic import command
-from sqlalchemy import Engine, create_engine, event, insert, inspect, select, text, update
+from sqlalchemy import (
+    Connection,
+    Engine,
+    create_engine,
+    event,
+    insert,
+    inspect,
+    select,
+    text,
+    update,
+)
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
@@ -20,6 +30,9 @@ from control_plane.storage.migrations.versions import (
     e7c1d5e9a3b6_drop_retired_delivery_tables as held,
     e8d2f6a0b4c7_drop_preview_enablement as previous_release,
     e9e3a7b1c5d8_join_retirement_paths as previous_join,
+)
+from control_plane.storage.migrations.versions.f0a4c8e2b6d9_canonical_public_host_fences import (
+    PUBLIC_HOST_SCHEMA_TRANSITION_LOCK_KEY,
 )
 from control_plane.storage.postgres import LaunchplaneDokployTargetRow, PostgresRecordStore
 from control_plane.storage.product_authority_bundle import (
@@ -98,6 +111,7 @@ class PublicHostAuthorityPostgresTests(unittest.TestCase):
                             select(LaunchplaneDokployTargetRow.payload)
                         )
                     entered, release = threading.Event(), threading.Event()
+                    exclusive_at_entry: list[bool] = []
 
                     def pause() -> None:
                         entered.set()
@@ -105,18 +119,35 @@ class PublicHostAuthorityPostgresTests(unittest.TestCase):
                             raise TimeoutError("Migration writer fixture was not released")
 
                     def before_key(
-                        _connection: object,
+                        connection: Connection,
                         _cursor: object,
-                        statement: str,
+                        _statement: str,
                         _parameters: object,
                         _context: object,
                         _executemany: bool,
                     ) -> None:
-                        if (
-                            phase == "before_key"
-                            and not entered.is_set()
-                            and "SELECT launchplane_lock_public_host_authority(" in statement
-                        ):
+                        if phase != "before_key" or entered.is_set():
+                            return
+                        # Observe the real backend lock before its next statement;
+                        # a separate DBAPI cursor preserves the pending cursor and
+                        # avoids recursively invoking SQLAlchemy's event hooks.
+                        driver = connection.connection.driver_connection
+                        assert driver is not None
+                        probe = driver.cursor()
+                        try:
+                            probe.execute(
+                                "SELECT bool_or(mode = 'ShareLock' AND objsubid = 1 AND "
+                                "((classid::bigint << 32) | objid::bigint) = "
+                                "hashtextextended(%s, 0)), bool_or(mode = 'ExclusiveLock') "
+                                "FROM pg_locks WHERE pid = pg_backend_pid() "
+                                "AND granted AND locktype = 'advisory'",
+                                (PUBLIC_HOST_SCHEMA_TRANSITION_LOCK_KEY,),
+                            )
+                            observation = probe.fetchone()
+                        finally:
+                            probe.close()
+                        if observation is not None and observation[0]:
+                            exclusive_at_entry.append(bool(observation[1]))
                             pause()
 
                     def apply(_checkpoint: object) -> None:
@@ -142,6 +173,9 @@ class PublicHostAuthorityPostgresTests(unittest.TestCase):
                             )
                             try:
                                 self.assertTrue(entered.wait(10))
+                                if phase == "before_key":
+                                    self.assertTrue(exclusive_at_entry)
+                                    self.assertFalse(any(exclusive_at_entry))
                                 with self.assertRaisesRegex(RuntimeError, "busy"):
                                     migrate()
                                 with store._engine.connect() as connection:

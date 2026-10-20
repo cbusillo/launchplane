@@ -491,11 +491,20 @@ class BrowserRouteRepairTests(_BrowserRouteRepairFixture):
         self.assertEqual(current["current_domains"], review["proposed_domains"])
 
     async def test_domain_respects_retained_hostname_and_testing_custody(self) -> None:
-        with patch.object(
-            self.store, "retained_disposable_hostnames", return_value=("app.example.test",)
+        for retained in (
+            "app.example.test",
+            "APP.EXAMPLE.TEST.",
+            " \thttps://APP.EXAMPLE.TEST.:8443/path?query#fragment\n",
         ):
-            response = await self.post("/v1/dokploy-targets/setup", self.domain_payload)
-        self.assertEqual(response.status_code, 409, response.text)
+            with (
+                self.subTest(retained=retained),
+                patch.object(self.store, "retained_disposable_hostnames", return_value=(retained,)),
+            ):
+                response = await self.post("/v1/dokploy-targets/setup", self.domain_payload)
+                self.assertEqual(response.status_code, 409, response.text)
+                self.assertEqual(
+                    response.json()["error"]["code"], "domain_repair_evidence_unqualified"
+                )
         self.target = self.target.model_copy(update={"instance": "testing"})
         self.target_id = self.target_id.model_copy(
             update={"instance": "testing", "target_id": "compose-testing-custody"}

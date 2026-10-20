@@ -4991,6 +4991,10 @@ calls a provider.
 
 Deploy and qualify the [compatibility prelude](https://github.com/cbusillo/launchplane/issues/4229)
 before activating this migration.
+Merging this activation change to main triggers deployment after successful push
+CI; startup then applies the new default migration. Qualify the compatibility
+image before this activation change merges. Until that evidence exists, keep
+its source branch unopened or its PR draft/held, without ready or train enqueue.
 That separate image knows the immutable hostname/join revisions and accepts both
 the old and new supported schema states, while retaining the preview-only default
 and old comparison behavior. Verify that every earlier HTTP replica and worker has
@@ -5000,13 +5004,19 @@ does not establish this prerequisite. Earlier images reject the new revision dur
 startup migration, before HTTP starts; automatic image rollback does not downgrade
 the database. Activation must wait for actual compatibility-image qualification.
 
-Every public-host operation takes a shared transaction schema-transition lock
-before its first SQL key-function call, outside the validation savepoint, and holds
-it through provider I/O. Every checkpoint reacquires it before further effects.
+Explicit runtime public-host authority-key calls take a shared transaction
+schema-transition lock before their first explicit call, outside the validation
+savepoint, and hold it through provider I/O. Every checkpoint reacquires it before
+further effects. Prepared/validate-only and ordinary target writes can invoke the
+key function through target-table triggers; the migration's table lock excludes
+those trigger writers.
 Both migration directions first try the matching exclusive lock, then take a NOWAIT
 SHARE lock on the target table, in the same transaction as key-function replacement
-and revision recording. Contention refuses the migration without changing the schema;
-retry after writers settle. The table lock also excludes ordinary target writes,
+and revision recording. Advisory contention raises the migration's busy RuntimeError;
+target-table NOWAIT contention can instead raise a database lock error with SQLSTATE
+55P03, including contention with VACUUM/ANALYZE or autovacuum/autoanalyze. Retry after
+the conflicting activity settles; no partial schema or revision change commits.
+The table lock also excludes ordinary target writes,
 including uncommitted new contexts. Independent public-host operations can run together.
 
 The qualified compatibility image can roll back activation without schema downgrade.

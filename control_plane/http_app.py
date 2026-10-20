@@ -74,6 +74,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from requests.exceptions import RequestException
 from sqlalchemy.exc import SQLAlchemyError
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.public_hosts import retained_hostname_identity
 from control_plane.contracts.odoo_cutover import OdooCutoverPlan
 from control_plane.workflows.odoo_cutover import OdooCutoverProvider
 from control_plane import authz_grant_service as control_plane_authz_grant_service
@@ -26631,8 +26632,11 @@ def create_launchplane_fastapi_app(
                     code="domain_repair_evidence_unqualified",
                     message=str(error),
                 ) from error
-            if set(plan.repair.result.requested_domains).intersection(
-                database_store.retained_disposable_hostnames()
+            if {
+                retained_hostname_identity(host) for host in plan.repair.result.requested_domains
+            }.intersection(
+                retained_hostname_identity(host)
+                for host in database_store.retained_disposable_hostnames()
             ):
                 raise _launchplane_http_error(
                     status_code=409,
