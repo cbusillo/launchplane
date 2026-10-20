@@ -1615,6 +1615,120 @@ class RehearsalScenario(unittest.TestCase):
 
 
 class RehearsalHostSafetyTests(unittest.TestCase):
+    def test_failed_child_preserves_exit_and_redacted_error_for_readback(self) -> None:
+        import subprocess
+
+        spec, root, _ = self.storage_fixture(
+            {"database_bytes": 40, "filestore_bytes": 80, "staging_bytes": 20, "reserve_bytes": 10}
+        )
+        (root / "verify.started").touch()
+        (root / ".execution.lock").touch()
+        self.host["COMMAND_FAILURE_CONTEXT"] = (spec, root)
+        error_text = "psycopg2.errors.UndefinedColumn: column legacy_code does not exist"
+        secret = "fixture-password-do-not-export"
+        with patch.object(
+            self.host["subprocess"],
+            "run",
+            return_value=subprocess.CompletedProcess(
+                [],
+                7,
+                stdout=b"initialization stopped",
+                stderr=(error_text + "\nPASSWORD=" + secret).encode(),
+            ),
+        ):
+            with self.assertRaises(self.host["RehearsalCommandFailure"]) as failure:
+                self.host["command"](["fixture-child"])
+        diagnostic = failure.exception.diagnostic
+        self.assertEqual(
+            diagnostic["step"],
+            self.test_failed_child_preserves_exit_and_redacted_error_for_readback.__name__,
+        )
+        self.assertEqual(diagnostic["exit_status"], 7)
+        self.assertIn(error_text, diagnostic["error_text"])
+        self.assertNotIn(secret, str(diagnostic))
+        spec.update(mode="observe", inspect_capture=True)
+        observed = self.run_host(spec)
+        self.assertEqual(observed["child_failure"]["exit_status"], diagnostic["exit_status"])
+        self.assertEqual(observed["child_failure"]["error_text"], diagnostic["error_text"])
+        self.assertEqual(observed["child_failure"]["attempt_sha256"], spec["attempt_sha256"])
+        self.assertFalse(observed["completed"])
+        original = spec["attempt_sha256"]
+        spec["attempt_sha256"] = hashlib.sha256(b"another operation").hexdigest()
+        with self.assertRaises(RuntimeError):
+            self.run_host(spec)
+        spec["attempt_sha256"] = original
+        path = self.host["command_failure_path"](spec, root)
+        path.rename(root / "aliased-diagnostic")
+        path.symlink_to(root / "aliased-diagnostic")
+        with self.assertRaises(OSError):
+            self.run_host(spec)
+
+    def test_diagnostic_bounds_redact_known_secrets_and_credential_forms(self) -> None:
+        from control_plane._odoo_rehearsal_diagnostics import REHEARSAL_DIAGNOSTIC_TEXT_LIMIT
+
+        error = "ValueError: missing legacy field"
+        text = (
+            "x" * (REHEARSAL_DIAGNOSTIC_TEXT_LIMIT * 2)
+            + "\n--db_password cli-value\nPASSWORD='quoted value'\nBearer bearer-value"
+            + "\npostgresql://user:uri-value@database/name\nstandalone-known-secret\n"
+            + error
+        )
+        redacted = self.host["diagnostic_text"](text, ["standalone-known-secret"])
+        self.assertLessEqual(len(redacted), REHEARSAL_DIAGNOSTIC_TEXT_LIMIT)
+        self.assertIn(error, redacted)
+        for secret in (
+            "cli-value",
+            "quoted value",
+            "bearer-value",
+            "uri-value",
+            "standalone-known-secret",
+        ):
+            self.assertNotIn(secret, redacted)
+
+    def test_retained_logs_are_bounded_read_only_and_exclude_symlinks(self) -> None:
+        from control_plane._odoo_rehearsal_diagnostics import REHEARSAL_DIAGNOSTIC_TEXT_LIMIT
+        from subprocess import CompletedProcess
+
+        spec, root, containers = self.storage_fixture(
+            {"database_bytes": 40, "filestore_bytes": 80, "staging_bytes": 20, "reserve_bytes": 10}
+        )
+        (root / "verify.started").touch()
+        mount = next(
+            item
+            for item in containers["script-runner"][1]["Mounts"]
+            if item["Name"].endswith("-logs")
+        )
+        logs = Path(self.fixture.volumes[mount["Name"]]["Mountpoint"])
+        mount["Source"] = str(logs)
+        secret = "known-runtime-password"
+        containers["script-runner"][1]["Config"]["Env"].append("ODOO_DB_PASSWORD=" + secret)
+        path = logs / "odoo.log"
+        content = (
+            b"old output\n" * REHEARSAL_DIAGNOSTIC_TEXT_LIMIT
+            + ("RuntimeError: unknown upgrade module\n" + secret).encode()
+        )
+        path.write_bytes(content)
+        before = path.stat()
+        private = self.fixture.root / "private.log"
+        private.write_text("must never be read")
+        (logs / "alias.log").symlink_to(private)
+        with patch.object(
+            self.host["subprocess"],
+            "run",
+            return_value=CompletedProcess([], 0, b"retained runtime error"),
+        ) as read:
+            result = self.host["retained_upgrade_logs"](spec, containers, root)
+        for call in read.call_args_list:
+            self.assertEqual(call.args[0][:2], ["docker", "logs"])
+        self.assertTrue(all(log["available"] for log in result["runtime"]))
+        self.assertEqual(len(result["files"]), 1)
+        self.assertIn("RuntimeError: unknown upgrade module", result["files"][0]["tail"])
+        self.assertNotIn(secret, str(result))
+        self.assertNotIn("must never be read", str(result))
+        self.assertEqual(path.read_bytes(), content)
+        self.assertEqual(path.stat().st_mtime_ns, before.st_mtime_ns)
+        self.assertLessEqual(len(result["files"][0]["tail"]), REHEARSAL_DIAGNOSTIC_TEXT_LIMIT)
+
     @staticmethod
     def attachment_mismatch_fixture() -> dict[str, Any]:
         checksum = hashlib.sha1(b"expected attachment").hexdigest()
@@ -2638,11 +2752,11 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         self.host["capture_attachment_observation"].assert_not_called()
         spec.update(action="execute")
         spec["record"]["state"] = "prepared"
-        from types import SimpleNamespace
+        from subprocess import CompletedProcess
 
         with (
             patch.object(
-                self.host["subprocess"], "run", return_value=SimpleNamespace(returncode=1)
+                self.host["subprocess"], "run", return_value=CompletedProcess([], 1, b"", b"")
             ),
             self.assertRaises(RuntimeError) as failure,
         ):
@@ -3351,6 +3465,20 @@ class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
             "raw_source_retained": True,
             "custody": custody,
             "capture_attachment_validation": "verified",
+            "child_failure": {
+                "intent_sha256": prepared.intent_sha256,
+                "record_binding_sha256": prepared.binding_sha256,
+                "attempt_sha256": canonical_json_sha256({"operation_key": "fixture-operation"}),
+                "step": "copy_runner",
+                "exit_status": 7,
+                "error_text": "UndefinedColumn: legacy_code",
+            },
+            "retained_upgrade_logs": {
+                "files": [],
+                "runtime": [],
+                "since": datetime.now(timezone.utc).isoformat(),
+                "truncated": False,
+            },
         }
         evidence: dict[str, Any] = {
             "intent_sha256": prepared.intent_sha256,
@@ -3410,6 +3538,8 @@ class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
                     continue
                 result = response.json()["result"]
                 self.assertEqual(result["custody"], custody)
+                self.assertEqual(result["child_failure"], observed["child_failure"])
+                self.assertEqual(result["retained_upgrade_logs"], observed["retained_upgrade_logs"])
                 self.assertEqual(result["operation_state"], before[0].state)
                 self.assertEqual(result["provider_effect_phase"], before[0].provider_effect_phase)
                 self.assertEqual(result.get("failure_events_unavailable", False), status == 503)

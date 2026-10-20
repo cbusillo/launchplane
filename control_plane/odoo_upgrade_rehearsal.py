@@ -815,7 +815,7 @@ class OdooRehearsalAdapter:
                 inspect_capture=(
                     journal_status == "bound"
                     and journal.get("operation_state") == "reconcile_required"
-                    and journal.get("provider_effect_phase") == "execute"
+                    and journal.get("provider_effect_phase") == self.request.action
                     and bool(journal.get("provider_effect_started_at"))
                 ),
             )
@@ -1100,6 +1100,25 @@ class OdooRehearsalAdapter:
             or mismatch["record_binding_sha256"] != record.binding_sha256
             or mismatch["attempt_sha256"] != canonical_json_sha256({"operation_key": operation_key})
             or result["capture_attachment_validation"] != mismatch["attachment"]["reason"]
+        ):
+            raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
+        child = result.get("child_failure")
+        if child is not None and (
+            not isinstance(child, dict)
+            or mode != "observe"
+            or not inspect_capture
+            or result["completed"] is not False
+            or child["intent_sha256"] != record.intent_sha256
+            or child["record_binding_sha256"] != record.binding_sha256
+            or child["attempt_sha256"] != canonical_json_sha256({"operation_key": operation_key})
+        ):
+            raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
+        if result.get("retained_upgrade_logs") is not None and (
+            mode != "observe"
+            or not inspect_capture
+            or self.request.action != "execute"
+            or record.state != "prepared"
+            or result["completed"] is not False
         ):
             raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
         return result

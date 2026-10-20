@@ -249,6 +249,11 @@ def register_odoo_upgrade_rehearsal_routes(
                     ),
                     "prepare_not_started": result.get("prepare_not_started", False),
                     **({"custody": result["custody"]} if result.get("custody") else {}),
+                    **{
+                        key: result[key]
+                        for key in ("child_failure", "retained_upgrade_logs")
+                        if result.get(key) is not None
+                    },
                     **(
                         {"attachment_mismatch": result["attachment_mismatch"]}
                         if result.get("attachment_mismatch") is not None

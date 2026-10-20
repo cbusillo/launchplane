@@ -10,11 +10,13 @@ from control_plane._odoo_rehearsal_attachment_validation import (
     ATTACHMENT_VALIDATION_PROGRAM,
 )
 from control_plane._odoo_rehearsal_capture_comparison import REHEARSAL_CAPTURE_COMPARISON_LIBRARY
+from control_plane._odoo_rehearsal_diagnostics import REHEARSAL_DIAGNOSTICS_LIBRARY
 
 ODOO_UPGRADE_REHEARSAL_PROGRAM = (
     REHEARSAL_SOURCE_READER_LIBRARY
     + REHEARSAL_CAPTURE_COMPARISON_LIBRARY
     + ATTACHMENT_MISMATCH_LIBRARY
+    + REHEARSAL_DIAGNOSTICS_LIBRARY
     + "\nATTACHMENT_VALIDATION_PROGRAM = "
     + repr(ATTACHMENT_VALIDATION_PROGRAM)
     + "\n"
@@ -38,14 +40,19 @@ from datetime import datetime, timezone
 
 
 class RehearsalCommandFailure(RuntimeError):
-    pass
+    def __init__(self, diagnostic=None):
+        self.diagnostic=diagnostic
+        super().__init__('Rehearsal command failed; preserve its private custody')
 
 
 def command(arguments, *, stdin=None, stdout=None, environment=None):
     result = subprocess.run(arguments, input=stdin, stdout=stdout or subprocess.PIPE,
         stderr=subprocess.PIPE, env=environment, check=False)
     if result.returncode:
-        raise RehearsalCommandFailure('Rehearsal command failed; preserve its private custody')
+        diagnostic=command_diagnostic(arguments,result,environment)
+        if COMMAND_FAILURE_CONTEXT is not None:
+            retain_command_failure(*COMMAND_FAILURE_CONTEXT,diagnostic)
+        raise RehearsalCommandFailure(diagnostic)
     return result.stdout if stdout is None else b''
 
 
@@ -69,7 +76,8 @@ def digest(path):
 
 
 def bounded_capture(arguments,path,bound):
-    process=subprocess.Popen(arguments,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
+    errors=tempfile.TemporaryFile()
+    process=subprocess.Popen(arguments,stdout=subprocess.PIPE,stderr=errors)
     try:
         size=0
         with path.open('xb') as output:
@@ -80,9 +88,19 @@ def bounded_capture(arguments,path,bound):
                 size+=len(chunk)
                 if size>bound: raise RuntimeError('Source copy exceeds its reviewed storage bound')
                 output.write(chunk)
-        if process.wait(timeout=30) or not size:
+        status=process.wait(timeout=30)
+        if status:
+            errors.seek(max(0,errors.seek(0,os.SEEK_END)-65536))
+            diagnostic=command_diagnostic(arguments,subprocess.CompletedProcess(
+                arguments,status,stdout=b'',stderr=errors.read(65536)),None)
+            diagnostic['step']='bounded_capture'
+            if COMMAND_FAILURE_CONTEXT is not None:
+                retain_command_failure(*COMMAND_FAILURE_CONTEXT,diagnostic)
+            raise RehearsalCommandFailure(diagnostic)
+        if not size:
             raise RuntimeError('Incomplete source copy')
     finally:
+        errors.close()
         process.stdout.close()
         if process.poll() is None:
             process.terminate()
@@ -509,6 +527,17 @@ def observe(spec, root, receipt, lock_held=False):
             'prepare_not_started':prepare_not_started,
             'custody':custody_observation(spec,root,action)}
         custody=result['custody']
+        if lock_held and spec.get('inspect_capture') is True and custody['effect_started']:
+            failure=read_command_failure(spec,root)
+            if failure is not None:
+                result['child_failure']=failure
+            names=database_names(spec)
+            if (action=='execute' and record['state']=='prepared'
+                    and {copy['database'] for copy in copies}=={names['source']}):
+                containers=inspection(spec,names['upgrade'],spec['target_image'])
+                if containers['web'][1].get('State',{}).get('Running') is not False:
+                    raise RuntimeError('Failed upgrade writer is active')
+                result['retained_upgrade_logs']=retained_upgrade_logs(spec,containers,root)
         mismatch=None
         if (lock_held and spec.get('inspect_capture') is True and action=='execute'
                 and record['state']=='prepared' and not copies and custody['effect_started']):
@@ -547,6 +576,8 @@ def observe(spec, root, receipt, lock_held=False):
 
 
 def main():
+    global COMMAND_FAILURE_CONTEXT
+    COMMAND_FAILURE_CONTEXT=None
     spec=json.loads(base64.b64decode(sys.argv[1],validate=True))
     record=spec['record']
     namespace=record['rehearsal_id']
@@ -596,6 +627,7 @@ def main():
         database,image=current(spec)
         if action=='prepare':
             (root/(action+'.started')).touch(mode=0o600)
+            COMMAND_FAILURE_CONTEXT=(spec,root)
             compose(spec,root,image=spec['source_image'],database=names['source'])
             deadline=time.monotonic()+120
             while True:
@@ -645,6 +677,7 @@ def main():
                 print('rehearsal_result='+json.dumps(result).encode().hex())
                 return
             (root/(action+'.started')).touch(mode=0o600)
+            COMMAND_FAILURE_CONTEXT=(spec,root)
             copies=list(record['copies'])
             if action=='execute':
                 raw=capture(spec,root,containers,names['source'])

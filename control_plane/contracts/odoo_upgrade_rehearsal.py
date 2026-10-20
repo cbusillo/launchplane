@@ -7,6 +7,10 @@ from typing import Annotated, Literal, get_args
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane._odoo_rehearsal_attachment_validation import ATTACHMENT_METADATA_LIMITS
+from control_plane._odoo_rehearsal_diagnostics import (
+    REHEARSAL_DIAGNOSTIC_TEXT_LIMIT,
+    REHEARSAL_DIAGNOSTIC_FILE_LIMIT,
+)
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
@@ -291,6 +295,45 @@ class RehearsalAttachmentMismatch(BaseModel):
     attachment: RehearsalAttachmentFacts
 
 
+class RehearsalChildFailure(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    intent_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    attempt_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    record_binding_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    step: str = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
+    exit_status: int = Field(strict=True)
+    error_text: str = Field(max_length=REHEARSAL_DIAGNOSTIC_TEXT_LIMIT)
+
+    @model_validator(mode="after")
+    def failed(self) -> "RehearsalChildFailure":
+        if self.exit_status == 0:
+            raise ValueError("Child failure requires a nonzero exit status.")
+        return self
+
+
+class RehearsalRetainedLog(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    file: str = Field(pattern=r"^(?:[A-Za-z0-9_.-]+/)?[A-Za-z0-9_.-]+\.log(?:\.[0-9]+)?$")
+    bytes: int = Field(ge=0, strict=True)
+    modified_at: datetime
+    tail: str = Field(max_length=REHEARSAL_DIAGNOSTIC_TEXT_LIMIT)
+
+
+class RehearsalRuntimeLog(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    service: Literal["script-runner", "database"]
+    available: bool
+    tail: str = Field(max_length=REHEARSAL_DIAGNOSTIC_TEXT_LIMIT)
+
+
+class RehearsalRetainedLogs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    files: list[RehearsalRetainedLog] = Field(max_length=REHEARSAL_DIAGNOSTIC_FILE_LIMIT)
+    runtime: list[RehearsalRuntimeLog] = Field(max_length=2)
+    since: datetime
+    truncated: bool
+
+
 class RehearsalHostResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
     intent_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
@@ -305,6 +348,8 @@ class RehearsalHostResult(BaseModel):
     prepare_not_started: bool = False
     custody: RehearsalCustodyObservation | None = None
     attachment_mismatch: RehearsalAttachmentMismatch | None = None
+    child_failure: RehearsalChildFailure | None = None
+    retained_upgrade_logs: RehearsalRetainedLogs | None = None
     capture_attachment_validation: (
         Literal[
             "dependency_unavailable",

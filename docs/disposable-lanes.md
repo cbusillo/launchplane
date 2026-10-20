@@ -2835,7 +2835,19 @@ and unrequested journals; no checkpoint is never proof that no effect happened.
 Events are read
 before launching the observation schedule. They are diagnostic candidates, not proof
 that an event belongs to the original apply. Provider prose and source data are
-withheld. Preserve the original request, key and all partial custody until a
+withheld. A failed rehearsal child now preserves `child_failure` in private host
+custody: the failing step, nonzero exit status and at most 4,096 characters of
+redacted child output. Original-key readback checks its intent, attempt and record
+binding before returning it. Arguments, input and environment are never exported.
+The native execution lock keeps observation separate from a running effect.
+For an older initial-upgrade failure with an independently verified source
+snapshot, readback can also return `retained_upgrade_logs`: bounded redacted
+tails from the rehearsal's exclusive log volume, with file size and modification
+time. It reads regular log files only and executes no upgrade, registry or SQL.
+An older discarded child exit status cannot be reconstructed from a log tail;
+neither a log nor a child diagnostic proves successful migration or authorizes
+continuation, replay, retirement or a replacement key.
+Preserve the original request, key and all partial custody until a
 supported continuation is established. Any failed readback preserves a supplied
 original key, including authorization and transport refusals. A read failure
 cannot establish release. Lock loss and integrity contradictions remain
