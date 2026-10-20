@@ -443,6 +443,7 @@ class MergeTrainSetupFailureRecovery(BaseModel):
     run_attempt: int = Field(gt=0)
     log_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     changed_files_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    ready_comment_floor: int = Field(gt=0)
 
 
 class MergeTrainBatchCandidateRecord(BaseModel):

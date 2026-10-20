@@ -117,9 +117,7 @@ def recover_candidate_block(
         current = blocked[entry.pull_request_number]
         setup_failure_evidence = None
         if current.head_sha == entry.head_sha:
-            history = store.list_merge_train_batch_candidate_records(
-                repository=snapshot.repository, base_branch=snapshot.base_branch
-            )
+            history = store.list_merge_train_batch_candidate_records(repository=snapshot.repository)
             # This budget follows the PR head across bases, policy revisions,
             # feedback delivery and restarts. Existing retry budgets stay spent.
             if any(
@@ -145,16 +143,21 @@ def recover_candidate_block(
             try:
                 setup_failure_evidence = client.read_setup_failure_recovery(candidate=failed)
             except MergeTrainGitHubError as error:
-                if error.rate_limited or error.status_code in {401, 403}:
+                if error.rate_limited:
                     raise
                 continue
             except (OSError, ValueError, TypeError, KeyError):
                 continue
-            if setup_failure_evidence is None or (
-                candidate.setup_failure_recovery is not None
-                and candidate.setup_failure_recovery != setup_failure_evidence
-            ):
+            if setup_failure_evidence is None:
                 continue
+            if candidate.setup_failure_recovery is not None:
+                setup_failure_evidence = setup_failure_evidence.model_copy(
+                    update={
+                        "ready_comment_floor": candidate.setup_failure_recovery.ready_comment_floor
+                    }
+                )
+                if candidate.setup_failure_recovery != setup_failure_evidence:
+                    continue
         legacy_writer_app_id = None
         if candidate.block_intent is None:
             # A legacy failure did not save its label name or writer App. Read

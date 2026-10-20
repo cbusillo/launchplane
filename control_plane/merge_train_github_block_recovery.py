@@ -290,10 +290,16 @@ def recover_candidate_block(
         if same_head:
             if setup_failure_evidence is None:
                 return False
-            from control_plane.merge_train_setup_failure_recovery import read_setup_failure_recovery
+            from control_plane.merge_train_github_setup_failure_recovery import (
+                read_setup_failure_recovery,
+            )
 
+            fresh = read_setup_failure_recovery(client, candidate=candidate.candidate)
             if (
-                read_setup_failure_recovery(client, candidate=candidate.candidate)
+                fresh is None
+                or fresh.model_copy(
+                    update={"ready_comment_floor": setup_failure_evidence.ready_comment_floor}
+                )
                 != setup_failure_evidence
             ):
                 return False
@@ -330,7 +336,9 @@ def recover_candidate_block(
         if label_event() != event or not qualified():
             return False
     except MergeTrainGitHubError as error:
-        if error.rate_limited or error.status_code in {401, 403}:
+        if error.rate_limited or (
+            setup_failure_evidence is None and error.status_code in {401, 403}
+        ):
             raise
         _LOGGER.warning(
             "Candidate block recovery evidence unavailable; preserving hold",

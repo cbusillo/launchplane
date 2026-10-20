@@ -655,7 +655,8 @@ This recovers the already-applied false culprit block; it does not change
 normal failure classification or fix the store lifecycle.
 
 Before removing the proven label, the fenced controller checkpoints its result
-and persists value-free job/run/attempt identifiers and source/log digests on
+and persists value-free job/run/attempt identifiers, the pre-release comment-ID
+floor and source/log digests on
 the blocked candidate record. That consumes one recovery per PR head across
 bases and policy revisions. Prior infrastructure, check-recovery or batch-body
 retry lineage for that head also exhausts this path. Dry runs spend nothing.
@@ -668,7 +669,19 @@ The supported operation remains the ordinary controller dry run, then its
 mutating pass through the deployed service. There is no manual label release,
 caller-supplied causal assertion, rerun-forcing commit, grant or direct merge.
 After release, obtain fresh checked Ready and normal train admission/candidate
-validation. Supervisor owns operational continuation when assigned by the brief.
+validation. Admission requires a trusted current-head Ready comment newer than
+the saved floor even when an enqueue label remains present. Supervisor owns
+operational continuation when assigned by the brief.
+
+The optional Actions evidence capability is never a grant prerequisite: a
+known missing permission skips the read; denied or unavailable evidence leaves
+that PR held while unrelated queue work continues. Storage-download failures
+are evidence failures, never GitHub authentication failures.
+Recovery records add a persisted `setup_failure_recovery` field. As with saved
+block intents, an older binary that forbids unknown record fields cannot read
+those records. After consuming this feature, the rollback reader must support
+the recovery record; do not delete audit/budget fields to make an older reader
+start.
 
 Both recovery paths refuse pending, failing or unreadable current-head evidence, conflicting
 or unknown mergeability, stale/missing/unweighed review, a renewed review request,

@@ -122,6 +122,7 @@ class MergeTrainPullRequestSnapshot(BaseModel):
     ready_handoff: MergeTrainReadyHandoff | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
+    recovery_ready_comment_floor: int = Field(default=0, ge=0, exclude_if=lambda value: not value)
     changed_paths: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
     actor_id: PositiveInt | None = None
     actor_role: str = "unknown"
@@ -813,6 +814,15 @@ def _build_queue_entry(
         repository_policy, pull_request.ready_handoff, pull_request.head_sha
     )
     has_ready_handoff = not handoff_refusal
+    if pull_request.recovery_ready_comment_floor and (
+        not has_ready_handoff
+        or (
+            pull_request.ready_handoff is not None
+            and (pull_request.ready_handoff.comment_id or 0)
+            <= pull_request.recovery_ready_comment_floor
+        )
+    ):
+        ineligible_reasons.append("recovered hold requires a fresh checked Ready handoff")
     if (
         skip_blocked
         and pull_request.state == "open"

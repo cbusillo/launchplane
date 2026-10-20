@@ -337,7 +337,7 @@ class UrllibMergeTrainGitHubTransport:
                 from control_plane.merge_train_job_logs import read_job_log
 
                 with timed_github_request(method=method, path=path):
-                    return read_job_log(request)
+                    return read_job_log(request, observer=self.response_headers_observer)
             with (
                 timed_github_request(method=method, path=path),
                 urlopen(request, timeout=15) as response,
@@ -2467,7 +2467,9 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
     def read_setup_failure_recovery(
         self, *, candidate: MergeTrainBatchCandidate
     ) -> MergeTrainSetupFailureRecovery | None:
-        from control_plane.merge_train_setup_failure_recovery import read_setup_failure_recovery
+        from control_plane.merge_train_github_setup_failure_recovery import (
+            read_setup_failure_recovery,
+        )
 
         return read_setup_failure_recovery(self, candidate=candidate)
 
@@ -3156,6 +3158,7 @@ class GitHubMergeTrainSnapshotReader:
         self._author_roles: dict[tuple[str, str], str] = {}
         self._dependency_classes: dict[tuple[str, int, str, str], DependencyUpdateClass] = {}
         self._ready_handoffs: dict[int, MergeTrainReadyHandoff] = {}
+        self._recovery_ready_floors: dict[tuple[int, str], int] | None = None
 
     def read_merge_train_snapshot(
         self, *, repository: str, base_branch: str
@@ -3164,6 +3167,7 @@ class GitHubMergeTrainSnapshotReader:
         self._author_roles.clear()
         self._dependency_classes.clear()
         self._ready_handoffs.clear()
+        self._recovery_ready_floors = None
         repository_path = _repository_path(repository)
         normalized_base_branch = _required_value(
             base_branch, "GitHub pull request base branch is required."
@@ -3527,7 +3531,17 @@ class GitHubMergeTrainSnapshotReader:
             else ("unknown", "")
         )
         checks_status, checks_error = checks_observation
+        recovery_floor = self._recovery_ready_floor(repository_path, pull_request_number, head_sha)
+        if recovery_floor and ready_handoff is None:
+            ready_handoff = self._read_ready_handoff(
+                repository_path=repository_path,
+                number=pull_request_number,
+                head_sha=head_sha,
+                base_branch=str(base.get("ref") or ""),
+                base_sha=str(base.get("sha") or ""),
+            )
         return MergeTrainPullRequestSnapshot(
+            recovery_ready_comment_floor=recovery_floor,
             ready_handoff=ready_handoff,
             owner_review_required=owner_review_required,
             client_test_notes_error=review_intent.error,
@@ -3555,6 +3569,23 @@ class GitHubMergeTrainSnapshotReader:
             branch_update_required=_branch_update_required(source),
             dependency_update_class=dependency_update_class,
         )
+
+    def _recovery_ready_floor(self, repository: str, number: int, head: str) -> int:
+        if self._recovery_ready_floors is None:
+            self._recovery_ready_floors = {}
+            reader = getattr(
+                self._branch_refresh_store, "list_merge_train_batch_candidate_records", None
+            )
+            if callable(reader):
+                for record in reader(repository=repository):
+                    if record.setup_failure_recovery is not None:
+                        for entry in record.candidate.entries:
+                            key = (entry.pull_request_number, entry.head_sha)
+                            self._recovery_ready_floors[key] = max(
+                                self._recovery_ready_floors.get(key, 0),
+                                record.setup_failure_recovery.ready_comment_floor,
+                            )
+        return self._recovery_ready_floors.get((number, head), 0)
 
     def _read_ready_handoff(
         self,

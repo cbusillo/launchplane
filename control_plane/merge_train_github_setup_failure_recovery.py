@@ -44,6 +44,15 @@ def _safe_source_path(value: object) -> bool:
 def read_setup_failure_recovery(
     client: GitHubMergeTrainClient, *, candidate: MergeTrainBatchCandidate
 ) -> MergeTrainSetupFailureRecovery | None:
+    from control_plane.merge_train_github_block_recovery import _pages
+
+    permissions = getattr(client.transport, "token_permissions", None)
+    if (
+        permissions is not None
+        and "actions:read" not in permissions
+        and getattr(client.transport, "repository_private", None) is True
+    ):
+        return None
     if len(candidate.entries) != 1 or not re.fullmatch(r"[0-9a-f]{40}", candidate.candidate_sha):
         return None
     prefix = f"/repos/{candidate.repository}"
@@ -204,6 +213,11 @@ def read_setup_failure_recovery(
             if not _safe_source_path(file["previous_filename"]):
                 return None
             paths.append(str(file["previous_filename"]))
+    comments = _pages(
+        client, f"{prefix}/issues/{candidate.entries[0].pull_request_number}/comments"
+    )
+    if not comments or any(type(comment.get("id")) is not int for comment in comments):
+        return None
     return MergeTrainSetupFailureRecovery(
         candidate_sha=candidate.candidate_sha,
         head_sha=head,
@@ -212,4 +226,5 @@ def read_setup_failure_recovery(
         run_attempt=attempt,
         log_sha256=sha256(log.encode()).hexdigest(),
         changed_files_sha256=sha256(json.dumps(sorted(paths)).encode()).hexdigest(),
+        ready_comment_floor=max(int(str(comment["id"])) for comment in comments),
     )

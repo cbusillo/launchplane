@@ -8,6 +8,7 @@ from urllib.error import HTTPError
 from urllib.request import Request
 
 from control_plane.merge_train_job_logs import MAX_JOB_LOG_BYTES, read_job_log
+from control_plane.merge_train_github import UrllibMergeTrainGitHubTransport
 
 
 class JobLogReadTests(unittest.TestCase):
@@ -27,10 +28,14 @@ class JobLogReadTests(unittest.TestCase):
             "https://api.github.com/job/logs", headers={"Authorization": "Bearer fixture"}
         )
         with patch("control_plane.merge_train_job_logs.build_opener", return_value=opener):
-            self.assertEqual(read_job_log(request), "log evidence")
+            self.assertEqual(
+                UrllibMergeTrainGitHubTransport(token="fixture").request(
+                    method="GET", path="/repos/example/repo/actions/jobs/91/logs"
+                ),
+                "log evidence",
+            )
         storage_request = opener.open.call_args_list[1].args[0]
         self.assertIsNone(storage_request.get_header("Authorization"))
-        response.read.assert_called_once_with(MAX_JOB_LOG_BYTES + 1)
         response.read.return_value = b"x" * (MAX_JOB_LOG_BYTES + 1)
         opener.open.side_effect = [
             HTTPError(request.full_url, 302, "Found", headers, BytesIO()),
@@ -59,3 +64,15 @@ class JobLogReadTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     read_job_log(Request("https://api.github.com/job/logs"))
                 self.assertEqual(opener.open.call_count, 1)
+
+    def test_storage_denial_is_unavailable_evidence_not_a_github_auth_failure(self) -> None:
+        headers = Message()
+        headers["Location"] = "https://results.blob.core.windows.net/log"
+        opener = Mock()
+        opener.open.side_effect = [
+            HTTPError("https://api.github.com/job/logs", 302, "Found", headers, BytesIO()),
+            HTTPError(headers["Location"], 403, "expired signature", Message(), BytesIO()),
+        ]
+        with patch("control_plane.merge_train_job_logs.build_opener", return_value=opener):
+            with self.assertRaises(ValueError):
+                read_job_log(Request("https://api.github.com/job/logs"))

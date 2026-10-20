@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from urllib.parse import quote
@@ -20,7 +21,12 @@ from control_plane.merge_train_controller_run_once import (
     MergeTrainControllerRunOnceEnvelope,
     _advance_from_live_snapshot,
 )
-from control_plane.merge_train_github import GitHubMergeTrainClient
+from control_plane.merge_train_github import (
+    GitHubMergeTrainClient,
+    GitHubMergeTrainSnapshotReader,
+    MergeTrainGitHubError,
+)
+from control_plane.merge_train_handoff import MergeTrainReadyHandoff
 from control_plane.storage.filesystem import FilesystemRecordStore
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy
 from tests.support.merge_train import _FakeExpandedMergeTrainSnapshotReader
@@ -117,6 +123,8 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
         self.events: list[dict[str, Any]] | None = None
         self.mutations: list[str] = []
         self.transport = Mock()
+        self.transport.token_permissions = None
+        self.transport.repository_private = None
         self.transport.request.side_effect = self.request
         self.client = GitHubMergeTrainClient(transport=self.transport)
         self.client.read_pull_request_snapshot = Mock(side_effect=lambda **_: self.current)  # type: ignore[method-assign]
@@ -289,6 +297,100 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
                     self.advance(mutate=True)["controller_action"], "recover_candidate_block"
                 )
                 self.assertEqual(self.mutations, [])
+
+    def test_recovered_head_requires_new_ready_with_or_without_enqueue_label(self) -> None:
+        self.setup_missing_store_failure()
+        self.advance(mutate=True)
+        reader = GitHubMergeTrainSnapshotReader(
+            transport=self.transport, branch_refresh_store=self.store
+        )
+        floor = reader._recovery_ready_floor(
+            self.target.repository, self.current.number, self.current.head_sha
+        )
+        self.assertGreater(floor, 0)
+        for labels in ((), (self.target.enqueue_label,)):
+            for comment_id, admitted in ((floor, False), (floor + 1, True)):
+                with self.subTest(labels=labels, comment_id=comment_id):
+                    pr = self.current.model_copy(
+                        update={
+                            "labels": labels,
+                            "recovery_ready_comment_floor": floor,
+                            "ready_handoff": MergeTrainReadyHandoff(
+                                status="ready",
+                                head_sha=self.current.head_sha,
+                                actor_id=42,
+                                comment_id=comment_id,
+                            ),
+                        }
+                    )
+                    result = build_merge_train_dry_run_result(
+                        policy=self.policy,
+                        snapshot=self.snapshot.model_copy(update={"pull_requests": (pr,)}),
+                        batch_landing=True,
+                        new_candidate=True,
+                    )
+                    self.assertEqual(bool(result.queue_order), admitted)
+
+    def test_optional_setup_evidence_denial_preserves_hold_and_other_train_work(self) -> None:
+        self.setup_missing_store_failure()
+        for code in (401, 403, 404, 410):
+            with (
+                self.subTest(code=code),
+                patch.object(
+                    self.client,
+                    "read_setup_failure_recovery",
+                    side_effect=MergeTrainGitHubError(
+                        "optional evidence unavailable", status_code=code
+                    ),
+                ),
+            ):
+                self.assertNotEqual(
+                    self.advance(mutate=True)["controller_action"], "recover_candidate_block"
+                )
+        self.transport.token_permissions = frozenset({"checks:read"})
+        self.transport.repository_private = True
+        self.transport.request.reset_mock()
+        self.assertIsNone(self.client.read_setup_failure_recovery(candidate=self.record.candidate))
+        self.transport.request.assert_not_called()
+        self.assertEqual(self.mutations, [])
+
+    def test_causal_reader_accepts_captured_incident_evidence(self) -> None:
+        fixture = json.loads(
+            (Path(__file__).parent / "fixtures/merge_train_missing_pnpm_store.json").read_text()
+        )
+        prefix = f"/repos/{fixture['repository']}"
+        job = fixture["job"]
+        candidate = self.record.candidate.model_copy(
+            update={
+                "repository": fixture["repository"],
+                "candidate_sha": fixture["candidate_sha"],
+                "base_sha": fixture["base_sha"],
+                "entries": (
+                    self.record.candidate.entries[0].model_copy(
+                        update={"head_sha": fixture["head_sha"]}
+                    ),
+                ),
+            }
+        )
+        self.setup_responses = {
+            f"{prefix}/commits/{fixture['candidate_sha']}/check-runs?per_page=100&page=1": fixture[
+                "checks"
+            ],
+            f"{prefix}/commits/{fixture['candidate_sha']}/status?per_page=100&page=1": fixture[
+                "statuses"
+            ],
+            f"{prefix}/actions/jobs/{job['id']}": job,
+            f"{prefix}/actions/jobs/{job['id']}/logs": fixture["log_excerpt"],
+            f"{prefix}/actions/runs/{job['run_id']}/jobs?per_page=100&page=1": fixture["jobs"],
+            f"{prefix}/compare/{fixture['base_sha']}...{fixture['head_sha']}": fixture[
+                "comparison"
+            ],
+        }
+        proof = self.client.read_setup_failure_recovery(candidate=candidate)
+        self.assertIsNotNone(proof)
+        assert proof is not None
+        self.assertEqual(proof.job_id, job["id"])
+        self.assertEqual(proof.head_sha, fixture["head_sha"])
 
     def test_setup_recovery_rechecks_current_head_and_persists_before_delete(self) -> None:
         self.setup_missing_store_failure()
