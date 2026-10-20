@@ -9,6 +9,7 @@ from control_plane.route_binding_reconcile import (
 from control_plane.contracts.merge_train_stall import MergeTrainStallRecord
 from control_plane.contracts.odoo_upgrade_rehearsal import OdooUpgradeRehearsalRecord
 from control_plane.contracts.testing_rebuild import TestingRebuildRecord
+from control_plane.testing_rebuild_request_settlement import TestingRebuildRequestExclusion
 from control_plane.contracts.testing_candidate import TestingCandidateAllocation
 
 from pathlib import Path
@@ -10141,12 +10142,32 @@ class PostgresRecordStore(HumanSessionStore):
         self, record: OdooStableTargetReplacementOperationRecord
     ) -> tuple[OdooStableTargetReplacementOperationRecord, bool]:
         with self._session_factory() as session:
-            self._lock_odoo_stable_lane(
-                session,
-                product=record.product,
-                context=record.context,
-                instance=record.instance,
+            self._lock_testing_rebuild_request(
+                session, scope=record.idempotency_scope, key=record.idempotency_key
             )
+            original = self._testing_rebuild_request_operation(
+                session, scope=record.idempotency_scope, key=record.idempotency_key
+            )
+            if original is not None:
+                return original, False
+            if (
+                self._testing_rebuild_request_exclusion(
+                    session, scope=record.idempotency_scope, key=record.idempotency_key
+                )
+                is not None
+            ):
+                from control_plane.testing_rebuild_request_settlement import (
+                    TestingRebuildRequestConflict,
+                )
+
+                raise TestingRebuildRequestConflict("The original request was excluded.")
+            if self.database_dialect_name != "sqlite":
+                self._lock_odoo_stable_lane(
+                    session,
+                    product=record.product,
+                    context=record.context,
+                    instance=record.instance,
+                )
             active_owner = self._active_odoo_stable_lane_operation_owner(
                 session,
                 product=record.product,
@@ -10206,6 +10227,89 @@ class PostgresRecordStore(HumanSessionStore):
                     )
                 )
         return record, True
+
+    def _lock_testing_rebuild_request(self, session: Session, *, scope: str, key: str) -> None:
+        self._begin_serialized_write(session)
+        self._lock_landing_authority(
+            session,
+            "testing-rebuild-request:" + canonical_json_sha256({"scope": scope, "key": key}),
+        )
+
+    def _testing_rebuild_request_operation(
+        self, session: Session, *, scope: str, key: str
+    ) -> OdooStableTargetReplacementOperationRecord | None:
+        from control_plane.testing_rebuild_request_settlement import TestingRebuildRequestConflict
+
+        rows = session.scalars(
+            select(LaunchplaneOdooStableTargetReplacementOperationRow).where(
+                LaunchplaneOdooStableTargetReplacementOperationRow.idempotency_scope == scope,
+                LaunchplaneOdooStableTargetReplacementOperationRow.idempotency_key == key,
+            )
+        ).all()
+        if len(rows) > 1:
+            raise TestingRebuildRequestConflict("The original key has ambiguous operations.")
+        return (
+            OdooStableTargetReplacementOperationRecord.model_validate(rows[0].payload)
+            if rows
+            else None
+        )
+
+    def _testing_rebuild_request_exclusion(
+        self, session: Session, *, scope: str, key: str
+    ) -> TestingRebuildRequestExclusion | None:
+        from control_plane.testing_rebuild_request_settlement import SETTLEMENT_ROUTE
+
+        row = session.scalar(
+            self._idempotency_statement(
+                scope=scope, route_path=SETTLEMENT_ROUTE, idempotency_key=key
+            )
+        )
+        if row is None:
+            return None
+        receipt = LaunchplaneIdempotencyRecord.model_validate(row.payload)
+        exclusion = TestingRebuildRequestExclusion.model_validate(receipt.response_payload)
+        if (
+            receipt.state != "completed"
+            or exclusion.original_scope != scope
+            or exclusion.original_key != key
+            or receipt.request_fingerprint != exclusion.request_fingerprint
+        ):
+            raise ValueError("The original request exclusion evidence is invalid.")
+        return exclusion
+
+    def settle_testing_rebuild_request(
+        self, exclusion: TestingRebuildRequestExclusion, *, trace_id: str
+    ) -> OdooStableTargetReplacementOperationRecord | TestingRebuildRequestExclusion:
+        from control_plane.testing_rebuild_request_settlement import TestingRebuildRequestConflict
+
+        with self._session_factory() as session:
+            self._lock_testing_rebuild_request(
+                session, scope=exclusion.original_scope, key=exclusion.original_key
+            )
+            original = self._testing_rebuild_request_operation(
+                session, scope=exclusion.original_scope, key=exclusion.original_key
+            )
+            if original is not None:
+                if (
+                    original.product != exclusion.product
+                    or not original.is_native_testing_rebuild
+                    or original.request_fingerprint != exclusion.request_fingerprint
+                ):
+                    raise TestingRebuildRequestConflict("This key identifies another intent.")
+                return original
+            existing = self._testing_rebuild_request_exclusion(
+                session, scope=exclusion.original_scope, key=exclusion.original_key
+            )
+            if existing is not None:
+                if (
+                    existing.product != exclusion.product
+                    or existing.request_fingerprint != exclusion.request_fingerprint
+                ):
+                    raise TestingRebuildRequestConflict("This key excludes another intent.")
+                return existing
+            session.add(self._idempotency_row(exclusion.receipt(trace_id)))
+            session.commit()
+        return exclusion
 
     def read_odoo_stable_target_replacement_operation_record(
         self, operation_id: str

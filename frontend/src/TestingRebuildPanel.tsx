@@ -1,15 +1,15 @@
 import { useEffect, useRef, useState } from "react";
-import { inspectTestingRebuild, readTestingRebuild, submitTestingRebuild, lookupTestingRebuild, resumeTestingRebuild, LaunchplaneApiError } from "./api";
+import { inspectTestingRebuild, readTestingRebuild, submitTestingRebuild, lookupTestingRebuild, resumeTestingRebuild, settleTestingRebuild, LaunchplaneApiError } from "./api";
 import { waitFor } from "./odoo-release-operation";
-import { readTestingRebuildAttempt, runTestingRebuild, resumeTestingRebuildAttempt, saveTestingRebuildAttempt, type TestingRebuildAttempt } from "./testing-rebuild-operation";
-import type { ProductEnvironmentDetail, TestingRebuildPreflight, TestingRebuildResponse, TestingRebuildSubmit } from "./generated/openapi.ts";
+import { readTestingRebuildAttempt, runTestingRebuild, resumeTestingRebuildAttempt, settleTestingRebuildAttempt, saveTestingRebuildAttempt, type TestingRebuildAttempt } from "./testing-rebuild-operation";
+import type { ProductEnvironmentDetail, TestingRebuildInspection, TestingRebuildResponse, TestingRebuildSubmit } from "./generated/openapi.ts";
 
 export function TestingRebuildPanel({ detail, fixtureMode, onRefresh }: {
   detail: ProductEnvironmentDetail; fixtureMode: boolean; onRefresh: () => void;
 }) {
   const [source, setSource] = useState<TestingRebuildSubmit["data_source_mode"]>("empty");
   const [reason, setReason] = useState("Rebuild testing for a fresh test session.");
-  const [preflight, setPreflight] = useState<TestingRebuildPreflight | null>(null);
+  const [preflight, setPreflight] = useState<TestingRebuildInspection | null>(null);
   const [inspectionError, setInspectionError] = useState("");
   const [attempt, setAttempt] = useState(() => readTestingRebuildAttempt(detail.product));
   const [result, setResult] = useState<TestingRebuildResponse | null>(null);
@@ -24,7 +24,7 @@ export function TestingRebuildPanel({ detail, fixtureMode, onRefresh }: {
     setPreflight(null); setInspectionError("");
     void inspectTestingRebuild(detail.product, source, controller.signal).then(response => {
       if (controller.signal.aborted) return;
-      if (response.product !== detail.product || response.context !== detail.context || response.data_source_mode !== source || response.base_url.replace(/\/$/, "") !== detail.base_url.replace(/\/$/, "")) {
+      if (!response.original_scope?.trim() || response.product !== detail.product || response.context !== detail.context || response.data_source_mode !== source || response.base_url.replace(/\/$/, "") !== detail.base_url.replace(/\/$/, "")) {
         throw new Error("The inspection does not identify this testing lane.");
       }
       setPreflight(response);
@@ -49,7 +49,7 @@ export function TestingRebuildPanel({ detail, fixtureMode, onRefresh }: {
     const selected = existing ?? {
       product: detail.product, key: `ui-testing-rebuild-${crypto.randomUUID()}`,
       payload: { data_source_mode: source, artifact_id: preflight!.artifact_id,
-        source_git_ref: preflight!.source_git_ref, reason: reason.trim() },
+        source_git_ref: preflight!.source_git_ref, reason: reason.trim(), original_scope: preflight!.original_scope },
     } satisfies TestingRebuildAttempt;
     const controller = new AbortController(); abort.current = controller;
     setBusy(true); setMessage("Preparing and checking the testing copy. The address stays the same.");
@@ -100,6 +100,29 @@ export function TestingRebuildPanel({ detail, fixtureMode, onRefresh }: {
     if (resumed && !controller.signal.aborted) void rebuild(selected);
   }
 
+  async function settleOriginal() {
+    if (!attempt || abort.current || fixtureMode) return;
+    const controller = new AbortController(); abort.current = controller;
+    setBusy(true); setMessage("Checking the original request and preventing any late submission…");
+    try {
+      const settled = await settleTestingRebuildAttempt(attempt, {
+        settle: settleTestingRebuild,
+        persist: value => { saveTestingRebuildAttempt(detail.product, value); setAttempt(value); },
+      }, controller.signal);
+      if (controller.signal.aborted) return;
+      setResult(settled.operation ? { trace_id: settled.trace_id, operation: settled.operation } : null);
+      const remaining = readTestingRebuildAttempt(detail.product);
+      setMessage(remaining ? "The original rebuild exists. Continue watching it; no rebuild was cancelled."
+        : settled.outcome === "excluded" ? "The original request is excluded. Review the fresh inspection before rebuilding."
+        : "The original rebuild has finished. Review the fresh inspection before rebuilding.");
+      if (!remaining) { setPreflight(null); onRefresh(); }
+    } catch (error) {
+      if (!controller.signal.aborted) setMessage(`${error instanceof Error ? error.message : "The settlement outcome is unknown."} The original request is retained. Find it or explicitly settle it again.`);
+    } finally {
+      if (abort.current === controller) { abort.current = null; setBusy(false); }
+    }
+  }
+
   const locked = fixtureMode || busy || !!attempt;
   return <section className="promotion-control testing-rebuild-control" aria-labelledby="testing-rebuild-title">
     <header className="promotion-control-header"><div>
@@ -119,9 +142,11 @@ export function TestingRebuildPanel({ detail, fixtureMode, onRefresh }: {
     {attempt && !attempt.denied ? <button type="button" className="secondary-button" disabled={busy || fixtureMode} onClick={() => void rebuild(attempt)}>{attempt.operationId ? "Resume watching this rebuild" : attempt.readOnlyRecovery ? "Find the original rebuild" : "Recover this request"}</button> : null}
     {attempt?.operationId && !attempt.denied && result?.operation.status === "reconciliation_required" ? <button type="button" className="primary-button" disabled={busy || fixtureMode || attempt.resumeNeedsRead} onClick={() => void resumeOriginal()}>Resume this rebuild</button> : null}
     {attempt?.denied ? <p>This request was denied and will not be submitted again. The denial needs to be resolved before rebuilding.</p> : null}
-    {attempt?.denied ? <button type="button" className="secondary-button" disabled={busy || fixtureMode} onClick={() => {
-      saveTestingRebuildAttempt(detail.product, null); setAttempt(null); setPreflight(null); setMessage(""); setRefresh(value => value + 1);
-    }}>Discard this denied request</button> : null}
+    {attempt && !attempt.operationId && attempt.payload.original_scope ? <>
+      <p>Settle checks for the original rebuild. If it has not been admitted, Launchplane prevents that request from arriving later so you can inspect afresh.</p>
+      <button type="button" className="secondary-button" disabled={busy || fixtureMode} onClick={() => void settleOriginal()}>Settle this request</button>
+    </> : null}
+    {attempt && !attempt.operationId && !attempt.payload.original_scope ? <p>This older saved request has no original administrator binding. Keep finding its original operation; it cannot be safely excluded from this browser state.</p> : null}
     <p role="status">{message}</p>
     {result ? <details><summary>Operation details</summary><p>{result.operation.status}: {result.operation.phase}</p><p>Operation: {result.operation.operation_id}</p><p>Trace: {result.trace_id}</p></details> : null}
   </section>;

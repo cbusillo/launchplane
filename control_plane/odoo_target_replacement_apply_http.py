@@ -40,6 +40,7 @@ from control_plane.release_review import (
     ProductionChangeRequiresPromotion,
 )
 from control_plane.testing_rebuild_resume import caller_binding
+from control_plane.testing_rebuild_request_settlement import TestingRebuildRequestConflict
 
 
 ODOO_TARGET_REPLACEMENT_APPLY_ROUTE = "/v1/drivers/odoo/target-replacement-apply"
@@ -209,6 +210,8 @@ def enqueue_odoo_target_replacement_apply_operation(
         )
     except OdooStableLaneOperationConflictError as error:
         raise OdooTargetReplacementApplyLaneBusyError(str(error)) from error
+    except TestingRebuildRequestConflict as error:
+        raise OdooTargetReplacementApplyIdempotencyKeyReusedError from error
     if not created_operation:
         if (
             operation.idempotency_key == idempotency_key

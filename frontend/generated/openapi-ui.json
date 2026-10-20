@@ -4166,7 +4166,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/TestingRebuildPreflight"
+                  "$ref": "#/components/schemas/TestingRebuildInspection"
                 }
               }
             },
@@ -9048,6 +9048,97 @@
           }
         },
         "summary": "Resume Original"
+      }
+    },
+    "/v1/products/{product}/testing-rebuild/settle": {
+      "post": {
+        "operationId": "settle_testing_rebuild",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 256,
+              "minLength": 1,
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TestingRebuildSettlement"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TestingRebuildSettlementResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Settle Original"
       }
     },
     "/v1/release-review/decisions": {
@@ -41166,6 +41257,81 @@
         "title": "TestingHoldRehearsal",
         "type": "object"
       },
+      "TestingRebuildInspection": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_id": {
+            "title": "Artifact Id",
+            "type": "string"
+          },
+          "base_url": {
+            "title": "Base Url",
+            "type": "string"
+          },
+          "candidate_verification": {
+            "const": "pending",
+            "default": "pending",
+            "title": "Candidate Verification",
+            "type": "string"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "data_source_mode": {
+            "enum": [
+              "empty",
+              "production_restore",
+              "upstream_restore"
+            ],
+            "title": "Data Source Mode",
+            "type": "string"
+          },
+          "instance": {
+            "const": "testing",
+            "default": "testing",
+            "title": "Instance",
+            "type": "string"
+          },
+          "observed_at": {
+            "title": "Observed At",
+            "type": "string"
+          },
+          "original_scope": {
+            "title": "Original Scope",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "source_git_ref": {
+            "title": "Source Git Ref",
+            "type": "string"
+          },
+          "status": {
+            "const": "pass",
+            "default": "pass",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "artifact_id",
+          "base_url",
+          "candidate_verification",
+          "context",
+          "data_source_mode",
+          "instance",
+          "observed_at",
+          "original_scope",
+          "product",
+          "source_git_ref",
+          "status"
+        ],
+        "title": "TestingRebuildInspection",
+        "type": "object"
+      },
       "TestingRebuildOperationView": {
         "additionalProperties": false,
         "properties": {
@@ -41213,76 +41379,6 @@
         "title": "TestingRebuildOperationView",
         "type": "object"
       },
-      "TestingRebuildPreflight": {
-        "additionalProperties": false,
-        "properties": {
-          "artifact_id": {
-            "title": "Artifact Id",
-            "type": "string"
-          },
-          "base_url": {
-            "title": "Base Url",
-            "type": "string"
-          },
-          "candidate_verification": {
-            "const": "pending",
-            "default": "pending",
-            "title": "Candidate Verification",
-            "type": "string"
-          },
-          "context": {
-            "title": "Context",
-            "type": "string"
-          },
-          "data_source_mode": {
-            "enum": [
-              "empty",
-              "production_restore",
-              "upstream_restore"
-            ],
-            "title": "Data Source Mode",
-            "type": "string"
-          },
-          "instance": {
-            "const": "testing",
-            "default": "testing",
-            "title": "Instance",
-            "type": "string"
-          },
-          "observed_at": {
-            "title": "Observed At",
-            "type": "string"
-          },
-          "product": {
-            "title": "Product",
-            "type": "string"
-          },
-          "source_git_ref": {
-            "title": "Source Git Ref",
-            "type": "string"
-          },
-          "status": {
-            "const": "pass",
-            "default": "pass",
-            "title": "Status",
-            "type": "string"
-          }
-        },
-        "required": [
-          "artifact_id",
-          "base_url",
-          "candidate_verification",
-          "context",
-          "data_source_mode",
-          "instance",
-          "observed_at",
-          "product",
-          "source_git_ref",
-          "status"
-        ],
-        "title": "TestingRebuildPreflight",
-        "type": "object"
-      },
       "TestingRebuildResponse": {
         "additionalProperties": false,
         "properties": {
@@ -41322,6 +41418,99 @@
         "title": "TestingRebuildResume",
         "type": "object"
       },
+      "TestingRebuildSettlement": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_id": {
+            "minLength": 1,
+            "title": "Artifact Id",
+            "type": "string"
+          },
+          "data_source_mode": {
+            "enum": [
+              "empty",
+              "production_restore",
+              "upstream_restore"
+            ],
+            "title": "Data Source Mode",
+            "type": "string"
+          },
+          "original_scope": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "title": "Original Scope",
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "source_git_ref": {
+            "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+            "title": "Source Git Ref",
+            "type": "string"
+          }
+        },
+        "required": [
+          "artifact_id",
+          "data_source_mode",
+          "original_scope",
+          "reason",
+          "source_git_ref"
+        ],
+        "title": "TestingRebuildSettlement",
+        "type": "object"
+      },
+      "TestingRebuildSettlementResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "operation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TestingRebuildOperationView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "original_key": {
+            "title": "Original Key",
+            "type": "string"
+          },
+          "original_request": {
+            "$ref": "#/components/schemas/TestingRebuildSettlement"
+          },
+          "outcome": {
+            "enum": [
+              "excluded",
+              "observed"
+            ],
+            "title": "Outcome",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation",
+          "original_key",
+          "original_request",
+          "outcome",
+          "product",
+          "trace_id"
+        ],
+        "title": "TestingRebuildSettlementResponse",
+        "type": "object"
+      },
       "TestingRebuildSubmit": {
         "additionalProperties": false,
         "properties": {
@@ -41337,6 +41526,12 @@
               "upstream_restore"
             ],
             "title": "Data Source Mode",
+            "type": "string"
+          },
+          "original_scope": {
+            "default": "",
+            "maxLength": 1024,
+            "title": "Original Scope",
             "type": "string"
           },
           "reason": {

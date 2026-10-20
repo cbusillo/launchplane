@@ -1,6 +1,6 @@
 import { expect, test, waitForState } from "./state";
 
-for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-observed", "session-unavailable", "session-unauthenticated", "watch-denied", "denied", "stale-build", "preflight-unavailable", "held-resume", "held-resume-denied", "held-resume-lost-reply"] as const) {
+for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-observed", "session-unavailable", "session-unauthenticated", "watch-denied", "denied", "stale-build", "preflight-unavailable", "held-resume", "held-resume-denied", "held-resume-lost-reply", "settlement-excluded", "settlement-lost-reply", "settlement-denied", "settlement-observed", "replay-conflict-settlement", "settlement-mismatch"] as const) {
   test(`testing rebuild keeps its address and original request after ${outcome} @responsive`, async ({ page }, testInfo) => {
     await page.goto("/ui/products?fixture=empty");
     const fixtures = await page.evaluate(async () => {
@@ -22,6 +22,9 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-o
     const writes: { key: string; body: Record<string, unknown> }[] = [];
     const selectedCommit = "c".repeat(40);
     const csrfToken = "fixture-csrf";
+    const originalScope = "fixture-original-administrator";
+    const settling = outcome.startsWith("settlement-") || outcome === "replay-conflict-settlement";
+    let settlements = 0;
     let polled = false;
     let reads = 0;
     let lookups = 0;
@@ -43,15 +46,32 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-o
       status: "pass", product: environment.product, context: environment.context, instance: "testing", base_url: environment.base_url,
       artifact_id: "current-verified-build", source_git_ref: selectedCommit, data_source_mode: new URL(route.request().url()).searchParams.get("data_source_mode"),
       observed_at: new Date().toISOString(), candidate_verification: "pending",
+      original_scope: originalScope,
     } }));
     const receipt = (status: string) => ({ trace_id: "rebuild-trace", operation: { product: environment.product, instance: "testing", operation_id: "native-original", status, phase: status === "pass" ? "completed" : "running", updated_at: status === "reconciliation_required" ? heldUpdatedAt : new Date().toISOString(), attempt: heldAttempt } });
     await page.route("**/v1/products/atlas-commerce/testing-rebuild", async route => {
       expect(route.request().headers()["x-csrf-token"]).toBe(csrfToken);
       writes.push({ key: route.request().headers()["idempotency-key"], body: route.request().postDataJSON() });
-      if (["lost-reply", "recovery-denied", "lookup-not-observed"].includes(outcome) && writes.length === 1) return route.abort();
+      if ((["lost-reply", "recovery-denied", "lookup-not-observed"].includes(outcome) || settling) && writes.length === 1) return route.abort();
+      if (outcome === "replay-conflict-settlement") return route.fulfill({ status: 409, json: { trace_id: "replay-conflict", error: { code: "testing_rebuild_not_ready", message: "The inspected build changed." } } });
+      if (settling) return route.fulfill({ status: 403, json: { trace_id: "recovery-denial", error: { code: "authorization_denied", message: "Recovery was denied." } } });
       if (["denied", "recovery-denied", "lookup-not-observed"].includes(outcome)) return route.fulfill({ status: 403, json: { trace_id: "denied-trace", error: { code: "authorization_denied", message: "This request is denied." } } });
       if (outcome === "stale-build") return route.fulfill({ status: 409, json: { trace_id: "stale-trace", error: { code: "testing_rebuild_not_ready", message: "The inspected build changed. Inspect again." } } });
       return route.fulfill({ json: receipt("pending") });
+    });
+    await page.route("**/v1/products/atlas-commerce/testing-rebuild/settle", route => {
+      settlements++;
+      expect(route.request().headers()["x-csrf-token"]).toBe(csrfToken);
+      expect({ key: route.request().headers()["idempotency-key"], body: route.request().postDataJSON() }).toEqual(writes[0]);
+      if (outcome === "settlement-lost-reply" && settlements === 1) return route.abort();
+      if (outcome === "settlement-denied" && settlements === 1) return route.fulfill({ status: 403, json: { trace_id: "settlement-denial", error: { code: "authorization_denied", message: "Settlement is denied." } } });
+      const originalRequest = { ...writes[0].body };
+      if (outcome === "settlement-mismatch" && settlements === 1) originalRequest.original_scope = "foreign-actor";
+      return route.fulfill({ json: {
+        trace_id: "settlement-trace", product: environment.product, original_key: writes[0].key,
+        original_request: originalRequest, outcome: outcome === "settlement-observed" ? "observed" : "excluded",
+        operation: outcome === "settlement-observed" ? receipt("running").operation : null,
+      } });
     });
     await page.route("**/v1/products/atlas-commerce/testing-rebuild/lookup", route => {
       lookups++;
@@ -90,7 +110,7 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-o
     const selectedSource = outcome === "success" ? "empty" : outcome === "stale-build" ? "production_restore" : "upstream_restore";
     if (selectedSource !== "empty") await panel.getByLabel("Start with").selectOption(selectedSource);
     await expect(panel).toContainText(selectedCommit.slice(0, 12));
-    if (["lost-reply", "recovery-denied", "lookup-not-observed"].includes(outcome)) {
+    if (["lost-reply", "recovery-denied", "lookup-not-observed"].includes(outcome) || settling) {
       await panel.getByText("Reason (optional edit)", { exact: true }).click();
       await panel.getByLabel("Reason", { exact: true }).fill("Prepare a fresh testing copy.");
     }
@@ -100,7 +120,7 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-o
     await panel.screenshot({ path: testInfo.outputPath("testing-rebuild-ready.png") });
     sessionUnavailable = ["session-unavailable", "session-unauthenticated"].includes(outcome);
     await panel.getByRole("button", { name: "Rebuild testing", exact: true }).click();
-    if (["lost-reply", "recovery-denied", "lookup-not-observed"].includes(outcome)) {
+    if (["lost-reply", "recovery-denied", "lookup-not-observed"].includes(outcome) || settling) {
       await expect(panel.getByRole("button", { name: "Recover this request" })).toBeEnabled();
       await page.reload();
       await expect(panel.getByRole("button", { name: "Recover this request" })).toBeEnabled();
@@ -108,6 +128,34 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-o
       await panel.getByRole("button", { name: "Recover this request" }).click();
       await waitForState(() => writes.length).toBe(2);
       expect(writes[1]).toEqual(writes[0]);
+      if (settling) {
+        const settle = panel.getByRole("button", { name: "Settle this request", exact: true });
+        await expect(settle).toBeEnabled();
+        await settle.click();
+        if (["settlement-lost-reply", "settlement-denied", "settlement-mismatch"].includes(outcome)) {
+          await expect(settle).toBeEnabled();
+          await waitForState(async () => (await readAttempt())?.readOnlyRecovery).toBe(true);
+          expect((await readAttempt())?.key).toBe(writes[0].key);
+          expect((await readAttempt())?.payload.original_scope).toBe(originalScope);
+          expect(settlements).toBe(1);
+          await expect(panel.getByRole("button", { name: "Rebuild testing", exact: true })).toHaveCount(0);
+          await panel.screenshot({ path: testInfo.outputPath("testing-rebuild-settlement-retained.png") });
+          await page.reload();
+          await expect(settle).toBeEnabled();
+          expect(settlements).toBe(1);
+          await settle.click();
+        }
+        if (outcome === "settlement-observed") {
+          await expect(panel.getByRole("button", { name: "Resume watching this rebuild", exact: true })).toBeEnabled();
+          expect((await readAttempt())?.operationId).toBe("native-original");
+          await panel.getByRole("button", { name: "Resume watching this rebuild", exact: true }).click();
+        }
+        await waitForState(readAttempt).toBe(null);
+        await expect(panel.getByRole("button", { name: "Rebuild testing", exact: true })).toBeEnabled();
+        expect(writes.length).toBe(2);
+        await panel.screenshot({ path: testInfo.outputPath("testing-rebuild-settled.png") });
+        return;
+      }
       if (["recovery-denied", "lookup-not-observed"].includes(outcome)) {
         await expect(panel.getByRole("button", { name: "Find the original rebuild" })).toBeEnabled();
         await panel.screenshot({ path: testInfo.outputPath("testing-rebuild-read-only-recovery.png") });
@@ -136,7 +184,7 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-o
       expect(writes.length).toBe(1);
       expect(polled).toBe(false);
       await panel.screenshot({ path: testInfo.outputPath("testing-rebuild-denied.png") });
-      await panel.getByRole("button", { name: "Discard this denied request" }).click();
+      await panel.getByRole("button", { name: "Settle this request" }).click();
       await expect(panel.getByRole("button", { name: "Rebuild testing", exact: true })).toBeEnabled();
       expect(writes.length).toBe(1);
     } else {

@@ -1,6 +1,7 @@
 import { LaunchplaneApiError } from "./api";
 import type { BrowserOperationOptions, BrowserOperationStorage } from "./browser-operation";
 import type { SubmitTestingRebuildData, TestingRebuildResponse, TestingRebuildOperationView, ResumeTestingRebuildData } from "./generated/openapi.ts";
+import type { SettleTestingRebuildData, TestingRebuildSettlementResponse } from "./generated/openapi.ts";
 
 export interface TestingRebuildAttempt {
   product: string;
@@ -29,6 +30,7 @@ export function readTestingRebuildAttempt(product: string, storage: BrowserOpera
       && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(attempt.payload.source_git_ref)
       && ["empty", "production_restore", "upstream_restore"].includes(attempt.payload.data_source_mode)
       && typeof attempt.payload.reason === "string" && attempt.payload.reason.trim() && attempt.payload.reason.length <= 1000
+      && (attempt.payload.original_scope === undefined || typeof attempt.payload.original_scope === "string")
       && (attempt.operationId === undefined || typeof attempt.operationId === "string" && !!attempt.operationId.trim())
       && (attempt.denied === undefined || typeof attempt.denied === "boolean")
       && (attempt.dispatchStarted === undefined || typeof attempt.dispatchStarted === "boolean")
@@ -36,12 +38,51 @@ export function readTestingRebuildAttempt(product: string, storage: BrowserOpera
       && (attempt.resumeNeedsRead === undefined || typeof attempt.resumeNeedsRead === "boolean")) {
       // Older saved denials did not distinguish a write refusal from a failed
       // recovery/read. Preserve their key and allow only lookup, never a write.
+      if (!attempt.payload.original_scope?.trim()) {
+        return { ...attempt, dispatchStarted: true, denied: false, readOnlyRecovery: true };
+      }
       return attempt.dispatchStarted === undefined
         ? { ...attempt, dispatchStarted: true, denied: false, readOnlyRecovery: !!attempt.denied }
         : attempt;
     }
   } catch { /* Unreadable browser state is not an operation handle. */ }
   return null;
+}
+
+export async function settleTestingRebuildAttempt(
+  attempt: TestingRebuildAttempt,
+  dependencies: {
+    settle: (product: string, payload: SettleTestingRebuildData["body"], options: BrowserOperationOptions) => Promise<TestingRebuildSettlementResponse>;
+    persist: (attempt: TestingRebuildAttempt | null) => void;
+  },
+  signal?: AbortSignal,
+): Promise<TestingRebuildSettlementResponse> {
+  const scope = attempt.payload.original_scope;
+  if (!scope?.trim() || attempt.operationId) {
+    throw new Error("This saved request needs observation of its original operation.");
+  }
+  const retained = { ...attempt, denied: false, readOnlyRecovery: true };
+  dependencies.persist(retained);
+  const settled = await dependencies.settle(attempt.product, { ...attempt.payload, original_scope: scope }, {
+    idempotencyKey: attempt.key, signal,
+  });
+  const intent = settled.original_request;
+  if (settled.product !== attempt.product || settled.original_key !== attempt.key
+    || intent.original_scope !== scope || intent.data_source_mode !== attempt.payload.data_source_mode
+    || intent.artifact_id !== attempt.payload.artifact_id || intent.source_git_ref !== attempt.payload.source_git_ref
+    || intent.reason !== attempt.payload.reason) {
+    throw new Error("The settlement does not identify the original request. Keep its recovery state.");
+  }
+  if (settled.outcome === "excluded" && settled.operation === null) {
+    dependencies.persist(null);
+  } else if (settled.outcome === "observed" && settled.operation?.product === attempt.product
+    && settled.operation.instance === "testing" && settled.operation.operation_id) {
+    dependencies.persist(["pass", "fail", "cancelled", "superseded"].includes(settled.operation.status)
+      ? null : { ...retained, operationId: settled.operation.operation_id });
+  } else {
+    throw new Error("The settlement outcome is unknown. Keep the original request.");
+  }
+  return settled;
 }
 
 interface TestingRebuildDependencies {

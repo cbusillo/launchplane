@@ -6,6 +6,7 @@ import type {
   ProductListPayload,
 } from "./types";
 import type { InspectTestingRebuildData, InspectTestingRebuildResponse, ReadTestingRebuildResponse, SubmitTestingRebuildData, SubmitTestingRebuildResponse, LookupTestingRebuildData, LookupTestingRebuildResponse, ResumeTestingRebuildData, ResumeTestingRebuildResponse } from "./generated/openapi.ts";
+import type { SettleTestingRebuildData, SettleTestingRebuildResponse } from "./generated/openapi.ts";
 import type {
   ApplyProductionBackupAuthorityData,
   ApplyProductionBackupAuthorityResponse,
@@ -871,6 +872,11 @@ export function lookupTestingRebuild(product: string, payload: LookupTestingRebu
   };
   return requestJson(request.url.replace("{product}", encodeURIComponent(product)), "POST", request.body,
     options.signal, options.idempotencyKey);
+}
+
+export function settleTestingRebuild(product: string, payload: SettleTestingRebuildData["body"], options: BrowserOperationOptions): Promise<SettleTestingRebuildResponse> {
+  const path = BROWSER_WRITE_ROUTES.testingRebuildSettle.replace("{product}", encodeURIComponent(product));
+  return requestJson(path, "POST", payload, options.signal, options.idempotencyKey);
 }
 
 export function resumeTestingRebuild(product: string, operationId: string, payload: ResumeTestingRebuildData["body"], options: BrowserOperationOptions): Promise<ResumeTestingRebuildResponse> {

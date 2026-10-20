@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { LaunchplaneApiError } from "../src/api.ts";
-import { readTestingRebuildAttempt, runTestingRebuild, resumeTestingRebuildAttempt, saveTestingRebuildAttempt } from "../src/testing-rebuild-operation.ts";
+import { readTestingRebuildAttempt, runTestingRebuild, resumeTestingRebuildAttempt, settleTestingRebuildAttempt, saveTestingRebuildAttempt } from "../src/testing-rebuild-operation.ts";
 
 const original = { product: "example", key: "original-click", payload: {
-  artifact_id: "verified-build", source_git_ref: "c".repeat(40), data_source_mode: "empty", reason: "Fresh testing copy",
+  artifact_id: "verified-build", source_git_ref: "c".repeat(40), data_source_mode: "empty", reason: "Fresh testing copy", original_scope: "fixture-original-administrator",
 } };
 const receipt = (status, operationId = "native-original") => ({ trace_id: "trace", operation: {
   product: original.product, instance: "testing", operation_id: operationId, status, phase: status === "pass" ? "completed" : "running", updated_at: "2026-10-17T00:00:00Z", attempt: 1,
@@ -13,6 +13,94 @@ const receipt = (status, operationId = "native-original") => ({ trace_id: "trace
 function dependencies(overrides = {}) {
   return { submit: async () => receipt("pending"), lookup: async () => receipt("pending"), read: async () => receipt("pass"), wait: async () => {}, persist: () => {}, progress: () => {}, ...overrides };
 }
+
+const settlement = (outcome = "excluded", operation = null) => ({
+  trace_id: "settlement", product: original.product, original_key: original.key,
+  original_request: original.payload, outcome, operation,
+});
+
+test("explicit exclusion clears an uncertain original only after its correlated receipt", async () => {
+  let saved = { ...original, dispatchStarted: true, readOnlyRecovery: true };
+  const result = await settleTestingRebuildAttempt(saved, {
+    persist: value => { saved = value; },
+    settle: async (product, payload, options) => {
+      assert.equal(product, original.product);
+      assert.deepEqual(payload, original.payload);
+      assert.equal(options.idempotencyKey, original.key);
+      assert.equal(saved.key, original.key);
+      return settlement();
+    },
+  });
+  assert.equal(result.outcome, "excluded");
+  assert.equal(saved, null);
+});
+
+test("settlement keeps an observed active or held rebuild and clears only terminal operations", async () => {
+  for (const status of ["pending", "running", "reconciliation_required", "pass", "fail", "cancelled", "superseded"]) {
+    let saved = original;
+    await settleTestingRebuildAttempt(saved, {
+      settle: async () => settlement("observed", receipt(status).operation),
+      persist: value => { saved = value; },
+    });
+    if (["pending", "running", "reconciliation_required"].includes(status)) {
+      assert.equal(saved.operationId, "native-original");
+      assert.equal(saved.key, original.key);
+      assert.equal(saved.readOnlyRecovery, true);
+    } else assert.equal(saved, null);
+  }
+});
+
+test("lost or denied settlement retains original intent and never turns recovery into submission", async () => {
+  for (const error of [new Error("Reply lost"), new LaunchplaneApiError("Denied", 403, "trace", "authorization_denied")]) {
+    let saved = { ...original, dispatchStarted: true };
+    let settlements = 0;
+    await assert.rejects(settleTestingRebuildAttempt(saved, {
+      settle: async () => { settlements++; throw error; }, persist: value => { saved = value; },
+    }));
+    assert.equal(saved.key, original.key);
+    assert.deepEqual(saved.payload, original.payload);
+    assert.equal(saved.readOnlyRecovery, true);
+    await assert.rejects(runTestingRebuild(saved, dependencies({
+      submit: async () => assert.fail("Recovery cannot submit after settlement uncertainty"),
+      lookup: async () => { throw new LaunchplaneApiError("Absent", 404, "trace", "testing_rebuild_not_observed"); },
+    })));
+    assert.equal(settlements, 1);
+    await settleTestingRebuildAttempt(saved, {
+      settle: async () => settlement(), persist: value => { saved = value; },
+    });
+    assert.equal(saved, null);
+  }
+});
+
+test("foreign or contradictory settlement evidence cannot clear the saved original", async () => {
+  for (const wrong of [
+    { ...settlement(), product: "another-product" }, { ...settlement(), original_key: "another-key" },
+    ...["original_scope", "artifact_id", "source_git_ref", "reason", "data_source_mode"].map(field => ({
+      ...settlement(), original_request: { ...original.payload, [field]: "foreign" },
+    })),
+    settlement("excluded", receipt("pending").operation), settlement("observed", null),
+    settlement("observed", { ...receipt("pass").operation, product: "another-product" }),
+  ]) {
+    let saved = original;
+    await assert.rejects(settleTestingRebuildAttempt(saved, {
+      settle: async () => wrong, persist: value => { saved = value; },
+    }));
+    assert.equal(saved.key, original.key);
+    assert.deepEqual(saved.payload, original.payload);
+  }
+});
+
+test("legacy attempts without an original actor binding remain observation-only", async () => {
+  const { original_scope, ...payload } = original.payload;
+  const storage = { getItem: () => JSON.stringify({ ...original, payload, dispatchStarted: true }) };
+  const legacy = readTestingRebuildAttempt(original.product, storage);
+  assert.equal(legacy.readOnlyRecovery, true);
+  assert.equal(legacy.payload.original_scope, undefined);
+  await assert.rejects(settleTestingRebuildAttempt(legacy, {
+    settle: async () => assert.fail("The current actor cannot adopt an unbound original"),
+    persist: () => assert.fail("Preserve the original legacy state"),
+  }));
+});
 
 test("explicit resume uses the held revision, original operation and original request key", async () => {
   const held = receipt("reconciliation_required").operation;
