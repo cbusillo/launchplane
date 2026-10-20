@@ -818,6 +818,49 @@ class IncompleteRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                     adapter=operation,
                 )
 
+            from control_plane.contracts.odoo_upgrade_rehearsal import (
+                IncompleteRehearsalRetirementCheckpoint,
+            )
+            from control_plane.contracts.canonical_json import canonical_json_sha256
+
+            admitted = prepared.model_copy(
+                update={
+                    "incomplete_retirement": IncompleteRehearsalRetirementCheckpoint(
+                        original_key_sha256=canonical_json_sha256(
+                            {"operation_key": "original-execute"}
+                        ),
+                        reviewed_plan_sha256=str(payload["reviewed_plan_sha256"]),
+                        host_binding_sha256=str(native["binding_sha256"]),
+                    )
+                }
+            )
+            fixture.store.compare_and_write_odoo_upgrade_rehearsal(prepared, admitted)
+            with patch.object(
+                OdooRehearsalAdapter,
+                "native_readback",
+                return_value={
+                    "completed": False,
+                    "host_observation_unavailable": True,
+                    "host_observation_reason": "provider_transport_unavailable",
+                },
+            ):
+                original_readback = await request(
+                    fixture.app,
+                    "POST",
+                    route,
+                    payload={
+                        **payload,
+                        "action": "execute",
+                        "mode": "readback",
+                        "reviewed_plan_sha256": "",
+                    },
+                    headers=headers,
+                )
+            self.assertEqual(original_readback.status_code, 202, original_readback.text)
+            self.assertFalse(original_readback.json()["result"]["completed"])
+            self.assertNotIn("resources_preserved", original_readback.json()["result"])
+            fixture.store.compare_and_write_odoo_upgrade_rehearsal(admitted, prepared)
+
             outcome, replay_outcome = run(), run()
             # The real local journal/adapter ran above. Bypass only HTTP's
             # PostgreSQL admission while mapping those completed outcomes.
@@ -861,21 +904,5 @@ class IncompleteRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(readback.json()["result"]["state"], "retired")
             self.assertEqual(readback.json()["result"]["copies"], [])
             self.assertEqual(host.call_count, calls)
-            payload["action"] = "execute"
-            with patch.object(
-                OdooRehearsalAdapter,
-                "native_readback",
-                return_value={
-                    "completed": False,
-                    "host_observation_unavailable": True,
-                    "host_observation_reason": "provider_transport_unavailable",
-                },
-            ):
-                original_readback = await request(
-                    fixture.app, "POST", route, payload=payload, headers=headers
-                )
-            self.assertEqual(original_readback.status_code, 202, original_readback.text)
-            self.assertFalse(original_readback.json()["result"]["completed"])
-            self.assertNotIn("resources_preserved", original_readback.json()["result"])
         self.assertEqual(fixture.authority(), before)
         self.assertFalse(fixture.store.list_held_provider_target_reservations())
