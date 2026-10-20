@@ -9,6 +9,8 @@ from tempfile import TemporaryDirectory
 from urllib.parse import quote
 from typing import Any
 from unittest.mock import Mock, patch
+from contextlib import ExitStack
+from types import SimpleNamespace
 
 from control_plane.contracts.merge_train_batch import (
     build_merge_train_batch_candidate_record,
@@ -27,7 +29,9 @@ from control_plane.merge_train_github import (
     MergeTrainGitHubError,
 )
 from control_plane.merge_train_handoff import MergeTrainReadyHandoff
+from control_plane.merge_train_setup_recovery_receipt import read_setup_recovery_receipt
 from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.storage.postgres import PostgresRecordStore
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy
 from tests.support.merge_train import _FakeExpandedMergeTrainSnapshotReader
 from control_plane.contracts.merge_train_batch import build_merge_train_batch_candidate
@@ -37,7 +41,9 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
     def setUp(self) -> None:
         self.directory = TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
-        self.store = FilesystemRecordStore(Path(self.directory.name))
+        self.store: FilesystemRecordStore | PostgresRecordStore = FilesystemRecordStore(
+            Path(self.directory.name)
+        )
         self.policy = build_test_merge_train_policy(trusted_automation_github_user_ids=(42,))
         self.target = self.policy.policies[0]
         source_app = self.target.github_token.github_app
@@ -54,6 +60,7 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
             repository=self.target.repository, base_branch=self.target.base_branch
         )
         self.old = template.pull_requests[1].model_copy(update={"head_sha": "a" * 40})
+        self.other = template.pull_requests[0]
         initial = template.model_copy(update={"pull_requests": (self.old,)})
         candidate = build_merge_train_batch_candidate(
             dry_run_result=build_merge_train_dry_run_result(policy=self.policy, snapshot=initial),
@@ -135,7 +142,10 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
     def request(self, *, method: str, path: str, body: object = None) -> object:
         del body
         if path in getattr(self, "setup_responses", {}):
-            return self.setup_responses[path]
+            value = self.setup_responses[path]
+            if isinstance(value, BaseException):
+                raise value
+            return value
         if method == "DELETE":
             self.mutations.append(path)
             self.current = self.current.model_copy(update={"labels": ()})
@@ -193,7 +203,7 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
             }
 
         self.setup_responses: dict[str, Any] = {
-            f"{prefix}/commits/{failed.candidate_sha}/check-runs?per_page=100&page=1": {
+            f"{prefix}/commits/{failed.candidate_sha}/check-runs?per_page=100&page=1&filter=all": {
                 "total_count": 2,
                 "check_runs": [
                     check(91, self.job["name"], "failure"),
@@ -210,7 +220,7 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
                 "'/home/runner/.local/share/pnpm/store/v10/files/71/" + "a" * 126 + "' -> "
                 "'/work/frontend/node_modules/.pnpm/lightningcss/node_modules/file.node'\n"
             ),
-            f"{prefix}/actions/runs/81/jobs?per_page=100&page=1": {
+            f"{prefix}/actions/runs/81/attempts/1/jobs?per_page=100&page=1": {
                 "total_count": 3,
                 "jobs": [
                     self.job,
@@ -246,9 +256,10 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
         self.setup_missing_store_failure()
         result = self.advance(mutate=True)
         self.assertEqual(result["controller_action"], "recover_candidate_block")
-        self.assertEqual(result["reason_code"], "candidate_block_unrelated_setup_reviewed")
-        saved = self.store.list_merge_train_batch_candidate_records()[0]
-        self.assertIsNotNone(saved.setup_failure_recovery)
+        saved = read_setup_recovery_receipt(
+            self.store, self.target.repository, self.current.number, self.current.head_sha
+        )
+        self.assertIsNotNone(saved)
         self.assertEqual(len(self.mutations), 1)
         self.current = self.current.model_copy(update={"labels": (self.target.blocked_label,)})
         self.events = [
@@ -279,7 +290,9 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
         self.setup_missing_store_failure()
         self.assertEqual(self.advance()["controller_action"], "recover_candidate_block")
         self.assertIsNone(
-            self.store.list_merge_train_batch_candidate_records()[0].setup_failure_recovery
+            read_setup_recovery_receipt(
+                self.store, self.target.repository, self.current.number, self.current.head_sha
+            )
         )
         self.assertEqual(self.mutations, [])
         for field in ("infrastructure_retry_of", "check_retry_of", "batch_body_retry_of"):
@@ -331,22 +344,118 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
                     )
                     self.assertEqual(bool(result.queue_order), admitted)
 
+    def test_snapshot_reader_enforces_recovery_gate_and_refreshes_exact_receipt(self) -> None:
+        from tests.test_merge_train_github import _github_pull_request
+        from control_plane.merge_train import MergeTrainLabelActor
+
+        self.setup_missing_store_failure()
+        reader = GitHubMergeTrainSnapshotReader(
+            transport=self.transport, branch_refresh_store=self.store, repository_policy=self.target
+        )
+        detail = _github_pull_request(
+            self.current.number,
+            repository=self.target.repository,
+            head_sha=self.current.head_sha,
+            base_sha=self.snapshot.base_sha,
+        )
+        detail["labels"] = [{"name": self.target.enqueue_label}]
+        prefix = f"/repos/{self.target.repository}"
+        self.setup_responses[f"{prefix}/pulls/{self.current.number}"] = detail
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch.object(reader, "_base_branch_sha", return_value=self.snapshot.base_sha)
+            )
+            stack.enter_context(
+                patch.object(reader, "_list_open_pull_requests", return_value=(detail,))
+            )
+            stack.enter_context(
+                patch.object(reader, "_actor_role_for_pull_request", return_value="repo_admin")
+            )
+            stack.enter_context(
+                patch.object(
+                    reader,
+                    "_label_actors",
+                    return_value=(
+                        MergeTrainLabelActor(label=self.target.enqueue_label, actor_id=42),
+                    ),
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    reader,
+                    "client_review_intent",
+                    return_value=SimpleNamespace(
+                        explicit_override=True, error="", review_required=False
+                    ),
+                )
+            )
+            stack.enter_context(patch.object(reader, "client_veto", return_value=False))
+            stack.enter_context(
+                patch.object(reader, "_required_checks_observation", return_value=("pass", ""))
+            )
+            stack.enter_context(
+                patch.object(
+                    reader,
+                    "_with_review_conversations",
+                    side_effect=lambda **kw: kw["pull_requests"],
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "control_plane.merge_train_github.individual_landing_snapshots",
+                    side_effect=lambda **kw: kw["pull_requests"],
+                )
+            )
+            # The same reader first sees no reservation, then a committed one.
+            self.assertEqual(
+                reader.read_pull_request_snapshot(
+                    repository=self.target.repository, pull_request_number=self.current.number
+                ).recovery_ready_comment_floor,
+                0,
+            )
+            self.advance(mutate=True)
+            for fresh in (False, True):
+                if fresh:
+                    self.comments.append(
+                        {
+                            "id": 102,
+                            "body": f"Ready for the merge train\n\nHead: {self.current.head_sha}",
+                            "user": {"id": 42, "login": "train[bot]"},
+                            "created_at": "2026-10-18T00:05:00Z",
+                        }
+                    )
+                snapshot = reader.read_merge_train_snapshot(
+                    repository=self.target.repository, base_branch=self.target.base_branch
+                )
+                result = build_merge_train_dry_run_result(
+                    policy=self.policy, snapshot=snapshot, batch_landing=True, new_candidate=True
+                )
+                self.assertEqual(bool(result.queue_order), fresh)
+
+    def test_green_rerun_preserves_original_attempt_attribution(self) -> None:
+        self.setup_missing_store_failure()
+        key = f"/repos/{self.target.repository}/commits/{self.record.candidate.candidate_sha}/check-runs?per_page=100&page=1&filter=all"
+        rows = self.setup_responses[key]["check_runs"]
+        rows.extend(
+            [{**row, "id": int(row["id"]) + 100, "conclusion": "success"} for row in tuple(rows)]
+        )
+        self.setup_responses[key]["total_count"] = len(rows)
+        self.assertEqual(self.advance(mutate=True)["controller_action"], "recover_candidate_block")
+
     def test_optional_setup_evidence_denial_preserves_hold_and_other_train_work(self) -> None:
         self.setup_missing_store_failure()
         for code in (401, 403, 404, 410):
-            with (
-                self.subTest(code=code),
-                patch.object(
-                    self.client,
-                    "read_setup_failure_recovery",
-                    side_effect=MergeTrainGitHubError(
-                        "optional evidence unavailable", status_code=code
-                    ),
-                ),
-            ):
+            with self.subTest(code=code):
+                self.setup_responses[f"/repos/{self.target.repository}/actions/jobs/91"] = (
+                    MergeTrainGitHubError("optional evidence unavailable", status_code=code)
+                )
                 self.assertNotEqual(
                     self.advance(mutate=True)["controller_action"], "recover_candidate_block"
                 )
+        self.snapshot = self.snapshot.model_copy(
+            update={"pull_requests": (self.current, self.other)}
+        )
+        self.assertEqual(self.advance()["controller_action"], "plan_candidate")
         self.transport.token_permissions = frozenset({"checks:read"})
         self.transport.repository_private = True
         self.transport.request.reset_mock()
@@ -373,7 +482,7 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
             }
         )
         self.setup_responses = {
-            f"{prefix}/commits/{fixture['candidate_sha']}/check-runs?per_page=100&page=1": fixture[
+            f"{prefix}/commits/{fixture['candidate_sha']}/check-runs?per_page=100&page=1&filter=all": fixture[
                 "checks"
             ],
             f"{prefix}/commits/{fixture['candidate_sha']}/status?per_page=100&page=1": fixture[
@@ -381,7 +490,9 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
             ],
             f"{prefix}/actions/jobs/{job['id']}": job,
             f"{prefix}/actions/jobs/{job['id']}/logs": fixture["log_excerpt"],
-            f"{prefix}/actions/runs/{job['run_id']}/jobs?per_page=100&page=1": fixture["jobs"],
+            f"{prefix}/actions/runs/{job['run_id']}/attempts/{job['run_attempt']}/jobs?per_page=100&page=1": fixture[
+                "jobs"
+            ],
             f"{prefix}/compare/{fixture['base_sha']}...{fixture['head_sha']}": fixture[
                 "comparison"
             ],
@@ -409,7 +520,7 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
         self.current = original
         with patch.object(
             self.store,
-            "write_merge_train_batch_candidate_record",
+            "write_merge_train_pr_feedback_record",
             side_effect=OSError("disk unavailable"),
         ):
             self.assertNotEqual(

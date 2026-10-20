@@ -461,9 +461,6 @@ class MergeTrainBatchCandidateRecord(BaseModel):
     block_intent: MergeTrainCandidateBlockIntent | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
-    setup_failure_recovery: MergeTrainSetupFailureRecovery | None = Field(
-        default=None, exclude_if=lambda value: value is None
-    )
 
     @model_validator(mode="after")
     def _validate_record(self) -> "MergeTrainBatchCandidateRecord":

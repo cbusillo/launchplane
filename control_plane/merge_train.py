@@ -123,6 +123,7 @@ class MergeTrainPullRequestSnapshot(BaseModel):
         default=None, exclude_if=lambda value: value is None
     )
     recovery_ready_comment_floor: int = Field(default=0, ge=0, exclude_if=lambda value: not value)
+    recovery_ready_unavailable: bool = Field(default=False, exclude_if=lambda value: not value)
     changed_paths: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
     actor_id: PositiveInt | None = None
     actor_role: str = "unknown"
@@ -814,6 +815,8 @@ def _build_queue_entry(
         repository_policy, pull_request.ready_handoff, pull_request.head_sha
     )
     has_ready_handoff = not handoff_refusal
+    if pull_request.recovery_ready_unavailable:
+        ineligible_reasons.append("recovery Ready evidence is unavailable")
     if pull_request.recovery_ready_comment_floor and (
         not has_ready_handoff
         or (

@@ -4612,6 +4612,7 @@ def _advance_from_live_snapshot(
             client=github_client,
             mutate=request.mutate,
             before_remove=checkpoint_block_recovery,
+            recorded_at=recorded_at,
         )
         if recovery is not None:
             recovery["dry_run_result"] = build_merge_train_dry_run_result(

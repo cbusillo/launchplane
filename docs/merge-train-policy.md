@@ -656,13 +656,21 @@ normal failure classification or fix the store lifecycle.
 
 Before removing the proven label, the fenced controller checkpoints its result
 and persists value-free job/run/attempt identifiers, the pre-release comment-ID
-floor and source/log digests on
-the blocked candidate record. That consumes one recovery per PR head across
-bases and policy revisions. Prior infrastructure, check-recovery or batch-body
-retry lineage for that head also exhausts this path. Dry runs spend nothing.
+floor and source/log digests in one keyed native feedback reservation. Its key
+binds repository, PR and head across bases and policy revisions. The existing
+per-PR feedback lock serializes reservation; PostgreSQL commits it before the
+provider effect. A different failure cannot overwrite it. No candidate schema
+or table migration is needed, and admission reads the one exact key rather
+than scanning candidate history. The blocked checkpoint retains legacy failure
+provenance independently of later feedback or comment delivery.
+That consumes one recovery per PR head. Existing retry lineage on the exact
+failed singleton also exhausts this path; an unrelated multi-entry or generated
+body retry never spends another PR's causal allowance. Dry runs spend nothing.
 Restarted attempts must match the saved proof and original label event; a new
 hold or different failed candidate cannot obtain another allowance. Storage
-failure prevents removal. Provider logs are bounded to 2 MiB, never persisted,
+failure prevents removal. Failure-job evidence uses all check runs and the
+original run-attempt job list, so a later passing rerun cannot erase the
+attribution. Provider logs are bounded to 2 MiB, never persisted,
 and fetched from HTTPS storage without forwarding the API credential.
 
 The supported operation remains the ordinary controller dry run, then its
@@ -677,11 +685,9 @@ The optional Actions evidence capability is never a grant prerequisite: a
 known missing permission skips the read; denied or unavailable evidence leaves
 that PR held while unrelated queue work continues. Storage-download failures
 are evidence failures, never GitHub authentication failures.
-Recovery records add a persisted `setup_failure_recovery` field. As with saved
-block intents, an older binary that forbids unknown record fields cannot read
-those records. After consuming this feature, the rollback reader must support
-the recovery record; do not delete audit/budget fields to make an older reader
-start.
+The reservation uses the existing feedback envelope; older binaries can still
+read the candidate and feedback records. Never delete a reservation to reset
+its allowance.
 
 Both recovery paths refuse pending, failing or unreadable current-head evidence, conflicting
 or unknown mergeability, stale/missing/unweighed review, a renewed review request,

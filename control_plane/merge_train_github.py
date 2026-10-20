@@ -2464,6 +2464,27 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
 
         return candidate_block_application(self, candidate=candidate, policy=policy)
 
+    def candidate_block_recovery_provenance(
+        self,
+        *,
+        candidate: MergeTrainBatchCandidateRecord,
+        feedback: MergeTrainPrFeedbackRecord | None,
+        policy: MergeTrainRepositoryPolicy,
+        legacy_writer_app_id: int | None,
+    ) -> bool:
+        from control_plane.merge_train_github_block_recovery import candidate_block_label_event
+
+        return (
+            candidate_block_label_event(
+                client=self,
+                candidate=candidate,
+                feedback=feedback,
+                policy=policy,
+                legacy_writer_app_id=legacy_writer_app_id,
+            )
+            is not None
+        )
+
     def read_setup_failure_recovery(
         self, *, candidate: MergeTrainBatchCandidate
     ) -> MergeTrainSetupFailureRecovery | None:
@@ -3158,7 +3179,6 @@ class GitHubMergeTrainSnapshotReader:
         self._author_roles: dict[tuple[str, str], str] = {}
         self._dependency_classes: dict[tuple[str, int, str, str], DependencyUpdateClass] = {}
         self._ready_handoffs: dict[int, MergeTrainReadyHandoff] = {}
-        self._recovery_ready_floors: dict[tuple[int, str], int] | None = None
 
     def read_merge_train_snapshot(
         self, *, repository: str, base_branch: str
@@ -3167,7 +3187,6 @@ class GitHubMergeTrainSnapshotReader:
         self._author_roles.clear()
         self._dependency_classes.clear()
         self._ready_handoffs.clear()
-        self._recovery_ready_floors = None
         repository_path = _repository_path(repository)
         normalized_base_branch = _required_value(
             base_branch, "GitHub pull request base branch is required."
@@ -3531,7 +3550,13 @@ class GitHubMergeTrainSnapshotReader:
             else ("unknown", "")
         )
         checks_status, checks_error = checks_observation
-        recovery_floor = self._recovery_ready_floor(repository_path, pull_request_number, head_sha)
+        try:
+            recovery_floor = self._recovery_ready_floor(
+                repository_path, pull_request_number, head_sha
+            )
+            recovery_unavailable = False
+        except Exception:
+            recovery_floor, recovery_unavailable = 0, True
         if recovery_floor and ready_handoff is None:
             ready_handoff = self._read_ready_handoff(
                 repository_path=repository_path,
@@ -3541,6 +3566,7 @@ class GitHubMergeTrainSnapshotReader:
                 base_sha=str(base.get("sha") or ""),
             )
         return MergeTrainPullRequestSnapshot(
+            recovery_ready_unavailable=recovery_unavailable,
             recovery_ready_comment_floor=recovery_floor,
             ready_handoff=ready_handoff,
             owner_review_required=owner_review_required,
@@ -3571,21 +3597,10 @@ class GitHubMergeTrainSnapshotReader:
         )
 
     def _recovery_ready_floor(self, repository: str, number: int, head: str) -> int:
-        if self._recovery_ready_floors is None:
-            self._recovery_ready_floors = {}
-            reader = getattr(
-                self._branch_refresh_store, "list_merge_train_batch_candidate_records", None
-            )
-            if callable(reader):
-                for record in reader(repository=repository):
-                    if record.setup_failure_recovery is not None:
-                        for entry in record.candidate.entries:
-                            key = (entry.pull_request_number, entry.head_sha)
-                            self._recovery_ready_floors[key] = max(
-                                self._recovery_ready_floors.get(key, 0),
-                                record.setup_failure_recovery.ready_comment_floor,
-                            )
-        return self._recovery_ready_floors.get((number, head), 0)
+        from control_plane.merge_train_setup_recovery_receipt import read_setup_recovery_receipt
+
+        receipt = read_setup_recovery_receipt(self._branch_refresh_store, repository, number, head)
+        return receipt.evidence.ready_comment_floor if receipt else 0
 
     def _read_ready_handoff(
         self,

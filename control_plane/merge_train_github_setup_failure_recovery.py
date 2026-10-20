@@ -45,6 +45,15 @@ def read_setup_failure_recovery(
     client: GitHubMergeTrainClient, *, candidate: MergeTrainBatchCandidate
 ) -> MergeTrainSetupFailureRecovery | None:
     from control_plane.merge_train_github_block_recovery import _pages
+    from control_plane.merge_train_github import MergeTrainGitHubError
+
+    def optional_action(path: str) -> object:
+        try:
+            return client.transport.request(method="GET", path=path)
+        except MergeTrainGitHubError as error:
+            if error.rate_limited or error.status_code not in {401, 403, 404, 410}:
+                raise
+            return None
 
     permissions = getattr(client.transport, "token_permissions", None)
     if (
@@ -73,7 +82,8 @@ def read_setup_failure_recovery(
         return cast(list[dict[str, object]], values)
 
     runs = rows(
-        f"{prefix}/commits/{candidate.candidate_sha}/check-runs?per_page=100&page=1", "check_runs"
+        f"{prefix}/commits/{candidate.candidate_sha}/check-runs?per_page=100&page=1&filter=all",
+        "check_runs",
     )
     statuses = rows(
         f"{prefix}/commits/{candidate.candidate_sha}/status?per_page=100&page=1", "statuses"
@@ -115,7 +125,7 @@ def read_setup_failure_recovery(
             return None
     if job_check.get("id") != job_id:
         return None
-    job = client.transport.request(method="GET", path=f"{prefix}/actions/jobs/{job_id}")
+    job = optional_action(f"{prefix}/actions/jobs/{job_id}")
     if not isinstance(job, dict) or (
         job.get("id"),
         job.get("run_id"),
@@ -142,8 +152,8 @@ def read_setup_failure_recovery(
         return None
     # The provider's complete same-attempt job set must include independent
     # successful frontend work, not just green aggregate/tree-reuse evidence.
-    jobs_payload = client.transport.request(
-        method="GET", path=f"{prefix}/actions/runs/{run_id}/jobs?per_page=100&page=1"
+    jobs_payload = optional_action(
+        f"{prefix}/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100&page=1"
     )
     if not isinstance(jobs_payload, dict):
         return None
@@ -179,7 +189,7 @@ def read_setup_failure_recovery(
         for row in siblings
     ):
         return None
-    log = client.transport.request(method="GET", path=f"{prefix}/actions/jobs/{job_id}/logs")
+    log = optional_action(f"{prefix}/actions/jobs/{job_id}/logs")
     if not isinstance(log, str) or not _STORE_MISSING.search(log) or log.count("ERR_PNPM_") != 1:
         return None
     head = candidate.entries[0].head_sha

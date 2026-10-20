@@ -1,6 +1,6 @@
 """Bounded Actions log reads without forwarding the API credential to storage."""
 
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 from control_plane.github_request_timing import record_github_response
@@ -49,8 +49,9 @@ def read_job_log(request: Request, *, observer: GitHubResponseHeadersObserver | 
             Request(location, headers={"Accept": "text/plain"}), timeout=15
         ) as response:
             payload: bytes = response.read(MAX_JOB_LOG_BYTES + 1)
-    except HTTPError as error:
-        error.close()
+    except (HTTPError, URLError, OSError) as error:
+        if isinstance(error, HTTPError):
+            error.close()
         raise ValueError("GitHub job log storage evidence unavailable.") from None
     if len(payload) > MAX_JOB_LOG_BYTES:
         raise ValueError("GitHub job log exceeds the recovery evidence bound.")

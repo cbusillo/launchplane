@@ -1884,6 +1884,14 @@ class RealPostgresNoTargetRetirementTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RealPostgresSchemaIntegrationTests(unittest.TestCase):
+    def test_setup_recovery_receipt_commits_before_unknown_provider_effect(self) -> None:
+        from tests.test_merge_train_setup_recovery_receipt import (
+            assert_committed_reservation_survives_unknown_delete,
+        )
+
+        with _store_for_fresh_head_database() as store:
+            assert_committed_reservation_survives_unknown_delete(self, store)
+
     def test_browser_domain_repair_atomic_receipt_rollback_and_retry(self) -> None:
         from tests.test_browser_route_repair import BrowserRouteRepairTests
 

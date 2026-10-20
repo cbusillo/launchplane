@@ -18,9 +18,22 @@ from control_plane.contracts.merge_train_pr_feedback_record import MergeTrainPrF
 from control_plane.merge_train import MergeTrainDryRunSnapshot
 from control_plane.merge_train_batch_candidate import MergeTrainBatchCandidateRecordStore
 from control_plane.merge_train_pr_feedback import MergeTrainPrFeedbackRecordStore
+from control_plane.merge_train_setup_recovery_receipt import (
+    read_setup_recovery_receipt,
+    reserve_setup_recovery,
+)
 
 
 class CandidateBlockRecoveryClient(Protocol):
+    def candidate_block_recovery_provenance(
+        self,
+        *,
+        candidate: MergeTrainBatchCandidateRecord,
+        feedback: MergeTrainPrFeedbackRecord | None,
+        policy: MergeTrainRepositoryPolicy,
+        legacy_writer_app_id: int | None,
+    ) -> bool: ...
+
     def read_setup_failure_recovery(
         self, *, candidate: MergeTrainBatchCandidate
     ) -> MergeTrainSetupFailureRecovery | None: ...
@@ -47,6 +60,7 @@ def recover_candidate_block(
     client: CandidateBlockRecoveryClient,
     mutate: bool,
     before_remove: Callable[[dict[str, object]], None],
+    recorded_at: str,
 ) -> dict[str, object] | None:
     blocked = {
         pr.number: pr
@@ -87,6 +101,22 @@ def recover_candidate_block(
     ):
         feedback = receipts.get(candidate.record_id)
         failed = candidate.candidate
+        if feedback is None and candidate.block_intent is None and len(failed.entries) == 1:
+            # Later feedback can supersede the latest blocked projection. The
+            # exact committed reservation retains this legacy decision itself.
+            from control_plane.merge_train_setup_recovery_receipt import receipt_id
+
+            entry = failed.entries[0]
+            try:
+                saved = read_setup_recovery_receipt(
+                    store, snapshot.repository, entry.pull_request_number, entry.head_sha
+                )
+                if saved is not None and saved.failed_record_id == candidate.record_id:
+                    feedback = feedback_store.read_merge_train_pr_feedback_record(
+                        receipt_id(snapshot.repository, entry.pull_request_number, entry.head_sha)
+                    )
+            except (AttributeError, OSError, ValueError, TypeError, KeyError):
+                continue
         if candidate.block_intent is None and failed.batch_id in explicit_batches:
             # A saved decision owns this failure's provenance. An older
             # generic outcome must not replace its missing current event proof.
@@ -115,49 +145,6 @@ def recover_candidate_block(
         ):
             continue
         current = blocked[entry.pull_request_number]
-        setup_failure_evidence = None
-        if current.head_sha == entry.head_sha:
-            history = store.list_merge_train_batch_candidate_records(repository=snapshot.repository)
-            # This budget follows the PR head across bases, policy revisions,
-            # feedback delivery and restarts. Existing retry budgets stay spent.
-            if any(
-                any(
-                    item.pull_request_number == entry.pull_request_number
-                    and item.head_sha == entry.head_sha
-                    for item in record.candidate.entries
-                )
-                and (
-                    record.candidate.infrastructure_retry_of
-                    or record.candidate.check_retry_of
-                    or record.candidate.batch_body_retry_of
-                    or (
-                        record.setup_failure_recovery is not None
-                        and record.record_id != candidate.record_id
-                    )
-                )
-                for record in history
-            ):
-                continue
-            from control_plane.merge_train_github import MergeTrainGitHubError
-
-            try:
-                setup_failure_evidence = client.read_setup_failure_recovery(candidate=failed)
-            except MergeTrainGitHubError as error:
-                if error.rate_limited:
-                    raise
-                continue
-            except (OSError, ValueError, TypeError, KeyError):
-                continue
-            if setup_failure_evidence is None:
-                continue
-            if candidate.setup_failure_recovery is not None:
-                setup_failure_evidence = setup_failure_evidence.model_copy(
-                    update={
-                        "ready_comment_floor": candidate.setup_failure_recovery.ready_comment_floor
-                    }
-                )
-                if candidate.setup_failure_recovery != setup_failure_evidence:
-                    continue
         legacy_writer_app_id = None
         if candidate.block_intent is None:
             # A legacy failure did not save its label name or writer App. Read
@@ -186,6 +173,50 @@ def recover_candidate_block(
                 continue
             source_app = targets[0].github_token.github_app
             legacy_writer_app_id = source_app.app_id if source_app is not None else None
+        setup_failure_evidence = None
+        if current.head_sha == entry.head_sha:
+            if (
+                current.required_checks_status != "pass"
+                or current.is_draft
+                or current.mergeable != "mergeable"
+            ):
+                continue
+            if (
+                failed.infrastructure_retry_of
+                or failed.check_retry_of
+                or failed.batch_body_retry_of
+            ):
+                continue
+            from control_plane.merge_train_github import MergeTrainGitHubError
+
+            try:
+                if not client.candidate_block_recovery_provenance(
+                    candidate=candidate,
+                    feedback=feedback,
+                    policy=policy,
+                    legacy_writer_app_id=legacy_writer_app_id,
+                ):
+                    continue
+                reservation = read_setup_recovery_receipt(
+                    store, snapshot.repository, entry.pull_request_number, entry.head_sha
+                )
+                if reservation is not None and reservation.failed_record_id != candidate.record_id:
+                    continue
+                setup_failure_evidence = client.read_setup_failure_recovery(candidate=failed)
+            except MergeTrainGitHubError as error:
+                if error.rate_limited or error.status_code in {401, 403}:
+                    raise
+                continue
+            except (OSError, ValueError, TypeError, KeyError):
+                continue
+            if setup_failure_evidence is None:
+                continue
+            if reservation is not None:
+                setup_failure_evidence = setup_failure_evidence.model_copy(
+                    update={"ready_comment_floor": reservation.evidence.ready_comment_floor}
+                )
+                if reservation.evidence != setup_failure_evidence:
+                    continue
         result: dict[str, object] = {
             "repository": snapshot.repository,
             "base_branch": snapshot.base_branch,
@@ -221,8 +252,12 @@ def recover_candidate_block(
         def checkpoint() -> None:
             before_remove(result)
             if setup_failure_evidence is not None:
-                store.write_merge_train_batch_candidate_record(
-                    candidate.model_copy(update={"setup_failure_recovery": setup_failure_evidence})
+                reserve_setup_recovery(
+                    store=store,
+                    candidate=candidate,
+                    policy=policy,
+                    evidence=setup_failure_evidence,
+                    recorded_at=recorded_at,
                 )
 
         if client.recover_candidate_block(
