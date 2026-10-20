@@ -84,6 +84,7 @@ def current_generic_sibling_ownership(
         ready_at = _time(generation.ready_at)
     except ValueError:
         return None
+    unproven = False
     for receipt in receipts:
         try:
             result = GenericWebPreviewRefreshResult.model_validate(
@@ -92,7 +93,8 @@ def current_generic_sibling_ownership(
             started_at = _time(result.refresh_started_at)
             finished_at = _time(result.refresh_finished_at)
         except ValueError:
-            return None
+            unproven = True
+            continue
         records = receipt.response_payload.get("records")
         if (
             receipt.state != "completed"
@@ -120,7 +122,8 @@ def current_generic_sibling_ownership(
             or started_at != requested_at
             or finished_at > ready_at
         ):
-            return None
+            unproven = True
+            continue
         targets.add(result.application_id)
         receipt_ids = (receipt.record_id,)
         evidence["refresh_receipt"] = receipt.model_dump(mode="json")
@@ -137,7 +140,8 @@ def current_generic_sibling_ownership(
             snapshot = recorded_application_lifecycle(record)
             captured_at = _time(snapshot.captured_at) if snapshot is not None else None
         except (ValueError, click.ClickException):
-            return None
+            unproven = True
+            continue
         if (
             snapshot is None
             or captured_at is None
@@ -149,7 +153,8 @@ def current_generic_sibling_ownership(
                 or record.deploy.target_name != snapshot.target_id
             )
         ):
-            return None
+            unproven = True
+            continue
         qualified = (
             requested_at <= captured_at <= ready_at
             and snapshot.state == "qualified"
@@ -166,6 +171,8 @@ def current_generic_sibling_ownership(
         lifecycle_records.append(record.model_dump(mode="json"))
     if len(positive_targets) > 1:
         raise ValueError("Generic sibling receipts disagree on the physical application.")
+    if unproven:
+        return None
     if lifecycle:
         latest_time = max(captured_at for captured_at, _, _ in lifecycle)
         latest = [item for item in lifecycle if item[0] == latest_time]

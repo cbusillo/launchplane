@@ -299,7 +299,7 @@ class LegacyGenericSiblingOwnershipTests(LegacyPreviewReconciliationFixture):
             APPLICATION_LIFECYCLE_EVIDENCE_KEY,
         )
 
-        await self.produced_sibling(configured_lifecycle=True)
+        runtime = await self.produced_sibling(configured_lifecycle=True)
         record = self.store.list_deployment_records()[0]
         malformed = record.model_copy(
             update={
@@ -323,6 +323,21 @@ class LegacyGenericSiblingOwnershipTests(LegacyPreviewReconciliationFixture):
         self.lifecycle.snapshot.target_id = self.lifecycle.application_id
         self.lifecycle.complete()
         self.assertEqual((await self.call("inspect")).status_code, 409)
+        conflicting = self.store.list_deployment_records()[0]
+        for uncertain in (malformed, old_binding):
+            for records in ((uncertain, conflicting), (conflicting, uncertain)):
+                with patch.object(self.store, "list_deployment_records", return_value=records):
+                    self.assertEqual((await self.call("inspect")).status_code, 409)
+        receipt = self.store.find_generic_preview_refresh_receipts(runtime.deployment_record_id)[0]
+        for uncertain_receipt in (
+            receipt.model_copy(update={"response_payload": {}}),
+            receipt.model_copy(update={"response_status_code": 409}),
+        ):
+            for receipts in ((uncertain_receipt, receipt), (receipt, uncertain_receipt)):
+                with patch.object(
+                    self.store, "find_generic_preview_refresh_receipts", return_value=receipts
+                ):
+                    self.assertEqual((await self.call("inspect")).status_code, 409)
         self.lifecycle.application_id = str(self.application["applicationId"])
         self.lifecycle.snapshot.target_id = self.lifecycle.application_id
         self.lifecycle.complete()

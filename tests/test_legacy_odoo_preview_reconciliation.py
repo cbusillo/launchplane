@@ -7,6 +7,7 @@ from control_plane.contracts.dokploy_target_id_record import DokployTargetIdReco
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.preview_execution import (
+    ODOO_PREVIEW_DESTROY_REASON_PREFIX,
     odoo_preview_reconciliation_key,
     odoo_preview_target_key,
     preview_execution_lock_name,
@@ -361,8 +362,8 @@ class LegacyOdooPreviewReconciliationTests(legacy_tests.LegacyPreviewReconciliat
 
         runtime = self.produced_sibling()
         sibling = self.store.read_preview_record(runtime.preview_id)
-        intent: dict[str, object]
-        for intent in ({}, {"issued_plan": {}}):
+        intents: tuple[dict[str, object], ...] = ({}, {"issued_plan": {}})
+        for intent in intents:
             with patch.object(self.store, "read_original_mutation_intent", return_value=intent):
                 self.assertEqual((await self.call("inspect")).status_code, 202)
                 self.compose(
@@ -631,6 +632,8 @@ class LegacyOdooPreviewReconciliationTests(legacy_tests.LegacyPreviewReconciliat
         from control_plane.odoo_preview_apply_http import (
             OdooPreviewPlanProvenanceError,
             _odoo_preview_destroy_reason,
+            apply_odoo_preview_lifecycle_evidence,
+            validate_odoo_preview_lifecycle_response_current,
         )
         from control_plane.workflows.launchplane import generate_preview_id
         from tests.test_product_reconcile import FakePreviewProvider
@@ -639,9 +642,13 @@ class LegacyOdooPreviewReconciliationTests(legacy_tests.LegacyPreviewReconciliat
         completed = now - timedelta(seconds=20)
         original = self.preview
         reasons = (
-            "odoo_preview_destroy:copied:" + (completed - timedelta(days=1)).isoformat(),
-            "odoo_preview_destroy:copied:" + (completed + timedelta(days=1)).isoformat(),
-            "odoo_preview_destroy:copied:invalid-time",
+            ODOO_PREVIEW_DESTROY_REASON_PREFIX
+            + ":copied:"
+            + (completed - timedelta(days=1)).isoformat(),
+            ODOO_PREVIEW_DESTROY_REASON_PREFIX
+            + ":copied:"
+            + (completed + timedelta(days=1)).isoformat(),
+            ODOO_PREVIEW_DESTROY_REASON_PREFIX + ":copied:invalid-time",
             "exact-service-destroy",
         )
         for number, reason in enumerate(reasons, 10):
@@ -705,6 +712,20 @@ class LegacyOdooPreviewReconciliationTests(legacy_tests.LegacyPreviewReconciliat
                 )
                 self.assertFalse(
                     self.store.read_preview_record(closed.preview_id).reconciliation_receipt_id
+                )
+                replayed = apply_odoo_preview_lifecycle_evidence(
+                    control_plane_root_path=self.root,
+                    record_store=self.store,
+                    profile=self.profile,
+                    issued_plan=destroy.adapter._issued_plan,
+                    driver_result=destroyed.response_payload["result"],
+                )
+                self.assertEqual(replayed["lifecycle_evidence_status"], "replayed")
+                validate_odoo_preview_lifecycle_response_current(
+                    record_store=self.store,
+                    profile=self.profile,
+                    issued_plan=destroy.adapter._issued_plan,
+                    records=replayed,
                 )
                 refresh = self.prepared_operation(fake, f"later-refresh-{number}", now)
                 with patch.object(refresh.adapter, "capture_schedule_binding"):
@@ -776,7 +797,7 @@ class LegacyOdooPreviewReconciliationTests(legacy_tests.LegacyPreviewReconciliat
                     "anchor_repo": self.preview.anchor_repo,
                     "anchor_pr_number": self.preview.anchor_pr_number,
                     "destroyed_at": datetime.now(timezone.utc).isoformat(),
-                    "destroy_reason": "odoo_preview_destroy:copied:invalid-time",
+                    "destroy_reason": ODOO_PREVIEW_DESTROY_REASON_PREFIX + ":copied:invalid-time",
                 },
             },
         )
@@ -1049,7 +1070,9 @@ class LegacyOdooPreviewReconciliationTests(legacy_tests.LegacyPreviewReconciliat
 
         forged_reason = closed.model_copy(
             update={
-                "destroy_reason": "odoo_preview_destroy:copied:" + self.preview.created_at,
+                "destroy_reason": ODOO_PREVIEW_DESTROY_REASON_PREFIX
+                + ":copied:"
+                + self.preview.created_at,
             }
         )
         self.assertTrue(
