@@ -90,7 +90,9 @@ does not reserve capacity against concurrent actors.
 
 Fresh ordinary Compose lanes and Odoo previews use the same admission check
 before their first provider create, including the project's and environment's
-creation. Generic-web testing activation and independent production recipients
+creation. Ordinary lane creation admits its private default bridge; repository
+Compose source is not yet available, so this is not a guarantee for additional
+networks a later deployment might declare. Generic-web testing activation and independent production recipients
 check before recording fresh placement custody or dispatching resource work.
 Their known Compose source reserves the default bridge and all declared private
 networks. Explicit partial-placement recovery and an existing preview continue

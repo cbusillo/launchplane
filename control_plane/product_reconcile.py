@@ -2381,7 +2381,7 @@ def _run_preview_operation(
                 issued_plan = original.issued_plan
         result = run_issued_plan(issued_plan, allow_mutation=operation != "destroy" or allow_retry)
         return finish_result(result, issued_plan)
-    except BridgeNetworkCapacityRefused as error:
+    except (BridgeNetworkCapacityRefused, NativeSourceAuthorizationDenied) as error:
         return _preview_failure(plan, error.code)
     except _PullRequestMovedError:
         plan["deferred"] = "pull_request_moved"
@@ -2730,6 +2730,7 @@ def run_product_reconcile_once(
         code = outcome.plan.get("last_failed_error_code")
         if code not in {
             *HOST_BRIDGE_NETWORK_FAILURE_MESSAGES,
+            "authorization_denied",
             "preview_plan_blocked",
             "preview_config_refused",
             "preview_provenance_refused",

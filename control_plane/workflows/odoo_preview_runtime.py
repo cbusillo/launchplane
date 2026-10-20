@@ -63,6 +63,7 @@ from control_plane.workflows.preview_resource_destroy import (
 from control_plane.workflows.odoo_verification import DEFAULT_ODOO_RUNTIME_HEALTH_PATH
 from control_plane.dokploy import api as dokploy_api
 from control_plane.dokploy.network_capacity import require_bridge_network_capacity
+from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 from control_plane.dokploy import source as dokploy_source
 from control_plane.dokploy import compose as dokploy_compose
 from control_plane.dokploy import post_deploy as dokploy_post_deploy
@@ -1855,6 +1856,10 @@ def _execute_refresh(
             module_install_update_evidence=module_install_update_evidence,
             steps=tuple(steps),
         )
+    except NativeSourceAuthorizationDenied:
+        # A refused read is not an ordinary deploy failure. Let the durable
+        # caller release an unused attempt or retain earlier provider custody.
+        raise
     except click.ClickException as exc:
         rollback_errors: tuple[str, ...] = ()
         if isinstance(exc, dokploy_post_deploy.OdooPostDeployReadbackFailure):

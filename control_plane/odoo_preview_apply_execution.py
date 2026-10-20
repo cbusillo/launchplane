@@ -18,7 +18,6 @@ from pathlib import Path
 from typing import Any, cast
 
 import click
-from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 from control_plane.lane_movement import LaneMovementRefused
 
 from control_plane.contracts.idempotency_record import (
@@ -345,7 +344,6 @@ class OdooPreviewProviderMutationAdapter:
                 provider_effect_performed=False,
             )
         except (
-            NativeSourceAuthorizationDenied,
             OdooPreviewApplyConfigError,
             FileNotFoundError,
             ValueError,

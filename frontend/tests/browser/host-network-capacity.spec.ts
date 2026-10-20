@@ -10,6 +10,7 @@ test("placement shows host capacity and refreshes short, denied and unavailable 
     return { product, detail: fixtures.environmentForFixture("products", product.product, "testing")!,
       identity: fixtures.fixtureIdentity, incidents: fixtures.incidentsForFixture("products", product.product, "testing") };
   });
+  let capacityReads = 0;
   let observation: HostNetworkCapacityObservation = {
     server_id: "selected-host", observed_at: new Date().toISOString(), status: "available",
     capacity: { total_slots: 256, free_slots: 200 }, required_networks: 1, safety_margin: 2, reason: "",
@@ -19,18 +20,25 @@ test("placement shows host capacity and refreshes short, denied and unavailable 
   await page.route(`**/v1/products/${product.product}`, route => route.fulfill({ json: { status: "ok", trace_id: "product", product } }));
   await page.route(`**/v1/products/${product.product}/environments/testing*`, route => {
     const withCapacity = new URL(route.request().url()).searchParams.has("include_host_network_capacity");
+    if (withCapacity) capacityReads += 1;
     return route.fulfill({ json: { status: "ok", trace_id: "environment", environment: detail,
       host_network_capacity_available: true, host_network_capacity: withCapacity ? observation : null } });
   });
   await page.route(`**/v1/products/${product.product}/environments/testing/public-ingress/incidents`, route => route.fulfill({ json: { status: "ok", trace_id: "incidents", incident_list: incidents } }));
   await page.goto(`/ui/products/${product.product}/environments/testing`);
   const capacity = page.locator(".host-network-capacity");
-  await expect(capacity).toContainText("200 free of 256 bridge networks");
+  await expect(capacity.getByLabel("Free bridge networks")).toHaveText(String(observation.capacity!.free_slots));
+  await expect(capacity.getByLabel("Total bridge networks")).toHaveText(String(observation.capacity!.total_slots));
+  expect(capacityReads).toBe(1);
+  await page.getByRole("button", { name: "Refresh current evidence", exact: true }).click();
+  await expect(page.locator(".refresh-state")).toHaveCount(0);
+  await expect(capacity.getByLabel("Free bridge networks")).toHaveText(String(observation.capacity!.free_slots));
+  expect(capacityReads).toBe(1);
   await expect(capacity).toContainText("selected-host");
   observation = { ...observation, status: "short", capacity: { total_slots: 256, free_slots: 2 }, reason: "The selected host has insufficient free bridge networks for this create and its safety margin." };
   await capacity.getByRole("button", { name: "Refresh host capacity" }).click();
   await expect(capacity).toHaveAttribute("data-status", "short");
-  await expect(capacity).toContainText("2 free of 256 bridge networks");
+  await expect(capacity.getByLabel("Free bridge networks")).toHaveText(String(observation.capacity!.free_slots));
   await expect(capacity).toContainText(observation.reason);
   await capacity.scrollIntoViewIfNeeded();
   await page.screenshot({ path: `../tmp/browser-smoke/host-network-capacity-short-${testInfo.project.name}.png`, fullPage: true });
@@ -40,6 +48,6 @@ test("placement shows host capacity and refreshes short, denied and unavailable 
     await capacity.getByRole("button", { name: "Refresh host capacity" }).click();
     await expect(capacity).toHaveAttribute("data-status", status);
     await expect(capacity).toContainText(observation.reason);
-    await expect(capacity.getByText(/free of/)).toHaveCount(0);
+    await expect(capacity.getByLabel("Free bridge networks")).toHaveCount(0);
   }
 });

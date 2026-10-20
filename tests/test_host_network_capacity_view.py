@@ -2,6 +2,7 @@
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import cast
 from unittest.mock import patch
 import unittest
 
@@ -20,6 +21,121 @@ from tests.test_http_app_product_operational_readiness import (
 
 
 class HostCapacityViewTests(unittest.IsolatedAsyncioTestCase):
+    async def test_recipient_read_routes_preserve_typed_capacity_and_provider_denials(self) -> None:
+        from unittest.mock import AsyncMock
+        from fastapi import FastAPI, HTTPException
+        from pydantic import BaseModel
+        from control_plane.dokploy.network_capacity import BridgeNetworkCapacityRefused
+        from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
+        from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
+        from control_plane.http_routes.production_recipient import (
+            register_production_recipient_routes,
+        )
+        from control_plane.http_routes.testing_activation import register_testing_activation_routes
+        from control_plane.service_auth import LocalOperatorIdentity
+        from tests.support.http import request
+
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(database_url=f"sqlite+pysqlite:///{directory}/state.db")
+            self.addCleanup(store.close)
+            store.ensure_schema()
+            identity = LocalOperatorIdentity("fixture", "fixture", director_agent=True)
+
+            def http_error(**kwargs: object) -> HTTPException:
+                return HTTPException(
+                    status_code=int(str(kwargs["status_code"])), detail={"code": kwargs["code"]}
+                )
+
+            dependencies = ReadRouteDependencies(
+                read_identity=lambda: identity,
+                get_record_store=lambda: store,
+                next_trace_id=lambda: "fixture",
+                authorization_allows=lambda **kwargs: True,
+                http_error=http_error,
+                error_response_model=BaseModel,
+            )
+            app = FastAPI()
+            mutate = AsyncMock()
+            register_production_recipient_routes(
+                cast(ApiRouteRegistrar, app),
+                dependencies=dependencies,
+                mutation_identity=lambda: identity,
+                actor=lambda _: "fixture",
+                root=Path(directory),
+                run_provider_mutation=mutate,
+            )
+            register_testing_activation_routes(
+                cast(ApiRouteRegistrar, app),
+                dependencies=dependencies,
+                mutation_identity=lambda: identity,
+                actor=lambda _: "fixture",
+                root=Path(directory),
+                run_provider_mutation=mutate,
+            )
+            common = {
+                "context": "fixture",
+                "mode": "readback",
+                "source_commit": "a" * 40,
+                "volume_keys": {"database": "DB_VOLUME", "config": "CONFIG_VOLUME"},
+                "reason": "Read original custody",
+            }
+            production = {
+                **common,
+                "destination_server_id": "host",
+                "ports": {"PORT": 9000},
+                "application_service": "web",
+                "database_service": "database",
+                "service_limits": {
+                    service: {"cpus": 1, "memory_bytes": 1024**3} for service in ("web", "database")
+                },
+            }
+            testing = {
+                **common,
+                "preparation_key": "original",
+                "interlock_record_sha256": "b" * 64,
+                "port_keys": ["PORT"],
+            }
+            from control_plane.production_recipient import ROUTE as production_route
+            from control_plane.testing_activation import ROUTE as testing_route
+
+            for route, adapter, body in (
+                (
+                    production_route,
+                    "control_plane.production_recipient.ProductionRecipientAdapter.current",
+                    production,
+                ),
+                (
+                    testing_route,
+                    "control_plane.testing_activation.TestingActivationAdapter.current",
+                    testing,
+                ),
+            ):
+                for error, status, code in (
+                    (
+                        BridgeNetworkCapacityRefused("host_bridge_network_capacity_short"),
+                        409,
+                        "host_bridge_network_capacity_short",
+                    ),
+                    (
+                        BridgeNetworkCapacityRefused("host_bridge_network_capacity_unavailable"),
+                        409,
+                        "host_bridge_network_capacity_unavailable",
+                    ),
+                    (
+                        NativeSourceAuthorizationDenied("private provider detail"),
+                        403,
+                        "authorization_denied",
+                    ),
+                ):
+                    with self.subTest(route=route, code=code), patch(adapter, side_effect=error):
+                        response = await request(
+                            app, "POST", route.format(product="fixture"), payload=body
+                        )
+                        self.assertEqual(response.status_code, status, response.text)
+                        self.assertEqual(response.json()["detail"]["code"], code)
+                        self.assertNotIn("private provider detail", response.text)
+            mutate.assert_not_called()
+
     async def test_capacity_read_uses_lane_host_and_authorization_precedes_provider(self) -> None:
         with TemporaryDirectory() as directory:
             store = PostgresRecordStore(database_url=f"sqlite+pysqlite:///{directory}/state.db")

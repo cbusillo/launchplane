@@ -51,6 +51,14 @@ class TestingReplacementResourceFixture:
     idempotency_key = "resource-fixture"
 
     def __init__(self, owner: unittest.TestCase, *, database_url: str = "") -> None:
+        from control_plane.contracts.host_network_capacity import BridgeNetworkCapacity
+
+        self.capacity_read = owner.enterContext(
+            patch(
+                "control_plane.dokploy.network_capacity.read_bridge_network_capacity",
+                return_value=BridgeNetworkCapacity(total_slots=16, free_slots=16),
+            )
+        )
         self.database_url = database_url
         temporary = TemporaryDirectory()
         owner.addCleanup(temporary.cleanup)
@@ -122,6 +130,70 @@ class TestingReplacementResourceHttpTests(
 ):
     def setUp(self) -> None:
         TestingReplacementResourceFixture.__init__(self, self)
+
+    async def test_unused_capacity_read_refusal_is_rejected_before_a_provider_checkpoint(
+        self,
+    ) -> None:
+        from contextlib import nullcontext
+        from unittest.mock import Mock
+        from control_plane.dokploy.network_capacity import BridgeNetworkCapacityRefused
+        from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
+        from control_plane.provider_operations import (
+            ProviderMutationRejectedError,
+            ProviderOperationLease,
+        )
+        from control_plane.testing_replacement_resources import TestingReplacementResourceAdapter
+
+        reviewed = await self.post()
+        self.assertEqual(reviewed.status_code, 202, reviewed.text)
+        body = TestingReplacementResourcesRequest(
+            context=self.context,
+            operation_id=self.operation.operation_id,
+            mode="apply",
+            reason="Prepare new isolated testing storage",
+            reviewed_plan_sha256=reviewed.json()["result"]["plan_sha256"],
+        )
+        adapter = TestingReplacementResourceAdapter(
+            self.root, self.store, self.profile.product, body, "fixture"
+        )
+        lease = Mock(spec=ProviderOperationLease)
+        # This unit check covers the adapter's error boundary; native integration
+        # retains the actual PostgreSQL serialization and atomic-adoption proof.
+        with (
+            patch.object(
+                self.store, "serialize_disposable_testing_resources", side_effect=nullcontext
+            ),
+            patch.object(
+                self.store,
+                "capture_disposable_resource_adoption",
+                side_effect=lambda *args, **kwargs: nullcontext(),
+            ),
+            patch.object(adapter, "created_placement", return_value=("", "", "")),
+            patch(
+                "control_plane.dokploy.source.read_dokploy_config",
+                return_value=("https://provider.invalid", "fixture"),
+            ),
+            patch(
+                "control_plane.dokploy.api.fetch_dokploy_target_payload",
+                return_value={"serverId": "fixture-host"},
+            ),
+            patch(
+                "control_plane.dokploy_target_setup_http.mutate_dokploy_payload_for_target_setup"
+            ) as mutate,
+        ):
+            for error in (
+                BridgeNetworkCapacityRefused("host_bridge_network_capacity_short"),
+                NativeSourceAuthorizationDenied("Fixture denial"),
+            ):
+                self.capacity_read.side_effect = error
+                with (
+                    self.subTest(error=type(error)),
+                    self.assertRaises(ProviderMutationRejectedError) as rejected,
+                ):
+                    adapter.apply("fixture", lease)
+                self.assertIs(rejected.exception.cause, error)
+            mutate.assert_not_called()
+            lease.checkpoint_effect.assert_not_called()
 
     async def test_pending_route_effects_keep_the_retained_target_attached(self) -> None:
         from control_plane.contracts.dokploy_target_record import PublicHostEffect

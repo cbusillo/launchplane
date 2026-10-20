@@ -167,7 +167,7 @@ def register_production_recipient_routes(
                 status_code=403,
                 trace_id=trace,
                 code="authorization_denied",
-                message="The provider denied the host capacity read.",
+                message="The provider denied the read.",
             ) from None
         except (
             ValueError,

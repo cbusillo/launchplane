@@ -7583,7 +7583,7 @@ def create_launchplane_fastapi_app(
                 status_code=403,
                 trace_id=trace_id,
                 code="authorization_denied",
-                message="The provider denied the host capacity read.",
+                message="The provider denied the read.",
             ) from None
         except OdooPreviewPlanProvenanceError as error:
             raise _launchplane_http_error(
@@ -27257,7 +27257,7 @@ def create_launchplane_fastapi_app(
                 status_code=403,
                 trace_id=trace_id,
                 code="authorization_denied",
-                message="The provider denied the host capacity read.",
+                message="The provider denied the read.",
             ) from None
         except DokployComposeDomainPartialError as error:
             raise LaunchplaneHTTPException(

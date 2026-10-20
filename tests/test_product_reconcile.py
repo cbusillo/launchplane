@@ -5096,6 +5096,21 @@ class _MinuteClock(datetime):
 
 
 class ProductReconcilePreviewTests(ProductReconcileTestCase):
+    def test_preview_provider_read_denial_keeps_its_classification(self) -> None:
+        from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
+
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+        with patch.object(
+            self.provider,
+            "execute_apply",
+            side_effect=NativeSourceAuthorizationDenied("private fixture detail"),
+        ):
+            failed = self.run_once()
+        self.assertEqual(failed.last_plan["last_failed_error_code"], "authorization_denied")
+        self.assertNotIn("private fixture detail", failed.model_dump_json())
+        self.assertEqual(self.provider.applied, [])
+
     def test_preview_capacity_refusal_keeps_typed_reason_without_provider_effects(self) -> None:
         from control_plane.dokploy.network_capacity import BridgeNetworkCapacityRefused
 
