@@ -9346,6 +9346,7 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
     def test_standing_acceptance_and_first_effect_serialize_in_both_orders(self) -> None:
         from control_plane import client_release as releases
         from control_plane.generic_web_promotion_http import GENERIC_WEB_PROD_PROMOTION_ROUTE
+        from control_plane.storage.postgres import MutationEffectAdmissionRefusedError
         from tests.test_generic_web_client_release import GenericWebClientReleaseTests
 
         for effect_first in (True, False):
@@ -9462,8 +9463,17 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                             finally:
                                 proceed.set()
                             first.result(timeout=10)
-                            with self.assertRaises(releases.ClientReleaseNotReady):
-                                contender.result(timeout=10)
+                            if effect_first:
+                                with self.assertRaises(releases.ClientReleaseNotReady):
+                                    contender.result(timeout=10)
+                            else:
+                                with self.assertRaises(
+                                    MutationEffectAdmissionRefusedError
+                                ) as refused:
+                                    contender.result(timeout=10)
+                                self.assertIsInstance(
+                                    refused.exception.cause, releases.ClientReleaseNotReady
+                                )
                         current = store.read_idempotency_record(
                             scope=reserved.scope,
                             route_path=reserved.route_path,

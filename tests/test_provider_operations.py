@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from control_plane.provider_operations import (
     DurableProviderOperationResult,
+    ProviderEvidenceLease,
     ProviderMutationOutcome,
     ProviderMutationRejectedError,
     ProviderMutationUnknownError,
@@ -153,6 +154,98 @@ class _StoreFixture:
 
 
 class DurableProviderOperationRunnerTests(unittest.TestCase):
+    def test_atomic_admission_refusal_preserves_cause_and_releases_target_without_effects(
+        self,
+    ) -> None:
+        from control_plane.generic_web_source_qualification import GenericWebPromotionSourceRefused
+
+        with TemporaryDirectory() as directory:
+            fixture = _StoreFixture(directory)
+            cause = GenericWebPromotionSourceRefused("Testing lost qualification before dispatch.")
+            current_source = True
+            atomic_checkpoint_entered = False
+            dispatched: list[str] = []
+            refused: list[LaunchplaneIdempotencyRecord] = []
+            original_lock = fixture.store._lock_product_authority_bundle_write
+
+            def require_source() -> None:
+                if not current_source:
+                    raise cause
+
+            def revoke_source_in_atomic_checkpoint(session: object) -> None:
+                nonlocal current_source
+                original_lock(session)
+                if atomic_checkpoint_entered:
+                    current_source = False
+
+            class AdmissionAdapter(_FakeAdapter):
+                def apply(
+                    self, provider_operation_key: str, lease: ProviderOperationLease
+                ) -> ProviderMutationOutcome:
+                    nonlocal atomic_checkpoint_entered
+                    assert isinstance(lease, ProviderEvidenceLease)
+                    try:
+                        require_source()
+                        with fixture.store.provider_evidence_guard(
+                            lease.evidence_reservation,
+                            effect_admission_checkpoint=require_source,
+                        ):
+                            atomic_checkpoint_entered = True
+                            lease.checkpoint_effect("test_effect")
+                            dispatched.append(provider_operation_key)
+                    except GenericWebPromotionSourceRefused as error:
+                        refused.append(fixture.stored())
+                        raise ProviderMutationRejectedError(error) from error
+                    return ProviderMutationOutcome(202)
+
+            with patch.object(
+                fixture.store,
+                "_lock_product_authority_bundle_write",
+                side_effect=revoke_source_in_atomic_checkpoint,
+            ):
+                with self.assertRaises(GenericWebPromotionSourceRefused) as raised:
+                    fixture.run(AdmissionAdapter())
+
+            self.assertIs(raised.exception, cause)
+            self.assertFalse(current_source)
+            self.assertEqual(dispatched, [])
+            self.assertFalse(refused[0].provider_effect_started_at)
+            self.assertFalse(refused[0].provider_effect_phase)
+            self.assertIsNone(fixture.maybe_stored())
+            self.assertEqual(
+                fixture.run(_FakeAdapter(), idempotency_key="newer-decision").status, "completed"
+            )
+
+    def test_checkpoint_storage_failure_preserves_target_fence_before_dispatch(self) -> None:
+        with TemporaryDirectory() as directory:
+            fixture = _StoreFixture(directory)
+            dispatched: list[str] = []
+
+            class CheckpointAdapter(_FakeAdapter):
+                def apply(
+                    self, provider_operation_key: str, lease: ProviderOperationLease
+                ) -> ProviderMutationOutcome:
+                    lease.checkpoint_effect("test_effect")
+                    dispatched.append(provider_operation_key)
+                    return ProviderMutationOutcome(202)
+
+            with patch.object(
+                fixture.store,
+                "checkpoint_mutation_provider_effect",
+                side_effect=OSError("Checkpoint storage is unavailable."),
+            ):
+                outcome = fixture.run(CheckpointAdapter())
+
+            self.assertEqual(outcome.status, "reconcile_required")
+            self.assertEqual(dispatched, [])
+            stored = fixture.stored()
+            self.assertEqual(stored.state, "reconcile_required")
+            self.assertFalse(stored.provider_effect_started_at)
+            self.assertFalse(stored.provider_effect_phase)
+            self.assertEqual(
+                fixture.run(_FakeAdapter(), idempotency_key="newer-decision").status, "target_busy"
+            )
+
     def test_fresh_acquire_applies_once_and_completes(self) -> None:
         with TemporaryDirectory() as directory:
             fixture = _StoreFixture(directory)

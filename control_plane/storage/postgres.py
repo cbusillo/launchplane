@@ -892,6 +892,14 @@ class ExistingMutationReservationLookupResult(NamedTuple):
     observed_at: str
 
 
+class MutationEffectAdmissionRefusedError(Exception):
+    """Internal checkpoint refusal; earlier operation effects remain unclassified."""
+
+    def __init__(self, cause: Exception) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
+
+
 class MutationReservationUpdateResult(NamedTuple):
     status: MutationReservationUpdateStatus
     record: LaunchplaneIdempotencyRecord | None = None
@@ -8874,7 +8882,10 @@ class PostgresRecordStore(HumanSessionStore):
             if effect_admission_checkpoint is not None:
                 # Reads only, before locking the reservation against its heartbeat.
                 # Decision insertion uses this same authority transaction lock.
-                effect_admission_checkpoint()
+                try:
+                    effect_admission_checkpoint()
+                except Exception as error:
+                    raise MutationEffectAdmissionRefusedError(error) from error
             row = session.scalar(
                 self._idempotency_statement(
                     scope=reservation.scope,
