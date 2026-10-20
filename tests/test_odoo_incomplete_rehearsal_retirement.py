@@ -399,7 +399,7 @@ class IncompleteRehearsalRetirementTests(unittest.TestCase):
                         self.assertTrue(operation.plan()["review_refusal_required"])
                         with self.assertRaises(RuntimeError):
                             scenario.run_retirement(operation)
-                    self.assertTrue((native.root / "raw/database.dump").exists())
+                    self.assertTrue((native.root / "raw-source/database.dump").exists())
                     self.assertFalse((native.root / "incomplete-retirement.json").exists())
                     # Restoring the original inventory must still generate a new
                     # review, rather than revive the durably refused admission.
@@ -648,10 +648,20 @@ class IncompleteRetirementHostTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.fixture.run_host(self.spec)
         self.assertTrue((self.root / receipt["database"] / "database.dump").exists())
-        self.assertTrue((self.root / "raw/database.dump").exists())
+        self.assertTrue((self.root / "raw-source/database.dump").exists())
 
     def test_post_switch_requires_verified_initial_custody_and_idle_initial_runtime(self) -> None:
-        for changed in ("missing", "corrupt", "aliased", "lineage", "pending", "final", "writer"):
+        for changed in (
+            "missing",
+            "no-snapshot",
+            "later-snapshot",
+            "corrupt",
+            "aliased",
+            "lineage",
+            "pending",
+            "final",
+            "writer",
+        ):
             with self.subTest(changed=changed):
                 native = IncompleteRetirementHostTests()
                 native.setUp()
@@ -660,6 +670,15 @@ class IncompleteRetirementHostTests(unittest.TestCase):
                 path = native.root / receipt["database"]
                 if changed == "missing":
                     (path / "receipt.json").unlink()
+                elif changed == "no-snapshot":
+                    import shutil
+
+                    shutil.rmtree(path)
+                elif changed == "later-snapshot":
+                    (
+                        native.root
+                        / native.fixture.host["database_names"](native.spec)["final_upgrade"]
+                    ).mkdir()
                 elif changed == "corrupt":
                     (path / "database.dump").write_bytes(b"changed snapshot")
                 elif changed == "aliased":
@@ -680,7 +699,7 @@ class IncompleteRetirementHostTests(unittest.TestCase):
                 with self.assertRaises((RuntimeError, OSError)):
                     native.fixture.run_host(native.spec)
                 self.assertFalse(any(call[0] in {"stop", "rm"} for call in native.calls))
-                self.assertTrue((native.root / "raw/database.dump").exists())
+                self.assertTrue((native.root / "raw-source/database.dump").exists())
 
     def test_snapshot_change_after_review_refuses_before_disposal(self) -> None:
         import json
@@ -727,7 +746,7 @@ class IncompleteRetirementHostTests(unittest.TestCase):
         self.spec["source_image"] = self.spec["target_image"]
         (self.root / ".execution.lock").touch()
         (self.root / "execute.started").touch()
-        raw = self.root / "raw"
+        raw = self.root / "raw-source"
         raw.mkdir()
         (raw / "database.dump").write_bytes(b"disposable raw capture")
         (raw / "filestore.tar").write_bytes(b"disposable raw files")
@@ -796,7 +815,7 @@ class IncompleteRetirementHostTests(unittest.TestCase):
         plan = self.fixture.run_host(self.spec)
         self.admit(plan)
         self.assertFalse(plan["disposed"])
-        self.assertTrue((self.root / "raw/database.dump").exists())
+        self.assertTrue((self.root / "raw-source/database.dump").exists())
         self.assertFalse(
             any(
                 call[0] in {"stop", "rm"} or call[:2] in {("volume", "rm"), ("network", "rm")}
@@ -810,7 +829,7 @@ class IncompleteRetirementHostTests(unittest.TestCase):
         self.assertEqual(applied["binding_sha256"], plan["binding_sha256"])
         self.assertFalse(self.fixture.fixture.containers)
         self.assertFalse(self.fixture.fixture.volumes)
-        self.assertFalse((self.root / "raw").exists())
+        self.assertFalse((self.root / "raw-source").exists())
         self.assertFalse(snapshot.exists())
         self.assertEqual((self.outside / "keep").read_bytes(), b"production fixture")
         self.spec["mode"] = "apply"
@@ -858,7 +877,7 @@ class IncompleteRetirementHostTests(unittest.TestCase):
             result = operation.host("dry-run", lambda: None)
         self.assertTrue(result["qualified"])
         self.assertFalse(result["disposed"])
-        self.assertTrue((self.root / "raw/database.dump").exists())
+        self.assertTrue((self.root / "raw-source/database.dump").exists())
         self.assertEqual(operation.original(scenario.prepared).state, "reconcile_required")
 
     def test_host_refuses_unreviewed_inventory_without_deleting_custody(self) -> None:
@@ -874,7 +893,7 @@ class IncompleteRetirementHostTests(unittest.TestCase):
             self.fixture.run_host(self.spec)
         self.assertTrue((self.root / "incomplete-retirement-refusals.json").is_file())
         self.assertFalse((self.root / "incomplete-retirement.json").exists())
-        self.assertTrue((self.root / "raw/database.dump").exists())
+        self.assertTrue((self.root / "raw-source/database.dump").exists())
         self.assertFalse(any(call[0] in {"stop", "rm"} for call in self.calls))
 
     def test_host_resumes_its_manifest_after_a_lost_volume_removal_reply(self) -> None:
@@ -895,7 +914,7 @@ class IncompleteRetirementHostTests(unittest.TestCase):
         self.fixture.host["docker"] = lose_reply
         with self.assertRaises(RuntimeError):
             self.fixture.run_host(self.spec)
-        self.assertTrue((self.root / "raw/database.dump").exists())
+        self.assertTrue((self.root / "raw-source/database.dump").exists())
         self.spec["mode"] = "dry-run"
         resumed_plan = self.fixture.run_host(self.spec)
         self.assertEqual(resumed_plan["binding_sha256"], plan["binding_sha256"])
@@ -927,7 +946,7 @@ class IncompleteRetirementHostTests(unittest.TestCase):
         self.fixture.fixture.containers[other["Id"]] = other
         with self.assertRaises(RuntimeError):
             self.fixture.run_host(self.spec)
-        self.assertTrue((self.root / "raw/database.dump").exists())
+        self.assertTrue((self.root / "raw-source/database.dump").exists())
         self.assertFalse(any(call[0] in {"stop", "rm"} for call in self.calls))
 
 
