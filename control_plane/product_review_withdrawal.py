@@ -32,10 +32,18 @@ class ReviewWithdrawalUnsettled(ReviewWithdrawalRefused):
 
 
 class ReviewWithdrawalNotDispatched(ReviewWithdrawalRefused):
-    def __init__(self, state: Literal["target_busy", "in_progress", "conflict"]) -> None:
+    def __init__(
+        self,
+        state: Literal[
+            "target_busy", "in_progress", "conflict", "invalid_request", "stale_plan", "not_started"
+        ],
+    ) -> None:
         self.state = state
         super().__init__(
             {
+                "invalid_request": "A bounded Idempotency-Key is required before dispatch.",
+                "stale_plan": "The reviewed withdrawal plan changed. Refresh and review the dry-run before applying.",
+                "not_started": "No operation exists for this caller and key. Resubmit the exact original apply with the same caller and key.",
                 "target_busy": "Another withdrawal owns this PR. This request was not dispatched; the original caller must recover its saved operation.",
                 "in_progress": "This original withdrawal is still running. Wait and read back with the same caller and key.",
                 "conflict": "The operation key belongs to another request. This request was not dispatched.",
@@ -149,7 +157,7 @@ class ReviewWithdrawalService:
         scope = "product-review-withdrawal:" + self.actor
         fingerprint = hashlib.sha256((encoded + request.reviewed_plan_sha256).encode()).hexdigest()
         if request.mode != "dry-run" and (not key.strip() or len(key) > 200):
-            raise ReviewWithdrawalRefused("Apply and readback require a bounded Idempotency-Key.")
+            raise ReviewWithdrawalNotDispatched("invalid_request")
         with self.store.product_review_lock(
             repository=self.profile.repository, pull_request_number=request.pull_request
         ):
@@ -169,7 +177,7 @@ class ReviewWithdrawalService:
                     any(saved_plan.get(name) != value for name, value in submitted.items())
                     or saved_plan.get("actor") != self.actor
                 ):
-                    raise ReviewWithdrawalRefused("The key belongs to another withdrawal request.")
+                    raise ReviewWithdrawalNotDispatched("conflict")
                 plan = saved_plan
                 encoded = json.dumps(plan, sort_keys=True, separators=(",", ":"))
                 digest = hashlib.sha256(encoded.encode()).hexdigest()
@@ -177,14 +185,21 @@ class ReviewWithdrawalService:
                     (encoded + request.reviewed_plan_sha256).encode()
                 ).hexdigest()
                 if original.request_fingerprint != fingerprint:
-                    raise ReviewWithdrawalRefused("The key belongs to another withdrawal request.")
+                    raise ReviewWithdrawalNotDispatched("conflict")
             if request.mode == "readback":
                 if original is None:
-                    raise ReviewWithdrawalRefused("No saved withdrawal exists for this key.")
+                    raise ReviewWithdrawalNotDispatched("not_started")
                 change = self.source.change()
                 head, labels = change.head_sha, change.labels
                 saved = cast(dict[str, object], original.response_payload.get("result", {}))
                 history_url = str(saved.get("history_url", ""))
+                try:
+                    history_matches = (
+                        bool(history_url)
+                        and self.source.history(str(saved.get("history_marker", ""))) == history_url
+                    )
+                except ReviewWithdrawalHistoryUnverifiable:
+                    history_matches = False
                 # This is observation only. A later request is never removed on readback.
                 return {
                     **saved,
@@ -197,21 +212,21 @@ class ReviewWithdrawalService:
                     and head == request.expected_head_sha
                     and str(plan["review_label"]).casefold()
                     not in {label.casefold() for label in labels}
-                    and bool(history_url)
-                    and self.source.history(str(saved.get("history_marker", ""))) == history_url,
+                    and history_matches,
                 }
             if original is not None and original.state == "completed":
                 return cast(dict[str, object], original.response_payload["result"])
             if original is None:
                 self._pending(request)
             if request.mode == "dry-run":
+                self.source.history("<!-- launchplane:review-withdrawal:preflight -->")
                 return {
                     "applied": False,
                     "plan_sha256": digest,
                     "head_sha": request.expected_head_sha,
                 }
             if request.reviewed_plan_sha256 != digest:
-                raise ReviewWithdrawalRefused("The reviewed withdrawal plan changed. Review again.")
+                raise ReviewWithdrawalNotDispatched("stale_plan")
             adapter = _WithdrawalAdapter(
                 self,
                 request,
@@ -282,7 +297,7 @@ class _WithdrawalAdapter:
         try:
             url = self.service.source.history(marker)
         except ReviewWithdrawalHistoryUnverifiable:
-            return self._replan(bool(provider_effect_phase))
+            return self._replan(bool(provider_effect_phase), history_unverifiable=True)
         if url:
             # Published only after confirmed removal: a later request cannot undo
             # the historical receipt, and is never removed by its recovery.
@@ -320,7 +335,9 @@ class _WithdrawalAdapter:
         # effects. A fresh reviewed plan and new key can then address the request.
         return self._replan(bool(provider_effect_phase))
 
-    def _replan(self, prior_effects_unknown: bool) -> ProviderObservation:
+    def _replan(
+        self, prior_effects_unknown: bool, *, history_unverifiable: bool = False
+    ) -> ProviderObservation:
         return ProviderObservation(
             "present",
             response_payload={
@@ -328,6 +345,7 @@ class _WithdrawalAdapter:
                     "applied": False,
                     "replan_required": True,
                     "prior_effects_unknown": prior_effects_unknown,
+                    "history_unverifiable": history_unverifiable,
                     "plan_sha256": self.digest,
                     "head_sha": self.request.expected_head_sha,
                 }
@@ -347,7 +365,9 @@ class _WithdrawalAdapter:
                     raise ReviewWithdrawalRefused(
                         "A later review request may exist. Recovery cannot remove its label."
                     )
-        except ReviewWithdrawalRefused as error:
+            if not self.recovering:
+                self.service.source.history(self._marker(provider_operation_key))
+        except (ReviewWithdrawalRefused, ReviewWithdrawalHistoryUnverifiable) as error:
             raise ProviderMutationRejectedError(error) from error
         try:
             return self._apply_effect(provider_operation_key, lease)
@@ -358,7 +378,6 @@ class _WithdrawalAdapter:
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
         if not self.recovering:
-            self.service.source.history(self._marker(provider_operation_key))
             lease.checkpoint_effect("withdraw-review-request")
             self.service.source.remove_label(self.service.profile.owner.review_label)
         else:

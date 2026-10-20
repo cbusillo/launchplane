@@ -25,6 +25,7 @@ from control_plane.product_review_withdrawal import (
     ReviewWithdrawalRefused,
     ReviewWithdrawalUnsettled,
     ReviewWithdrawalNotDispatched,
+    ReviewWithdrawalHistoryUnverifiable,
 )
 from control_plane.product_review_withdrawal_github import GitHubReviewWithdrawalSource
 from control_plane.service_auth import (
@@ -90,9 +91,7 @@ def register_product_review_withdrawal_route(
                 purpose="pull_request_feedback",
             ) as token:
                 if not token:
-                    raise ReviewWithdrawalRefused(
-                        "The existing preview feedback credential is unavailable."
-                    )
+                    raise ValueError("The existing preview feedback credential is unavailable.")
                 source = GitHubReviewWithdrawalSource(
                     profile.repository,
                     body.pull_request,
@@ -112,13 +111,23 @@ def register_product_review_withdrawal_route(
             refuse(409, "product_review_withdrawal_" + error.state, str(error))
         except ReviewWithdrawalUnsettled as error:
             refuse(409, "product_review_withdrawal_unsettled", str(error))
+        except ReviewWithdrawalHistoryUnverifiable:
+            refuse(
+                409,
+                "product_review_withdrawal_history_unverifiable",
+                "Authenticated history cannot be uniquely verified. No new withdrawal was dispatched. Resolve history verification before retrying; changing keys cannot fix it.",
+            )
         except ReviewWithdrawalRefused as error:
             refuse(409, "product_review_withdrawal_refused", str(error))
         except (ValueError, click.ClickException, OSError):
             refuse(
                 503,
                 "product_review_withdrawal_unavailable",
-                "Source-control evidence is unavailable. Preserve the original operation key and read back before retrying.",
+                (
+                    "Source-control evidence is unavailable. Retry the dry-run when evidence is available."
+                    if body.mode == "dry-run"
+                    else "Source-control evidence is unavailable. Preserve the original operation key and read back before retrying."
+                ),
             )
         return accepted_evidence_response(trace_id=trace, records={}, result=result)
 

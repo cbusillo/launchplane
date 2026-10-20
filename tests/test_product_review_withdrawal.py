@@ -219,7 +219,7 @@ class ReviewWithdrawalTests(unittest.TestCase):
         with patch.object(
             self.source, "change", side_effect=[current, OSError("temporary evidence outage")]
         ):
-            with self.assertRaises((OSError, ReviewWithdrawalRefused)):
+            with self.assertRaises(OSError):
                 self.apply()
         self.assertEqual(self.source.deletes, 0)
         self.assertTrue(self.apply()["applied"])
@@ -316,21 +316,83 @@ class ReviewWithdrawalTests(unittest.TestCase):
         self.assertTrue(observed["applied"])
         self.assertTrue(observed["readback_matches"])
 
-    def test_history_limits_settle_without_removing_a_label(self) -> None:
+    def test_history_limits_block_before_dispatch_and_preserve_saved_receipt(self) -> None:
         from unittest.mock import patch
 
+        planned = self.service.run(self.request, key="", trace="plan")
+        request = self.request.model_copy(
+            update={"mode": "apply", "reviewed_plan_sha256": planned["plan_sha256"]}
+        )
         with patch.object(
             self.source,
             "history",
             side_effect=ReviewWithdrawalHistoryUnverifiable("ambiguous or bounded"),
         ):
+            for mode in ("dry-run", "apply"):
+                with self.assertRaises(ReviewWithdrawalHistoryUnverifiable):
+                    self.service.run(
+                        self.request if mode == "dry-run" else request,
+                        key="" if mode == "dry-run" else "withdraw-1",
+                        trace=mode,
+                    )
+        self.assertEqual(self.source.deletes, 0)
+        # A pre-checkpoint rejection releases the reservation; the same key can retry.
+        result = self.service.run(request, key="withdraw-1", trace="retry")
+        self.assertTrue(result["applied"])
+        with patch.object(
+            self.source, "history", side_effect=ReviewWithdrawalHistoryUnverifiable("later bound")
+        ):
+            read = self.service.run(
+                request.model_copy(update={"mode": "readback"}), key="withdraw-1", trace="audit"
+            )
+        self.assertTrue(read["applied"])
+        self.assertEqual(read["history_url"], result["history_url"])
+        self.assertFalse(read["readback_matches"])
+
+    def test_permanent_history_failure_settles_an_uncertain_effect_without_new_key_advice(
+        self,
+    ) -> None:
+        from unittest.mock import patch
+
+        remove = self.source.remove_label
+
+        def lost(label: str) -> None:
+            remove(label)
+            raise OSError("lost delete response")
+
+        with patch.object(self.source, "remove_label", side_effect=lost):
             with self.assertRaises(ReviewWithdrawalUnsettled):
                 self.apply()
+        with patch.object(
+            self.source, "history", side_effect=ReviewWithdrawalHistoryUnverifiable("bound")
+        ):
             settled = self.apply()
-        self.assertTrue(settled["replan_required"])
-        self.assertFalse(settled["prior_effects_unknown"])
-        self.assertEqual(self.source.deletes, 0)
-        self.assertIn(REVIEW_LABEL, self.source.labels)
+        self.assertFalse(settled["applied"])
+        self.assertTrue(settled["history_unverifiable"])
+        self.assertTrue(settled["prior_effects_unknown"])
+        self.assertEqual(self.source.deletes, 1)
+
+    def test_not_dispatched_classifies_binding_and_missing_original(self) -> None:
+        planned = self.service.run(self.request, key="", trace="plan")
+        request = self.request.model_copy(
+            update={"mode": "apply", "reviewed_plan_sha256": planned["plan_sha256"]}
+        )
+        for submitted, key, state in (
+            (request, "", "invalid_request"),
+            (request.model_copy(update={"reviewed_plan_sha256": "0" * 64}), "stale", "stale_plan"),
+            (request.model_copy(update={"mode": "readback"}), "never-started", "not_started"),
+        ):
+            with self.assertRaises(ReviewWithdrawalNotDispatched) as rejected:
+                self.service.run(submitted, key=key, trace="invalid")
+            self.assertEqual(rejected.exception.state, state)
+        self.service.run(request, key="original", trace="apply")
+        with self.assertRaises(ReviewWithdrawalNotDispatched) as conflict:
+            self.service.run(
+                request.model_copy(update={"reason": "Changed intent"}),
+                key="original",
+                trace="conflict",
+            )
+        self.assertEqual(conflict.exception.state, "conflict")
 
 
 class ReviewWithdrawalHttpTests(unittest.IsolatedAsyncioTestCase):
@@ -444,6 +506,27 @@ class ReviewWithdrawalHttpTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(
                         unsettled.json()["detail"]["code"], "product_review_withdrawal_unsettled"
                     )
+                for error, status, code in (
+                    (
+                        ValueError("unavailable evidence"),
+                        503,
+                        "product_review_withdrawal_unavailable",
+                    ),
+                    (
+                        ReviewWithdrawalHistoryUnverifiable("bounded history"),
+                        409,
+                        "product_review_withdrawal_history_unverifiable",
+                    ),
+                ):
+                    with patch(
+                        "control_plane.http_routes.product_review_withdrawal.ReviewWithdrawalService.run",
+                        side_effect=error,
+                    ):
+                        unavailable = await request(
+                            app, "POST", "/v1/product-review/withdrawal", payload=payload
+                        )
+                    self.assertEqual(unavailable.status_code, status)
+                    self.assertEqual(unavailable.json()["detail"]["code"], code)
                 identity = LocalOperatorIdentity("other-agent", "other-token")
                 # Plan is a read; a scoped write rule still cannot attest a Director decision.
                 source.labels.add(REVIEW_LABEL)

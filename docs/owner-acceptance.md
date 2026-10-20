@@ -284,8 +284,16 @@ call dispatched nothing and its key cannot recover the original caller's work.
 `product_review_withdrawal_conflict` names a key/request conflict.
 
 Provider evidence failures are unavailable evidence, not eligibility refusals.
-A fresh apply checks authenticated history before removing a label. A permanent
-history bound or ambiguous receipt settles the original operation as needing a
-new plan, preserving uncertainty about prior effects. The durable operation
+Dry-run and fresh apply check authenticated history before removing a label.
+A permanent history bound or ambiguous receipt returns
+`product_review_withdrawal_history_unverifiable` before dispatch and releases a
+fresh reservation. Resolve history verification before retrying; changing keys
+cannot fix it. Recovery after an uncertain effect settles the original operation
+with `history_unverifiable=true`, preserving prior-effect uncertainty. Completed
+readback retains its applied receipt and reports `readback_matches=false` when
+history cannot be verified. A missing original operation returns
+`product_review_withdrawal_not_started`; resubmit the exact original apply with
+the same caller and key. Invalid keys and stale reviewed plans return distinct
+not-dispatched statuses; refresh and review a dry-run for a stale plan. The durable operation
 retains the full caller identity; the public history contains the reviewed head,
 reason and Director citation without internal identity labels.
