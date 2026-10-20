@@ -2,6 +2,7 @@ export type AppRoute =
   | { kind: "product-index" }
   | { kind: "product-workspace"; product: string }
   | { kind: "product-activity"; product: string }
+  | { kind: "product-topics"; product: string }
   | {
       kind: "product-environment";
       product: string;
@@ -41,6 +42,10 @@ export function productPath(product: string): string {
 
 export function productActivityPath(product: string): string {
   return `${productPath(product)}/activity`;
+}
+
+export function productTopicsPath(product: string): string {
+  return `${productPath(product)}/topics`;
 }
 
 export function productEnvironmentPath(
@@ -140,6 +145,9 @@ export function parseAppRoute(pathname: string): AppRoute {
     }
     if (routeSegments.length === 2 && routeSegments[1] === "activity") {
       return { kind: "product-activity", product };
+    }
+    if (routeSegments.length === 2 && routeSegments[1] === "topics") {
+      return { kind: "product-topics", product };
     }
     if (routeSegments[1] === "environments") {
       const environment = decodeRouteSegment(routeSegments[2] ?? "");

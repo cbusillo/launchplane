@@ -5,6 +5,7 @@ import type {
   ApplyProductEnvironmentConfigData,
   ApplyProductOwnerData,
   DataProvenance,
+  DiscussionTopicsResponse,
   DispatchProductPromotionWorkflowData,
   DryRunProductPromotionData,
   EveryCodeSummaryResponse,
@@ -134,6 +135,20 @@ export async function waitForReadinessFixture(
     }, 1800);
     signal.addEventListener("abort", onAbort, { once: true });
   });
+}
+
+export function discussionTopicsForFixture(fixture: DataFixtureMode, product: string): DiscussionTopicsResponse {
+  assertFixtureAvailable(fixture);
+  if (fixture === "denied") throw new LaunchplaneApiError("Topics unavailable.", 403, "fixture-topics");
+  const site = productsForFixture("products").find(candidate => candidate.product === product);
+  if (!site) throw new LaunchplaneApiError("Product unavailable.", 404, "fixture-topics");
+  return {
+    status: "ok", trace_id: "fixture-topics", product, display_name: site.display_name,
+    topics: fixture === "empty" ? [] : [{
+      product, topic_id: "contact-links", title: "Should we keep the contact links?",
+      issue_url: "https://git.example.invalid/example/site/issues/7", added_at: OBSERVED_AT, closed_at: null,
+    }],
+  };
 }
 
 export function productsForFixture(

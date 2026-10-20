@@ -1,4 +1,9 @@
 import type { BackupCredentialBindingRequest, AcceptedEvidenceResponse, QualifyProductionBackupPreflightData } from "./generated/openapi.ts";
+import type { DiscussionTopicsResponse } from "./generated/openapi.ts";
+
+export function readDiscussionTopics(product: string, signal?: AbortSignal): Promise<DiscussionTopicsResponse> {
+  return requestJson<DiscussionTopicsResponse>(`/v1/products/${encodeURIComponent(product)}/discussion-topics`, "GET", undefined, signal);
+}
 import type {
   ApiErrorPayload,
   AuthSessionPayload,
