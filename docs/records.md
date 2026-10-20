@@ -909,7 +909,7 @@ Register a new non-runtime product through `POST /v1/product-onboarding/apply`
 using the existing `product_onboarding.apply` authorization. Send `product:
 "launchplane"`, `mode: "dry_run"` and a `manifest` containing the new product key,
 display name, one `owner/repository`, explicit classification and `driver_id: ""`.
-Optional immutable repository/owner ids must be supplied together. Supply no
+Optional `repository_id` and `repository_owner_id` must be supplied together. Supply no
 runtime resources. The dry run writes nothing and returns `plan_sha256` and the
 planned profile. Apply the same manifest with `mode: "apply"`, that digest as
 `reviewed_plan_sha256`, and an `Idempotency-Key`; there is no provider target id.
