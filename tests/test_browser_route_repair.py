@@ -36,7 +36,7 @@ from tests.test_route_binding_record import (
 )
 
 
-class BrowserRouteRepairTests(unittest.IsolatedAsyncioTestCase):
+class _BrowserRouteRepairFixture(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.directory = TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
@@ -156,7 +156,7 @@ class BrowserRouteRepairTests(unittest.IsolatedAsyncioTestCase):
             },
         }
 
-    async def test_domain_apply_and_immutable_replay_precede_source_drift(self) -> None:
+    async def assert_domain_apply_and_immutable_replay_precede_source_drift(self) -> None:
         review = await self.domain_plan()
         self.assertEqual(review["proposed_domains"], ["app.example.test"])
         self.assertNotIn("must-not-escape", str(review))
@@ -192,6 +192,245 @@ class BrowserRouteRepairTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(replay.json()["result"]["reason"], applied["reason"])
         self.assertEqual(replay.json()["original_trace_id"], response.json()["trace_id"])
 
+    async def assert_domain_receipt_failure_rolls_back_records_and_retry_can_complete(self) -> None:
+        review = await self.domain_plan()
+        applied = self.domain_apply(review)
+        with patch.object(
+            self.store, "_sync_idempotency_row", side_effect=RuntimeError("receipt storage failed")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "receipt storage failed"):
+                await self.post("/v1/dokploy-targets/setup", applied, "domain-atomic")
+        self.assertEqual(
+            self.store.read_dokploy_target_record(
+                context_name=self.target.context, instance_name=self.target.instance
+            ),
+            self.target,
+        )
+        self.assertIsNone(
+            self.store.read_idempotency_record(
+                scope=idempotency_scope(self.session.identity),
+                route_path="/v1/dokploy-targets/setup",
+                idempotency_key="domain-atomic",
+            )
+        )
+        response = await self.post("/v1/dokploy-targets/setup", applied, "domain-atomic")
+        self.assertEqual(response.status_code, 202, response.text)
+
+    def seed_binding(self) -> dict[str, Any]:
+        target = self.target.model_copy(update={"domains": ("app.example.test",)})
+        self.store.write_dokploy_target_record(target)
+        self.store.write_provider_target_record(
+            ProviderTargetRecord.from_dokploy_records(
+                target_record=target, target_id_record=self.target_id
+            )
+        )
+        self.store.write_edge_endpoint_record(_edge_endpoint_record())
+        self.store.write_ingress_route_audit_record(_ingress_audit_record())
+        return {
+            "mode": "dry-run",
+            "product": "example-product",
+            "context": "example-testing",
+            "instance": "web",
+            "expected_current": {"state": "absent"},
+            "browser_review": {"product": "example-product"},
+        }
+
+    async def assert_binding_commit_rejects_intervening_domain_repair(self) -> None:
+        payload = self.seed_binding()
+        review_response = await self.post("/v1/route-bindings/reconcile", payload)
+        self.assertEqual(review_response.status_code, 202, review_response.text)
+        review = review_response.json()["review"]
+        applied = {
+            **payload,
+            "mode": "apply",
+            "reason": "Recognize route evidence.",
+            "confirmation": RouteBindingReconcileEnvelope.model_validate(
+                payload
+            ).expected_confirmation,
+            "browser_review": {
+                "product": "example-product",
+                "reviewed_plan_sha256": review["plan_sha256"],
+            },
+        }
+        reconcile = self.store.reconcile_route_binding_record
+
+        def intervening(*args: Any, **kwargs: Any) -> Any:
+            current = self.store.read_dokploy_target_record(
+                context_name=self.target.context, instance_name=self.target.instance
+            )
+            provider = self.store.read_provider_target_record(
+                context_name=self.target.context, instance_name=self.target.instance
+            )
+            status, _receipt = self.store.commit_dokploy_domain_repair(
+                expected_record=current,
+                expected_target_id_record=self.target_id,
+                expected_provider_target_record=provider,
+                domains=("later.example.test",),
+                updated_at="2026-08-01T00:00:00Z",
+                source_label="service:intervening-domain-repair",
+                product="example-product",
+                mutation=DbOnlyMutationRequest(
+                    scope="fixture",
+                    route_path="/v1/dokploy-targets/setup",
+                    idempotency_key="intervening-domain",
+                    request_fingerprint="intervening-domain-payload",
+                    lease_owner="intervening",
+                    response_status_code=202,
+                    response_trace_id="intervening",
+                    response_payload={
+                        "status": "accepted",
+                        "trace_id": "intervening",
+                        "records": {},
+                    },
+                ),
+            )
+            self.assertEqual(status, "written")
+            return reconcile(*args, **kwargs)
+
+        with patch.object(self.store, "reconcile_route_binding_record", side_effect=intervening):
+            response = await self.post(
+                "/v1/route-bindings/reconcile", applied, "binding-interleaved"
+            )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()["error"]["code"], "stale")
+        with self.assertRaises(FileNotFoundError):
+            self.store.read_route_binding_record(
+                product="example-product", context_name="example-testing", instance_name="web"
+            )
+        refusal = self.store.read_idempotency_record(
+            scope=idempotency_scope(self.session.identity),
+            route_path="/v1/route-bindings/reconcile",
+            idempotency_key="binding-interleaved",
+        )
+        self.assertIsNotNone(refusal)
+        assert refusal is not None
+        self.assertEqual(refusal.response_status_code, 409)
+        replay = await self.post("/v1/route-bindings/reconcile", applied, "binding-interleaved")
+        self.assertEqual(replay.status_code, 409, replay.text)
+        self.assertEqual(replay.json(), response.json())
+
+    async def assert_atomic_terminal_winner(self, kind: str, winner: str) -> None:
+        if kind == "domain":
+            review = await self.domain_plan()
+            payload = self.domain_apply(review)
+            route = "/v1/dokploy-targets/setup"
+            method_name = "commit_dokploy_domain_repair"
+        else:
+            initial = self.seed_binding()
+            response = await self.post("/v1/route-bindings/reconcile", initial)
+            self.assertEqual(response.status_code, 202, response.text)
+            review = response.json()["review"]
+            payload = {
+                **initial,
+                "mode": "apply",
+                "reason": "Recognize the recorded route.",
+                "confirmation": RouteBindingReconcileEnvelope.model_validate(
+                    initial
+                ).expected_confirmation,
+                "browser_review": {
+                    "product": "example-product",
+                    "reviewed_plan_sha256": review["plan_sha256"],
+                },
+            }
+            route = "/v1/route-bindings/reconcile"
+            method_name = "reconcile_route_binding_record"
+        key = f"{kind}-{winner}-original"
+        reached = Event()
+        release = Event()
+        pause_method = method_name if winner == "stale" else "write_idempotency_record_once"
+        original = getattr(self.store, pause_method)
+        canonical_target = self.store.read_dokploy_target_record(
+            context_name=self.target.context, instance_name=self.target.instance
+        )
+        observed = [{"host": "app.example.test"}]
+
+        def pause_loser(*args: Any, **kwargs: Any) -> Any:
+            if current_thread().name.startswith("paused-request"):
+                reached.set()
+                if not release.wait(5):
+                    raise AssertionError("Paused request was not released")
+            return original(*args, **kwargs)
+
+        with (
+            patch(
+                "control_plane.dokploy_target_setup_http.fetch_dokploy_target_domains_for_setup",
+                side_effect=lambda *_args: tuple(observed),
+            ),
+            patch.object(self.store, pause_method, side_effect=pause_loser),
+        ):
+            if winner == "success":
+                if kind == "domain":
+                    observed[:] = [{"host": "later.example.test"}]
+                else:
+                    self.store.write_dokploy_target_record(self.target)
+            with ThreadPoolExecutor(max_workers=1, thread_name_prefix="paused-request") as executor:
+                loser = executor.submit(lambda: asyncio.run(self.post(route, payload, key)))
+                try:
+                    self.assertTrue(await asyncio.to_thread(reached.wait, 5))
+                    if winner == "stale":
+                        if kind == "domain":
+                            observed[:] = [{"host": "later.example.test"}]
+                        else:
+                            # The old five planned rows remain unchanged; append a newer eligible audit.
+                            self.store.write_ingress_route_audit_record(
+                                _ingress_audit_record(
+                                    record_id="audit-newer-during-request",
+                                    recorded_at="2026-07-13T00:00:00Z",
+                                )
+                            )
+                    elif kind == "domain":
+                        observed[:] = [{"host": "app.example.test"}]
+                    else:
+                        # Restore exact authority (ABA) before the original reviewed request commits.
+                        self.store.write_dokploy_target_record(canonical_target)
+                    completed = await self.post(route, payload, key)
+                    self.assertEqual(
+                        completed.status_code, 409 if winner == "stale" else 202, completed.text
+                    )
+                finally:
+                    release.set()
+                late = await asyncio.to_thread(loser.result, 5)
+        self.assertEqual(late.status_code, completed.status_code, late.text)
+        replay = await self.post(route, payload, key)
+        self.assertEqual(replay.status_code, completed.status_code, replay.text)
+        receipt = self.store.read_idempotency_record(
+            scope=idempotency_scope(self.session.identity), route_path=route, idempotency_key=key
+        )
+        self.assertIsNotNone(receipt)
+        assert receipt is not None
+        self.assertEqual(receipt.response_status_code, completed.status_code)
+        if winner == "stale":
+            self.assertEqual(late.json(), completed.json())
+            self.assertEqual(replay.json(), completed.json())
+            self.assertEqual(
+                self.store.read_dokploy_target_record(
+                    context_name=self.target.context, instance_name=self.target.instance
+                ),
+                canonical_target,
+            )
+            if kind == "binding":
+                with self.assertRaises(FileNotFoundError):
+                    self.store.read_route_binding_record(
+                        product="example-product",
+                        context_name="example-testing",
+                        instance_name="web",
+                    )
+        else:
+            self.assertTrue(late.json()["replayed"])
+            self.assertTrue(replay.json()["replayed"])
+            self.assertEqual(late.json()["review"], completed.json()["review"])
+            self.assertEqual(late.json()["result"]["reason"], payload["reason"])
+        conflict = await self.post(
+            route, {**payload, "reason": "Different intent under the completed key."}, key
+        )
+        self.assertEqual(conflict.status_code, 409, conflict.text)
+        self.assertEqual(conflict.json()["error"]["code"], "idempotency_key_reused")
+
+
+class BrowserRouteRepairTests(_BrowserRouteRepairFixture):
+    async def test_domain_apply_and_immutable_replay_precede_source_drift(self) -> None:
+        await self.assert_domain_apply_and_immutable_replay_precede_source_drift()
+
     async def test_domain_rejects_changed_review_and_reuses_no_authority_from_browser(self) -> None:
         review = await self.domain_plan()
         self.store.write_dokploy_target_record(
@@ -222,28 +461,7 @@ class BrowserRouteRepairTests(unittest.IsolatedAsyncioTestCase):
             )
 
     async def test_domain_receipt_failure_rolls_back_records_and_retry_can_complete(self) -> None:
-        review = await self.domain_plan()
-        applied = self.domain_apply(review)
-        with patch.object(
-            self.store, "_sync_idempotency_row", side_effect=RuntimeError("receipt storage failed")
-        ):
-            with self.assertRaisesRegex(RuntimeError, "receipt storage failed"):
-                await self.post("/v1/dokploy-targets/setup", applied, "domain-atomic")
-        self.assertEqual(
-            self.store.read_dokploy_target_record(
-                context_name=self.target.context, instance_name=self.target.instance
-            ),
-            self.target,
-        )
-        self.assertIsNone(
-            self.store.read_idempotency_record(
-                scope=idempotency_scope(self.session.identity),
-                route_path="/v1/dokploy-targets/setup",
-                idempotency_key="domain-atomic",
-            )
-        )
-        response = await self.post("/v1/dokploy-targets/setup", applied, "domain-atomic")
-        self.assertEqual(response.status_code, 202, response.text)
+        await self.assert_domain_receipt_failure_rolls_back_records_and_retry_can_complete()
 
     async def test_domain_preserves_primary_order_and_readback_is_current(self) -> None:
         self.store.write_dokploy_target_record(
@@ -271,25 +489,6 @@ class BrowserRouteRepairTests(unittest.IsolatedAsyncioTestCase):
             current = await self.domain_plan()
         self.assertEqual(current["status"], "unchanged")
         self.assertEqual(current["current_domains"], review["proposed_domains"])
-
-    def seed_binding(self) -> dict[str, Any]:
-        target = self.target.model_copy(update={"domains": ("app.example.test",)})
-        self.store.write_dokploy_target_record(target)
-        self.store.write_provider_target_record(
-            ProviderTargetRecord.from_dokploy_records(
-                target_record=target, target_id_record=self.target_id
-            )
-        )
-        self.store.write_edge_endpoint_record(_edge_endpoint_record())
-        self.store.write_ingress_route_audit_record(_ingress_audit_record())
-        return {
-            "mode": "dry-run",
-            "product": "example-product",
-            "context": "example-testing",
-            "instance": "web",
-            "expected_current": {"state": "absent"},
-            "browser_review": {"product": "example-product"},
-        }
 
     async def test_domain_respects_retained_hostname_and_testing_custody(self) -> None:
         with patch.object(
@@ -431,78 +630,7 @@ class BrowserRouteRepairTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(replay.json(), response.json())
 
     async def test_binding_commit_rejects_intervening_domain_repair(self) -> None:
-        payload = self.seed_binding()
-        review_response = await self.post("/v1/route-bindings/reconcile", payload)
-        self.assertEqual(review_response.status_code, 202, review_response.text)
-        review = review_response.json()["review"]
-        applied = {
-            **payload,
-            "mode": "apply",
-            "reason": "Recognize route evidence.",
-            "confirmation": RouteBindingReconcileEnvelope.model_validate(
-                payload
-            ).expected_confirmation,
-            "browser_review": {
-                "product": "example-product",
-                "reviewed_plan_sha256": review["plan_sha256"],
-            },
-        }
-        reconcile = self.store.reconcile_route_binding_record
-
-        def intervening(*args: Any, **kwargs: Any) -> Any:
-            current = self.store.read_dokploy_target_record(
-                context_name=self.target.context, instance_name=self.target.instance
-            )
-            provider = self.store.read_provider_target_record(
-                context_name=self.target.context, instance_name=self.target.instance
-            )
-            status, _receipt = self.store.commit_dokploy_domain_repair(
-                expected_record=current,
-                expected_target_id_record=self.target_id,
-                expected_provider_target_record=provider,
-                domains=("later.example.test",),
-                updated_at="2026-08-01T00:00:00Z",
-                source_label="service:intervening-domain-repair",
-                product="example-product",
-                mutation=DbOnlyMutationRequest(
-                    scope="fixture",
-                    route_path="/v1/dokploy-targets/setup",
-                    idempotency_key="intervening-domain",
-                    request_fingerprint="intervening-domain-payload",
-                    lease_owner="intervening",
-                    response_status_code=202,
-                    response_trace_id="intervening",
-                    response_payload={
-                        "status": "accepted",
-                        "trace_id": "intervening",
-                        "records": {},
-                    },
-                ),
-            )
-            self.assertEqual(status, "written")
-            return reconcile(*args, **kwargs)
-
-        with patch.object(self.store, "reconcile_route_binding_record", side_effect=intervening):
-            response = await self.post(
-                "/v1/route-bindings/reconcile", applied, "binding-interleaved"
-            )
-        self.assertEqual(response.status_code, 409, response.text)
-        self.assertEqual(response.json()["error"]["code"], "stale")
-        with self.assertRaises(FileNotFoundError):
-            self.store.read_route_binding_record(
-                product="example-product", context_name="example-testing", instance_name="web"
-            )
-        refusal = self.store.read_idempotency_record(
-            scope=idempotency_scope(self.session.identity),
-            route_path="/v1/route-bindings/reconcile",
-            idempotency_key="binding-interleaved",
-        )
-        self.assertIsNotNone(refusal)
-        assert refusal is not None
-        self.assertEqual(refusal.response_status_code, 409)
-        replay = await self.post("/v1/route-bindings/reconcile", applied, "binding-interleaved")
-        self.assertEqual(replay.status_code, 409, replay.text)
-        self.assertEqual(replay.json(), response.json())
+        await self.assert_binding_commit_rejects_intervening_domain_repair()
 
     async def test_binding_row_cas_refusal_is_terminal_after_other_key_wins(self) -> None:
         payload = self.seed_binding()
@@ -550,123 +678,6 @@ class BrowserRouteRepairTests(unittest.IsolatedAsyncioTestCase):
         replay = await self.post("/v1/route-bindings/reconcile", applied, "binding-row-cas")
         self.assertEqual(replay.status_code, 409, replay.text)
         self.assertEqual(replay.json(), refused.json())
-
-    async def assert_atomic_terminal_winner(self, kind: str, winner: str) -> None:
-        if kind == "domain":
-            review = await self.domain_plan()
-            payload = self.domain_apply(review)
-            route = "/v1/dokploy-targets/setup"
-            method_name = "commit_dokploy_domain_repair"
-        else:
-            initial = self.seed_binding()
-            response = await self.post("/v1/route-bindings/reconcile", initial)
-            self.assertEqual(response.status_code, 202, response.text)
-            review = response.json()["review"]
-            payload = {
-                **initial,
-                "mode": "apply",
-                "reason": "Recognize the recorded route.",
-                "confirmation": RouteBindingReconcileEnvelope.model_validate(
-                    initial
-                ).expected_confirmation,
-                "browser_review": {
-                    "product": "example-product",
-                    "reviewed_plan_sha256": review["plan_sha256"],
-                },
-            }
-            route = "/v1/route-bindings/reconcile"
-            method_name = "reconcile_route_binding_record"
-        key = f"{kind}-{winner}-original"
-        reached = Event()
-        release = Event()
-        pause_method = method_name if winner == "stale" else "write_idempotency_record_once"
-        original = getattr(self.store, pause_method)
-        canonical_target = self.store.read_dokploy_target_record(
-            context_name=self.target.context, instance_name=self.target.instance
-        )
-        observed = [{"host": "app.example.test"}]
-
-        def pause_loser(*args: Any, **kwargs: Any) -> Any:
-            if current_thread().name.startswith("paused-request"):
-                reached.set()
-                if not release.wait(5):
-                    raise AssertionError("Paused request was not released")
-            return original(*args, **kwargs)
-
-        with (
-            patch(
-                "control_plane.dokploy_target_setup_http.fetch_dokploy_target_domains_for_setup",
-                side_effect=lambda *_args: tuple(observed),
-            ),
-            patch.object(self.store, pause_method, side_effect=pause_loser),
-        ):
-            if winner == "success":
-                if kind == "domain":
-                    observed[:] = [{"host": "later.example.test"}]
-                else:
-                    self.store.write_dokploy_target_record(self.target)
-            with ThreadPoolExecutor(max_workers=1, thread_name_prefix="paused-request") as executor:
-                loser = executor.submit(lambda: asyncio.run(self.post(route, payload, key)))
-                try:
-                    self.assertTrue(await asyncio.to_thread(reached.wait, 5))
-                    if winner == "stale":
-                        if kind == "domain":
-                            observed[:] = [{"host": "later.example.test"}]
-                        else:
-                            # The old five planned rows remain unchanged; append a newer eligible audit.
-                            self.store.write_ingress_route_audit_record(
-                                _ingress_audit_record(
-                                    record_id="audit-newer-during-request",
-                                    recorded_at="2026-07-13T00:00:00Z",
-                                )
-                            )
-                    elif kind == "domain":
-                        observed[:] = [{"host": "app.example.test"}]
-                    else:
-                        # Restore exact authority (ABA) before the original reviewed request commits.
-                        self.store.write_dokploy_target_record(canonical_target)
-                    completed = await self.post(route, payload, key)
-                    self.assertEqual(
-                        completed.status_code, 409 if winner == "stale" else 202, completed.text
-                    )
-                finally:
-                    release.set()
-                late = await asyncio.to_thread(loser.result, 5)
-        self.assertEqual(late.status_code, completed.status_code, late.text)
-        replay = await self.post(route, payload, key)
-        self.assertEqual(replay.status_code, completed.status_code, replay.text)
-        receipt = self.store.read_idempotency_record(
-            scope=idempotency_scope(self.session.identity), route_path=route, idempotency_key=key
-        )
-        self.assertIsNotNone(receipt)
-        assert receipt is not None
-        self.assertEqual(receipt.response_status_code, completed.status_code)
-        if winner == "stale":
-            self.assertEqual(late.json(), completed.json())
-            self.assertEqual(replay.json(), completed.json())
-            self.assertEqual(
-                self.store.read_dokploy_target_record(
-                    context_name=self.target.context, instance_name=self.target.instance
-                ),
-                canonical_target,
-            )
-            if kind == "binding":
-                with self.assertRaises(FileNotFoundError):
-                    self.store.read_route_binding_record(
-                        product="example-product",
-                        context_name="example-testing",
-                        instance_name="web",
-                    )
-        else:
-            self.assertTrue(late.json()["replayed"])
-            self.assertTrue(replay.json()["replayed"])
-            self.assertEqual(late.json()["review"], completed.json()["review"])
-            self.assertEqual(late.json()["result"]["reason"], payload["reason"])
-        conflict = await self.post(
-            route, {**payload, "reason": "Different intent under the completed key."}, key
-        )
-        self.assertEqual(conflict.status_code, 409, conflict.text)
-        self.assertEqual(conflict.json()["error"]["code"], "idempotency_key_reused")
 
     async def test_domain_concurrent_terminal_winner_is_immutable(self) -> None:
         for winner in ("stale", "success"):

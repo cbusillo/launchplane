@@ -28,10 +28,7 @@ class TestingCandidateTests(unittest.TestCase):
     database_url = ""
 
     def setUp(self) -> None:
-        fixture = resources.TestingReplacementResourceHttpTests()
-        fixture.database_url = self.database_url
-        fixture.setUp()
-        self.addCleanup(fixture.doCleanups)
+        fixture = resources.TestingReplacementResourceFixture(self, database_url=self.database_url)
         self.store, self.root = fixture.store, fixture.root
         self.context, self.product = fixture.context, fixture.profile.product
         self.allocation = TestingCandidateAllocation(

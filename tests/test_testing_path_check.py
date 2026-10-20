@@ -21,9 +21,7 @@ from tests.support.http import request
 
 class TestingPathCheckHttpTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
-        self.fixture = resources.TestingReplacementResourceHttpTests()
-        self.fixture.setUp()
-        self.addCleanup(self.fixture.doCleanups)
+        self.fixture = resources.TestingReplacementResourceFixture(self)
         self.store = self.fixture.store
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)

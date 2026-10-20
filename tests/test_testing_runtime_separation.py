@@ -1,6 +1,5 @@
 """Configuration staging protects production without asserting disposable lane facts."""
 
-import unittest
 from httpx2 import Response
 from unittest.mock import patch
 
@@ -14,15 +13,11 @@ from tests.support.auth import scoped_agent_transport
 from tests.support.http import request
 
 
-class TestingRuntimeSeparationTests(unittest.IsolatedAsyncioTestCase):
+class TestingRuntimeSeparationTests(authority._DisposableRuntimeAuthorityFixture):
     database_url: str | None = None
 
     def setUp(self) -> None:
-        fixture = authority.DisposableRuntimeAuthorityTests()
-        fixture.database_url = self.database_url
-        fixture.setUp()
-        self.addCleanup(fixture.doCleanups)
-        self.store, self.context, self.app = fixture.store, fixture.context, fixture.app
+        super().setUp()
         from control_plane.contracts.secret_record import SecretRecord, SecretBinding
 
         self.production_secret = SecretRecord(

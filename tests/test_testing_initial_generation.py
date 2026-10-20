@@ -15,9 +15,7 @@ from tests.test_testing_replacement_bootstrap import FreshTestingBootstrapScenar
 
 class InitialTestingGenerationHttpTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
-        self.fixture = resource_tests.TestingReplacementResourceHttpTests()
-        self.fixture.setUp()
-        self.addCleanup(self.fixture.doCleanups)
+        self.fixture = resource_tests.TestingReplacementResourceFixture(self)
         self.store = self.fixture.store
         self.success = self.fixture.operation.model_copy(
             update={

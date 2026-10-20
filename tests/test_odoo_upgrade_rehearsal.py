@@ -207,10 +207,7 @@ class RehearsalScenario(unittest.TestCase):
                 )
 
     def setUp(self) -> None:
-        fixture = resources.TestingReplacementResourceHttpTests()
-        fixture.database_url = self.database_url
-        fixture.setUp()
-        self.addCleanup(fixture.doCleanups)
+        fixture = resources.TestingReplacementResourceFixture(self, database_url=self.database_url)
         self.store = fixture.store
         self.app = fixture.app
         self.root = fixture.root

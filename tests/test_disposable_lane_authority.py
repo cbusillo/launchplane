@@ -22,7 +22,7 @@ from tests.support.http import request
 from tests.support.profiles import _generic_site_profile_payload
 
 
-class DisposableRuntimeAuthorityTests(unittest.IsolatedAsyncioTestCase):
+class _DisposableRuntimeAuthorityFixture(unittest.IsolatedAsyncioTestCase):
     database_url: str | None = None
 
     def setUp(self) -> None:
@@ -109,6 +109,8 @@ class DisposableRuntimeAuthorityTests(unittest.IsolatedAsyncioTestCase):
             payload=payload,
         )
 
+
+class DisposableRuntimeAuthorityTests(_DisposableRuntimeAuthorityFixture):
     async def test_bounded_observer_records_actor_and_leaves_lane_config_unchanged(self) -> None:
         initial = self.store.read_product_profile_record("example-site")
         inspected = await self.observe()

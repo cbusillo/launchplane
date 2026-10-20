@@ -31,10 +31,11 @@ from tests.support.profiles import _odoo_preview_profile_payload
 from tests.test_odoo_preview_apply_execution import _issued_plan, _refresh_payload, _PLAN_ID
 
 
-class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase):
-    def setUp(self) -> None:
+class DirectorBoundedWritesFixture:
+    def __init__(self, owner: unittest.TestCase) -> None:
+        self.owner = owner
         temporary = TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
+        owner.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.store = PostgresRecordStore(
             database_url=f"sqlite+pysqlite:///{self.root / 'state.db'}"
@@ -46,8 +47,8 @@ class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase):
             self.store, "serialize_existing_preview_refresh", return_value=nullcontext()
         )
         guard.start()
-        self.addCleanup(guard.stop)
-        self.addCleanup(self.store.close)
+        owner.addCleanup(guard.stop)
+        owner.addCleanup(self.store.close)
         self.profile = LaunchplaneProductProfileRecord.model_validate(
             _odoo_preview_profile_payload()
         )
@@ -140,6 +141,55 @@ class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+    async def post(self, path: str, payload: dict[str, Any], key: str = "") -> Any:
+        return await request(
+            self.app,
+            "POST",
+            path,
+            payload=payload,
+            headers={
+                "Authorization": "Bearer local-operator-token",
+                "Idempotency-Key": key,
+            },
+        )
+
+    async def classify(self, *, idempotency_key: str = "", **changes: Any) -> Any:
+        payload = {
+            "production_use": "prelaunch",
+            "reason": "Record reviewed never-live facts.",
+            **changes,
+        }
+        route = f"/v1/product-profiles/{self.profile.product}/production-use"
+        dry = await self.post(route, payload)
+        self.owner.assertEqual(dry.status_code, 202, dry.text)
+        return await self.post(
+            route,
+            {
+                **payload,
+                "mode": "apply",
+                "reviewed_plan_sha256": dry.json()["result"]["plan_sha256"],
+            },
+            idempotency_key or f"classification-{payload['production_use']}",
+        )
+
+    def safety(self, **changes: Any) -> None:
+        record_safety(
+            self.store,
+            self.profile.product,
+            self.preview.context,
+            "pr-42",
+            preview=self.preview,
+            **changes,
+        )
+
+    async def preview_apply(self) -> Any:
+        return await self.post("/v1/drivers/odoo/preview-apply", self.payload, self.plan_id)
+
+
+class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase, DirectorBoundedWritesFixture):
+    def setUp(self) -> None:
+        DirectorBoundedWritesFixture.__init__(self, self)
+
     def test_old_clear_review_cannot_remove_new_preview_protection(self) -> None:
         from control_plane.disposable_lanes import (
             resolve_disposable_observation_binding,
@@ -186,55 +236,11 @@ class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase):
                         preview_refresh=True,
                     )
 
-    async def post(self, path: str, payload: dict[str, Any], key: str = "") -> Any:
-        return await request(
-            self.app,
-            "POST",
-            path,
-            payload=payload,
-            headers={
-                "Authorization": "Bearer local-operator-token",
-                "Idempotency-Key": key,
-            },
-        )
-
-    async def classify(self, *, idempotency_key: str = "", **changes: Any) -> Any:
-        payload = {
-            "production_use": "prelaunch",
-            "reason": "Record reviewed never-live facts.",
-            **changes,
-        }
-        route = f"/v1/product-profiles/{self.profile.product}/production-use"
-        dry = await self.post(route, payload)
-        self.assertEqual(dry.status_code, 202, dry.text)
-        return await self.post(
-            route,
-            {
-                **payload,
-                "mode": "apply",
-                "reviewed_plan_sha256": dry.json()["result"]["plan_sha256"],
-            },
-            idempotency_key or f"classification-{payload['production_use']}",
-        )
-
-    def safety(self, **changes: Any) -> None:
-        record_safety(
-            self.store,
-            self.profile.product,
-            self.preview.context,
-            "pr-42",
-            preview=self.preview,
-            **changes,
-        )
-
-    async def preview_apply(self) -> Any:
-        return await self.post("/v1/drivers/odoo/preview-apply", self.payload, self.plan_id)
-
     async def test_reviewed_never_live_correction_is_atomic_replayed_and_bounded(self) -> None:
         route = f"/v1/product-profiles/{self.profile.product}/production-use"
         payload = {"production_use": "prelaunch", "reason": "Reviewed product facts."}
         dry = await self.post(route, payload)
-        self.assertEqual(dry.status_code, 202, dry.text)
+        self.owner.assertEqual(dry.status_code, 202, dry.text)
         self.assertEqual(self.store.read_product_profile_record(self.profile.product), self.profile)
         apply = {
             **payload,
