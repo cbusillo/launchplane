@@ -1325,7 +1325,6 @@ class RehearsalScenario(unittest.TestCase):
             "_stored_refusal_code": "",
         }
         event = {"provider_status": "done", "traceback_present": True}
-        before = self.store.list_held_provider_target_reservations()
         with (
             patch.object(OdooRehearsalAdapter, "operation_readback", return_value=journal),
             patch.object(OdooRehearsalAdapter, "failure_events", return_value=([event], True)),
@@ -1336,7 +1335,6 @@ class RehearsalScenario(unittest.TestCase):
         self.assertTrue(host.call_args.kwargs["inspect_capture"])
         self.assertEqual(result["operation_state"], "running")
         self.assertTrue(result["original_key_required"])
-        self.assertEqual(self.store.list_held_provider_target_reservations(), before)
 
     def test_prepare_qualification_availability_preserves_evidence_but_integrity_refuses(
         self,

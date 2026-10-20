@@ -4711,17 +4711,6 @@ Exclusion never settles the reservation or proves provider effects harmless:
 its target fence and missing-original-proof classification remain unchanged.
 New work on that target is still refused after service replacement.
 
-Agent-started standalone Odoo rehearsals, including incomplete retirement,
-also participate in this drain. Their principal need not be an event-reconciler
-or Client-release scope. Fresh and retried applies wait behind the existing
-deploy fence, while original-operation observations and completed response
-replay remain available. An admitted caller can renew and finish. Replacement
-can pass an expired rehearsal lease only after acquiring its actual rehearsal
-executor lock; the retirement reservation's target suffix is not a separate
-executor. This preserves the original journal and all custody. An active lease
-or occupied lock blocks replacement through the existing bounded drain and its
-diagnostic timeout, rather than interrupting the rehearsal's waiting caller.
-
 The existing provider-fence monitor also watches Odoo preview reservations,
 including reservation-only legacy residue. Its incident uses the opaque
 reservation id, never private keys/target coordinates, and routes through

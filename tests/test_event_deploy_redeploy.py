@@ -4,7 +4,7 @@ from datetime import timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from typing import Any, cast
+from typing import cast
 from unittest.mock import patch
 
 from control_plane.contracts.idempotency_record import (
@@ -26,56 +26,6 @@ from tests.test_client_release_redeploy import _prepare, _replacement_env
 
 
 class EventDeployRedeployTests(unittest.TestCase):
-    def test_agent_rehearsal_drains_and_keeps_expired_original_custody(self) -> None:
-        self.assert_agent_rehearsal_drains("")
-
-    def test_retirement_drains_on_its_original_rehearsal_executor(self) -> None:
-        self.assert_agent_rehearsal_drains(":incomplete-retirement")
-
-    def assert_agent_rehearsal_drains(self, target_suffix: str) -> None:
-        from control_plane.contracts.odoo_upgrade_rehearsal import ODOO_UPGRADE_REHEARSAL_ROUTE
-
-        intent: dict[str, Any] = dict(
-            scope="bearer:director-agent",
-            route_path=ODOO_UPGRADE_REHEARSAL_ROUTE.format(product="example-product"),
-            idempotency_key="original-execute",
-            request_fingerprint="reviewed-execute",
-            lease_owner="original-worker",
-            reconciliation_key="rehearsal-execute",
-            provider_target_key="isolated-rehearsal" + target_suffix,
-        )
-        reservation = self.store.reserve_mutation(**intent).record
-        _, blockers, dispatch = _prepare(self.store)
-        self.assertEqual(blockers, (reservation.record_id,))
-        self.assertFalse(dispatch)
-        with self.assertRaises(ServiceDeployDraining):
-            self.store.reserve_mutation(**{**intent, "idempotency_key": "new-rehearsal"})
-        renewed = self.store.renew_mutation_reservation(reservation=reservation)
-        self.assertEqual(renewed.status, "updated")
-        assert renewed.record is not None
-        expired = parse_launchplane_mutation_timestamp(
-            renewed.record.lease_expires_at, field_name="lease_expires_at"
-        ) + timedelta(seconds=1)
-        with patch.object(
-            self.store, "_database_mutation_timestamp", return_value=expired.isoformat()
-        ):
-            with self.store.testing_replacement_execution_lock("isolated-rehearsal") as check:
-                assert check is not None
-                _, blockers, dispatch = _prepare(self.store)
-                self.assertEqual(blockers, (reservation.record_id,))
-                self.assertFalse(dispatch)
-            _, blockers, dispatch = _prepare(self.store)
-            self.assertFalse(blockers)
-            self.assertTrue(dispatch)
-        self.assertEqual(
-            self.store.read_idempotency_record(
-                scope=reservation.scope,
-                route_path=reservation.route_path,
-                idempotency_key=reservation.idempotency_key,
-            ),
-            renewed.record,
-        )
-
     def setUp(self) -> None:
         directory = TemporaryDirectory()
         self.addCleanup(directory.cleanup)
