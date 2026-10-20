@@ -215,6 +215,16 @@ class RehearsalScenario(unittest.TestCase):
                 read_status(self.store)["rehearsal_checkpoints"],
                 ({"operation_id": paused.record.record_id, "state": "recovery_required"},),
             )
+        # Supported original-key recovery settles the same journal independently
+        # of the stopped automatic observer. Runtime must stop asking for recovery.
+        recovered = self.store.adopt_reconciled_mutation(
+            reservation=paused.record,
+            response_status_code=202,
+            response_trace_id="original-recovery",
+            response_payload={"status": "accepted", "result": {"completed": True}},
+        )
+        self.assertEqual(recovered.status, "adopted")
+        self.assertEqual(read_status(self.store)["rehearsal_checkpoints"], ())
 
     def test_failed_checkpoint_storage_keeps_original_journal_recoverable(self) -> None:
         from control_plane.service_deploy_drain import read_status

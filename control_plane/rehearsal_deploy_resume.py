@@ -23,6 +23,7 @@ from control_plane.contracts.odoo_upgrade_rehearsal import (
 from control_plane.odoo_upgrade_rehearsal import OdooRehearsalAdapter
 from control_plane.service_deploy_drain import _read, admission_allowed, lock
 from control_plane.storage.postgres import (
+    LaunchplaneIdempotencyRow,
     LaunchplaneServiceDeployDrainRow,
     PostgresRecordStore,
 )
@@ -65,6 +66,14 @@ def checkpoint_status(session: Session) -> tuple[dict[str, str], ...]:
             )
             continue
         if item.state != "completed":
+            journal = session.get(LaunchplaneIdempotencyRow, item.reservation.record_id)
+            if (
+                item.state == "recovery_required"
+                and journal is not None
+                and journal.state == "completed"
+                and journal.request_fingerprint == item.reservation.request_fingerprint
+            ):
+                continue
             details.append({"operation_id": item.reservation.record_id, "state": item.state})
     return tuple(details)
 
