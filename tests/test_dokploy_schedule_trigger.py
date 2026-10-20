@@ -46,9 +46,11 @@ class FakeProvider:
         *,
         trigger: Callable[[], JsonValue],
         listings: list[Callable[[], list[JsonObject]]],
+        baseline: Callable[[], JsonValue] = lambda: [OLDER, BEFORE],
     ) -> None:
         self._trigger = trigger
         self._listings = listings
+        self._baseline = baseline
         self.trigger_calls: list[int | float] = []
         self.list_calls = 0
 
@@ -58,6 +60,8 @@ class FakeProvider:
             self.trigger_calls.append(kwargs["timeout_seconds"])  # type: ignore[arg-type]
             return self._trigger()
         if path == LIST_PATH:
+            if not self.trigger_calls:
+                return self._baseline()
             listing = self._listings[min(self.list_calls, len(self._listings) - 1)]
             self.list_calls += 1
             return list(listing())
@@ -99,6 +103,92 @@ def _run(provider: FakeProvider, *, execution_timeout_seconds: int = 7200) -> st
 
 
 class ScheduleTriggerTests(unittest.TestCase):
+    def test_all_known_runs_inside_skew_window_are_excluded_after_timeout(self) -> None:
+        trigger_time = datetime(2026, 10, 20, 3, 59, 8, tzinfo=timezone.utc)
+        baseline: list[JsonObject] = [
+            {"deploymentId": key, "status": "done", "createdAt": created_at}
+            for key, created_at in (
+                ("earlier-one", "2026-10-20T03:58:02.917Z"),
+                ("earlier-two", "2026-10-20T03:58:06.726Z"),
+                ("deployment-before", "2026-10-20T03:58:29.233Z"),
+            )
+        ]
+        new: JsonObject = {
+            "deploymentId": "actual-new-job",
+            "status": "done",
+            "createdAt": "2026-10-20T03:59:08.361Z",
+        }
+        provider = FakeProvider(
+            trigger=_timed_out,
+            baseline=lambda: [*baseline],
+            listings=[lambda: [*baseline, new]],
+        )
+        with patch("control_plane.dokploy.api.time.time", return_value=trigger_time.timestamp()):
+            result = _run(provider)
+        self.assertEqual(result, "deployment=actual-new-job status=done")
+        self.assertEqual(len(provider.trigger_calls), 1)
+
+    def test_unreadable_baseline_never_dispatches_or_checkpoints(self) -> None:
+        malformed: list[JsonValue] = [None, [{}], [BEFORE, None]]
+        baselines: list[Callable[[], JsonValue]] = [lambda: [*_list_unavailable()]]
+        for payload in malformed:
+            baselines.append(unittest.mock.Mock(return_value=payload))
+        for baseline in baselines:
+            with self.subTest(baseline=baseline):
+                provider = FakeProvider(
+                    trigger=_timed_out, baseline=baseline, listings=[lambda: [BEFORE]]
+                )
+                checkpoint = unittest.mock.Mock()
+                with patch.object(dokploy_api, "dokploy_request", side_effect=provider.request):
+                    with self.assertRaises(click.ClickException):
+                        dokploy_api.trigger_dokploy_schedule_and_wait(
+                            host="https://provider.invalid",
+                            token="fixture",
+                            schedule_id=SCHEDULE_ID,
+                            before_key="deployment-before",
+                            execution_timeout_seconds=60,
+                            readback_grace_seconds=0,
+                            before_trigger=checkpoint,
+                        )
+                self.assertEqual(provider.trigger_calls, [])
+                checkpoint.assert_not_called()
+
+    def test_known_runs_without_a_new_job_stay_unknown(self) -> None:
+        recent = _deployment("recent-known", "done", timedelta(seconds=-1))
+        provider = FakeProvider(
+            trigger=_timed_out,
+            baseline=lambda: [BEFORE, recent],
+            listings=[lambda: [recent, BEFORE]],
+        )
+        with self.assertRaises(dokploy_api.DokployScheduleExecutionFailed) as raised:
+            _run(provider)
+        self.assertEqual(raised.exception.cause, "trigger_outcome_unknown")
+        self.assertEqual(raised.exception.deployment_id, "")
+        self.assertEqual(len(provider.trigger_calls), 1)
+
+    def test_timestamp_absence_does_not_hide_a_genuinely_ambiguous_job(self) -> None:
+        dated = _deployment("new-dated", "running", timedelta(seconds=1))
+        undated: JsonObject = {"deploymentId": "new-undated", "status": "running"}
+        for jobs in ([dated, undated], [undated, {**undated, "deploymentId": "another"}]):
+            with self.subTest(jobs=jobs):
+                provider = FakeProvider(trigger=_timed_out, listings=[lambda: [BEFORE, *jobs]])
+                with self.assertRaises(dokploy_api.DokployScheduleExecutionFailed) as raised:
+                    _run(provider)
+                self.assertEqual(raised.exception.cause, "trigger_outcome_unknown")
+                self.assertEqual(raised.exception.deployment_id, "")
+                self.assertEqual(len(provider.trigger_calls), 1)
+
+    def test_one_new_undated_job_is_observed_with_known_runs_excluded(self) -> None:
+        known: JsonObject = {"deploymentId": "known-undated", "status": "done"}
+        new: JsonObject = {"deploymentId": "new-undated", "status": "done"}
+        provider = FakeProvider(
+            trigger=_timed_out,
+            baseline=lambda: [known, BEFORE],
+            listings=[lambda: [new, BEFORE, known]],
+        )
+        self.assertEqual(_run(provider), "deployment=new-undated status=done")
+        self.assertEqual(len(provider.trigger_calls), 1)
+
     def test_oversize_script_refuses_before_provider_access_or_checkpoint(self) -> None:
         payload: JsonObject = {
             "script": "x" * dokploy_api.DOKPLOY_SCHEDULE_MATERIALIZATION_LIMIT_BYTES

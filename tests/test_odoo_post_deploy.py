@@ -355,6 +355,7 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
                             upsert_dokploy_schedule=Mock(
                                 return_value={"scheduleId": "maintenance-schedule"}
                             ),
+                            _read_schedule_deployments=Mock(return_value=[]),
                             latest_deployment_for_schedule=Mock(
                                 side_effect=[
                                     {"deploymentId": "previous-maintenance"},
@@ -506,6 +507,7 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
                             upsert_dokploy_schedule=Mock(
                                 return_value={"scheduleId": "maintenance"}
                             ),
+                            _read_schedule_deployments=Mock(return_value=[]),
                             latest_deployment_for_schedule=Mock(
                                 side_effect=[
                                     {"deploymentId": "previous"},

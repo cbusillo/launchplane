@@ -111,6 +111,7 @@ class ConnectionIsolationTests(unittest.TestCase):
             context="example", instance="testing", target_type="compose", target_id="fixture"
         )
         with (
+            patch("control_plane.dokploy.api._read_schedule_deployments", return_value=[]),
             patch.object(api, "upsert_dokploy_schedule", return_value={"scheduleId": "fixture"}),
             patch.object(
                 api,

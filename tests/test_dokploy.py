@@ -473,6 +473,7 @@ class DokployConfigTests(unittest.TestCase):
             remote_command_failed=True,
         )
         with (
+            patch("control_plane.dokploy.api._read_schedule_deployments", return_value=[]),
             patch(
                 "control_plane.dokploy.api.latest_deployment_for_schedule",
                 side_effect=(
@@ -2826,6 +2827,7 @@ domains = ["cm-testing.shinycomputers.com"]
                 }
 
             with (
+                patch("control_plane.dokploy.api._read_schedule_deployments", return_value=[]),
                 patch(
                     "control_plane.dokploy.api.fetch_dokploy_target_payload",
                     side_effect=fetch_target_payload,
@@ -3053,6 +3055,7 @@ domains = ["cm-testing.shinycomputers.com"]
             }
 
         with (
+            patch("control_plane.dokploy.api._read_schedule_deployments", return_value=[]),
             patch(
                 "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 side_effect=fetch_target_payload,
@@ -3115,6 +3118,7 @@ domains = ["cm-testing.shinycomputers.com"]
             return {"scheduleId": "schedule-123"}
 
         with (
+            patch("control_plane.dokploy.api._read_schedule_deployments", return_value=[]),
             patch(
                 "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 return_value={
@@ -3216,6 +3220,7 @@ domains = ["cm-testing.shinycomputers.com"]
                     ),
                     find_matching_dokploy_schedule=Mock(return_value=None),
                     upsert_dokploy_schedule=Mock(return_value={"scheduleId": "schedule-example"}),
+                    _read_schedule_deployments=Mock(return_value=[]),
                     latest_deployment_for_schedule=Mock(
                         side_effect=[
                             {"id": "before"},
@@ -3263,6 +3268,7 @@ domains = ["cm-testing.shinycomputers.com"]
         )
 
         with (
+            patch("control_plane.dokploy.api._read_schedule_deployments", return_value=[]),
             patch(
                 "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 return_value={
@@ -3329,6 +3335,7 @@ domains = ["cm-testing.shinycomputers.com"]
         )
 
         with (
+            patch("control_plane.dokploy.api._read_schedule_deployments", return_value=[]),
             patch(
                 "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 return_value={
@@ -3403,6 +3410,7 @@ domains = ["cm-testing.shinycomputers.com"]
         )
 
         with (
+            patch("control_plane.dokploy.api._read_schedule_deployments", return_value=[]),
             patch(
                 "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 return_value={
@@ -3462,6 +3470,7 @@ domains = ["cm-testing.shinycomputers.com"]
         )
 
         with (
+            patch("control_plane.dokploy.api._read_schedule_deployments", return_value=[]),
             patch(
                 "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 return_value={
@@ -3533,6 +3542,7 @@ domains = ["cm-testing.shinycomputers.com"]
             return {"scheduleId": "schedule-123"}
 
         with (
+            patch("control_plane.dokploy.api._read_schedule_deployments", return_value=[]),
             patch(
                 "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 return_value={
@@ -3757,6 +3767,7 @@ esac
             return {"ok": True}
 
         with (
+            patch("control_plane.dokploy.api._read_schedule_deployments", return_value=[]),
             patch(
                 "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 return_value={"appName": "cm-prod-app", "serverId": "server-123"},
@@ -3821,6 +3832,7 @@ esac
         )
 
         with (
+            patch("control_plane.dokploy.api._read_schedule_deployments", return_value=[]),
             patch(
                 "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 return_value={"appName": "cm-prod-app", "serverId": "server-123"},
@@ -3896,6 +3908,7 @@ esac
             return {"scheduleId": "schedule-verify"}
 
         with (
+            patch("control_plane.dokploy.api._read_schedule_deployments", return_value=[]),
             patch(
                 "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 return_value={"appName": "cm-prod-app", "serverId": "server-123"},
@@ -4223,6 +4236,7 @@ esac
             return {"ok": True}
 
         with (
+            patch("control_plane.dokploy.api._read_schedule_deployments", return_value=[]),
             patch(
                 "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 return_value={

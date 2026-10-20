@@ -1130,6 +1130,20 @@ def trigger_dokploy_schedule_and_wait(
     """
     if execution_timeout_seconds < 1:
         raise ValueError("Dokploy schedule execution timeout must be positive.")
+    try:
+        baseline = _read_schedule_deployments(host=host, token=token, schedule_id=schedule_id)
+    except click.ClickException as error:
+        raise DokployScheduleExecutionFailed(
+            schedule_id=schedule_id,
+            deployment_id="",
+            deployment_status="not_started",
+            cause="trigger_baseline_unavailable",
+            provider_detail=_bounded_provider_detail(
+                f"Pre-trigger deployment baseline failed: {error.message} The trigger was not sent."
+            ),
+        ) from error
+    before_keys = {deployment_key(item) for item in baseline} | {before_key}
+    before_key = deployment_key(_latest_deployment_from_list(baseline)) or before_key
     started_monotonic = time.monotonic()
     trigger_started_at = time.time()
     try:
@@ -1153,7 +1167,7 @@ def trigger_dokploy_schedule_and_wait(
             host=host,
             token=token,
             schedule_id=schedule_id,
-            before_key=before_key,
+            before_keys=before_keys,
             trigger_started_at=trigger_started_at,
             grace_seconds=0 if rejected else readback_grace_seconds,
             interval_seconds=readback_interval_seconds,
@@ -1259,7 +1273,7 @@ def _read_back_triggered_schedule_deployment(
     host: str,
     token: str,
     schedule_id: str,
-    before_key: str,
+    before_keys: set[str],
     trigger_started_at: float,
     grace_seconds: float,
     interval_seconds: float,
@@ -1269,11 +1283,8 @@ def _read_back_triggered_schedule_deployment(
     deadline = time.monotonic() + grace_seconds
     while True:
         try:
-            payload = dokploy_request(
-                host=host,
-                token=token,
-                path="/api/deployment.allByType",
-                query={"id": schedule_id, "type": "schedule"},
+            deployments = _read_schedule_deployments(
+                host=host, token=token, schedule_id=schedule_id
             )
         except click.ClickException as read_error:
             raise DokployScheduleExecutionFailed(
@@ -1287,8 +1298,8 @@ def _read_back_triggered_schedule_deployment(
                 ),
             ) from trigger_error
         candidates = _triggered_schedule_deployment_candidates(
-            deployments=extract_deployments(payload),
-            before_key=before_key,
+            deployments=deployments,
+            before_keys=before_keys,
             trigger_started_at=trigger_started_at,
         )
         if len(candidates) > 1:
@@ -1313,27 +1324,37 @@ def _read_back_triggered_schedule_deployment(
 def _triggered_schedule_deployment_candidates(
     *,
     deployments: list[JsonObject],
-    before_key: str,
+    before_keys: set[str],
     trigger_started_at: float,
 ) -> list[JsonObject]:
     new_deployments = [
         deployment
         for deployment in deployments
-        if deployment_key(deployment) and deployment_key(deployment) != before_key
+        if deployment_key(deployment) and deployment_key(deployment) not in before_keys
     ]
     earliest_start = trigger_started_at - _DOKPLOY_SCHEDULE_START_CLOCK_SKEW_SECONDS
     dated = [(deployment, _deployment_created_at(deployment)) for deployment in new_deployments]
-    if any(created_at is not None for _deployment, created_at in dated):
-        return [
-            deployment
-            for deployment, created_at in dated
-            if created_at is not None and created_at >= earliest_start
-        ]
-    # Without creation times, only the latest deployment can belong to this trigger.
-    latest = _latest_deployment_from_list(deployments)
-    if latest is None or deployment_key(latest) in {"", before_key}:
-        return []
-    return [latest]
+    # Missing timestamps cannot eliminate an unseen job or resolve ambiguity.
+    return [
+        deployment
+        for deployment, created_at in dated
+        if created_at is None or created_at >= earliest_start
+    ]
+
+
+def _read_schedule_deployments(*, host: str, token: str, schedule_id: str) -> list[JsonObject]:
+    payload = dokploy_request(
+        host=host,
+        token=token,
+        path="/api/deployment.allByType",
+        query={"id": schedule_id, "type": "schedule"},
+    )
+    deployments = extract_deployments(payload)
+    if parse_deployment_history(payload).state == "unknown" or any(
+        not deployment_key(item) for item in deployments
+    ):
+        raise click.ClickException("Dokploy schedule deployment history is unreadable.")
+    return deployments
 
 
 def _deployment_created_at(deployment: JsonObject) -> float | None:
