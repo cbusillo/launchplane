@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
+from control_plane.contracts.public_hosts import retained_hostname_identity
 
 import click
 from pydantic import BaseModel, ConfigDict, Field
@@ -337,14 +338,26 @@ def bootstrap_plan(
         or generation.request_sha256 != bootstrap_request_sha256(request)
     ):
         raise ValueError("Bootstrap request differs from its recorded generation.")
-    old_hosts = {urlsplit(value).hostname for value in (lane.base_url, lane.health_url)}
-    old_hosts.update(target.domains)
+    requested_host = retained_hostname_identity(request.domain_host)
+    old_hosts = {
+        retained_hostname_identity(value)
+        for value in (lane.base_url, lane.health_url, *target.domains)
+    }
     # The retained hostname is never moved or independently duplicated.
     if (
-        request.domain_host in store.retained_disposable_hostnames()
-        or (generation is None and request.domain_host in old_hosts)
+        requested_host
+        in {retained_hostname_identity(host) for host in store.retained_disposable_hostnames()}
+        or (generation is None and requested_host in old_hosts)
         or any(
-            request.domain_host in {*other.domains, *other.public_hosts}
+            requested_host
+            in {
+                retained_hostname_identity(host)
+                for host in (
+                    *other.domains,
+                    *other.public_hosts,
+                    *(effect.host for effect in other.pending_public_host_effects),
+                )
+            }
             and (
                 generation is None
                 or (other.context, other.instance) != (request.context, "testing")
@@ -352,8 +365,11 @@ def bootstrap_plan(
             for other in store.list_dokploy_target_records()
         )
         or any(
-            request.domain_host
-            in {urlsplit(candidate.base_url).hostname, urlsplit(candidate.health_url).hostname}
+            requested_host
+            in {
+                retained_hostname_identity(value)
+                for value in (candidate.base_url, candidate.health_url)
+            }
             and not (
                 generation is not None
                 and other.product == product

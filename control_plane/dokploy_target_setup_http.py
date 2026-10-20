@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from control_plane.browser_route_repair import BrowserRouteRepairRequest
 from control_plane.contracts.deploy_target import DeployedTargetReference
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.public_hosts import retained_hostname_identity
 from control_plane.contracts.dokploy_target_record import (
     DokployTargetPolicies,
     DokployTargetRecord,
@@ -678,7 +679,9 @@ def _execute_dokploy_target_setup(
         return mutate_dokploy_payload_for_target_setup(host, token, path, payload)
 
     apply_changes = request.mode == "apply"
-    if set(request.domains).intersection(record_store.retained_disposable_hostnames()):
+    if {retained_hostname_identity(host) for host in request.domains}.intersection(
+        retained_hostname_identity(host) for host in record_store.retained_disposable_hostnames()
+    ):
         raise ValueError("A hostname remains reserved by retained testing custody.")
     if disposable_placement is not None and disposable_checkpoint is None:
         raise ValueError("Resuming fresh placement requires its service-owned checkpoint.")

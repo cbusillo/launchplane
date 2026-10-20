@@ -11,6 +11,7 @@ import click
 from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
+from control_plane.contracts.public_hosts import retained_hostname_identity
 from control_plane.contracts.disposable_lane import TESTING_PUBLIC_INGRESS_ROUTE
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.edge_endpoint_record import EdgeEndpointRecord
@@ -143,8 +144,15 @@ class TestingPublicIngressAdapter:
             raise ValueError("Testing hostname authority changed.")
         for other in self.store.list_dokploy_target_records():
             if (other.context, other.instance) != (target.context, target.instance) and (
-                generation.domain_host in (*other.domains, *other.public_hosts)
-                or any(e.host == generation.domain_host for e in other.pending_public_host_effects)
+                retained_hostname_identity(generation.domain_host)
+                in {
+                    retained_hostname_identity(host)
+                    for host in (
+                        *other.domains,
+                        *other.public_hosts,
+                        *(effect.host for effect in other.pending_public_host_effects),
+                    )
+                }
             ):
                 raise ValueError("The testing hostname belongs to another target.")
         binding = self.store.read_route_binding_record(

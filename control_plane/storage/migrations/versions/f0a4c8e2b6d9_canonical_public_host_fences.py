@@ -11,6 +11,7 @@ revision: str = "f0a4c8e2b6d9"
 down_revision: str = preview.revision
 branch_labels: str | None = None
 depends_on: str | None = None
+PUBLIC_HOST_SCHEMA_TRANSITION_LOCK_KEY = "launchplane:public-host-schema-transition"
 
 
 def _replace_keys(*, canonical: bool) -> None:
@@ -21,7 +22,31 @@ def _replace_keys(*, canonical: bool) -> None:
         r"\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200a\2028\2029"
         r"\202f\205f\3000"
     )
-    hostname = f"lower(rtrim(btrim(host, U&'{whitespace}'), '.'))" if canonical else "lower(host)"
+    if canonical:
+        op.execute(
+            sa.text(f"""
+            CREATE FUNCTION launchplane_retained_hostname_identity(value text)
+            RETURNS text LANGUAGE plpgsql IMMUTABLE STRICT AS $$
+            DECLARE authority text;
+            BEGIN
+                authority := btrim(value, U&'{whitespace}');
+                IF strpos(authority, '://') > 0 THEN
+                    authority := substr(authority, strpos(authority, '://') + 3);
+                END IF;
+                authority := (regexp_split_to_array(authority, '[/#?]'))[1];
+                authority := regexp_replace(authority, '^.*@', '');
+                IF left(authority, 1) = '[' THEN
+                    authority := split_part(substr(authority, 2), ']', 1);
+                ELSE
+                    authority := split_part(authority, ':', 1);
+                END IF;
+                RETURN translate(rtrim(btrim(authority, U&'{whitespace}'), '.'),
+                    'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz');
+            END
+            $$
+            """)
+        )
+    hostname = "launchplane_retained_hostname_identity(host)" if canonical else "lower(host)"
     pending = (
         """
         UNION ALL
@@ -73,13 +98,28 @@ def _replace_keys(*, canonical: bool) -> None:
         $$
     """)
     )
+    if not canonical:
+        op.execute("DROP FUNCTION launchplane_retained_hostname_identity(text)")
+
+
+def _exclude_writers() -> None:
+    if not op.get_bind().scalar(
+        sa.text("SELECT pg_try_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": PUBLIC_HOST_SCHEMA_TRANSITION_LOCK_KEY},
+    ):
+        raise RuntimeError("Public-host schema transition is busy; retry after writers settle.")
+    # Covers ordinary target writes, including an uncommitted new context whose
+    # trigger has not acquired its first authority key. Never wait holding K.
+    op.execute("LOCK TABLE launchplane_dokploy_targets IN SHARE MODE NOWAIT")
 
 
 def upgrade() -> None:
     if op.get_bind().dialect.name == "postgresql":
+        _exclude_writers()
         _replace_keys(canonical=True)
 
 
 def downgrade() -> None:
     if op.get_bind().dialect.name == "postgresql":
+        _exclude_writers()
         _replace_keys(canonical=False)

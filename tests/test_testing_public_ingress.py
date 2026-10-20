@@ -558,6 +558,20 @@ class TestingPublicIngressTests(TestingPublicIngressScenario):
             self.publish()
         self.assertNotIn("create", self.client.calls)
         self.server["ipAddress"] = self.endpoint.upstream_host
+        target = self.store.read_dokploy_target_record(
+            context_name=self.request.context, instance_name="testing"
+        )
+        for alias in (
+            self.request.domain_host.upper() + ".",
+            f"https://{self.request.domain_host}/path",
+        ):
+            with self.subTest(alias=alias):
+                foreign = target.model_copy(update={"context": "foreign-lane", "domains": (alias,)})
+                self.store.write_dokploy_target_record(foreign)
+                with self.assertRaises(ValueError):
+                    self.edge().plan()
+                self.assertNotIn("create", self.client.calls)
+                self.store.delete_dokploy_target_record(expected_record=foreign)
         self.client.proxy_hosts.append(
             self.client.proxy_hosts[0].model_copy(
                 update={"id": 999, "domain_names": (self.request.domain_host,)}

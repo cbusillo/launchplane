@@ -4970,24 +4970,53 @@ and their rows preserved. If a database has already applied the held drop or old
 join, startup adds only the missing approved preview/hostname steps and joins the paths.
 After explicit approval, requesting the held revision on a database already at
 the preview or hostname revision applies the missing steps and the new empty join.
-An explicit held target also converges to that join from older supported revisions.
+An explicit held target or old retirement-join target also converges to that join
+from older supported revisions. Both requests require the held drop's separate approval.
 Both routes leave one recorded Alembic revision; startup never mistakes incomparable branches for
 ordered versions. Do not substitute Alembic `head` for the release migration
 target: `head` includes the held drop and is reserved for disposable rehearsals
 or the separately approved application procedure.
 
 Hostname fencing compares retained target domains, public hosts and pending
-effect hostnames with the same DNS identity as ownership checks: lowercase,
-surrounding whitespace removed, and trailing dots removed. Existing payloads are
+effect hostnames with the same DNS identity as ownership checks: ASCII case folding,
+surrounding whitespace removed, and trailing dots removed. Retained URL-form domains
+contribute their hostname, excluding scheme, user information, port, path, query and
+fragment. This extraction applies only to retained claims; new public-host input
+validation stays unchanged. No Unicode case folding or IDNA conversion is introduced.
+Existing payloads are
 not rewritten. The new runtime rejects pre-hostname schema revisions so it cannot
 run the new comparisons with the old lock identities. Newly submitted public-host
 validation remains unchanged. No hostname migration grants access, changes DNS or
 calls a provider.
 
-The hostname migration's downgrade restores the previous key function without
-rewriting payloads. Older images still require their own accepted schema revision;
-an image-only rollback does not establish that compatibility. Rehearse any schema
-rollback with its matching image and quiesce writers before changing lock identities.
+Deploy and qualify the [compatibility prelude](https://github.com/cbusillo/launchplane/issues/4229)
+before activating this migration.
+That separate image knows the immutable hostname/join revisions and accepts both
+the old and new supported schema states, while retaining the preview-only default
+and old comparison behavior. Verify that every earlier HTTP replica and worker has
+been replaced, and retain that exact immutable image as activation's previous-image
+rollback target. A source merge, deploy-drain marker or successful new replica alone
+does not establish this prerequisite. Earlier images reject the new revision during
+startup migration, before HTTP starts; automatic image rollback does not downgrade
+the database. Activation must wait for actual compatibility-image qualification.
+
+Every public-host operation takes a shared transaction schema-transition lock
+before its first SQL key-function call, outside the validation savepoint, and holds
+it through provider I/O. Every checkpoint reacquires it before further effects.
+Both migration directions first try the matching exclusive lock, then take a NOWAIT
+SHARE lock on the target table, in the same transaction as key-function replacement
+and revision recording. Contention refuses the migration without changing the schema;
+retry after writers settle. The table lock also excludes ordinary target writes,
+including uncommitted new contexts. Independent public-host operations can run together.
+
+The qualified compatibility image can roll back activation without schema downgrade.
+For a disposable schema-reversal rehearsal, set `LAUNCHPLANE_DATABASE_URL` to that
+disposable database and use the exact reviewed activation source
+and `uv run alembic downgrade e8d2f6a0b4c7` on the hostname-only branch, or
+`uv run alembic downgrade e9e3a7b1c5d8` on the joined branch. These commands restore
+the previous key function without rewriting payloads and use the same contention
+refusal protocol. They are not live-operation authority or a fallback to an arbitrary
+checkout. Do not roll back to a pre-compatibility image after activation.
 
 An image rollback across the Q533 preview drop cannot start an older image
 that still requires the enablement table or rejects the new revision. Recovery

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from urllib.parse import urlsplit
-
-from control_plane.contracts.public_hosts import canonical_dns_hostname
+from control_plane.contracts.public_hosts import retained_hostname_identity
+from control_plane.storage.migrations.versions.f0a4c8e2b6d9_canonical_public_host_fences import (
+    PUBLIC_HOST_SCHEMA_TRANSITION_LOCK_KEY,
+)
 
 from control_plane.route_binding_reconcile import (
     RouteBindingReviewSources,
@@ -6093,7 +6094,7 @@ class PostgresRecordStore(HumanSessionStore):
 
         def guard(session: Any) -> None:
             requested_hosts = {
-                canonical_dns_hostname(host)
+                retained_hostname_identity(host)
                 for host in (
                     *bundle.dokploy_targets[0].public_hosts,
                     *bundle.dokploy_targets[0].domains,
@@ -6110,8 +6111,7 @@ class PostgresRecordStore(HumanSessionStore):
                     endpoint.status == "active"
                     and (endpoint.context, endpoint.instance)
                     != (expected_target.context, expected_target.instance)
-                    and canonical_dns_hostname(urlsplit(endpoint.url).hostname or "")
-                    in requested_hosts
+                    and retained_hostname_identity(endpoint.url) in requested_hosts
                 ):
                     raise DokployTargetRecordChanged(
                         "A host is already owned by another lane's private endpoint."
@@ -6123,7 +6123,7 @@ class PostgresRecordStore(HumanSessionStore):
                 ):
                     other = DokployTargetRecord.model_validate(row.payload)
                     if requested_hosts.intersection(
-                        canonical_dns_hostname(host)
+                        retained_hostname_identity(host)
                         for host in (
                             *other.domains,
                             *other.public_hosts,
@@ -6195,6 +6195,15 @@ class PostgresRecordStore(HumanSessionStore):
                 # cached before another authority writer could acquire it.
                 session.expire_all()
                 if self.database_dialect_name == "postgresql":
+                    # Acquire before the first key-function call, outside the
+                    # validation savepoint, and again after every checkpoint.
+                    if not session.scalar(
+                        text("SELECT pg_try_advisory_xact_lock_shared(hashtextextended(:key, 0))"),
+                        {"key": PUBLIC_HOST_SCHEMA_TRANSITION_LOCK_KEY},
+                    ):
+                        raise PublicHostAuthorityBusy(
+                            "Public-host schema transition is busy; retry from a fresh plan."
+                        )
                     # Keep only target/name fences over I/O. A checkpoint commits
                     # these locks, so acquire them anew before further effects.
                     fenced_target = expected_target.model_copy(
@@ -12994,7 +13003,11 @@ class PostgresRecordStore(HumanSessionStore):
                     if (
                         current_identity.target_id == generation.target_id
                         and target_id in (None, generation.target_id)
-                        and generation.domain_host in {*existing.domains, *existing.public_hosts}
+                        and retained_hostname_identity(generation.domain_host)
+                        in {
+                            retained_hostname_identity(host)
+                            for host in (*existing.domains, *existing.public_hosts)
+                        }
                     ):
                         # Preserve an existing route on its exact original recipient.
                         # A new ID in this same bundle must never inherit that host.
@@ -13060,12 +13073,18 @@ class PostgresRecordStore(HumanSessionStore):
         target_id: str | None = None,
     ) -> None:
         requested = {
-            *target.domains,
-            *target.public_hosts,
-            *(effect.host for effect in target.pending_public_host_effects),
+            retained_hostname_identity(host)
+            for host in (
+                *target.domains,
+                *target.public_hosts,
+                *(effect.host for effect in target.pending_public_host_effects),
+            )
         }
         if requested.intersection(
-            self._retained_disposable_hostnames(session, current_target=target, target_id=target_id)
+            retained_hostname_identity(host)
+            for host in self._retained_disposable_hostnames(
+                session, current_target=target, target_id=target_id
+            )
         ):
             raise DokployTargetRecordChanged(
                 "A hostname remains reserved by retained testing custody."

@@ -524,6 +524,15 @@ class TestingGenerationRetirementTests(unittest.TestCase):
             )
         with self.assertRaises(ValueError):
             self.store.write_dokploy_target_record(held.model_copy(update={"context": "unrelated"}))
+        for alias in (
+            self.gen.domain_host.upper() + ".",
+            f" \t{self.gen.domain_host}.\n",
+            f"https://{self.gen.domain_host.upper()}./path",
+        ):
+            with self.subTest(alias=alias), self.assertRaises(ValueError):
+                self.store.write_dokploy_target_record(
+                    held.model_copy(update={"context": "unrelated", "domains": (alias,)})
+                )
         self.assertEqual(
             self.store.read_dokploy_target_id_record(
                 context_name=self.context, instance_name="testing"

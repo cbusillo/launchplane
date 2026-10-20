@@ -12,7 +12,7 @@ import click
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord, PublicHostEffect
-from control_plane.contracts.public_hosts import canonical_dns_hostname
+from control_plane.contracts.public_hosts import retained_hostname_identity
 from control_plane.dokploy import api, compose, source
 from control_plane.dokploy_target_setup_http import (
     delete_dokploy_domain_for_target_setup,
@@ -151,7 +151,11 @@ def plan_public_hosts(
     mode: str,
 ) -> PublicHostsPlan:
     try:
-        if set(hosts).intersection(record_store.retained_disposable_hostnames()):
+        requested_identities = {retained_hostname_identity(host) for host in hosts}
+        if requested_identities.intersection(
+            retained_hostname_identity(host)
+            for host in record_store.retained_disposable_hostnames()
+        ):
             raise ValueError("A hostname remains reserved by retained testing custody.")
         target = record_store.read_dokploy_target_record(
             context_name=context, instance_name=instance
@@ -173,8 +177,7 @@ def plan_public_hosts(
         ):
             raise ValueError("Public hosts require the owned prod compose binding.")
         protected = set(target.domains)
-        protected_identities = {canonical_dns_hostname(host) for host in protected}
-        requested_identities = {canonical_dns_hostname(host) for host in hosts}
+        protected_identities = {retained_hostname_identity(host) for host in protected}
         if protected_identities & requested_identities:
             raise ValueError("Public hosts cannot take ownership of an existing internal domain.")
         for other in record_store.list_dokploy_target_records():
@@ -182,7 +185,7 @@ def plan_public_hosts(
                 context,
                 instance,
             ) and requested_identities.intersection(
-                canonical_dns_hostname(host)
+                retained_hostname_identity(host)
                 for host in (
                     *other.domains,
                     *other.public_hosts,
@@ -213,7 +216,7 @@ def plan_public_hosts(
             raise ValueError("Public hosts require an existing HTTPS web origin route.")
         effects = {effect.host: effect for effect in target.pending_public_host_effects}
         if protected_identities.intersection(
-            canonical_dns_hostname(host) for host in (*target.public_hosts, *effects)
+            retained_hostname_identity(host) for host in (*target.public_hosts, *effects)
         ):
             raise ProductConfigError(
                 "A managed public host now belongs to the target's protected origin; inspect the target before retrying.",

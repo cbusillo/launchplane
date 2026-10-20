@@ -70,7 +70,7 @@ def schema_migration_target(*, current_revision: str, target_revision: str) -> s
         retirement_join.revision,
     }:
         return EXPECTED_ALEMBIC_HEAD_REVISION
-    if target_revision == retired_delivery.revision:
+    if target_revision in {retired_delivery.revision, retirement_join.revision}:
         return EXPECTED_ALEMBIC_HEAD_REVISION
     if {current_revision, target_revision} == {retired_delivery.revision, retired_preview.revision}:
         return EXPECTED_ALEMBIC_HEAD_REVISION

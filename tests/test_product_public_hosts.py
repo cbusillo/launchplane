@@ -216,7 +216,13 @@ class ProductPublicHostsTests(unittest.IsolatedAsyncioTestCase):
                 updated_at=self.target.updated_at,
             )
         )
-        for alias in (HOSTS[0].upper(), f"{HOSTS[0]}.", f" \t{HOSTS[0].upper()}.\n"):
+        for alias in (
+            HOSTS[0].upper(),
+            f"{HOSTS[0]}.",
+            f" \t{HOSTS[0].upper()}.\n",
+            f"https://{HOSTS[0].upper()}./path",
+            f"https://{HOSTS[0]}:8443/path?query#fragment",
+        ):
             for claim_field in ("domains", "pending_effects", "pending_public_host_effects"):
                 with self.subTest(alias=alias, source=claim_field):
                     target = self.target.model_copy(
@@ -251,7 +257,13 @@ class ProductPublicHostsTests(unittest.IsolatedAsyncioTestCase):
         self.store.write_dokploy_target_record(
             self.target.model_copy(update={"domains": (HOSTS[0],)})
         )
-        for alias in (HOSTS[0].upper(), f"{HOSTS[0]}.", f" \t{HOSTS[0].upper()}.\n"):
+        for alias in (
+            HOSTS[0].upper(),
+            f"{HOSTS[0]}.",
+            f" \t{HOSTS[0].upper()}.\n",
+            f"https://{HOSTS[0].upper()}./path",
+            f"https://{HOSTS[0]}:8443/path?query#fragment",
+        ):
             for claim_field in ("domains", "pending_public_host_effects"):
                 with self.subTest(alias=alias, source=claim_field):
                     foreign = self.target.model_copy(
