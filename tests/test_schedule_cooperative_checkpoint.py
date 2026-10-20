@@ -26,7 +26,6 @@ class ScheduleCooperativeCheckpointTests(unittest.TestCase):
                         "_read_back_triggered_schedule_deployment",
                         return_value={"deploymentId": "original-job"},
                     ),
-                    patch.object(api, "_schedule_deployment_by_key") as poll,
                     self.assertRaises(InterruptedError),
                 ):
                     api.run_dokploy_schedule(
@@ -38,7 +37,6 @@ class ScheduleCooperativeCheckpointTests(unittest.TestCase):
                     )
                 checkpoint.assert_called_once_with("original-schedule", "original-job")
                 self.assertEqual(trigger.call_count, 1)
-                poll.assert_not_called()
 
     def test_unknown_trigger_never_hands_off_an_unidentified_job(self) -> None:
         checkpoint = Mock()

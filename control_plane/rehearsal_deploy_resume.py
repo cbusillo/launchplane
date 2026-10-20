@@ -6,11 +6,12 @@ The continuation observes; it never replays capture, upgrade or retirement.
 """
 
 import logging
-import os
+from collections.abc import Callable
 from pathlib import Path
+from threading import Event
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -20,11 +21,15 @@ from control_plane.contracts.odoo_upgrade_rehearsal import (
     OdooUpgradeRehearsalRequest,
 )
 from control_plane.odoo_upgrade_rehearsal import OdooRehearsalAdapter
-from control_plane.service_deploy_drain import _read, lock
+from control_plane.service_deploy_drain import _read, admission_allowed, lock
 from control_plane.storage.postgres import (
     LaunchplaneServiceDeployDrainRow,
     PostgresRecordStore,
 )
+
+
+REHEARSAL_CHECKPOINT_PREFIX = "rehearsal-checkpoint:"
+REHEARSAL_RESUME_OBSERVATION_TIMEOUT_SECONDS = 60
 
 
 class RehearsalDeployCheckpoint(BaseModel):
@@ -43,15 +48,25 @@ class RehearsalDeployCheckpoint(BaseModel):
 
 def checkpoint_status(session: Session) -> tuple[dict[str, str], ...]:
     """Runtime diagnostics expose custody, never stored intent or provider values."""
-    return tuple(
-        {"operation_id": item.reservation.record_id, "state": item.state}
-        for row in session.scalars(
-            select(LaunchplaneServiceDeployDrainRow).where(
-                LaunchplaneServiceDeployDrainRow.record_id.startswith("rehearsal-checkpoint:")
-            )
+    details: list[dict[str, str]] = []
+    for row in session.scalars(
+        select(LaunchplaneServiceDeployDrainRow).where(
+            LaunchplaneServiceDeployDrainRow.record_id.startswith(REHEARSAL_CHECKPOINT_PREFIX)
         )
-        if (item := RehearsalDeployCheckpoint.model_validate(row.payload)).state != "completed"
-    )
+    ):
+        try:
+            item = RehearsalDeployCheckpoint.model_validate(row.payload)
+        except ValidationError:
+            details.append(
+                {
+                    "operation_id": row.record_id.removeprefix(REHEARSAL_CHECKPOINT_PREFIX),
+                    "state": "unreadable",
+                }
+            )
+            continue
+        if item.state != "completed":
+            details.append({"operation_id": item.reservation.record_id, "state": item.state})
+    return tuple(details)
 
 
 def drain_requested(store: PostgresRecordStore) -> bool:
@@ -60,7 +75,7 @@ def drain_requested(store: PostgresRecordStore) -> bool:
         return bool(
             fence is not None
             and fence.state == "draining"
-            and fence.expires_at > store._database_mutation_timestamp(session)
+            and not admission_allowed(session, store._database_mutation_timestamp(session))
         )
 
 
@@ -115,7 +130,7 @@ def persist_checkpoint(
             schedule_id=schedule_id,
             deployment_id=deployment_id,
         )
-        checkpoint_id = "rehearsal-checkpoint:" + reservation.record_id
+        checkpoint_id = REHEARSAL_CHECKPOINT_PREFIX + reservation.record_id
         if session.get(LaunchplaneServiceDeployDrainRow, checkpoint_id) is not None:
             raise ValueError("Original checkpoint custody already exists.")
         store._sync_idempotency_row(row, held)
@@ -128,7 +143,9 @@ def persist_checkpoint(
         return held
 
 
-def remote_job_terminal(root: Path, checkpoint: RehearsalDeployCheckpoint) -> bool:
+def remote_job_status(
+    root: Path, checkpoint: RehearsalDeployCheckpoint
+) -> Literal["missing", "running", "terminal"]:
     from control_plane.dokploy import api, source
 
     host, token = source.read_dokploy_config(control_plane_root=root)
@@ -138,34 +155,31 @@ def remote_job_terminal(root: Path, checkpoint: RehearsalDeployCheckpoint) -> bo
         schedule_id=checkpoint.schedule_id,
         deployment_id=checkpoint.deployment_id,
     )
-    return job is not None and api._deployment_status(job) in (
-        api._DEPLOYMENT_SUCCESS_STATUSES | api._DEPLOYMENT_FAILURE_STATUSES
+    if job is None:
+        return "missing"
+    return (
+        "terminal"
+        if api._deployment_status(job)
+        in (api._DEPLOYMENT_SUCCESS_STATUSES | api._DEPLOYMENT_FAILURE_STATUSES)
+        else "running"
     )
 
 
-def resume_rehearsals(store: PostgresRecordStore, root: Path) -> tuple[str, ...]:
-    """One bounded sweep, called by the existing Odoo worker from its first poll."""
+def resume_rehearsals(
+    store: PostgresRecordStore, root: Path, *, stop_event: Event | None = None
+) -> tuple[str, ...]:
+    """One observation sweep off the existing worker's production execution loop."""
     with store._session_factory() as session:
-        _, fence = _read(session)
-        # Worker containers carry the image identity. Only matching API startup
-        # confirms the fence; an overlapping old image must never continue it.
-        if fence is not None:
-            timed_out_pause = (
-                fence.state == "draining"
-                and fence.expires_at <= store._database_mutation_timestamp(session)
-            )
-            matching_startup = (
-                fence.state == "confirmed"
-                and fence.image_reference == os.environ.get("DOCKER_IMAGE_REFERENCE", "").strip()
-            )
-            if not (timed_out_pause or matching_startup):
-                return ()
+        if not admission_allowed(session, store._database_mutation_timestamp(session)):
+            return ()
         rows = tuple(
             (row.record_id, row.payload)
             for row in session.scalars(
                 select(LaunchplaneServiceDeployDrainRow)
                 .where(
-                    LaunchplaneServiceDeployDrainRow.record_id.startswith("rehearsal-checkpoint:")
+                    LaunchplaneServiceDeployDrainRow.record_id.startswith(
+                        REHEARSAL_CHECKPOINT_PREFIX
+                    )
                 )
                 .order_by(LaunchplaneServiceDeployDrainRow.record_id)
             )
@@ -173,6 +187,8 @@ def resume_rehearsals(store: PostgresRecordStore, root: Path) -> tuple[str, ...]
         )
     completed: list[str] = []
     for checkpoint_id, payload in rows:
+        if stop_event is not None and stop_event.is_set():
+            break
         with store.testing_replacement_execution_lock("resume:" + checkpoint_id) as exclusive:
             if exclusive is None:
                 continue
@@ -193,67 +209,10 @@ def resume_rehearsals(store: PostgresRecordStore, root: Path) -> tuple[str, ...]
                 elif current != reservation:
                     state = "recovery_required"
                 else:
-                    adapter = OdooRehearsalAdapter(
-                        root,
-                        store,
-                        checkpoint.product,
-                        checkpoint.request,
-                        checkpoint.principal,
-                        checkpoint.trace,
-                    )
-                    with store.testing_replacement_execution_lock(adapter.target_key()) as check:
-                        if check is None:
-                            continue
-                        record = store.read_odoo_upgrade_rehearsal(adapter.target_key())
-                        if record is None:
-                            continue
-                        # A crash after publishing the proven host result but before
-                        # journal adoption must also converge without another effect.
-                        original = checkpoint.rehearsal
-                        published = (
-                            record.state == "upgraded"
-                            and record.model_copy(
-                                update={
-                                    "state": original.state,
-                                    "copies": original.copies,
-                                    "elapsed_seconds": original.elapsed_seconds,
-                                    "updated_at": original.updated_at,
-                                }
-                            )
-                            == original
-                        )
-                        if record != original and not published:
-                            continue
-                        adapter.operation_readback(original, reservation.idempotency_key)
-                        check()
-                    if not remote_job_terminal(root, checkpoint):
+                    outcome = observe_checkpoint(store, root, checkpoint, exclusive)
+                    if outcome == "pending":
                         continue
-                    from control_plane.provider_operations import build_provider_operation_key
-
-                    operation_key = build_provider_operation_key(
-                        scope=reservation.scope,
-                        route_path=reservation.route_path,
-                        idempotency_key=reservation.idempotency_key,
-                        request_fingerprint=reservation.request_fingerprint,
-                        reconciliation_key=reservation.reconciliation_key,
-                    )
-                    observation = adapter.observe(
-                        operation_key,
-                        reservation.provider_effect_phase,
-                        reservation.reconciliation_key,
-                    )
-                    if observation.outcome != "present":
-                        continue
-                    exclusive()
-                    adopted = store.adopt_reconciled_mutation(
-                        reservation=reservation,
-                        response_status_code=observation.response_status_code,
-                        response_trace_id=checkpoint.trace,
-                        response_payload=observation.response_payload,
-                    )
-                    if adopted.status not in {"adopted", "replayed"}:
-                        continue
-                    state = "completed"
+                    state = outcome
                 with store._session_factory() as session:
                     store._begin_serialized_write(session)
                     row = session.get(LaunchplaneServiceDeployDrainRow, checkpoint_id)
@@ -268,3 +227,76 @@ def resume_rehearsals(store: PostgresRecordStore, root: Path) -> tuple[str, ...]
                 # A transient provider/readback failure preserves original custody.
                 logging.exception("Rehearsal checkpoint observation remains pending.")
     return tuple(completed)
+
+
+def observe_checkpoint(
+    store: PostgresRecordStore,
+    root: Path,
+    checkpoint: RehearsalDeployCheckpoint,
+    exclusive: Callable[[], None],
+) -> Literal["pending", "completed", "recovery_required"]:
+    from control_plane.provider_operations import build_provider_operation_key
+
+    reservation = checkpoint.reservation
+    adapter = OdooRehearsalAdapter(
+        root,
+        store,
+        checkpoint.product,
+        checkpoint.request,
+        checkpoint.principal,
+        checkpoint.trace,
+        observation_timeout_seconds=REHEARSAL_RESUME_OBSERVATION_TIMEOUT_SECONDS,
+    )
+    with store.testing_replacement_execution_lock(adapter.target_key()) as check:
+        if check is None:
+            return "pending"
+        record = store.read_odoo_upgrade_rehearsal(adapter.target_key())
+        if record is None:
+            return "recovery_required"
+        # Publishing a proven result and adopting its journal are independently
+        # recoverable writes. Recognize only that exact publication shape.
+        original = checkpoint.rehearsal
+        published = (
+            record.state == "upgraded"
+            and record.model_copy(
+                update={
+                    "state": original.state,
+                    "copies": original.copies,
+                    "elapsed_seconds": original.elapsed_seconds,
+                    "updated_at": original.updated_at,
+                }
+            )
+            == original
+        )
+        if record != original and not published:
+            return "recovery_required"
+        adapter.operation_readback(original, reservation.idempotency_key)
+        check()
+    job_status = remote_job_status(root, checkpoint)
+    if job_status == "missing":
+        return "recovery_required"
+    if job_status != "terminal":
+        return "pending"
+    operation_key = build_provider_operation_key(
+        scope=reservation.scope,
+        route_path=reservation.route_path,
+        idempotency_key=reservation.idempotency_key,
+        request_fingerprint=reservation.request_fingerprint,
+        reconciliation_key=reservation.reconciliation_key,
+    )
+    observation = adapter.observe(
+        operation_key,
+        reservation.provider_effect_phase,
+        reservation.reconciliation_key,
+        expected_record=record,
+    )
+    if observation.outcome != "present":
+        return "recovery_required"
+    exclusive()
+    adopted = store.adopt_reconciled_mutation(
+        reservation=reservation,
+        response_status_code=observation.response_status_code,
+        response_trace_id=checkpoint.trace,
+        response_payload=observation.response_payload,
+    )
+    return "completed" if adopted.status in {"adopted", "replayed"} else "pending"

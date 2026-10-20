@@ -652,6 +652,12 @@ def _apply_acquired(
         current_reservation, _ = heartbeat.stop()
         try:
             held = checkpoint.persist(current_reservation)
+        except Exception:
+            return _mark_reconcile_required(
+                store=store,
+                reservation=current_reservation,
+                reconciliation_key=reconciliation_key,
+            )
         except BaseException:
             _mark_reconcile_required(
                 store=store,

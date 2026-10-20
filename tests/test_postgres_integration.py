@@ -14492,6 +14492,24 @@ class PostgresOdooSecretTransportTests(secret_transport_tests.OdooSecretTranspor
 
 @unittest.skipUnless(os.environ.get(POSTGRES_TEST_URL_ENV), "PostgreSQL integration URL required")
 class RealPostgresOdooUpgradeRehearsalTests(unittest.TestCase):
+    def test_checkpointed_rehearsal_resumes_original_job_on_postgres(self) -> None:
+        from tests.test_odoo_upgrade_rehearsal import RehearsalScenario
+
+        fixture = RehearsalScenario()
+        fixture.database_url = self.enterContext(_head_postgres_database())
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.test_deploy_checkpoints_exact_remote_execute_and_worker_resumes_without_replay()
+
+    def test_checkpoint_executor_exclusion_and_original_binding_on_postgres(self) -> None:
+        from tests.test_odoo_upgrade_rehearsal import RehearsalScenario
+
+        fixture = RehearsalScenario()
+        fixture.database_url = self.enterContext(_head_postgres_database())
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.test_rehearsal_checkpoint_preserves_live_executor_and_original_binding()
+
     def test_rehearsal_record_compare_and_write_and_native_alias_fence(self) -> None:
         from tests.test_odoo_upgrade_rehearsal import RehearsalScenario
 

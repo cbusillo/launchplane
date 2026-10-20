@@ -4784,8 +4784,14 @@ continues under its existing host lock and custody. No capture, upgrade or
 provider trigger is repeated, and no remote process is cancelled. The drain
 checks executor exclusion and can dispatch replacement without waiting for that
 job to finish or for new traffic to become idle.
+If checkpoint admission loses its lease or cannot store the continuation, the
+request instead retains the original journal with the existing typed
+`mutation_reconciliation_required` refusal. Preserve its key and use supported
+original-operation recovery; an uncommitted handoff supplies no resume authority.
 
-The existing Odoo worker checks these persisted checkpoints from its first poll.
+The existing Odoo worker schedules these persisted checkpoints from startup,
+on a separate sweep paced by its poll interval so observation cannot delay queued
+production operations. Each host observation has a one-minute execution budget.
 After matching-image API startup confirms the replacement, it observes the exact
 original provider job. Once that job is terminal, the existing original-operation
 host observation validates the result and settles the same journal. Replica
@@ -4795,8 +4801,11 @@ An expired pre-effect drain pause permits observation on the existing instance
 as well. Runtime `release_drain.rehearsal_checkpoints` lists unresolved checkpoint
 operation IDs and states without request fields or provider coordinates.
 
-Missing jobs, failed observations and changed bindings remain held for the
-original-key recovery path. Only newly written execute checkpoints participate;
+Missing jobs, changed bindings and terminal jobs without a verified result are
+marked `recovery_required` once, preserving original-key custody without an
+automatic observation loop. Transient read failures remain pending for a later
+sweep. Unreadable checkpoint rows are reported as `unreadable` without hiding
+drain diagnostics. Only newly written execute checkpoints participate;
 historical interrupted journals, including C10, are not adopted by this worker.
 Prepare, retirement and other long-operation families retain their existing
 bounded drain/recovery behavior. Broader top-level admission and checkpoints for
