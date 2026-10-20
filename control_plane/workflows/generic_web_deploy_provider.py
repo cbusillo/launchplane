@@ -89,6 +89,13 @@ class GenericWebProviderReconciliationTarget(BaseModel):
     deploy_timeout_seconds: int = Field(ge=1)
 
 
+@runtime_checkable
+class GenericWebApplicationExecutionProvider(Protocol):
+    def application_execution_history(
+        self, *, control_plane_root: Path, application_id: str, schedule_id: str
+    ) -> tuple[dokploy_api.JsonObject, ...]: ...
+
+
 _GENERIC_WEB_RECONCILIATION_KEY_PREFIX = "generic-web-provider-target:"
 _GENERIC_WEB_PROVIDER_SUCCESS_STATUSES = frozenset(
     {"success", "succeeded", "done", "completed", "healthy", "finished"}
@@ -663,6 +670,34 @@ class DokployGenericWebDeployProvider:
             checkpoint=checkpoint,
             effect_started=effect_started,
         )
+
+    def application_execution_history(
+        self, *, control_plane_root: Path, application_id: str, schedule_id: str
+    ) -> tuple[dokploy_api.JsonObject, ...]:
+        host, token = self._read_provider_config(control_plane_root=control_plane_root)
+        schedules = dokploy_api.list_dokploy_schedules(
+            host=host, token=token, target_id=application_id, schedule_type="application"
+        )
+        matching = tuple(
+            item for item in schedules if dokploy_api.schedule_key(item) == schedule_id
+        )
+        if len(matching) != 1 or matching[0].get("applicationId") != application_id:
+            raise click.ClickException(
+                "Original application execution schedule binding is unavailable."
+            )
+        history = tuple(
+            dokploy_api._read_schedule_deployments(host=host, token=token, schedule_id=schedule_id)
+        )
+        for row in history:
+            nested = dokploy_api.as_json_object(row.get("schedule"))
+            for identity in (row, nested or {}):
+                if identity.get("applicationId") and identity["applicationId"] != application_id:
+                    raise click.ClickException(
+                        "Original execution history has a foreign application."
+                    )
+                if identity.get("scheduleId") and identity["scheduleId"] != schedule_id:
+                    raise click.ClickException("Original execution history has a foreign schedule.")
+        return history
 
     def _read_provider_config(self, *, control_plane_root: Path) -> tuple[str, str]:
         if self.provider_id != "dokploy":

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timezone
-from typing import Literal, TypedDict
+from typing import Literal, Protocol, TypedDict
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -1115,7 +1115,18 @@ def wait_for_dokploy_schedule_deployment(
     )
 
 
-class ScheduleMutationGuardOptions(TypedDict, total=False):
+class ScheduleExecutionObserver(Protocol):
+    def before_dispatch(self, baseline_ids: tuple[str, ...]) -> None: ...
+    def acknowledged(self, response: JsonValue) -> None: ...
+    def rejected(self) -> None: ...
+    def completed(self, history: tuple[JsonObject, ...]) -> bool: ...
+
+
+class ScheduleExecutionOptions(TypedDict, total=False):
+    execution_observer: ScheduleExecutionObserver | None
+
+
+class ScheduleMutationGuardOptions(ScheduleExecutionOptions, total=False):
     provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None
     before_trigger: Callable[[], None] | None
 
@@ -1153,6 +1164,7 @@ def trigger_dokploy_schedule_and_wait(
     observation_interval_seconds: float = _DOKPLOY_SCHEDULE_OBSERVATION_INTERVAL_SECONDS,
     provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
     before_trigger: Callable[[], None] | None = None,
+    execution_observer: ScheduleExecutionObserver | None = None,
 ) -> str:
     """Trigger a schedule exactly once and wait for the provider job it started.
 
@@ -1173,15 +1185,36 @@ def trigger_dokploy_schedule_and_wait(
         with (provider_mutation_guard or nullcontext)():
             if before_trigger is not None:
                 before_trigger()
-            dokploy_request(
+            if execution_observer is not None:
+                execution_observer.before_dispatch(
+                    tuple(sorted(deployment_key(row) for row in baseline))
+                )
+            response = dokploy_request(
                 host=host,
                 token=token,
                 path="/api/schedule.runManually",
                 method="POST",
                 payload={"scheduleId": schedule_id},
-                timeout_seconds=max(1, min(trigger_timeout_seconds, execution_timeout_seconds)),
+                timeout_seconds=execution_timeout_seconds
+                if execution_observer is not None
+                else max(1, min(trigger_timeout_seconds, execution_timeout_seconds)),
             )
+            if execution_observer is not None:
+                execution_observer.acknowledged(response)
     except DokployRequestFailed as error:
+        if execution_observer is not None:
+            if _is_definite_trigger_rejection(error):
+                execution_observer.rejected()
+            raise DokployScheduleExecutionFailed(
+                schedule_id=schedule_id,
+                deployment_id="",
+                deployment_status="not_started"
+                if _is_definite_trigger_rejection(error)
+                else "unknown",
+                cause="trigger_rejected"
+                if _is_definite_trigger_rejection(error)
+                else "trigger_outcome_unknown",
+            ) from error
         if error.remote_command_failed:
             # The provider answered: the job ran and its command exited non-zero.
             raise
@@ -1218,6 +1251,16 @@ def trigger_dokploy_schedule_and_wait(
             timeout_seconds=max(1, int(remaining_seconds)),
             interval_seconds=observation_interval_seconds,
             trigger_detail=_bounded_provider_detail(str(error)),
+        )
+    if execution_observer is not None:
+        history = tuple(_read_schedule_deployments(host=host, token=token, schedule_id=schedule_id))
+        if execution_observer.completed(history):
+            return f"schedule={schedule_id} status=done"
+        raise DokployScheduleExecutionFailed(
+            schedule_id=schedule_id,
+            deployment_id="",
+            deployment_status="unknown",
+            cause="trigger_outcome_unknown",
         )
     deployment = _read_back_triggered_schedule_deployment(
         host=host,
@@ -1442,6 +1485,7 @@ def run_dokploy_schedule(
     timeout_seconds: int,
     provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
     before_trigger: Callable[[], None] | None = None,
+    execution_observer: ScheduleExecutionObserver | None = None,
 ) -> str:
     baseline = read_dokploy_schedule_baseline(
         host=host,
@@ -1464,6 +1508,8 @@ def run_dokploy_schedule(
             "before_trigger": admit_trigger,
             "trigger_timeout_seconds": 10,
         }
+    if execution_observer is not None:
+        dispatch["execution_observer"] = execution_observer
     try:
         return trigger_dokploy_schedule_and_wait(
             host=host,

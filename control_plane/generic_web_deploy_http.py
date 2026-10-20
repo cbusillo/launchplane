@@ -22,6 +22,7 @@ from control_plane.workflows.generic_web_deploy_provider import (
     GenericWebDeployProvider,
     GenericWebResolvedDeployTarget,
 )
+from control_plane.workflows.generic_web_execution import ExecutionRecorder
 
 
 GENERIC_WEB_DEPLOY_ROUTE = _GENERIC_WEB_DEPLOY_ROUTE.route_path
@@ -89,6 +90,7 @@ def execute_generic_web_deploy_result(
     recorded_artifact: bool = False,
     proved_pre_image_retry: bool = False,
     post_deploy_authority_digest: str = "",
+    execution_recorder: ExecutionRecorder | None = None,
 ) -> tuple[dict[str, object], dict[str, object]]:
     driver_result = execute_generic_web_deploy(
         control_plane_root=control_plane_root,
@@ -100,6 +102,7 @@ def execute_generic_web_deploy_result(
             profile, instance=lane.instance
         ),
         post_deploy_authority_digest=post_deploy_authority_digest,
+        execution_recorder=execution_recorder,
         deploy_provider=deploy_provider,
         resolved_deploy_target=resolved_deploy_target,
         provider_operation_title=provider_operation_title,

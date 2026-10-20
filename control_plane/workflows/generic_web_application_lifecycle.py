@@ -15,6 +15,10 @@ from control_plane.contracts.generic_web_extensions import (
 )
 from control_plane.dokploy import api, source
 from control_plane.dokploy.post_deploy import DOKPLOY_MANUAL_ONLY_CRON_EXPRESSION
+from control_plane.workflows.generic_web_execution import (
+    ExecutionRecorder,
+    RecordedScheduleExecution,
+)
 from control_plane.workflows.generic_web_application_snapshot import (
     ApplicationLifecycleSnapshot,
     application_snapshot_for_deploy,
@@ -110,6 +114,7 @@ class DokployApplicationLifecycle:
     effect_started: Callable[[], None]
     effect_attempted: bool = False
     observed: dict[str, api.JsonObject | None] = field(default_factory=dict)
+    execution_recorder: ExecutionRecorder | None = None
 
     def _mutate(self, phase: str) -> None:
         self.checkpoint(phase)
@@ -133,23 +138,46 @@ class DokployApplicationLifecycle:
 
     def _upsert(self, payload: api.JsonObject, phase: str) -> api.JsonObject:
         self._mutate(phase)
-        return api.upsert_dokploy_application_schedule(
+        index = (
+            self.execution_recorder.begin(
+                "schedule_write", str(payload["name"]), self.application_id, payload
+            )
+            if self.execution_recorder
+            else -1
+        )
+        result = api.upsert_dokploy_application_schedule(
             host=self.host,
             token=self.token,
             application_id=self.application_id,
             schedule_payload=payload,
         )
+        if self.execution_recorder is not None:
+            self.execution_recorder.update(
+                index, acknowledgement="completed", terminal="write_completed"
+            )
+        return result
 
     def _delete(self, name: str) -> None:
         observed = self._read(name)
         if observed is not None:
             self._mutate("application_schedule_remove")
+            index = (
+                self.execution_recorder.begin(
+                    "schedule_delete", name, self.application_id, observed
+                )
+                if self.execution_recorder
+                else -1
+            )
             api.delete_dokploy_application_schedule(
                 host=self.host,
                 token=self.token,
                 application_id=self.application_id,
                 schedule_payload=observed,
             )
+            if self.execution_recorder is not None:
+                self.execution_recorder.update(
+                    index, acknowledgement="completed", terminal="write_completed"
+                )
 
     def capture(self) -> None:
         # Capture every baseline before the first provider mutation. The caller
@@ -204,12 +232,25 @@ class DokployApplicationLifecycle:
         return evidence
 
     def _run_schedule(self, schedule: api.JsonObject, timeout_seconds: int) -> None:
+        observer: api.ScheduleExecutionOptions = (
+            {
+                "execution_observer": RecordedScheduleExecution(
+                    self.execution_recorder,
+                    str(schedule.get("name", "")),
+                    api.schedule_key(schedule),
+                    schedule,
+                )
+            }
+            if self.execution_recorder
+            else {}
+        )
         api.run_dokploy_schedule(
             host=self.host,
             token=self.token,
             schedule_id=api.schedule_key(schedule),
             timeout_seconds=timeout_seconds,
             before_trigger=lambda: self._mutate("application_schedule_canary"),
+            **observer,
         )
 
     def _run_command(self, definition: GenericWebMaintenanceCommand) -> None:
@@ -224,12 +265,22 @@ class DokployApplicationLifecycle:
             schedule_payload(definition, self.application_id, enabled=False),
             "application_maintenance_prepare",
         )
+        observer: api.ScheduleExecutionOptions = (
+            {
+                "execution_observer": RecordedScheduleExecution(
+                    self.execution_recorder, definition.name, api.schedule_key(schedule), schedule
+                )
+            }
+            if self.execution_recorder
+            else {}
+        )
         api.run_dokploy_schedule(
             host=self.host,
             token=self.token,
             schedule_id=api.schedule_key(schedule),
             timeout_seconds=definition.timeout_seconds,
             before_trigger=lambda: self._mutate("application_maintenance_execute"),
+            **observer,
         )
 
     def restore(self) -> None:

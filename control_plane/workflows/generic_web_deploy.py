@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 import json
 from pathlib import Path
@@ -10,6 +10,7 @@ import click
 from control_plane.generic_web_source_qualification import GenericWebPromotionSourceRefused
 from control_plane.generic_web_testing_inputs import TestingInputSafetyRefused
 from control_plane.provider_operations import ProviderMutationUnknownError
+from control_plane.workflows.generic_web_execution import ExecutionRecorder
 from control_plane.lane_movement import (
     LaneBuild,
     LaneMovementRefused,
@@ -209,6 +210,18 @@ class GenericWebPostDeployContext(BaseModel):
 class GenericWebPostDeployGuard:
     provider_effect_checkpoint: Callable[[str], None] | None = None
     deployment_title: str = ""
+    execution_recorder: ExecutionRecorder | None = None
+    exchanges: dict[str, bool] = field(default_factory=dict, compare=False)
+
+    def begin_exchange(self, name: str) -> None:
+        self.exchanges[name] = False
+
+    def complete_exchange(self, name: str) -> None:
+        self.exchanges[name] = True
+
+    def require_completed_exchanges(self) -> None:
+        if not all(self.exchanges.values()):
+            raise ProviderMutationUnknownError("Testing product exchange completion is unknown.")
 
     def checkpoint_effect(self, phase: str) -> None:
         if self.provider_effect_checkpoint is not None:
@@ -480,6 +493,7 @@ def execute_generic_web_deploy(
     lane: ProductLaneProfile | None = None,
     post_deploy_executor: GenericWebPostDeployExecutor | None = None,
     post_deploy_authority_digest: str = "",
+    execution_recorder: ExecutionRecorder | None = None,
     deploy_provider: GenericWebDeployProvider | None = None,
     resolved_deploy_target: GenericWebResolvedDeployTarget | None = None,
     provider_operation_title: str = "",
@@ -601,6 +615,7 @@ def execute_generic_web_deploy(
             lane=lane,
             post_deploy_executor=post_deploy_executor,
             post_deploy_authority_digest=post_deploy_authority_digest,
+            execution_recorder=execution_recorder,
             deploy_provider=deploy_provider,
             resolved_deploy_target=resolved_deploy_target,
             provider_operation_title=provider_operation_title,
@@ -626,6 +641,7 @@ def _execute_generic_web_deploy_unserialized(
     lane: ProductLaneProfile | None = None,
     post_deploy_executor: GenericWebPostDeployExecutor | None = None,
     post_deploy_authority_digest: str = "",
+    execution_recorder: ExecutionRecorder | None = None,
     deploy_provider: GenericWebDeployProvider | None = None,
     resolved_deploy_target: GenericWebResolvedDeployTarget | None = None,
     provider_operation_title: str = "",
@@ -948,10 +964,16 @@ def _execute_generic_web_deploy_unserialized(
         )
         if application_lifecycle is not None:
             application_lifecycle.capture()
+            if hasattr(application_lifecycle, "execution_recorder"):
+                application_lifecycle.execution_recorder = execution_recorder
+        if application_lifecycle is not None or execution_recorder is not None:
             if before_deployment_records is not None:
                 before_deployment_records()
             post_deploy_update = PostDeployUpdateEvidence(
-                evidence=application_lifecycle.snapshot.evidence(),
+                evidence={
+                    **(application_lifecycle.snapshot.evidence() if application_lifecycle else {}),
+                    **(execution_recorder.evidence() if execution_recorder else {}),
+                },
             )
             record_store.write_deployment_record(
                 build_deployment_record(
@@ -968,6 +990,7 @@ def _execute_generic_web_deploy_unserialized(
                     runtime_source=verified_build_evidence,
                 )
             )
+        if application_lifecycle is not None:
             if provider_effect_checkpoint is not None:
                 provider_effect_checkpoint("application_lifecycle_prepared")
             application_lifecycle.prepare()
@@ -1041,6 +1064,7 @@ def _execute_generic_web_deploy_unserialized(
                     deployment_title=_generic_web_post_deploy_operation_title(
                         normalized_provider_operation_title
                     ),
+                    execution_recorder=execution_recorder,
                 ),
             )
             post_deploy_update = extension_update.model_copy(
@@ -1157,6 +1181,8 @@ def _execute_generic_web_deploy_unserialized(
             runtime_identity=runtime_identity,
             runtime_source=verified_build_evidence,
         ).model_copy(update={"integration_key_readback": key_readback})
+        if execution_recorder is not None:
+            deployment_record.post_deploy_update.evidence.update(execution_recorder.evidence())
         if isinstance(exc, LaneMovementRefused):
             deployment_record = deployment_record.model_copy(
                 update={"failure": exc.record_failure()}
@@ -1242,6 +1268,8 @@ def _execute_generic_web_deploy_unserialized(
     ).model_copy(update={"integration_key_readback": key_readback})
     if before_records_commit is not None:
         before_records_commit()
+    if execution_recorder is not None:
+        deployment_record.post_deploy_update.evidence.update(execution_recorder.evidence())
     record_store.write_deployment_record(deployment_record)
     record_store.write_environment_inventory(
         build_environment_inventory(
@@ -1269,7 +1297,7 @@ def _execute_generic_web_deploy_unserialized(
     )
 
 
-def record_observed_generic_web_deploy(
+def build_observed_generic_web_deploy(
     *,
     record_store: GenericWebDeployStore,
     profile: LaunchplaneProductProfileRecord,
@@ -1278,7 +1306,7 @@ def record_observed_generic_web_deploy(
     observation: GenericWebProviderDeploymentObservation,
     deployment_record_id: str,
     post_deploy_unobserved: bool,
-) -> tuple[dict[str, object], dict[str, object]]:
+) -> tuple[DeploymentRecord, dict[str, object], dict[str, object]]:
     if observation.outcome != "present":
         raise ValueError("Observed generic web deploy evidence must be present.")
     lane = _canonical_generic_web_lane(lane)
@@ -1346,14 +1374,6 @@ def record_observed_generic_web_deploy(
         runtime_identity=runtime_identity,
         runtime_source=existing_record.runtime_source if existing_record is not None else {},
     )
-    record_store.write_deployment_record(deployment_record)
-    if deploy_status == "pass":
-        record_store.write_environment_inventory(
-            build_environment_inventory(
-                deployment_record=deployment_record,
-                updated_at=deployment_record.deploy.finished_at or finished_at,
-            )
-        )
     target_fields = _deploy_result_target_fields(resolved_deploy_target=resolved_deploy_target)
     result = GenericWebDeployResult(
         deployment_record_id=deployment_record_id,
@@ -1377,7 +1397,43 @@ def record_observed_generic_web_deploy(
             else observation.error_message
         ),
     )
-    return {"deployment_record_id": deployment_record_id}, result.model_dump(mode="json")
+    return (
+        deployment_record,
+        {"deployment_record_id": deployment_record_id},
+        result.model_dump(mode="json"),
+    )
+
+
+def record_observed_generic_web_deploy(
+    *,
+    record_store: GenericWebDeployStore,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+    resolved_deploy_target: GenericWebResolvedDeployTarget,
+    observation: GenericWebProviderDeploymentObservation,
+    deployment_record_id: str,
+    post_deploy_unobserved: bool,
+    publish: bool = True,
+) -> tuple[dict[str, object], dict[str, object]]:
+    record, records, result = build_observed_generic_web_deploy(
+        record_store=record_store,
+        profile=profile,
+        lane=lane,
+        resolved_deploy_target=resolved_deploy_target,
+        observation=observation,
+        deployment_record_id=deployment_record_id,
+        post_deploy_unobserved=post_deploy_unobserved,
+    )
+    if publish:
+        record_store.write_deployment_record(record)
+        if record.deploy.status == "pass":
+            record_store.write_environment_inventory(
+                build_environment_inventory(
+                    deployment_record=record,
+                    updated_at=record.deploy.finished_at or observation.finished_at,
+                )
+            )
+    return records, result
 
 
 def _non_production_integration_key_refusal(
@@ -1516,16 +1572,37 @@ def _run_post_deploy_extension(
     post_deploy_executor: GenericWebPostDeployExecutor,
     guard: GenericWebPostDeployGuard,
 ) -> PostDeployUpdateEvidence:
+    recorder = guard.execution_recorder
+    index = (
+        recorder.begin(
+            "product_executor",
+            post_deploy_executor.__name__,
+            context.target_id,
+            {"authority": context.authority_digest},
+        )
+        if recorder
+        else -1
+    )
     try:
         guard.checkpoint_effect("post_deploy_started")
-        return _terminal_post_deploy_update(
+        result = _terminal_post_deploy_update(
             post_deploy_executor(control_plane_root, record_store, context, guard)
         )
+        guard.require_completed_exchanges()
+        if recorder is not None:
+            recorder.update(index, acknowledgement="completed", terminal="executor_completed")
+        return result
     except ProviderMutationUnknownError:
         raise
     except click.ClickException:
+        guard.require_completed_exchanges()
+        if recorder is not None:
+            recorder.update(index, acknowledgement="completed", terminal="executor_completed")
         raise
     except Exception as exc:
+        guard.require_completed_exchanges()
+        if recorder is not None:
+            recorder.update(index, acknowledgement="completed", terminal="executor_completed")
         raise click.ClickException(str(exc)) from exc
 
 

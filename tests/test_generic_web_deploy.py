@@ -1808,7 +1808,7 @@ class GenericWebDeployTests(unittest.TestCase):
         self.assertEqual(replacement_provider.observed_target_ids, ["target-original"])
         self.assertEqual(recovered_adapter.reconciliation_key(), original_key)
 
-    def test_provider_adapter_repairs_failed_terminal_deployment_as_502(self) -> None:
+    def test_testing_observation_keeps_unpublished_terminal_failure_unknown(self) -> None:
         profile = _profile()
         store = _GenericWebDeployStore(profile)
         provider = _FakeGenericWebDeployProvider(
@@ -1834,15 +1834,11 @@ class GenericWebDeployTests(unittest.TestCase):
             reconciliation_key,
         )
 
-        self.assertEqual(observation.outcome, "present")
-        self.assertEqual(observation.response_status_code, 502)
-        result = cast(dict[str, object], observation.response_payload["result"])
-        self.assertEqual(result["deploy_status"], "fail")
-        self.assertEqual(result["error_message"], "provider deployment failed")
-        self.assertEqual(len(store.deployments), 1)
-        self.assertEqual(store.deployments[0].deploy.status, "fail")
+        self.assertEqual(observation.outcome, "unknown")
+        self.assertEqual(store.deployments, [])
+        self.assertEqual(store.inventories, [])
 
-    def test_provider_adapter_repairs_placeholder_failure_with_observed_evidence(
+    def test_testing_observation_preserves_placeholder_until_explicit_recovery(
         self,
     ) -> None:
         profile = _profile()
@@ -1885,12 +1881,11 @@ class GenericWebDeployTests(unittest.TestCase):
             adapter.reconciliation_key(),
         )
 
-        self.assertEqual(observation.outcome, "present")
-        self.assertEqual(observation.response_status_code, 502)
-        repaired = store.read_deployment_record(deployment_record_id)
-        self.assertEqual(repaired.deploy.deployment_id, "deployment-failed-exact")
-        self.assertEqual(repaired.deploy.started_at, "2026-07-13T12:00:00Z")
-        self.assertEqual(repaired.deploy.finished_at, "2026-07-13T12:01:00Z")
+        self.assertEqual(observation.outcome, "unknown")
+        retained = store.read_deployment_record(deployment_record_id)
+        self.assertEqual(retained.deploy.deployment_id, "control-plane-dokploy")
+        self.assertEqual(retained.deploy.finished_at, "2026-07-13T11:59:30Z")
+        self.assertEqual(store.inventories, [])
 
     def test_provider_adapter_keeps_post_deploy_phase_unknown_until_record_exists(
         self,
@@ -1966,10 +1961,10 @@ class GenericWebDeployTests(unittest.TestCase):
             "2026-08-15T12:00:00Z",
         )
 
-        self.assertEqual(observation.outcome, "present")
-        self.assertEqual(observation.response_status_code, 202)
+        self.assertEqual(observation.outcome, "unknown")
         self.assertEqual(provider.legacy_observation_calls, 1)
-        self.assertEqual(len(store.deployments), 1)
+        self.assertEqual(store.deployments, [])
+        self.assertEqual(store.inventories, [])
 
     def test_present_provider_observation_requires_exact_terminal_evidence(self) -> None:
         with self.assertRaisesRegex(ValueError, "deployment_id, started_at, finished_at"):

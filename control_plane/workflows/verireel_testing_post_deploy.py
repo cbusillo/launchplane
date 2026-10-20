@@ -24,6 +24,8 @@ from playwright.sync_api import (
     Browser,
     BrowserType,
     Page,
+    Request as BrowserRequest,
+    Response as BrowserResponse,
     expect,
     sync_playwright,
 )
@@ -258,19 +260,117 @@ def _maintenance(
             }
         ),
         testing_target=RecordedTestingMaintenanceTarget(context.context, context.target_id),
+        execution_guard=guard,
     )
     if result.maintenance_status != "pass":
         raise click.ClickException(f"Testing {action} did not complete successfully.")
 
 
-def _goto(page: Page, base_url: str, path: str) -> None:
-    response = page.goto(f"{base_url}{path}", wait_until="domcontentloaded")
+def _goto(
+    page: Page,
+    base_url: str,
+    path: str,
+    guard: GenericWebPostDeployGuard | None = None,
+    exchanges: "_TestingPageExchanges | None" = None,
+) -> None:
+    if guard is not None:
+        guard.begin_exchange("page-load")
+    try:
+        response = page.goto(f"{base_url}{path}", wait_until="domcontentloaded")
+        if guard is not None:
+            if response is None or response.status >= 400:
+                raise ProviderMutationUnknownError("Testing dynamic page completion is unknown.")
+            if exchanges is None:
+                raise ProviderMutationUnknownError("Testing response observer is unavailable.")
+            exchanges.finish_response(response)
+            guard.complete_exchange("page-load")
+    except Exception as error:
+        if guard is not None:
+            raise ProviderMutationUnknownError(
+                "Testing dynamic page completion is unknown."
+            ) from error
+        raise
     if response is not None and response.status >= 500:
         raise click.ClickException("Testing product gateway is unavailable.")
     if response is None or response.status >= 400:
         raise TestingProductCheckFailed("Testing product route failed.")
     if urlparse(page.url).netloc != urlparse(base_url).netloc:
         raise TestingProductCheckFailed("Testing product route left the recorded origin.")
+
+
+class _TestingPageExchanges:
+    """Only this verifier's known dynamic page/auth/action requests, in memory."""
+
+    def __init__(self, page: Page, base_url: str, guard: GenericWebPostDeployGuard) -> None:
+        self.origin = urlparse(base_url)
+        self.page = page
+        self.guard = guard
+        self.requests: dict[BrowserRequest, str] = {}
+        self.completed: set[BrowserRequest] = set()
+        self.failed: set[BrowserRequest] = set()
+        self.responses: dict[BrowserRequest, BrowserResponse] = {}
+        page.on("request", self.started)
+        page.on("response", self.responded)
+        page.on("requestfinished", self.completed.add)
+        page.on("requestfailed", self.failed.add)
+
+    def responded(self, response: BrowserResponse) -> None:
+        self.responses[response.request] = response
+
+    def started(self, request: BrowserRequest) -> None:
+        url = urlparse(request.url)
+        if (url.scheme, url.netloc) != (self.origin.scheme, self.origin.netloc):
+            return
+        if url.path not in {
+            "/sign-up",
+            "/billing",
+            "/dashboard",
+            "/site-config",
+            "/site-config/billing",
+            "/api/auth/sign-up/email",
+        } and not url.path.startswith("/v/"):
+            return
+        name = f"dynamic-request:{len(self.guard.exchanges)}"
+        self.requests[request] = name
+        self.guard.begin_exchange(name)
+
+    def finish_response(self, response: BrowserResponse) -> None:
+        self.finish_request(response.request)
+
+    def finish_request(self, request: BrowserRequest) -> None:
+        if request in self.failed:
+            raise ProviderMutationUnknownError("Testing response body failed after dispatch.")
+        if request not in self.completed:
+            # Response.finished() has no timeout and can remain pending after
+            # requestfailed. The built-in event wait is bounded even in that case.
+            self.page.wait_for_event(
+                "requestfinished", predicate=lambda finished: finished == request, timeout=30_000
+            )
+        response = self.responses.get(request)
+        if response is None or response.status >= 400 or request in self.failed:
+            raise ProviderMutationUnknownError("Testing dynamic request completion is unknown.")
+        self.completed.add(request)
+        if request in self.requests:
+            self.guard.complete_exchange(self.requests[request])
+
+    def finish(self) -> None:
+        while pending := [
+            request for request, name in self.requests.items() if not self.guard.exchanges[name]
+        ]:
+            for request in pending:
+                self.finish_request(request)
+
+
+def _finish_action(
+    response: BrowserResponse,
+    guard: GenericWebPostDeployGuard,
+    name: str,
+    exchanges: _TestingPageExchanges,
+) -> None:
+    if response.status >= 400:
+        raise ProviderMutationUnknownError("Testing submitted action completion is unknown.")
+    exchanges.finish_response(response)
+    guard.complete_exchange(name)
 
 
 def verification_path(base_url: str, href: str) -> str:
@@ -303,10 +403,11 @@ def verify_verireel_testing_product(
             try:
                 with browser.new_context() as browser_context:
                     page = browser_context.new_page()
+                    exchanges = _TestingPageExchanges(page, base_url, guard)
                     page.set_default_timeout(30_000)
                     try:
                         assert_verireel_testing_identity(base_url, context)
-                        _goto(page, base_url, "/sign-up")
+                        _goto(page, base_url, "/sign-up", guard, exchanges)
                         page.wait_for_load_state("networkidle")
                         page.get_by_label("Creator name").fill("Launchplane testing")
                         page.get_by_label("Email").fill(email)
@@ -314,14 +415,23 @@ def verify_verireel_testing_product(
                             "Quartz!Canopy$" + "-".join(str(randbelow(10)) for _ in range(18))
                         )
                         checkpoint_testing_effect(guard, "post_deploy_fixture_signup")
-                        page.get_by_role(
-                            "button", name=re.compile("create account and choose a plan", re.I)
-                        ).click()
+                        guard.begin_exchange("signup-submit")
+                        with page.expect_response(
+                            lambda response: (
+                                response.request.method == "POST"
+                                and response.url == f"{base_url}/api/auth/sign-up/email"
+                            )
+                        ) as signup:
+                            page.get_by_role(
+                                "button", name=re.compile("create account and choose a plan", re.I)
+                            ).click()
+                        _finish_action(signup.value, guard, "signup-submit", exchanges)
                         page.wait_for_url(f"{base_url}/billing", wait_until="domcontentloaded")
+                        exchanges.finish()
                         assert_verireel_testing_identity(base_url, context)
                         # Exercise creator denial before turning this fixture into an admin.
                         for path in ("/site-config", "/site-config/billing"):
-                            _goto(page, base_url, path)
+                            _goto(page, base_url, path, guard, exchanges)
                             if urlparse(page.url).path in {path, "/sign-in", "/sign-up"}:
                                 raise TestingProductCheckFailed(
                                     "Creator admin denial did not preserve its session."
@@ -337,26 +447,41 @@ def verify_verireel_testing_product(
                             intent="stable-testing-remote-e2e-grant-sponsored",
                             email=email,
                         )
-                        _goto(page, base_url, "/dashboard")
+                        _goto(page, base_url, "/dashboard", guard, exchanges)
                         page.get_by_label("Video label").fill(f"Launchplane creator {stamp}")
                         page.get_by_label("Public verification label").fill(public_label)
                         page.get_by_label("Destination URL").fill(destination)
                         checkpoint_testing_effect(guard, "post_deploy_fixture_qr")
-                        page.get_by_role(
-                            "button", name=re.compile("create verification qr", re.I)
-                        ).click()
+                        guard.begin_exchange("qr-submit")
+                        guard.begin_exchange("qr-success")
+                        with page.expect_response(
+                            lambda response: (
+                                response.request.method == "POST"
+                                and urlparse(response.url).netloc == urlparse(base_url).netloc
+                                and urlparse(response.url).path == "/dashboard"
+                                and "next-action" in response.request.headers
+                            )
+                        ) as qr:
+                            page.get_by_role(
+                                "button", name=re.compile("create verification qr", re.I)
+                            ).click()
+                        _finish_action(qr.value, guard, "qr-submit", exchanges)
                         link = page.locator("a[href*='/v/']").last
                         expect(link).to_be_visible(timeout=30_000)
                         href = link.get_attribute("href") or ""
                         # Only this fixture's QR can qualify; never inspect another user's record.
                         path = verification_path(base_url, href)
+                        guard.complete_exchange("qr-success")
+                        exchanges.finish()
                         with browser.new_context() as public_context:
                             public_page = public_context.new_page()
+                            public_exchanges = _TestingPageExchanges(public_page, base_url, guard)
                             public_page.set_default_timeout(30_000)
-                            _goto(public_page, base_url, path)
+                            _goto(public_page, base_url, path, guard, public_exchanges)
                             expect(
                                 public_page.get_by_text(public_label, exact=False)
                             ).to_be_visible(timeout=30_000)
+                            public_exchanges.finish()
                             expect(
                                 public_page.get_by_role("link", name=destination, exact=True)
                             ).to_be_visible(timeout=30_000)
@@ -371,7 +496,7 @@ def verify_verireel_testing_product(
                             email=email,
                         )
                         for path in ("/site-config", "/site-config/billing"):
-                            _goto(page, base_url, path)
+                            _goto(page, base_url, path, guard, exchanges)
                             if urlparse(page.url).path != path:
                                 raise TestingProductCheckFailed(
                                     "Admin could not reach the protected route."
@@ -391,11 +516,23 @@ def verify_verireel_testing_product(
                     except ProviderMutationUnknownError as error:
                         effect_unknown = error
                         raise
+                    except Exception as error:
+                        try:
+                            exchanges.finish()
+                            guard.require_completed_exchanges()
+                        except Exception as completion_error:
+                            effect_unknown = ProviderMutationUnknownError(
+                                "Testing product exchange completion is unknown."
+                            )
+                            raise effect_unknown from completion_error
+                        raise error
                     finally:
                         # The existing cleanup intent also removes sponsored creator fixtures.
                         evidence["cleanup_status"] = "fail"
                         if not effect_unknown:
                             try:
+                                exchanges.finish()
+                                guard.require_completed_exchanges()
                                 _maintenance(
                                     root,
                                     context,
