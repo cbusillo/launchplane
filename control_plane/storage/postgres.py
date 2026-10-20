@@ -24296,7 +24296,7 @@ class PostgresRecordStore(HumanSessionStore):
         self, product: str, artifact_id: str, *, context: str, generation_binding_sha256: str = ""
     ) -> TestingRetryRearm | None:
         # Old APIs advance only the product key during emergency rollback.
-        # Compare persisted commit times, not second-resolution request times.
+        # The DB write clock has second resolution; ties prefer the product key.
         candidates = []
         for key in dict.fromkeys(
             (
@@ -24316,7 +24316,7 @@ class PostgresRecordStore(HumanSessionStore):
                     candidates.append(
                         (
                             parse_launchplane_mutation_timestamp(
-                                record.recorded_at, field_name="retry checkpoint commit"
+                                record.recorded_at, field_name="retry checkpoint write"
                             ),
                             rearm,
                         )

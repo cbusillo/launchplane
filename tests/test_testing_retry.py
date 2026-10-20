@@ -29,7 +29,12 @@ from control_plane.storage.postgres import (
     LaunchplaneFreshOdooTestingGenerationRow,
     LaunchplaneReleaseTupleRow,
 )
-from control_plane.contracts.testing_retry import TESTING_RETRY_ROUTE
+from control_plane.contracts.testing_retry import (
+    TESTING_RETRY_ROUTE,
+    TESTING_RETRY_REARM_SCOPE,
+    TESTING_RETRY_REARM_ROUTE,
+    testing_retry_history_key,
+)
 from control_plane.testing_lane_hold import STAFF_TESTING_HOLD_REASON
 from control_plane.launchplane_reconcile_authorization import (
     build_launchplane_reconcile_authorization,
@@ -365,6 +370,20 @@ class TestingRetryTests(reconcile_fixtures.ProductReconcileTestCase):
                     self.request()
                     self.finish(str(self.reconcile()["queued_operation_id"]), "fail")
                 self.assertEqual(self.post(self.reviewed(), f"old-writer-{cycle}").status_code, 202)
+        legacy = self.store.read_idempotency_record(
+            scope=TESTING_RETRY_REARM_SCOPE,
+            route_path=TESTING_RETRY_REARM_ROUTE,
+            idempotency_key="site",
+        )
+        history = self.store.read_idempotency_record(
+            scope=TESTING_RETRY_REARM_SCOPE,
+            route_path=TESTING_RETRY_REARM_ROUTE,
+            idempotency_key=testing_retry_history_key("site", str(self.draft["artifact_id"])),
+        )
+        assert legacy is not None and history is not None
+        # Avoid incidental same-second tie order hiding a reversed comparison.
+        earlier = (datetime.fromisoformat(legacy.recorded_at) - timedelta(seconds=1)).isoformat()
+        self.store.write_idempotency_record(history.model_copy(update={"recorded_at": earlier}))
         # A valid reviewed budget must take effect even with stale traversal
         # metadata from before the emergency rollback.
         self.request()

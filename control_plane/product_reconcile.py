@@ -1239,7 +1239,6 @@ def testing_retry_after_operation(
 ) -> str:
     if not isinstance(record_store, PostgresRecordStore):
         return ""
-    rearm = None
     if not require_current_binding:
         rearm = record_store.read_testing_retry_history(
             profile.product,
@@ -1247,21 +1246,13 @@ def testing_retry_after_operation(
             context=lane.context,
             generation_binding_sha256=generation_binding_sha256,
         )
-    if rearm is None:
-        rearm = record_store.read_testing_retry_rearm(
-            profile.product, generation_binding_sha256=generation_binding_sha256
-        )
-    if (
-        not require_current_binding
-        and generation_binding_sha256
-        and (rearm is None or (rearm.context, rearm.artifact_id) != (lane.context, artifact_id))
-    ):
-        # Legacy product boundaries remain usable for traversal, never as a
-        # successor generation's permission to reset its budget.
-        rearm = record_store.read_testing_retry_rearm(profile.product)
+        return rearm.after_operation_id if rearm is not None else ""
+    rearm = record_store.read_testing_retry_rearm(
+        profile.product, generation_binding_sha256=generation_binding_sha256
+    )
     if rearm is None or (rearm.context, rearm.artifact_id) != (lane.context, artifact_id):
         return ""
-    if require_current_binding and (
+    if (
         record_store.read_testing_retry_binding(product=profile.product, context=lane.context)
         != rearm.lane_binding_sha256
     ):
