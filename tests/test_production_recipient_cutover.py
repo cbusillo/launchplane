@@ -331,7 +331,7 @@ class RecipientCutoverTests(unittest.TestCase):
             {
                 **runtime_values(self.store, self.fixture.root, current),
                 **runtime_identity_env(kwargs["runtime_identity"]),
-            }
+            },
         )
         kwargs["before_provider_mutation"]("deploy_trigger")
         self.assertFalse(self.old_running)

@@ -763,7 +763,12 @@ def run_compose_post_deploy_update(
             ),
         )
     if desired_env_map != current_env_map:
-        env_text = api.serialize_dokploy_env_text(desired_env_map)
+        env_text = api.serialize_dokploy_env_text(
+            desired_env_map,
+            target_type="compose",
+            compose_type=str(target_payload.get("composeType") or "docker-compose"),
+            current_env_text=str(target_payload.get("env") or ""),
+        )
         with (provider_mutation_guard or nullcontext)():
             if before_provider_mutation is not None:
                 before_provider_mutation("post_deploy_target_update")
@@ -1036,7 +1041,12 @@ def run_compose_odoo_stable_bootstrap(
             target_type="compose",
             target_id=compose_id,
             target_payload=target_payload,
-            env_text=api.serialize_dokploy_env_text(desired_env_map),
+            env_text=api.serialize_dokploy_env_text(
+                desired_env_map,
+                target_type="compose",
+                compose_type=str(target_payload.get("composeType") or "docker-compose"),
+                current_env_text=str(target_payload.get("env") or ""),
+            ),
         )
         latest_compose_deployment = api.latest_deployment_for_target(
             host=host,

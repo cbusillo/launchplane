@@ -1068,7 +1068,7 @@ class ProductionRecipientAdapter:
                 volume["external"] = True
             if not configured:
                 env_text = api.serialize_dokploy_env_text(
-                    runtime_values(self.store, self.root, record)
+                    runtime_values(self.store, self.root, record), target_type="compose"
                 )
                 record = self.save(record, phase="configure_recipient")
                 checkpoint(record.phase)
