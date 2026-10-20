@@ -21,7 +21,11 @@ from control_plane.odoo_target_replacement_apply_http import (
     resolve_odoo_target_replacement_apply_lane,
 )
 from control_plane.product_reconcile import ProductReconcileError
-from control_plane.service_auth import AuthorizationTarget, LaunchplaneIdentity
+from control_plane.service_auth import (
+    AuthorizationTarget,
+    LaunchplaneIdentity,
+    director_agent_identity,
+)
 from control_plane.storage.postgres import DbOnlyMutationRequest, PostgresRecordStore
 from control_plane.testing_retry import (
     TESTING_RETRY_ROUTE,
@@ -65,7 +69,9 @@ def register_testing_retry_routes(
             )
         except (ValueError, click.ClickException):
             refusal("testing_retry_lane_unavailable", 404)
-        if not dependencies.authorization_allows(
+        # This route can only wake the testing reconciler. Keep standing
+        # permission here rather than widening the mixed production/testing action.
+        if not director_agent_identity(identity) and not dependencies.authorization_allows(
             identity=identity,
             action="odoo_target_replacement_apply.execute",
             product=product,
