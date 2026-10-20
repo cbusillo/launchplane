@@ -280,12 +280,7 @@ same head. The normal preview reconciler refreshes the check after those edits.
 An unlabeled request needs no label withdrawal: edit its notes truthfully and
 the next event reconcile or open-PR sweep refreshes the check. A held preview
 operation remains held; check reclassification neither retries it nor records
-Client acceptance. Withdrawal still refuses an unlabeled request with
-`product_review_withdrawal_no_pending_labeled_request`. Other preflight refusals
-name `profile_changed`, `repository_mismatch`, `pull_request_closed`,
-`head_changed`, or `client_already_decided` after the same
-`product_review_withdrawal_` prefix. These bounded codes remain visible when a
-caller redacts the free-text message.
+Client acceptance. Withdrawal still requires a labeled pending request.
 
 Recovery and readback can observe a closed PR; a new withdrawal still requires
 an open PR. A published history receipt remains historical proof after closure.

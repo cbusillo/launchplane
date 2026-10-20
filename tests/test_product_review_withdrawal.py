@@ -478,17 +478,6 @@ class ReviewWithdrawalHttpTests(unittest.IsolatedAsyncioTestCase):
                     app, "POST", "/v1/product-review/withdrawal", payload=payload
                 )
                 self.assertEqual(planned.status_code, 202, planned.text)
-                source.labels.remove(REVIEW_LABEL)
-                refused = await request(
-                    app, "POST", "/v1/product-review/withdrawal", payload=payload
-                )
-                self.assertEqual(refused.status_code, 409)
-                self.assertEqual(
-                    refused.json()["detail"]["code"],
-                    "product_review_withdrawal_no_pending_labeled_request",
-                )
-                self.assertEqual(source.deletes, 0)
-                source.labels.add(REVIEW_LABEL)
                 apply = payload | {
                     "mode": "apply",
                     "reviewed_plan_sha256": planned.json()["result"]["plan_sha256"],

@@ -156,15 +156,18 @@ def _decide_feedback(
     # Review intent depends on fresh PR notes and saved decisions, not whether
     # the preview can be planned, recovered or delivered. The publisher rereads
     # those facts itself, including when reconciliation failed before planning.
-    written = (
-        owner_review_status(profile, request.pull_request_number)
-        if request.target_kind == "preview"
+    written = None
+    if (
+        request.target_kind == "preview"
         and request.pull_request_number is not None
         and owner_review_status is not None
         and plan.get("action") != "destroy"
         and plan.get("reason") != "pull_request_not_open"
-        else None
-    )
+    ):
+        try:
+            written = owner_review_status(profile, request.pull_request_number)
+        except Exception:
+            _LOGGER.warning("Client review status refresh failed.", exc_info=True)
     if plan.get("deferred"):
         # A busy lane or a moved PR runs again and says what it did then.
         return None
