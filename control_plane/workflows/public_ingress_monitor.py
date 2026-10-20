@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+from control_plane.provider_target_holds import ProviderHoldLaneSnapshot, ProviderOperationReference
+
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
-from typing import Any, Literal, Protocol, cast, runtime_checkable
+from typing import Any, Literal, Protocol, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
@@ -130,9 +132,6 @@ from control_plane.outbound_http import probe_public_tls
 from control_plane.contracts.product_topology_read_model import product_lane_public_domains
 from control_plane.outbound_http import request_private_http
 from control_plane.outbound_http import PublicHttpResponse
-from control_plane.workflows.generic_web_deploy_provider import (
-    decode_generic_web_provider_reconciliation_target,
-)
 from control_plane.outbound_http import request_public_http
 from control_plane.workflows.odoo_verification import (
     default_odoo_health_url,
@@ -301,6 +300,7 @@ class PublicIngressMonitorTarget:
     tls_stale_after: str = ""
     tls_provider_evidence: dict[str, str] | None = None
     deploy_fence: LaunchplaneIdempotencyRecord | None = None
+    provider_hold_snapshot: ProviderHoldLaneSnapshot | None = None
     preview_fence: bool = False
     testing_replacement: OdooStableTargetReplacementOperationRecord | None = None
 
@@ -391,7 +391,16 @@ def discover_public_ingress_monitor_targets(
         for profile in (profiles or record_store.list_product_profile_records())
         if profile.is_active
     )
-    held_deploy_fences = _held_generic_web_deploy_fences(record_store)
+    open_fence_incidents = record_store.list_public_ingress_incident_records(
+        check_name=DEPLOY_FENCE_CHECK_NAME,
+        check_kind="provider",
+        status="open",
+    )
+    held_deploy_fences = _held_generic_web_deploy_fences(
+        record_store,
+        profiles=product_profiles,
+        incidents=open_fence_incidents,
+    )
     read_replacements = getattr(
         record_store, "list_odoo_stable_target_replacement_operation_records", None
     )
@@ -427,13 +436,14 @@ def discover_public_ingress_monitor_targets(
                 lane=lane,
             ):
                 targets.append(tls_target)
-            if not _profile_uses_generic_web(profile):
-                continue
             # Only lanes with a fence, or an open fence incident to resolve, get a probe.
-            fence = (held_deploy_fences or {}).get((lane.context, lane.instance))
+            snapshot = (held_deploy_fences or {}).get(
+                (profile.product, lane.context, lane.instance)
+            )
+            fence = None
             replacement = held_replacements.get((profile.product, lane.context, lane.instance))
             if (
-                fence is not None
+                (snapshot is not None and bool(snapshot.holds or snapshot.references))
                 or replacement is not None
                 or ((profile.product, lane.context, lane.instance) in open_deploy_fence_lanes)
             ):
@@ -441,6 +451,7 @@ def discover_public_ingress_monitor_targets(
                     replace(
                         _deploy_fence_monitor_target(profile=profile, lane=lane, fence=fence),
                         testing_replacement=replacement,
+                        provider_hold_snapshot=snapshot,
                     )
                 )
     targets.extend(discover_preview_fence_monitor_targets(record_store, profiles=product_profiles))
@@ -506,32 +517,43 @@ def _open_deploy_fence_incident_lanes(
     }
 
 
-@runtime_checkable
-class _HeldReservationReader(Protocol):
-    def list_held_provider_target_reservations(
-        self,
-    ) -> tuple[LaunchplaneIdempotencyRecord, ...]: ...
-
-
 def _held_generic_web_deploy_fences(
     record_store: object,
-) -> dict[tuple[str, str], LaunchplaneIdempotencyRecord] | None:
-    if not isinstance(record_store, _HeldReservationReader):
+    *,
+    profiles: tuple[LaunchplaneProductProfileRecord, ...],
+    incidents: tuple[PublicIngressIncidentRecord, ...],
+) -> dict[tuple[str, str, str], ProviderHoldLaneSnapshot] | None:
+    read = getattr(record_store, "read_provider_hold_snapshots", None)
+    if not callable(read):
         return None
-    fences: dict[tuple[str, str], LaunchplaneIdempotencyRecord] = {}
-    for reservation in record_store.list_held_provider_target_reservations():
-        from control_plane.testing_activation import retained_fence_is_separated
-
-        if retained_fence_is_separated(record_store, reservation):
+    references = {}
+    for incident in incidents:
+        if incident.instance.startswith("preview-mutation-reservation-"):
             continue
-        try:
-            target = decode_generic_web_provider_reconciliation_target(
-                reservation.reconciliation_key
-            )
-        except ValueError:
-            continue
-        fences[(target.context, target.instance)] = reservation
-    return fences
+        fingerprint = incident.material_fingerprint
+        refs = tuple(
+            value
+            if ProviderOperationReference.parse(value) is not None
+            else "provider-operation:unavailable"
+            for value in (fingerprint.route_authority.target_keys if fingerprint else ())
+            if value.startswith("provider-operation:")
+        )
+        # Historical ref-less warnings have no exact settlement proof. Catalog
+        # retirement cannot supply it. Never fabricate an incarnation for them.
+        references[(incident.product, incident.context, incident.instance)] = refs or (
+            "provider-operation:unavailable",
+        )
+    return cast(
+        dict[tuple[str, str, str], ProviderHoldLaneSnapshot],
+        read(
+            lane_keys=tuple(
+                (profile.product, lane.context, lane.instance)
+                for profile in profiles
+                for lane in profile.lanes
+            ),
+            references_by_lane=references,
+        ),
+    )
 
 
 def _deploy_fence_monitor_target(
@@ -897,6 +919,7 @@ def run_public_ingress_monitor_once(
             expected_private_endpoint_key=target.private_endpoint_key,
             expected_private_endpoint_sha256=target.private_endpoint_sha256,
             expected_route_binding_sha256=target.route_binding_sha256,
+            expected_provider_hold_snapshot=target.provider_hold_snapshot,
             recovery_observation_threshold=target.recovery_observation_threshold,
             notify=notify,
             notification_drivers=notification_drivers,
@@ -1067,6 +1090,7 @@ def _store_monitor_observation(
     expected_private_endpoint_key: str = "",
     expected_private_endpoint_sha256: str = "",
     expected_route_binding_sha256: str = "",
+    expected_provider_hold_snapshot: ProviderHoldLaneSnapshot | None = None,
     recovery_observation_threshold: int,
     notify: bool,
     notification_drivers: PublicIngressNotificationDrivers | None,
@@ -1123,8 +1147,38 @@ def _store_monitor_observation(
             expected_private_endpoint_key=expected_private_endpoint_key,
             expected_private_endpoint_sha256=expected_private_endpoint_sha256,
             expected_route_binding_sha256=expected_route_binding_sha256,
+            **(
+                {"expected_provider_hold_snapshot": expected_provider_hold_snapshot}
+                if expected_provider_hold_snapshot is not None
+                else {}
+            ),
         )
         write_status = getattr(write_result, "status", "written")
+        if write_status == "provider_source_changed":
+            # Do not publish the stale pass or its recovery/outbox. A bounded next
+            # scheduler observation re-evaluates pure local source from scratch.
+            unavailable = record.model_copy(
+                update={
+                    "status": "skipped",
+                    "failure_code": None,
+                    "targets": tuple(
+                        target.model_copy(
+                            update={
+                                "status": "skipped",
+                                "failure_code": None,
+                                "summary": "Provider source changed; observation was not accepted.",
+                            }
+                        )
+                        for target in record.targets
+                    ),
+                    "summary": "Provider operation evidence changed before publication; observation was not accepted.",
+                    "incident_id": "",
+                    "incident_event_id": "",
+                    "material_fingerprint": None,
+                    "material_fingerprint_sha256": "",
+                }
+            )
+            return _StoredMonitorTransition(unavailable, (), (), (), (), authority_changed=True)
         if write_status == "incident_changed":
             continue
         if write_status == "authority_changed":
@@ -1223,7 +1277,12 @@ def _monitoring_reconciliation_observations(
             )
             for incident in open_incidents:
                 # Delivery has its own recovery evidence; HTTP target retirement cannot resolve it.
-                if incident.check_name.startswith(("production-delivery-", "testing-delivery-")):
+                if incident.check_name.startswith(
+                    ("production-delivery-", "testing-delivery-")
+                ) or (
+                    incident.check_name == DEPLOY_FENCE_CHECK_NAME
+                    and incident.check_kind == "provider"
+                ):
                     continue
                 target_key = _incident_target_key(incident)
                 monitored = monitored_check_identity(incident.check_name)
@@ -2514,6 +2573,27 @@ def check_public_ingress_target(
         provider=target.provider,
         provider_check=target.provider_check,
     )
+    snapshot = target.provider_hold_snapshot
+    if snapshot is not None:
+        references = tuple(
+            sorted(
+                {
+                    *(hold.reference for hold in snapshot.holds if hold.reference),
+                    *snapshot.unavailable_references,
+                }
+            )
+        )
+        if references:
+            authority = material_fingerprint.route_authority.model_copy(
+                update={
+                    "target_keys": tuple(
+                        sorted({*material_fingerprint.route_authority.target_keys, *references})
+                    ),
+                }
+            )
+            material_fingerprint = material_fingerprint.model_copy(
+                update={"route_authority": authority}
+            )
     return observation.model_copy(
         update={
             "material_fingerprint": material_fingerprint,
@@ -2917,6 +2997,49 @@ def _check_deploy_fence(
                 "unknown provider outcomes require further reconciliation; no effects are replayed."
             ),
         )
+    snapshot = target.provider_hold_snapshot
+    if snapshot is not None:
+        stuck = tuple(
+            hold
+            for hold in snapshot.holds
+            if _deploy_fence_is_stuck(
+                hold.reservation,
+                checked_at=checked_at,
+            )
+        )
+        unavailable = bool(snapshot.unavailable_references) or any(
+            hold.origin is None for hold in snapshot.holds
+        )
+        if stuck or unavailable:
+            selected = stuck[0].reservation if stuck else None
+            detail = (
+                f" Operation {selected.record_id} remains {selected.state}, last phase "
+                f"{selected.provider_effect_phase or 'not recorded'}, since {selected.created_at}."
+                if selected
+                else ""
+            )
+            return PublicIngressTargetObservation(
+                target="provider",
+                url=url,
+                status="fail",
+                failure_code="deploy_fence_held",
+                summary=(
+                    f"{len(snapshot.holds)} shared provider operations remain held for this lane; "
+                    f"{len(stuck)} require reconciliation."
+                    + detail
+                    + (
+                        " Original operation or incarnation evidence is unavailable; settlement is unverified."
+                        if unavailable
+                        else ""
+                    )
+                ),
+            )
+        return PublicIngressTargetObservation(
+            target="provider",
+            url=url,
+            status="pass",
+            summary="No stuck shared provider operation is holding this lane. Completed operations do not prove verification succeeded.",
+        )
     fence = target.deploy_fence
     if fence is None or not _deploy_fence_is_stuck(fence, checked_at=checked_at):
         return PublicIngressTargetObservation(
@@ -2944,7 +3067,7 @@ def _check_deploy_fence(
         status="fail",
         failure_code="deploy_fence_held",
         summary=(
-            f"Deploy {fence.idempotency_key!r} started at {fence.created_at or 'an unknown time'} "
+            f"Operation {fence.record_id} started at {fence.created_at or 'an unknown time'} "
             f"and holds this target ({fence.state}, last at {phase}, since "
             f"{fence.updated_at or 'an unknown time'}). Every later deploy is refused until "
             "it is recovered with the generic-web deploy recovery dry-run."

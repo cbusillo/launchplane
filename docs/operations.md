@@ -1564,18 +1564,47 @@ Prelaunch failures therefore stay visible as readiness evidence without being
 reported as public outages. Moving to `public` deterministically activates
 incident eligibility on the next monitor cycle.
 
-The monitor also watches every generic-web lane's deploy fence, with no lane
-configuration. A lane whose provider target is held by an unresolved deploy
-gets a Launchplane-owned `provider` check named `launchplane-deploy-fence`:
-it fails with `deploy_fence_held`, at warning severity, once a `running`
-reservation's lease has expired or a `reconcile_required` reservation has
-stood for 15 minutes. The incident names the held deploy's idempotency key,
-start time, and last provider-effect phase, notifies through the lane's
-notification policies, and resolves on the first cycle after recovery clears
-the fence. The monitor never clears a fence itself. Lanes with no fence and no
-open fence incident get no probe. A later deploy refused by that fence gets
-409 `mutation_reconciliation_required` naming when the held request started,
-instead of `mutation_in_progress`.
+The monitor also watches all shared generic-web provider-parent holds captured
+for a product lane, without lane configuration and independently of today's
+provider target or driver. Its Launchplane-owned `provider` check is named
+`launchplane-deploy-fence`. It counts every held operation and fails with
+`deploy_fence_held`, at warning severity, once any `running` reservation's lease
+has expired or a `reconcile_required` reservation has stood for 15 minutes. A
+live replacement never hides a stuck old hold. The incident reports safe
+reservation IDs, times and phases; caller scopes, request keys, fingerprints
+and physical-key hashes stay private.
+
+New incident material retains opaque reservation-ID/operation-nonce references
+in the existing route authority. A matching completed row establishes only
+that this incarnation no longer holds a key, even if its terminal result was a
+failure. A missing row, mismatched nonce or invalid receipt remains unverified.
+Historical reference-less warnings cannot acquire strong incarnation proof
+from present-day absence, and generic monitoring retirement does not resolve
+them. This conservative limit also covers indistinguishable historical Odoo
+replacement warnings; typed replacement holds and preview reservation probes
+keep their own existing paths. The monitor never clears a provider fence.
+
+Original custody comes from the immutable receipt, or a legacy encoded snapshot
+whose product is present and physical key recomputes exactly. Current target
+matches remain separate metadata. Unattributed rows remain in internal service
+attention rather than being assigned to every product sharing a context. They
+are not yet a bounded public attention API. If product A's old physical key
+becomes product B's current lane, A keeps its original attention and B is only
+current-match metadata. There is no separate inherited product-B warning.
+Deleted/inactive A rows remain service attention. Exact qualified testing separation
+still uses its existing activation/execution-exclusion proof; origin alone
+cannot detach an opaque hold.
+
+Provider observations are accepted only after a short same-session source
+recheck under the existing membership advisory lock. Fresh insertion, unbound
+reclaim and supersession join that lock before row locks and lease timestamps.
+The monitor locks reservation/reference rows before checking separation and
+incident authority. A nonblocking shared product-authority lock avoids waiting
+behind a publisher that holds authority and needs a reservation. A changed or
+busy source leaves the observation unaccepted/skipped, with no persisted pass,
+recovery event or notification outbox. Normal scheduler change detection or
+cadence retries it. No provider or notification call runs under these locks.
+Lanes with no hold and no open warning receive no provider probe.
 
 `public_http` uses the centralized public outbound HTTP policy. Every initial
 destination and redirect hop is resolved independently; all IPv4 and IPv6

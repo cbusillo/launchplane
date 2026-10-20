@@ -3193,7 +3193,8 @@ class PublicIngressMonitorTests(unittest.TestCase):
         incident = stuck.incidents[0]
         self.assertEqual(incident.failure_code, "deploy_fence_held")
         self.assertEqual(incident.severity, "warning")
-        self.assertIn("generic-web-stable-deploy:run-7:1", stuck.records[0].summary)
+        self.assertIn(held.record_id, stuck.records[0].summary)
+        self.assertNotIn(held.idempotency_key, stuck.records[0].summary)
         self.assertIn("deploy_trigger", stuck.records[0].summary)
         self.assertNotIn(held.scope, stuck.records[0].summary)
         self.assertEqual(len(outbox_rows), 1)

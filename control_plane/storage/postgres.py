@@ -1,5 +1,14 @@
 from __future__ import annotations
 
+from control_plane.provider_target_holds import (
+    ProviderHoldAuthorityBusy,
+    ProviderHoldLaneSnapshot,
+    ProviderTargetHold,
+    ProviderOperationReference,
+    bound_provider_target_origin,
+    project_provider_target_hold,
+    provider_hold_source_sha256,
+)
 from control_plane.contracts.provider_target_origin import (
     ProviderTargetOrigin,
     RetainedProviderTargetOrigin,
@@ -759,6 +768,7 @@ TrustedMaintenancePolicyCompareWriteStatus = Literal[
     "reconciliation_required",
 ]
 PublicIngressTransitionWriteStatus = Literal[
+    "provider_source_changed",
     "written",
     "authority_changed",
     "incident_changed",
@@ -5700,25 +5710,26 @@ class PostgresRecordStore(HumanSessionStore):
                 snapshots.setdefault((context, instance), []).append(
                     ("secret-version", secret_id, version_id, status)
                 )
-        from control_plane.workflows.generic_web_deploy_provider import (
-            decode_generic_web_provider_reconciliation_target,
-        )
-
-        for reservation in self.list_held_provider_target_reservations():
-            try:
-                target = decode_generic_web_provider_reconciliation_target(
-                    reservation.reconciliation_key
+        fence_snapshots: dict[tuple[str, str, str], list[object]] = {}
+        for hold in self.list_provider_target_holds():
+            lanes = (hold.lane,) if hold.lane is not None else ()
+            for lane_key in lanes:
+                fence_snapshots.setdefault(lane_key, []).append(
+                    (
+                        "provider-hold",
+                        hold.reservation.record_id,
+                        str(hold.operation_nonce),
+                        hold.reservation.state,
+                        hold.attribution,
+                        hold.separated,
+                    )
                 )
-            except ValueError:
-                continue
-            snapshots.setdefault((target.context, target.instance), []).append(
-                ("deploy-fence", reservation.record_id, reservation.state)
-            )
         revisions = {}
         for profile in profiles:
             for lane in profile.lanes:
                 material = [
                     profile.model_dump(mode="json"),
+                    *fence_snapshots.get((profile.product, lane.context, lane.instance), []),
                     *snapshots.get(("", ""), []),
                     *snapshots.get((lane.context, ""), []),
                     *snapshots.get((lane.context, lane.instance), []),
@@ -8136,8 +8147,27 @@ class PostgresRecordStore(HumanSessionStore):
         intent = receipt.response_payload.get("original_intent") if receipt else None
         return intent if isinstance(intent, dict) else {}
 
+    def _read_provider_hold_record(
+        self, row: LaunchplaneIdempotencyRow
+    ) -> LaunchplaneIdempotencyRecord:
+        """Reject contradictory indexed source before interpreting held/terminal evidence."""
+        record = self._read_payload(model_type=LaunchplaneIdempotencyRecord, payload=row.payload)
+        canonical = record.model_dump(mode="json")
+        if any(value != canonical.get(name) for name, value in row.payload.items()) or any(
+            canonical.get(column.name) != getattr(row, column.name)
+            for column in LaunchplaneIdempotencyRow.__table__.columns
+            if column.name != "payload"
+        ):
+            raise ValueError("Provider operation source projection is unavailable.")
+        return record
+
     def _original_mutation_receipt(
-        self, session: Any, reservation: LaunchplaneIdempotencyRecord, *, for_update: bool = False
+        self,
+        session: Any,
+        reservation: LaunchplaneIdempotencyRecord,
+        *,
+        for_update: bool = False,
+        require_projection: bool = False,
     ) -> LaunchplaneIdempotencyRecord | None:
         statement = self._idempotency_statement(
             scope=reservation.scope,
@@ -8149,7 +8179,11 @@ class PostgresRecordStore(HumanSessionStore):
         row = session.scalar(statement)
         if row is None:
             return None
-        receipt = self._read_payload(model_type=LaunchplaneIdempotencyRecord, payload=row.payload)
+        receipt = (
+            self._read_provider_hold_record(row)
+            if require_projection
+            else self._read_payload(model_type=LaunchplaneIdempotencyRecord, payload=row.payload)
+        )
         if (
             receipt.state != "completed"
             or receipt.request_fingerprint != reservation.request_fingerprint
@@ -8164,17 +8198,233 @@ class PostgresRecordStore(HumanSessionStore):
         """Internal bound custody read; missing or invalid evidence stays unavailable."""
         with self._session_factory() as session:
             try:
-                receipt = self._original_mutation_receipt(session, reservation)
-                if receipt is None:
-                    return None
-                capsule = RetainedProviderTargetOrigin.model_validate(
-                    receipt.response_payload.get("provider_target_origin")
+                receipt = self._original_mutation_receipt(
+                    session, reservation, require_projection=True
                 )
             except ValueError:
                 return None
-            return (
-                capsule if capsule.origin.target_key() == reservation.provider_target_key else None
+            return bound_provider_target_origin(reservation, receipt)
+
+    def read_provider_hold_snapshot(
+        self,
+        *,
+        product: str,
+        context: str,
+        instance: str,
+        references: tuple[str, ...] = (),
+    ) -> ProviderHoldLaneSnapshot:
+        with self._session_factory() as session:
+            holds, authority = self._provider_target_holds(session, references=references)
+            return self._provider_hold_lane_snapshot(
+                holds,
+                authority,
+                product=product,
+                context=context,
+                instance=instance,
+                references=references,
             )
+
+    def read_provider_hold_snapshots(
+        self,
+        *,
+        lane_keys: tuple[tuple[str, str, str], ...],
+        references_by_lane: dict[tuple[str, str, str], tuple[str, ...]],
+    ) -> dict[tuple[str, str, str], ProviderHoldLaneSnapshot]:
+        references = tuple(
+            sorted({value for values in references_by_lane.values() for value in values})
+        )
+        with self._session_factory() as session:
+            holds, authority = self._provider_target_holds(session, references=references)
+            return {
+                lane: self._provider_hold_lane_snapshot(
+                    holds,
+                    authority,
+                    product=lane[0],
+                    context=lane[1],
+                    instance=lane[2],
+                    references=references_by_lane.get(lane, ()),
+                )
+                for lane in lane_keys
+            }
+
+    def list_provider_target_holds(self) -> tuple[ProviderTargetHold, ...]:
+        """Bulk internal projection. Unattributed rows remain in this service-level result."""
+        with self._session_factory() as session:
+            holds, _authority = self._provider_target_holds(session)
+            return tuple(hold for hold in holds if hold.reservation.state != "completed")
+
+    def _provider_target_holds(
+        self,
+        session: Any,
+        *,
+        references: tuple[str, ...] = (),
+        for_update: bool = False,
+    ) -> tuple[tuple[ProviderTargetHold, ...], "_ProviderHoldAuthorityView"]:
+        reference_ids = tuple(
+            reference.record_id
+            for value in references
+            if (reference := ProviderOperationReference.parse(value)) is not None
+        )
+        # One indexed membership read and one primary-key batch receipt read, including
+        # completed referenced rows. Never scan private family intent to discover origin.
+        statement = (
+            select(LaunchplaneIdempotencyRow)
+            .where(
+                (
+                    (
+                        LaunchplaneIdempotencyRow.provider_target_key.startswith(
+                            "generic-web-provider-target:"
+                        )
+                    )
+                    & (LaunchplaneIdempotencyRow.provider_target_key != "")
+                    & ~LaunchplaneIdempotencyRow.provider_target_key.regexp_match(
+                        r"^generic-web-provider-target:[0-9a-f]{64}:.+$"
+                    )
+                    & LaunchplaneIdempotencyRow.state.in_(("running", "reconcile_required"))
+                )
+                | LaunchplaneIdempotencyRow.record_id.in_(reference_ids)
+            )
+            .order_by(LaunchplaneIdempotencyRow.record_id)
+        )
+        if for_update and not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update()
+        reservations = tuple(
+            record
+            for row in session.scalars(statement)
+            if requires_provider_target_origin(
+                (record := self._read_provider_hold_record(row)).provider_target_key
+            )
+        )
+        receipt_ids = tuple(
+            build_launchplane_mutation_reservation_id(
+                scope=row.scope,
+                route_path=ORIGINAL_MUTATION_INTENT_ROUTE,
+                idempotency_key=row.record_id,
+            )
+            for row in reservations
+        )
+        statement = (
+            select(LaunchplaneIdempotencyRow)
+            .where(LaunchplaneIdempotencyRow.record_id.in_(receipt_ids))
+            .order_by(LaunchplaneIdempotencyRow.record_id)
+        )
+        if for_update and not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update()
+        receipts: dict[str, LaunchplaneIdempotencyRecord | None] = {}
+        for row in session.scalars(statement):
+            try:
+                receipts[row.record_id] = self._read_provider_hold_record(row)
+            except ValueError:
+                receipts[row.record_id] = None
+        # Reservation -> authority -> incident is the adoption-compatible lock order.
+        if for_update and not self.database_url.startswith("sqlite"):
+            if not session.scalar(
+                text("select pg_try_advisory_xact_lock_shared(hashtextextended(:lock_name, 0))"),
+                {"lock_name": "launchplane:product-authority-bundle"},
+            ):
+                raise ProviderHoldAuthorityBusy("Product authority is being published.")
+        authority = _ProviderHoldAuthorityView(self, session)
+        from control_plane.testing_activation import retained_fence_is_separated
+        from control_plane.workflows.generic_web_deploy_provider import (
+            generic_web_provider_target_key,
+        )
+
+        current_lanes: dict[str, list[tuple[str, str, str]]] = {}
+        for profile in authority.list_product_profile_records():
+            for lane in profile.lanes:
+                try:
+                    target = authority.read_provider_target_record(
+                        context_name=lane.context, instance_name=lane.instance
+                    )
+                except FileNotFoundError:
+                    continue
+                key = generic_web_provider_target_key(
+                    provider_id=target.provider_id,
+                    context=lane.context,
+                    instance=lane.instance,
+                    target_type=target.provider_target_type,
+                    target_id=target.target_id,
+                )
+                current_lanes.setdefault(key, []).append(
+                    (profile.product, lane.context, lane.instance)
+                )
+        holds = []
+        for reservation in reservations:
+            receipt_id = build_launchplane_mutation_reservation_id(
+                scope=reservation.scope,
+                route_path=ORIGINAL_MUTATION_INTENT_ROUTE,
+                idempotency_key=reservation.record_id,
+            )
+            receipt = receipts.get(receipt_id)
+            corrupt = receipt_id in receipts and receipt is None
+            hold = project_provider_target_hold(reservation, receipt, receipt_corrupt=corrupt)
+            lanes = tuple(sorted(current_lanes.get(reservation.provider_target_key, ())))
+            holds.append(
+                replace(
+                    hold,
+                    separated=retained_fence_is_separated(authority, reservation),
+                    current_target_matches=hold.lane is not None and hold.lane in lanes,
+                    current_lanes=lanes,
+                )
+            )
+        return tuple(holds), authority
+
+    @staticmethod
+    def _provider_hold_lane_snapshot(
+        holds: tuple[ProviderTargetHold, ...],
+        authority: "_ProviderHoldAuthorityView",
+        *,
+        product: str,
+        context: str,
+        instance: str,
+        references: tuple[str, ...] = (),
+    ) -> ProviderHoldLaneSnapshot:
+        lane = (product, context, instance)
+        by_reference = {hold.reference: hold for hold in holds if hold.reference}
+        unavailable = tuple(
+            sorted(
+                value
+                for value in references
+                if (value not in by_reference or by_reference[value].lane != lane)
+            )
+        )
+        selected = tuple(
+            hold
+            for hold in holds
+            if (
+                hold.lane == lane
+                and hold.reservation.state in ("running", "reconcile_required")
+                and not hold.separated
+            )
+        )
+        # Source identity includes exact lease/grace inputs and the full records used
+        # by the unchanged separation predicate. The hash stays strictly internal.
+        material = [
+            [
+                (
+                    hold.reservation.model_dump(mode="json"),
+                    hold.origin.model_dump(mode="json") if hold.origin else None,
+                    hold.attribution,
+                    str(hold.operation_nonce),
+                    hold.separated,
+                    hold.current_lanes,
+                )
+                for hold in holds
+                if hold.lane == lane or lane in hold.current_lanes or hold.reference in references
+            ],
+            references,
+            unavailable,
+            authority.material_for_lane(product, context, instance),
+        ]
+        return ProviderHoldLaneSnapshot(
+            product,
+            context,
+            instance,
+            selected,
+            tuple(sorted(references)),
+            unavailable,
+            provider_hold_source_sha256(material),
+        )
 
     def _retain_original_mutation_intent(
         self,
@@ -8590,6 +8840,12 @@ class PostgresRecordStore(HumanSessionStore):
         try:
             with self._session_factory() as session:
                 self._begin_serialized_write(session)
+                if requires_provider_target_origin(
+                    normalized_provider_target_key
+                ) and not self.database_url.startswith("sqlite"):
+                    from control_plane.service_deploy_drain import lock
+
+                    lock(self, session)
                 observed = self._observe_mutation_during_drain(
                     session,
                     scope=normalized_scope,
@@ -8626,6 +8882,12 @@ class PostgresRecordStore(HumanSessionStore):
 
         with self._session_factory() as session:
             self._begin_serialized_write(session)
+            if requires_provider_target_origin(
+                normalized_provider_target_key
+            ) and not self.database_url.startswith("sqlite"):
+                from control_plane.service_deploy_drain import lock
+
+                lock(self, session)
             observed = self._observe_mutation_during_drain(
                 session,
                 scope=normalized_scope,
@@ -9419,6 +9681,12 @@ class PostgresRecordStore(HumanSessionStore):
                 self._begin_serialized_write(session)
                 from control_plane.service_deploy_drain import admit_reservation
 
+                if requires_provider_target_origin(
+                    normalized_provider_target_key
+                ) and not self.database_url.startswith("sqlite"):
+                    from control_plane.service_deploy_drain import lock
+
+                    lock(self, session)
                 admit_reservation(self, session, scope)
                 row = session.scalar(
                     self._idempotency_statement(
@@ -28844,10 +29112,34 @@ class PostgresRecordStore(HumanSessionStore):
         expected_private_endpoint_key: str = "",
         expected_private_endpoint_sha256: str = "",
         expected_route_binding_sha256: str = "",
+        expected_provider_hold_snapshot: ProviderHoldLaneSnapshot | None = None,
     ) -> PublicIngressTransitionWriteResult:
         check_token = canonical_health_check_record_token(observation.check_name)
         with self._session_factory() as session:
             self._begin_serialized_write(session)
+            if expected_provider_hold_snapshot is not None:
+                if not self.database_url.startswith("sqlite"):
+                    from control_plane.service_deploy_drain import lock
+
+                    lock(self, session)
+                try:
+                    holds, authority = self._provider_target_holds(
+                        session,
+                        references=expected_provider_hold_snapshot.references,
+                        for_update=True,
+                    )
+                except (ProviderHoldAuthorityBusy, ValueError):
+                    return PublicIngressTransitionWriteResult(status="provider_source_changed")
+                current_source = self._provider_hold_lane_snapshot(
+                    holds,
+                    authority,
+                    product=observation.product,
+                    context=observation.context,
+                    instance=observation.instance,
+                    references=expected_provider_hold_snapshot.references,
+                )
+                if current_source.source_sha256 != expected_provider_hold_snapshot.source_sha256:
+                    return PublicIngressTransitionWriteResult(status="provider_source_changed")
             authority_changed = False
             if expected_profile_sha256:
                 profile_statement = (
@@ -28907,6 +29199,8 @@ class PostgresRecordStore(HumanSessionStore):
                 )
                 authority_changed = route_binding_sha256 != expected_route_binding_sha256
             if authority_changed:
+                if expected_provider_hold_snapshot is not None:
+                    return PublicIngressTransitionWriteResult(status="provider_source_changed")
                 observation_row = LaunchplanePublicIngressObservationRow(
                     record_id=observation.record_id,
                     product=observation.product,
@@ -28975,6 +29269,10 @@ class PostgresRecordStore(HumanSessionStore):
                 )
             )
             if incident_changed:
+                if expected_provider_hold_snapshot is not None:
+                    # A retry can discover new held source. Do not leave an
+                    # unaccepted pass behind before that independent recheck.
+                    return PublicIngressTransitionWriteResult(status="incident_changed")
                 unlinked_observation = observation.model_copy(
                     update={"incident_id": "", "incident_event_id": ""}
                 )
@@ -31865,3 +32163,132 @@ class PostgresRecordStore(HumanSessionStore):
             self.write_release_tuple_record(release_tuple_record)
             counts["release_tuples"] += 1
         return counts
+
+
+class _ProviderHoldAuthorityView(PostgresRecordStore):
+    """Bulk same-session inputs for the existing retained-fence separation predicate.
+
+    This read-only view deliberately uses the predicate's existing store interface;
+    it cannot perform a provider call, acquire authority or write a record.
+    """
+
+    def __init__(self, store: PostgresRecordStore, session: Any) -> None:
+        self._profiles = tuple(
+            store._read_product_profile_payload(row.payload)
+            for row in session.scalars(
+                select(LaunchplaneProductProfileRow).order_by(LaunchplaneProductProfileRow.product)
+            )
+        )
+        self._providers = tuple(
+            ProviderTargetRecord.model_validate(row.payload)
+            for row in session.scalars(
+                select(LaunchplaneProviderTargetRow).order_by(
+                    LaunchplaneProviderTargetRow.context, LaunchplaneProviderTargetRow.instance
+                )
+            )
+        )
+        self._target_ids = tuple(
+            DokployTargetIdRecord.model_validate(row.payload)
+            for row in session.scalars(
+                select(LaunchplaneDokployTargetIdRow).order_by(
+                    LaunchplaneDokployTargetIdRow.context, LaunchplaneDokployTargetIdRow.instance
+                )
+            )
+        )
+        self._targets = tuple(
+            DokployTargetRecord.model_validate(row.payload)
+            for row in session.scalars(
+                select(LaunchplaneDokployTargetRow).order_by(
+                    LaunchplaneDokployTargetRow.context, LaunchplaneDokployTargetRow.instance
+                )
+            )
+        )
+        self._activations = {
+            (row.product, row.context): row.payload
+            for row in session.scalars(
+                select(LaunchplaneTestingActivationRow).order_by(
+                    LaunchplaneTestingActivationRow.product, LaunchplaneTestingActivationRow.context
+                )
+            )
+        }
+
+    def material_for_lane(self, product: str, context: str, instance: str) -> object:
+        target_ids = {
+            row.target_id
+            for row in self._providers
+            if (row.context, row.instance) == (context, instance)
+        } | {
+            row.target_id
+            for row in self._target_ids
+            if (row.context, row.instance) == (context, instance)
+        }
+        return [
+            [row.model_dump(mode="json") for row in self._profiles if row.product == product],
+            [
+                row.model_dump(mode="json")
+                for row in self._providers
+                if (row.context, row.instance) == (context, instance) or row.target_id in target_ids
+            ],
+            [
+                row.model_dump(mode="json")
+                for row in self._target_ids
+                if (row.context, row.instance) == (context, instance) or row.target_id in target_ids
+            ],
+            [
+                row.model_dump(mode="json")
+                for row in self._targets
+                if (row.context, row.instance) == (context, instance)
+            ],
+            self._activations.get((product, context)),
+        ]
+
+    def close(self) -> None:
+        pass
+
+    def list_product_profile_records(
+        self, *, driver_id: str = ""
+    ) -> tuple[LaunchplaneProductProfileRecord, ...]:
+        return tuple(row for row in self._profiles if not driver_id or row.driver_id == driver_id)
+
+    def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord:
+        for row in self._profiles:
+            if row.product == product:
+                return row
+        raise FileNotFoundError("Original product is unavailable.")
+
+    def read_provider_target_record(
+        self, *, context_name: str, instance_name: str
+    ) -> ProviderTargetRecord:
+        for row in self._providers:
+            if (row.context, row.instance) == (context_name, instance_name):
+                return row
+        raise FileNotFoundError("Provider target is unavailable.")
+
+    def list_provider_target_records(
+        self, *, provider_id: str = ""
+    ) -> tuple[ProviderTargetRecord, ...]:
+        return tuple(
+            row for row in self._providers if not provider_id or row.provider_id == provider_id
+        )
+
+    def read_dokploy_target_record(
+        self, *, context_name: str, instance_name: str
+    ) -> DokployTargetRecord:
+        for row in self._targets:
+            if (row.context, row.instance) == (context_name, instance_name):
+                return row
+        raise FileNotFoundError("Target settings are unavailable.")
+
+    def read_dokploy_target_id_record(
+        self, *, context_name: str, instance_name: str
+    ) -> DokployTargetIdRecord:
+        for row in self._target_ids:
+            if (row.context, row.instance) == (context_name, instance_name):
+                return row
+        raise FileNotFoundError("Target identity is unavailable.")
+
+    def list_dokploy_target_id_records(self) -> tuple[DokployTargetIdRecord, ...]:
+        return self._target_ids
+
+    def read_testing_activation(self, product: str, context: str) -> dict[str, Any] | None:
+        return self._activations.get((product, context))
