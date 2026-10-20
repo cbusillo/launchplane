@@ -21,6 +21,7 @@ from urllib.parse import quote, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 import hashlib
 import json
+import logging
 import os
 import smtplib
 import socket
@@ -574,6 +575,10 @@ def _held_generic_web_deploy_fences(
             read(lane_keys=lane_keys, references_by_lane=references),
         )
     except ValueError:
+        logging.getLogger(__name__).warning(
+            "Provider operation evidence is unavailable; provider observations will not be accepted. "
+            "Other health checks continue."
+        )
         # The strict source read remains unavailable, not an empty inventory or
         # attributed hold. Keep unrelated probes running; these unaccepted provider
         # snapshots cannot resolve incidents even if source repairs before publication.

@@ -1662,7 +1662,9 @@ cadence retries it. No provider or notification call runs under these locks.
 Lanes with no hold and no open warning receive no provider probe. Malformed
 reservation or provider-authority evidence makes the provider source explicitly
 unavailable: its observation remains unaccepted/skipped and cannot clear an
-incident. HTTP, TLS and private checks and scheduler authority detection continue;
+incident. Each failed discovery writes one fixed, value-free warning to service
+logs. This diagnostic warning does not create a persisted incident, notification
+or UI alert. HTTP, TLS and private checks and scheduler authority detection continue;
 no invalid held row is treated as absent or assigned invented custody. The
 strict service attention read still returns unavailable for contradictory held
 records rather than an empty page.

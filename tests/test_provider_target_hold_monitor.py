@@ -4,6 +4,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from tempfile import TemporaryDirectory
+import logging
 import unittest
 from unittest.mock import Mock, patch
 
@@ -213,8 +214,10 @@ class ProviderTargetHoldMonitorTests(unittest.TestCase):
         from control_plane.workflows.public_ingress_monitor import HttpObservation
         from tests.test_public_ingress_monitor import _route_binding, _tls_certificate
 
+        logger = discover_public_ingress_monitor_targets.__module__
         row = self.reserve("corrupt")
-        self.observe()
+        with self.assertNoLogs(logger, level="WARNING"):
+            self.observe()
         profile = _profile()
         lane = profile.lanes[0]
         lane = lane.model_copy(
@@ -293,8 +296,11 @@ class ProviderTargetHoldMonitorTests(unittest.TestCase):
                         )
                     )
                     checked_at = _minutes_after("2026-10-01T01:00:00Z", index + 1)
-                    with patch.object(
-                        self.store, "_database_mutation_timestamp", return_value=checked_at
+                    with (
+                        patch.object(
+                            self.store, "_database_mutation_timestamp", return_value=checked_at
+                        ),
+                        self.assertLogs(logger, level="WARNING") as warnings,
                     ):
                         result = run_public_ingress_monitor_once(
                             record_store=self.store,
@@ -304,6 +310,9 @@ class ProviderTargetHoldMonitorTests(unittest.TestCase):
                             private_http_get=private,
                             tls_get=tls,
                         )
+                    self.assertTrue(
+                        all(record.levelno == logging.WARNING for record in warnings.records)
+                    )
                     self.assertTrue(http.called)
                     self.assertTrue(private.called)
                     self.assertTrue(tls.called)
@@ -342,6 +351,20 @@ class ProviderTargetHoldMonitorTests(unittest.TestCase):
                             self.store._sync_idempotency_row(stored, row)
                         else:
                             session.delete(session.merge(authority))
+
+        private_failure = "private-intent-and-fingerprint-error-sentinel"
+        with (
+            patch.object(
+                self.store, "read_provider_hold_snapshots", side_effect=ValueError(private_failure)
+            ),
+            self.assertLogs(logger, level="WARNING") as warnings,
+        ):
+            discover_public_ingress_monitor_targets(self.store)
+        for record in warnings.records:
+            self.assertEqual(record.levelno, logging.WARNING)
+            self.assertIsNone(record.exc_info)
+            self.assertIsNone(record.stack_info)
+            self.assertNotIn(private_failure, record.getMessage())
 
     def typed_operation(self, key: str, *, running: bool = False) -> Any:
         from datetime import datetime, timedelta, timezone
