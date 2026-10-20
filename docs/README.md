@@ -145,6 +145,8 @@ not describe runtime authority until it is implemented, deployed, and activated.
   pull-request dependency comparisons and absolute health evidence.
 - [runtime-dependency-health.md](runtime-dependency-health.md) — derived lane
   dependencies, public health results, shared web helper and individual adoption.
+- [sync-cycle-health.md](sync-cycle-health.md) — typed sync facts retained by
+  existing health probes, their readback and qualification limits.
 - [advisory-governance-checks.md](advisory-governance-checks.md) — dedicated
   GitHub App identity, stable advisory engineering/Client check runs, replay,
   drift, and authority self-exclusion.

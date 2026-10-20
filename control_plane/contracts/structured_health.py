@@ -3,7 +3,12 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
+
+from control_plane.contracts.sync_cycle_health import (
+    SyncCycleHealthEvidence,
+    sync_cycle_health_evidence_from_payload,
+)
 
 
 StructuredHealthStatus = Literal["unchecked", "pass", "fail", "malformed"]
@@ -19,6 +24,11 @@ class StructuredHealthEvidence(BaseModel):
     image_reference: str = ""
     detail: str = ""
     components: tuple[str, ...] = ()
+    sync: SyncCycleHealthEvidence | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
 
 _PASS_STATUSES = {"ok", "pass", "passing", "ready", "healthy", "serving", "up"}
@@ -60,4 +70,5 @@ def structured_health_evidence_from_payload(payload: object) -> StructuredHealth
         image_reference=_text(payload.get("image_reference") or payload.get("image")),
         detail=_text(payload.get("detail") or payload.get("summary")),
         components=_component_names(payload.get("components")),
+        sync=sync_cycle_health_evidence_from_payload(payload),
     )
