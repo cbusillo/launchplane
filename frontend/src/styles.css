@@ -2072,3 +2072,12 @@ h3 {
 .monitoring-review dl { display: grid; gap: .7rem; }
 .monitoring-review dt { color: var(--muted); }
 .monitoring-review dd { margin: .2rem 0 0; }
+
+.provider-hold-attention { margin-block: 1rem; }
+.provider-hold-list { display: grid; gap: .75rem; list-style: none; padding: 0; }
+.provider-hold-list li { display: grid; gap: .35rem; padding: .75rem; border: 1px solid var(--border); border-radius: .5rem; min-width: 0; overflow-wrap: anywhere; }
+.provider-hold-list code { display: block; font-size: .75rem; overflow-wrap: anywhere; }
+.provider-hold-list small, .provider-hold-attention .muted { color: var(--muted); }
+.provider-hold-controls { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; }
+
+.provider-hold-attention .product-incident-overview-head { grid-template-columns: minmax(0, 1fr); }

@@ -143,6 +143,7 @@ def write_canonical_openapi(output_path: Path) -> Path:
 
 
 UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
+    "/v1/operations/provider-hold-attention": "read_provider_hold_attention",
     "/v1/products/{product}/testing-rebuild/inputs": "inspect_testing_rebuild",
     "/v1/products/{product}/testing-rebuild/operations/{operation_id}": "read_testing_rebuild",
     "/v1/production-backup-authority": "read_production_backup_authority",

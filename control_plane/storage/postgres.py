@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+from control_plane.provider_hold_attention import (
+    PROVIDER_HOLD_PAGE_LIMIT,
+    ProviderHoldAttentionPage,
+    parse_provider_hold_cursor,
+    provider_hold_page,
+)
+
 from control_plane.provider_target_holds import (
     ProviderHoldAuthorityBusy,
     ProviderHoldLaneSnapshot,
@@ -8253,48 +8260,13 @@ class PostgresRecordStore(HumanSessionStore):
             holds, _authority = self._provider_target_holds(session)
             return tuple(hold for hold in holds if hold.reservation.state != "completed")
 
-    def _provider_target_holds(
+    def _project_provider_hold_reservations(
         self,
         session: Any,
+        reservations: tuple[LaunchplaneIdempotencyRecord, ...],
         *,
-        references: tuple[str, ...] = (),
         for_update: bool = False,
-    ) -> tuple[tuple[ProviderTargetHold, ...], "_ProviderHoldAuthorityView"]:
-        reference_ids = tuple(
-            reference.record_id
-            for value in references
-            if (reference := ProviderOperationReference.parse(value)) is not None
-        )
-        # One indexed membership read and one primary-key batch receipt read, including
-        # completed referenced rows. Never scan private family intent to discover origin.
-        statement = (
-            select(LaunchplaneIdempotencyRow)
-            .where(
-                (
-                    (
-                        LaunchplaneIdempotencyRow.provider_target_key.startswith(
-                            "generic-web-provider-target:"
-                        )
-                    )
-                    & (LaunchplaneIdempotencyRow.provider_target_key != "")
-                    & ~LaunchplaneIdempotencyRow.provider_target_key.regexp_match(
-                        r"^generic-web-provider-target:[0-9a-f]{64}:.+$"
-                    )
-                    & LaunchplaneIdempotencyRow.state.in_(("running", "reconcile_required"))
-                )
-                | LaunchplaneIdempotencyRow.record_id.in_(reference_ids)
-            )
-            .order_by(LaunchplaneIdempotencyRow.record_id)
-        )
-        if for_update and not self.database_url.startswith("sqlite"):
-            statement = statement.with_for_update()
-        reservations = tuple(
-            record
-            for row in session.scalars(statement)
-            if requires_provider_target_origin(
-                (record := self._read_provider_hold_record(row)).provider_target_key
-            )
-        )
+    ) -> tuple[ProviderTargetHold, ...]:
         receipt_ids = tuple(
             build_launchplane_mutation_reservation_id(
                 scope=row.scope,
@@ -8316,6 +8288,93 @@ class PostgresRecordStore(HumanSessionStore):
                 receipts[row.record_id] = self._read_provider_hold_record(row)
             except ValueError:
                 receipts[row.record_id] = None
+        return tuple(
+            project_provider_target_hold(
+                reservation,
+                receipts.get(receipt_id),
+                receipt_corrupt=receipt_id in receipts and receipts[receipt_id] is None,
+            )
+            for reservation in reservations
+            for receipt_id in (
+                build_launchplane_mutation_reservation_id(
+                    scope=reservation.scope,
+                    route_path=ORIGINAL_MUTATION_INTENT_ROUTE,
+                    idempotency_key=reservation.record_id,
+                ),
+            )
+        )
+
+    @staticmethod
+    def _provider_hold_membership() -> Any:
+        return (
+            LaunchplaneIdempotencyRow.provider_target_key.startswith("generic-web-provider-target:")
+            & ~LaunchplaneIdempotencyRow.provider_target_key.regexp_match(
+                r"^generic-web-provider-target:[0-9a-f]{64}:.+$"
+            )
+            & LaunchplaneIdempotencyRow.state.in_(("running", "reconcile_required"))
+        )
+
+    def read_provider_hold_attention_page(
+        self,
+        *,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> ProviderHoldAttentionPage:
+        """One bounded indexed keyset read, followed by a bounded batch origin read."""
+        if not 1 <= limit <= PROVIDER_HOLD_PAGE_LIMIT:
+            raise ValueError("Invalid provider attention page limit.")
+        after_id = parse_provider_hold_cursor(cursor)
+        with self._session_factory() as session:
+            statement = (
+                select(LaunchplaneIdempotencyRow)
+                .where(
+                    self._provider_hold_membership(), LaunchplaneIdempotencyRow.record_id > after_id
+                )
+                .order_by(LaunchplaneIdempotencyRow.record_id)
+                .limit(limit + 1)
+            )
+            # Validate indexed columns against payload before projecting. A corrupt held
+            # source makes this page unavailable rather than silently disappearing.
+            reservations = tuple(
+                self._read_provider_hold_record(row) for row in session.scalars(statement)
+            )
+            holds = self._project_provider_hold_reservations(session, reservations)
+            return provider_hold_page(holds, limit=limit, cursor=cursor)
+
+    def _provider_target_holds(
+        self,
+        session: Any,
+        *,
+        references: tuple[str, ...] = (),
+        for_update: bool = False,
+    ) -> tuple[tuple[ProviderTargetHold, ...], "_ProviderHoldAuthorityView"]:
+        reference_ids = tuple(
+            reference.record_id
+            for value in references
+            if (reference := ProviderOperationReference.parse(value)) is not None
+        )
+        # One indexed membership read and one primary-key batch receipt read, including
+        # completed referenced rows. Never scan private family intent to discover origin.
+        statement = (
+            select(LaunchplaneIdempotencyRow)
+            .where(
+                self._provider_hold_membership()
+                | LaunchplaneIdempotencyRow.record_id.in_(reference_ids)
+            )
+            .order_by(LaunchplaneIdempotencyRow.record_id)
+        )
+        if for_update and not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update()
+        reservations = tuple(
+            record
+            for row in session.scalars(statement)
+            if requires_provider_target_origin(
+                (record := self._read_provider_hold_record(row)).provider_target_key
+            )
+        )
+        projected = self._project_provider_hold_reservations(
+            session, reservations, for_update=for_update
+        )
         # Reservation -> authority -> incident is the adoption-compatible lock order.
         if for_update and not self.database_url.startswith("sqlite"):
             if not session.scalar(
@@ -8349,15 +8408,8 @@ class PostgresRecordStore(HumanSessionStore):
                     (profile.product, lane.context, lane.instance)
                 )
         holds = []
-        for reservation in reservations:
-            receipt_id = build_launchplane_mutation_reservation_id(
-                scope=reservation.scope,
-                route_path=ORIGINAL_MUTATION_INTENT_ROUTE,
-                idempotency_key=reservation.record_id,
-            )
-            receipt = receipts.get(receipt_id)
-            corrupt = receipt_id in receipts and receipt is None
-            hold = project_provider_target_hold(reservation, receipt, receipt_corrupt=corrupt)
+        for hold in projected:
+            reservation = hold.reservation
             lanes = tuple(sorted(current_lanes.get(reservation.provider_target_key, ())))
             holds.append(
                 replace(

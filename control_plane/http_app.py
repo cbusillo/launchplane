@@ -1,3 +1,4 @@
+from control_plane.provider_hold_attention import PROVIDER_HOLD_ATTENTION_ROUTE
 from control_plane import browser_route_repair
 from control_plane.access_policy_review import github_account_login, github_account_for_login
 from control_plane.dokploy_target_comparison import (
@@ -4613,7 +4614,10 @@ def create_launchplane_fastapi_app(
                         ),
                     ).model_dump(mode="json"),
                 )
-            if request.url.path == _AUTHZ_ACTIVATION_PREFLIGHT_ROUTE or (
+            if request.url.path in (
+                _AUTHZ_ACTIVATION_PREFLIGHT_ROUTE,
+                PROVIDER_HOLD_ATTENTION_ROUTE,
+            ) or (
                 request.url.path in _AUTHZ_NO_STORE_ROUTES
                 or request.url.path.startswith(_SOLO_ADMINISTRATION_CONFIRMATION_ROUTE)
                 or request.url.path.startswith(("/v1/agent/ordinary-agent-", "/v1/ordinary-agent-"))

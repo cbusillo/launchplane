@@ -467,6 +467,143 @@ class FastApiEnvironmentInventoryReadTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class FastApiProviderHoldAttentionReadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_service_read_returns_bounded_sanitized_page_without_writes(self) -> None:
+        from tests.test_provider_hold_attention import reserve_attention_hold
+        from tests.support.http import get
+        from control_plane.provider_hold_attention import PROVIDER_HOLD_ATTENTION_ROUTE
+
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(directory) / "attention.db")
+            )
+            self.addCleanup(store.close)
+            store.ensure_schema()
+            for name in ("PRIVATE-FIRST", "PRIVATE-SECOND", "PRIVATE-THIRD"):
+                reserve_attention_hold(store, name)
+            before = store.list_provider_target_holds()
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_record_read_policy(action="operations.read", context="launchplane"),
+                record_store_factory=lambda: store,
+            )
+            response = await get(
+                app,
+                PROVIDER_HOLD_ATTENTION_ROUTE + "?limit=1",
+                headers={"Authorization": "Bearer valid-token"},
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.headers["cache-control"], "no-store")
+            page = response.json()["attention"]
+            self.assertEqual(len(page["items"]), 1)
+            self.assertTrue(page["has_more"])
+            self.assertEqual(page["completeness"], "partial")
+            self.assertEqual(page["items"][0]["original_scope"]["product"], "retired-product")
+            next_page = await get(
+                app,
+                PROVIDER_HOLD_ATTENTION_ROUTE
+                + "?limit=1&cursor="
+                + quote(page["next_cursor"], safe=""),
+                headers={"Authorization": "Bearer valid-token"},
+            )
+            self.assertEqual(next_page.status_code, 200)
+            self.assertNotEqual(next_page.json()["attention"]["items"], page["items"])
+            self.assertEqual(before, store.list_provider_target_holds())
+            for private in (
+                "PRIVATE-",
+                "source_sha256",
+                "provider_target_key",
+                "fingerprint",
+                "original_intent",
+            ):
+                self.assertNotIn(private, response.text)
+
+    async def test_denied_and_unauthenticated_cannot_read_unknown_rows_or_counts(self) -> None:
+        from tests.support.http import get
+        from control_plane.provider_hold_attention import PROVIDER_HOLD_ATTENTION_ROUTE
+
+        class Probe:
+            calls = 0
+
+            def read_provider_hold_attention_page(self, **kwargs: object) -> None:
+                self.calls += 1
+                raise AssertionError("held store was read")
+
+        for context, authorization, expected in (
+            ("product-lane", "Bearer valid-token", 403),
+            ("launchplane", "", 401),
+        ):
+            store = Probe()
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_record_read_policy(action="operations.read", context=context),
+                record_store_factory=lambda: store,
+            )
+            response = await get(
+                app, PROVIDER_HOLD_ATTENTION_ROUTE, headers={"Authorization": authorization}
+            )
+            self.assertEqual(response.status_code, expected)
+            self.assertEqual(response.headers["cache-control"], "no-store")
+            self.assertEqual(store.calls, 0)
+            self.assertNotIn("attention", response.json())
+
+    async def test_missing_storage_corrupt_source_and_invalid_page_are_ordinary_errors(
+        self,
+    ) -> None:
+        from tests.support.http import get
+        from control_plane.provider_hold_attention import (
+            PROVIDER_HOLD_ATTENTION_ROUTE,
+            PROVIDER_HOLD_PAGE_LIMIT,
+        )
+
+        class CorruptStore:
+            def read_provider_hold_attention_page(self, **kwargs: object) -> None:
+                raise ValueError("PRIVATE malformed row")
+
+        for store, query, expected, code in (
+            (_MissingProductReadStore(), "", 503, "database_storage_required"),
+            (CorruptStore(), "", 503, "provider_attention_unavailable"),
+            (CorruptStore(), "?cursor=private", 400, "invalid_cursor"),
+            (CorruptStore(), f"?limit={PROVIDER_HOLD_PAGE_LIMIT + 1}", 400, "validation_error"),
+        ):
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_record_read_policy(action="operations.read", context="launchplane"),
+                record_store_factory=lambda: store,
+            )
+            response = await get(
+                app,
+                PROVIDER_HOLD_ATTENTION_ROUTE + query,
+                headers={"Authorization": "Bearer valid-token"},
+            )
+            self.assertEqual(response.status_code, expected)
+            self.assertEqual(response.headers["cache-control"], "no-store")
+            if query != f"?limit={PROVIDER_HOLD_PAGE_LIMIT + 1}":
+                self.assertEqual(response.json()["error"]["code"], code)
+            self.assertNotIn("PRIVATE", response.text)
+
+    async def test_openapi_exposes_closed_attention_models_and_existing_error_contract(
+        self,
+    ) -> None:
+        from control_plane.provider_hold_attention import PROVIDER_HOLD_ATTENTION_ROUTE
+
+        response = await openapi_response()
+        schema = response.json()
+        operation = schema["paths"][PROVIDER_HOLD_ATTENTION_ROUTE]["get"]
+        self.assertEqual(operation["operationId"], "read_provider_hold_attention")
+        self.assertTrue({"200", "400", "401", "403", "503"}.issubset(operation["responses"]))
+        for name in (
+            "ProviderHoldAttentionResponse",
+            "ProviderHoldAttentionPage",
+            "ProviderHoldAttentionItem",
+            "ProviderHoldScope",
+        ):
+            self.assertFalse(schema["components"]["schemas"][name]["additionalProperties"])
+        properties = schema["components"]["schemas"]["ProviderHoldAttentionItem"]["properties"]
+        self.assertIn("operation_reference", properties)
+        self.assertNotIn("reservation", properties)
+
+
 class FastApiRecentOperationsReadTests(unittest.IsolatedAsyncioTestCase):
     async def test_recent_operations_returns_operator_read_model(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

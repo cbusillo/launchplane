@@ -65,6 +65,26 @@ evidence. A `403` remains an authorization failure, and an ordinary `503` or
 transport failure retains visibly stale cached evidence. No mutation is retried
 by this transition.
 
+The Product Ops index includes a read-only **Service operation attention**
+section for signed-in admins, including when the product inventory is empty,
+loading, or unavailable. It preserves original scopes after removal and labels
+unproved ownership explicitly. A known running operation is recorded work, not
+a claim of a stuck failure. Fresh individual lane facts remain independent.
+Loading, denied, unavailable, stale, unknown-origin and partial service evidence
+qualifies the incident overview so healthy lanes cannot hide retained work.
+Missing service authority is unavailable evidence, not zero operations.
+
+The panel keeps only one bounded page. **Next operation page** replaces that
+page; **Refresh operation attention** and the shell refresh return to the first
+page. A continuation never establishes global absence, even when empty.
+Background reads use existing cancellation, polling and evidence deadlines.
+Logout/session loss removes the panel and its cache; a service `401` or `403`
+clears sensitive attention rows. Transient failures may retain explicitly stale
+evidence. Demo mode never sends this service request. The panel offers no
+recovery mutation, retry, release or clear control. See
+[service attention](operations.md) for the
+retained-operation read and its proof limits.
+
 ## Representative Admin Journeys
 
 The clean-slate product model is grounded in recent Launchplane work rather than

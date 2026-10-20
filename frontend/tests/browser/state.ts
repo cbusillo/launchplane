@@ -6,6 +6,11 @@ import { chromium, expect, test as base, type BrowserContext, type Page } from "
 export const test = base.extend({
   context: async ({ context }, use) => {
     await freezeClock(context);
+    // Existing journeys supply their own lane reads. Keep the independent
+    // service read inert unless a page explicitly supplies attention evidence.
+    await context.route("**/v1/operations/provider-hold-attention**", route => route.fulfill({
+      status: 503, json: { error: { code: "fixture_unavailable", message: "Service attention is not supplied by this journey." } },
+    }));
     await use(context);
   },
 });

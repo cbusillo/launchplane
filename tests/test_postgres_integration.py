@@ -15781,3 +15781,19 @@ class RealPostgresProviderHoldMonitorTests(unittest.TestCase):
                     for record in monitor.list_public_ingress_observation_records()
                 )
             )
+
+
+@unittest.skipUnless(
+    os.environ.get("LAUNCHPLANE_TEST_POSTGRES_URL"), "PostgreSQL integration URL required"
+)
+class RealPostgresProviderHoldAttentionTests(unittest.TestCase):
+    def test_bounded_parent_keyset_and_corrupt_source(self) -> None:
+        from tests.test_provider_hold_attention import ProviderHoldAttentionTests
+
+        with _head_postgres_database() as url:
+            store = PostgresRecordStore(database_url=url)
+            self.addCleanup(store.close)
+            portable = ProviderHoldAttentionTests()
+            portable.store = store
+            portable.test_keyset_pages_bound_projection_and_keep_inactive_original_scope()
+            portable.test_indexed_payload_contradiction_is_unavailable_never_empty()

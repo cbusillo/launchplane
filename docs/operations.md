@@ -1586,14 +1586,43 @@ keep their own existing paths. The monitor never clears a provider fence.
 
 Original custody comes from the immutable receipt, or a legacy encoded snapshot
 whose product is present and physical key recomputes exactly. Current target
-matches remain separate metadata. Unattributed rows remain in internal service
-attention rather than being assigned to every product sharing a context. They
-are not yet a bounded public attention API. If product A's old physical key
+matches remain separate metadata. Unattributed rows remain in service attention rather than being assigned to
+every product sharing a context. The bounded service read and Product Ops
+attention panel below expose them without inventing original ownership. If product A's old physical key
 becomes product B's current lane, A keeps its original attention and B is only
 current-match metadata. There is no separate inherited product-B warning.
 Deleted/inactive A rows remain service attention. Exact qualified testing separation
 still uses its existing activation/execution-exclusion proof; origin alone
 cannot detach an opaque hold.
+
+`GET /v1/operations/provider-hold-attention` requires existing `operations.read`
+on product/context `launchplane`, checked before any held-record read. A lane
+reader cannot observe unknown service rows or counts. Responses, including
+errors, are `no-store`. Unsupported storage or contradictory held-row payload
+and indexed columns makes the evidence unavailable, never an empty all-clear.
+The route performs a storage keyset read ordered by unique reservation ID with
+`limit + 1` rows (default 50, maximum 100), followed by one bounded receipt batch.
+It uses the same parent membership and strict origin projection as monitoring;
+unrelated namespaces and suffixed child effects do not consume a page.
+
+The closed response contains only nonce-backed opaque operation references when
+proved, original product/context/instance when proved, explicit retained/legacy/
+unavailable/corrupt attribution, held state, coarse recorded-effect phase, and
+times. Free-form phase text, physical provider identities, caller scopes, request
+keys/fingerprints, private intent and internal source hashes are omitted. The
+coarse phase says only whether a checkpoint was recorded; it cannot establish
+provider effects or their absence. Legacy custody without a nonce has no strong
+operation reference. Deleted/inactive original scopes remain visible without
+consulting today's product inventory. Current-target associations do not supply
+ownership and are not included in this public page.
+
+`has_more` and `next_cursor` support bounded continuation. `completeness` is
+`single_page` only on an untruncated first read, otherwise `partial`, including
+an empty last page. Pages are independent observations of changing records, not
+a snapshot assembled across requests or proof of safe recovery. Refresh starts
+at the first page. The fresh-read deadline bounds attention claims; neither an
+empty page nor completion of one operation settles another operation or grants
+replay, retry, release, or clear authority.
 
 Provider observations are accepted only after a short same-session source
 recheck under the existing membership advisory lock. Fresh insertion, unbound
