@@ -3,6 +3,7 @@ from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
+from itertools import product
 from tempfile import TemporaryDirectory
 from typing import Any, cast
 from unittest import TestCase
@@ -542,73 +543,81 @@ class GenericWebTestingFailureSettlementTests(TestCase):
             self.assertFalse(self.store.list_environment_inventory())
             self.assertFalse(any(item["enabled"] for item in self.schedules.values()))
 
-    def test_records_commit_recovers_runtime_without_inventing_lifecycle_qualification(
+    def test_quiescent_checkpoints_recover_without_inventing_lifecycle_qualification(
         self,
     ) -> None:
-        for job_status in ("done", "error", "failed"):
-            for healthy in (False, True):
+        for phase, job_status, healthy in product(
+            (
+                "records_commit",
+                "application_maintenance_prepare",
+                "application_schedule_prepare",
+                "application_schedule_remove",
+            ),
+            ("done", "error", "failed"),
+            (False, True),
+        ):
+            with (
+                self.subTest(phase=phase, job_status=job_status, healthy=healthy),
+                self.scenario(phase=phase, job_status=job_status),
+            ):
                 with (
-                    self.subTest(job_status=job_status, healthy=healthy),
-                    self.scenario(phase="records_commit", job_status=job_status),
-                ):
-                    with (
-                        patch.object(
-                            self.provider,
-                            "observe_testing_application_runtime",
-                            side_effect=self.base_runtime_read,
-                        )
-                        if healthy
-                        else nullcontext()
-                    ):
-                        status, dry = self.dry()
-                        self.assertEqual(status, 200, dry)
-                        adopted = job_status == "done" and healthy
-                        self.assertEqual(
-                            dry["proposed_action"],
-                            "adopt_observed" if adopted else "settle_testing_failure",
-                        )
-                        self.assertEqual(dry["provider_outcome"], "present")
-                        self.assertFalse(dry["retry_safe"])
-                        status, applied = self.apply(dry)
-                    self.assertEqual(status, 202, applied)
-                    self.assertFalse(self.store.list_held_provider_target_reservations())
-                    record = self.store.read_deployment_record(self.record_id)
-                    self.assertEqual(record.deploy.status, "pass" if adopted else "fail")
-                    self.assertEqual(record.post_deploy_update.status, "fail")
-                    receipt = recorded_application_lifecycle(record)
-                    assert receipt is not None
-                    self.assertEqual(receipt.state, "prepared" if adopted else "held")
-                    self.assertEqual(receipt.originals, self.receipt.originals)
-                    if adopted:
-                        self.upsert.assert_not_called()
-                        self.assertTrue(all(item["enabled"] for item in self.schedules.values()))
-                        inventory = self.store.read_environment_inventory(
-                            context_name=self.target.ship_request.context,
-                            instance_name=self.target.ship_request.instance,
-                        )
-                        self.assertEqual(inventory.deployment_record_id, record.record_id)
-                        self.assertIsNotNone(record.runtime_identity)
-                    else:
-                        self.assertFalse(self.store.list_environment_inventory())
-                        self.assertIsNone(record.runtime_identity)
-                        self.assertFalse(any(item["enabled"] for item in self.schedules.values()))
-                    successor = application_snapshot_for_deploy(
-                        store=self.store,
-                        product=self.profile.product,
-                        context=receipt.context,
-                        instance=receipt.instance,
-                        provider_id=receipt.provider_id,
-                        target_id=receipt.target_id,
-                        artifact_id=receipt.artifact_id,
-                        source_git_ref=receipt.source_git_ref,
-                        deployment_record_id="next-deliberate-deployment",
-                        extensions=receipt.extensions,
-                        rollback=False,
+                    patch.object(
+                        self.provider,
+                        "observe_testing_application_runtime",
+                        side_effect=self.base_runtime_read,
                     )
-                    assert successor is not None
-                    self.assertTrue(successor.resume_from_hold)
-                    self.assertEqual(successor.originals, self.receipt.originals)
-                    self.assertEqual(successor.state, "prepared")
+                    if healthy
+                    else nullcontext()
+                ):
+                    status, dry = self.dry()
+                    self.assertEqual(status, 200, dry)
+                    adopted = job_status == "done" and healthy
+                    self.assertEqual(
+                        dry["proposed_action"],
+                        "adopt_observed" if adopted else "settle_testing_failure",
+                    )
+                    self.assertEqual(dry["provider_outcome"], "present")
+                    self.assertFalse(dry["retry_safe"])
+                    status, applied = self.apply(dry)
+                self.assertEqual(status, 202, applied)
+                self.assertFalse(self.store.list_held_provider_target_reservations())
+                record = self.store.read_deployment_record(self.record_id)
+                self.assertEqual(record.deploy.status, "pass" if adopted else "fail")
+                self.assertEqual(record.post_deploy_update.status, "fail")
+                receipt = recorded_application_lifecycle(record)
+                assert receipt is not None
+                self.assertEqual(receipt.state, "prepared" if adopted else "held")
+                self.assertEqual(receipt.originals, self.receipt.originals)
+                if adopted:
+                    self.upsert.assert_not_called()
+                    self.assertTrue(all(item["enabled"] for item in self.schedules.values()))
+                    inventory = self.store.read_environment_inventory(
+                        context_name=self.target.ship_request.context,
+                        instance_name=self.target.ship_request.instance,
+                    )
+                    self.assertEqual(inventory.deployment_record_id, record.record_id)
+                    self.assertIsNotNone(record.runtime_identity)
+                else:
+                    self.assertFalse(self.store.list_environment_inventory())
+                    self.assertIsNone(record.runtime_identity)
+                    self.assertFalse(any(item["enabled"] for item in self.schedules.values()))
+                successor = application_snapshot_for_deploy(
+                    store=self.store,
+                    product=self.profile.product,
+                    context=receipt.context,
+                    instance=receipt.instance,
+                    provider_id=receipt.provider_id,
+                    target_id=receipt.target_id,
+                    artifact_id=receipt.artifact_id,
+                    source_git_ref=receipt.source_git_ref,
+                    deployment_record_id="next-deliberate-deployment",
+                    extensions=receipt.extensions,
+                    rollback=False,
+                )
+                assert successor is not None
+                self.assertTrue(successor.resume_from_hold)
+                self.assertEqual(successor.originals, self.receipt.originals)
+                self.assertEqual(successor.state, "prepared")
 
     def test_written_final_record_does_not_fence_a_settled_runtime_failure(self) -> None:
         for state in ("prepared", "qualified"):
@@ -679,6 +688,56 @@ class GenericWebTestingFailureSettlementTests(TestCase):
                     assert successor is not None
                     self.assertTrue(successor.resume_from_hold)
                     self.assertEqual(successor.originals, self.receipt.originals)
+
+    def test_saved_pass_and_exact_healthy_runtime_survive_auxiliary_job_failure(self) -> None:
+        for lifecycle in (False, True):
+            for job_status in ("error", "failed"):
+                with (
+                    self.subTest(lifecycle=lifecycle, job_status=job_status),
+                    self.scenario(
+                        phase="records_commit", receipt_state="qualified", job_status=job_status
+                    ),
+                ):
+                    pending = self.store.read_deployment_record(self.record_id)
+                    self.store.write_deployment_record(
+                        pending.model_copy(
+                            update={
+                                "deploy": pending.deploy.model_copy(update={"status": "pass"}),
+                                "post_deploy_update": pending.post_deploy_update.model_copy(
+                                    update={
+                                        "attempted": lifecycle,
+                                        "status": "pass" if lifecycle else "skipped",
+                                        "evidence": self.receipt.evidence() if lifecycle else {},
+                                    }
+                                ),
+                            }
+                        )
+                    )
+                    with patch.object(
+                        self.provider,
+                        "observe_testing_application_runtime",
+                        side_effect=self.base_runtime_read,
+                    ):
+                        status, dry = self.dry()
+                        self.assertEqual(status, 200, dry)
+                        self.assertEqual(dry["proposed_action"], "adopt_observed")
+                        status, applied = self.apply(dry)
+                    self.assertEqual(status, 202, applied)
+                    stored = self.store.read_deployment_record(self.record_id)
+                    self.assertEqual(stored.deploy.status, "pass")
+                    self.assertEqual(
+                        stored.post_deploy_update.status, "pass" if lifecycle else "skipped"
+                    )
+                    self.assertIsNotNone(stored.runtime_identity)
+                    self.upsert.assert_not_called()
+                    self.assertTrue(all(item["enabled"] for item in self.schedules.values()))
+                    self.assertFalse(self.store.list_held_provider_target_reservations())
+                    receipt = recorded_application_lifecycle(stored)
+                    if lifecycle:
+                        assert receipt is not None
+                        self.assertEqual(receipt.state, "qualified")
+                    else:
+                        self.assertIsNone(receipt)
 
     def test_terminal_failed_job_with_old_service_repeats_only_captured_hold(self) -> None:
         for status, state, failed_record in (

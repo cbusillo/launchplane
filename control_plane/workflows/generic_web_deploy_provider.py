@@ -23,7 +23,7 @@ from control_plane.contracts.deploy_target import (
 from control_plane.contracts.deploy_reference import validate_provider_deploy_reference
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
-from control_plane.contracts.deployment_record import ResolvedTargetEvidence
+from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.idempotency_record import parse_launchplane_mutation_timestamp
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
@@ -636,6 +636,7 @@ def qualify_testing_application_observation(
     wait: bool = False,
     deadline: float | None = None,
     original_deadline_expired: bool = False,
+    recovered_record: DeploymentRecord | None = None,
 ) -> GenericWebProviderDeploymentObservation:
     """A provider job is insufficient proof of application testing convergence."""
     if (
@@ -660,6 +661,48 @@ def qualify_testing_application_observation(
             )
             if runtime.application_id != target.resolved_target.target_id:
                 raise ValueError("Runtime observation belongs to another target.")
+            if (
+                observation.deployment_status in {"error", "failed"}
+                and recovered_record is not None
+                and recovered_record.deploy.status == "pass"
+                and recovered_record.artifact_identity is not None
+                and recovered_record.resolved_target is not None
+                and (
+                    recovered_record.record_id,
+                    recovered_record.context,
+                    recovered_record.instance,
+                    recovered_record.artifact_identity.artifact_id,
+                    recovered_record.source_git_ref,
+                    recovered_record.resolved_target.target_type,
+                    recovered_record.resolved_target.target_id,
+                )
+                == (
+                    deployment_record_id,
+                    target.ship_request.context,
+                    target.ship_request.instance,
+                    target.ship_request.artifact_id,
+                    target.ship_request.source_git_ref,
+                    "application",
+                    target.resolved_target.target_id,
+                )
+                and application_runtime_matches(
+                    runtime,
+                    artifact_reference=target.ship_request.artifact_id,
+                    provider_reference=dokploy_deploy_artifact_reference(
+                        ship_request=target.ship_request, target_type="application"
+                    ),
+                    deployment_record_id=deployment_record_id,
+                )
+            ):
+                return observation.model_copy(
+                    update={
+                        "deployment_status": "done",
+                        "error_message": (
+                            "Original saved deployment pass and fresh runtime agree; "
+                            f"provider job status={observation.deployment_status}."
+                        ),
+                    }
+                )
             if observation.deployment_status in {"error", "failed"} and runtime.rollout_state in {
                 "",
                 "completed",

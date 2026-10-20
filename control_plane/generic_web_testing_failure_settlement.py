@@ -44,6 +44,11 @@ TESTING_FAILURE_SETTLEMENT_PHASES = frozenset(
     {
         "deploy_trigger",
         "application_schedule_hold",
+        # These only disable or remove schedules. They cannot re-enable work
+        # after a repeated hold, even if a remote configuration call is in flight.
+        "application_maintenance_prepare",
+        "application_schedule_prepare",
+        "application_schedule_remove",
         "records_commit",
         TESTING_FAILURE_SETTLEMENT_PHASE,
     }
@@ -219,6 +224,7 @@ def settle_testing_failure(
                 operation_key, context=lane.context, instance=lane.instance
             ),
             original_deadline_expired=True,
+            recovered_record=original_record,
         )
         if qualified.outcome != "present" or generic_web_provider_deployment_succeeded(
             qualified.deployment_status

@@ -480,6 +480,7 @@ class GenericWebDeployProviderMutationAdapter:
                 provider_evidence="provider_read_failed",
                 provider_read_error_class="target_resolution_failed",
             )
+        recovered_record = None
         if (
             resolved_target.ship_request.instance == "testing"
             and resolved_target.resolved_target.target_type == "application"
@@ -490,6 +491,7 @@ class GenericWebDeployProviderMutationAdapter:
                 )
             except FileNotFoundError:
                 record = None
+            recovered_record = record
             try:
                 receipt = recorded_application_lifecycle(record) if record is not None else None
             except click.ClickException:
@@ -510,6 +512,7 @@ class GenericWebDeployProviderMutationAdapter:
             target=resolved_target,
             observation=observation,
             deployment_record_id=self._deployment_record_id(provider_operation_key),
+            recovered_record=recovered_record,
             original_deadline_expired=(
                 original_deadline_expired
                 and self._settled_spec_timeout_allowed(

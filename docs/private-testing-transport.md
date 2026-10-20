@@ -236,9 +236,21 @@ or reservation completion was interrupted, its pass verdict and qualified receip
 do not override fresh proof of a settled runtime failure at the original deadline.
 Recovery can hold that exact captured baseline and record failure without adding
 inventory credit. Any existing inventory still points to the now-failed record.
+An exact saved pass plus fresh healthy runtime for that original deployment can
+instead be adopted when only Dokploy's auxiliary job status changed to `error` or
+`failed`. Recovery retains that provider status in its bounded observation detail;
+missing, pending, failed or differently bound records cannot supply that proof.
 Dokploy can publish `done` before a later notification
 failure changes that job to `error`; the final status does not authorize rerunning
 data or post-deploy effects.
+The schedule-configuration checkpoints `application_maintenance_prepare` and
+`application_schedule_prepare` or `application_schedule_remove` can use this same
+failure recovery: they only disable or remove schedules, and any preceding
+maintenance, canary or post-deploy call returned before that next checkpoint.
+An interrupted `application_maintenance_execute`, `application_schedule_canary`,
+`application_schedule_activate` or `post_deploy_*` call can still execute or
+re-enable work. A deployment timeout or healthy image cannot prove that call has
+stopped, so failure settlement at those checkpoints keeps the original fence.
 Missing or malformed baseline, changed target authority, an active updater,
 unknown service/provider effects or lost lease keep the original operation fenced.
 A failed cleanup also keeps the fence and a durable hold-only checkpoint, so a new
