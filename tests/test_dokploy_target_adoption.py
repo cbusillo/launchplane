@@ -66,6 +66,16 @@ def _write_dokploy_managed_secrets(*, store: PostgresRecordStore) -> None:
 
 
 class DokployTargetAdoptionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from control_plane.contracts.host_network_capacity import BridgeNetworkCapacity
+
+        self.enterContext(
+            patch(
+                "control_plane.dokploy.network_capacity.read_bridge_network_capacity",
+                return_value=BridgeNetworkCapacity(total_slots=16, free_slots=16),
+            )
+        )
+
     def test_setup_dry_runs_check_current_provider_binding_without_writes(self) -> None:
         for operation in ("application", "compose", "adopt"):
             with self.subTest(operation=operation), TemporaryDirectory() as directory:
