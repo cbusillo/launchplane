@@ -642,8 +642,58 @@ label. Changes to enqueue, token-source or admission settings do not strand the
 old label; current checks and review authority are read again, and the subsequent
 ready/admission path enforces the full current policy.
 
-The same blocked head never qualifies, including after a green rerun. Recovery
-also refuses pending, failing or unreadable current-head evidence, conflicting
+An unchanged blocked head has one narrow recovery: a superseded singleton's
+only failed checks are a GitHub Actions browser shard and its CI aggregate;
+the bound job failed dependency installation before browser execution, its
+bounded provider log proves `ERR_PNPM_ENOENT` copying from the pnpm store into
+frontend dependencies, and independent frontend validation and a browser sibling
+passed in that same candidate/run/attempt. A complete immutable base-to-head
+comparison must show only application/test Python and Markdown documentation
+changes. Install inputs, workflow/runner changes, frontend changes, unknown or
+truncated evidence, other failures and source-file ENOENT do not qualify.
+This recovers the already-applied false culprit block; it does not change
+normal failure classification or fix the store lifecycle.
+
+Before removing the proven label, the fenced controller checkpoints its result
+and persists value-free job/run/attempt identifiers, the pre-release comment-ID
+floor and source/log digests in one keyed native feedback reservation. Its key
+binds repository, PR and head across bases and policy revisions. The existing
+per-PR feedback lock serializes reservation; PostgreSQL commits it before the
+provider effect. A different failure cannot overwrite it. No candidate schema
+or table migration is needed, and admission reads the one exact key rather
+than scanning candidate history. The blocked checkpoint retains legacy failure
+provenance independently of later feedback or comment delivery.
+That consumes one recovery per PR head. Existing retry lineage on the exact
+failed singleton also exhausts this path; an unrelated multi-entry or generated
+body retry never spends another PR's causal allowance. Dry runs spend nothing.
+Restarted attempts must match the saved proof and original label event; a new
+hold or different failed candidate cannot obtain another allowance. Storage
+failure prevents removal. Failure-job evidence uses all check runs and the
+original run-attempt job list, so a later passing rerun cannot erase the
+attribution. Provider logs are bounded to 2 MiB, never persisted,
+and fetched from HTTPS storage without forwarding the API credential.
+
+The supported operation remains the ordinary controller dry run, then its
+mutating pass through the deployed service. There is no manual label release,
+caller-supplied causal assertion, rerun-forcing commit, grant or direct merge.
+After release, obtain fresh checked Ready and normal train admission/candidate
+validation. Admission requires a trusted current-head Ready comment newer than
+the saved floor even when an enqueue label remains present. Supervisor owns
+operational continuation when assigned by the brief. An exhausted allowance stays
+held. Fix the owning CI defect first; a genuine later source change can use the
+existing new-head recovery path. Do not invent a commit, reset the allowance or
+remove the label by hand to obtain another attempt.
+
+The optional Actions evidence capability is never a grant prerequisite: a
+known missing permission skips the read; denied or unavailable evidence leaves
+that PR held while unrelated queue work continues. Storage-download failures
+are evidence failures, never GitHub authentication failures.
+The reservation uses the existing feedback envelope; older binaries can still
+read the candidate and feedback records. They do not enforce the new reservation
+or fresh-Ready gate, so recovery and subsequent admission require this controller
+version or newer. Never delete a reservation to reset its allowance.
+
+Both recovery paths refuse pending, failing or unreadable current-head evidence, conflicting
 or unknown mergeability, stale/missing/unweighed review, a renewed review request,
 drafts, a different base, forks and unresolved required review conversations.
 Review request/receipt parsing follows the catalog's producer contract, including

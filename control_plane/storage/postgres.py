@@ -22263,6 +22263,18 @@ class PostgresRecordStore(HumanSessionStore):
         else:
             self._write_row(row)
 
+    def read_merge_train_pr_feedback_record(
+        self, feedback_id: str
+    ) -> MergeTrainPrFeedbackRecord | None:
+        held = getattr(self._merge_train_feedback_context, "session", None)
+        with nullcontext(held) if held is not None else self._session_factory() as session:
+            row = session.get(LaunchplaneMergeTrainPrFeedbackRow, feedback_id)
+            return (
+                self._read_payload(model_type=MergeTrainPrFeedbackRecord, payload=row.payload)
+                if row is not None
+                else None
+            )
+
     def list_merge_train_pr_feedback_records(
         self,
         *,

@@ -95,7 +95,10 @@ def controller_last_result(
     observation = "Run the next fenced controller pass with fresh evidence."
     if reconciliation_required:
         observation = "Reconcile the checkpointed effect with fresh provider evidence."
-    elif reason == "candidate_block_new_head_reviewed":
+    elif reason in {
+        "candidate_block_new_head_reviewed",
+        "candidate_block_unrelated_setup_reviewed",
+    }:
         actor = "repository_agent"
         observation = "Post a fresh checked gh-pr.py ready handoff for the recovered current head."
     elif reason in {"candidate_check_retry_used", "infrastructure_retry_used"}:
