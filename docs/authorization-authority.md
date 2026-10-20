@@ -117,8 +117,10 @@ restrictions remain. Exact product/lane/check and private endpoint validation,
 reviewed plan digest, idempotency, concurrent-profile checks and readback still
 govern apply. Other machine identities retain their existing scoped policy.
 
-The existing testing-retry route also admits an authenticated Director agent
-under the standing permission. This is a testing-only reconciler wakeup, not
+The existing testing-retry route also admits the authenticated Director agent
+through the existing `local_operator` bearer transport under the standing
+permission. Terminal-agent credentials retain their read-only transport boundary.
+This is a testing-only reconciler wakeup, not
 inherited authority for `odoo_target_replacement_apply.execute`, whose mixed
 production/testing scope keeps its policy checks. Other callers still require
 that action on the exact testing lane. Mutation authentication and browser CSRF,

@@ -324,6 +324,7 @@ class TestingRetryTests(reconcile_fixtures.ProductReconcileTestCase):
                         product="site",
                         context="cm",
                         target=AuthorizationTarget(scope="instance", instances=(instance,)),
+                        inherit_agent_read_role=True,
                     )
                 )
         body = self.reviewed()
