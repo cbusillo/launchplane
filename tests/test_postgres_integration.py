@@ -15214,10 +15214,61 @@ class RealPostgresBrowserRuntimeSyncTests(browser_runtime_sync_tests.BrowserRunt
         self.database_url = database.__enter__()
         self.addCleanup(database.__exit__, None, None, None)
         super().setUp()
+        self.store.seed_authz_policy_if_absent(
+            LaunchplaneAuthzPolicyRecord(
+                record_id=build_authz_policy_record_id(
+                    revision=1, policy_sha256=authz_policy_sha256(self.policy)
+                ),
+                revision=1,
+                status="active",
+                source="test:browser-runtime-sync",
+                updated_at=self.profile.updated_at,
+                policy=self.policy,
+            )
+        )
+
+    def make_app(self, policy: LaunchplaneAuthzPolicy | None = None) -> Any:
+        app = super().make_app(policy)
+        app.state.fixture_authz_policy = policy if policy is not None else self.policy
+        return app
+
+    async def post(
+        self,
+        payload: dict[str, Any],
+        key: str = "",
+        *,
+        app: Any = None,
+        headers: dict[str, str] | None = None,
+    ) -> Any:
+        selected_app = app if app is not None else self.app
+        policy = selected_app.state.fixture_authz_policy
+        active = self.store.list_authz_policy_records(status="active", limit=2)
+        self.assertEqual(len(active), 1)
+        current = active[0]
+        digest = authz_policy_sha256(policy)
+        if authz_policy_sha256(current.policy) != digest:
+            replacement = LaunchplaneAuthzPolicyRecord(
+                record_id=build_authz_policy_record_id(
+                    revision=current.revision + 1, policy_sha256=digest
+                ),
+                revision=current.revision + 1,
+                status="active",
+                source="test:browser-runtime-sync",
+                updated_at=self.profile.updated_at,
+                policy=policy,
+            )
+            result = self.store.compare_and_write_authz_policy_record(
+                expected_record=current, replacement_record=replacement
+            )
+            self.assertEqual(result.current_record, replacement)
+        return await super().post(payload, key, app=selected_app, headers=headers)
 
     async def test_runtime_sync_guard_excludes_runtime_and_key_policy_writers(self) -> None:
         from control_plane import browser_runtime_sync
-        from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyPolicyRecord
+        from control_plane.contracts.runtime_key_safety_policy import (
+            RuntimeKeySafetyPolicyRecord,
+            RuntimeSecretSafetyRule,
+        )
         from control_plane.live_target_runtime import LiveTargetRuntimeApplyEnvelope
 
         second = PostgresRecordStore(database_url=self.store.database_url)
@@ -15228,6 +15279,19 @@ class RealPostgresBrowserRuntimeSyncTests(browser_runtime_sync_tests.BrowserRunt
             self.store, self.root, payload, captured.intent, "fixture-guard"
         )
         original_lock = second._lock_product_authority_bundle_write
+        policy = RuntimeKeySafetyPolicyRecord(
+            record_id="guard-policy",
+            source="fixture",
+            updated_at=self.profile.updated_at,
+            rules=(
+                RuntimeSecretSafetyRule(
+                    binding_key="APP_SECRET",
+                    secret_class="testing",
+                    allowed_contexts=(self.context,),
+                    allowed_instances=(self.instance,),
+                ),
+            ),
+        )
         for change in ("runtime-setting", "key-policy"):
             reached = threading.Event()
 
@@ -15239,14 +15303,7 @@ class RealPostgresBrowserRuntimeSyncTests(browser_runtime_sync_tests.BrowserRunt
                 if change == "runtime-setting":
                     second.write_runtime_environment_record(self.setting)
                 else:
-                    second.write_runtime_key_safety_policy_record(
-                        RuntimeKeySafetyPolicyRecord(
-                            record_id="guard-policy",
-                            source="fixture",
-                            updated_at=self.profile.updated_at,
-                            rules=(),
-                        )
-                    )
+                    second.write_runtime_key_safety_policy_record(policy)
 
             with (
                 self.subTest(change=change),

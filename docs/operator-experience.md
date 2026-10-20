@@ -649,13 +649,28 @@ and offers original-request re-entry, including after reload. Re-entry enables
 the existing fields only to reconstruct that request; its retained fingerprint
 rejects a different payload before dispatch. New dry-runs and Start over remain
 unavailable until that Apply settles. Secret values are cleared again after each
-retry, including a rejected mismatch. Live-target endpoints returned in `next_actions` are rendered as
-inspect-only evidence until they have a separate generated browser adapter.
+retry, including a rejected mismatch. A runtime-sync `next_actions` entry links
+to the lane's **Actions** page through a fixed UI route, retaining the supplied
+key names and counts; the browser never dispatches an advertised endpoint.
 For both configuration forms, a server or gateway 5xx after dispatch keeps the
 Apply uncertain even when the error response is valid JSON. The retained key and
 fingerprint survive navigation/reload; a pre-dispatch failure or explicit client
 refusal remains definitive. A retry that began uncertain still requires evidence
 that the original operation settled before its identity can be discarded.
+
+**Runtime sync** is the first control on the lane's Actions page. Its generated
+browser adapter shows target identity, key changes/counts, a reviewed digest and
+an opaque fingerprint, without runtime values. Server availability for planning
+and applying is separate from configuration-edit rights. Qualified generic-web
+lanes permit an explicitly named administrator to review, confirm and apply;
+Odoo stays unavailable pending its durable ownership integration (#4190).
+Deployment is disabled in this operation. Refresh invalidates an old review.
+An uncertain apply retains the exact value-free request and original key across
+reload. A currently authorized administrator can resume that operation even if
+new reviews are unavailable. A later refusal does not erase earlier uncertainty.
+Completion requires matching original receipt evidence; a separate current
+readback may fail or differ without undoing that completion. Neither result
+claims that the website is healthy.
 
 The environment Managed secrets form can also select a credential supplied by the
 named Client. The Client receives the focused `/ui/owner-secrets` page, containing

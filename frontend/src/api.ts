@@ -612,6 +612,17 @@ export function repairDomainAuthority(
     options.signal, options.idempotencyKey, options.onDispatch);
 }
 
+export function applyLiveTargetRuntime(
+  payload: import("./generated/openapi.ts").ApplyLiveTargetRuntimeData["body"],
+  options: BrowserOperationOptions,
+): Promise<import("./generated/openapi.ts").RuntimeSyncResponse> {
+  const request: import("./generated/openapi.ts").ApplyLiveTargetRuntimeData = {
+    url: BROWSER_WRITE_ROUTES.liveTargetRuntimeApply, body: payload,
+    headers: { "Idempotency-Key": options.idempotencyKey },
+  };
+  return requestGeneratedPost(request, options.signal, options.onDispatch);
+}
+
 export function repairRouteBinding(
   payload: import("./generated/openapi.ts").ReconcileRouteBindingData["body"],
   options: BrowserOperationOptions,

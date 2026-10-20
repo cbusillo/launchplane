@@ -479,7 +479,14 @@ class BrowserRuntimeSyncTests(unittest.IsolatedAsyncioTestCase):
                         datetime.fromisoformat(policy.updated_at.replace("Z", "+00:00"))
                         + timedelta(seconds=1)
                     ).isoformat(),
-                    "rules": (),
+                    "rules": (
+                        RuntimeSecretSafetyRule(
+                            binding_key="APP_SECRET",
+                            secret_class="prod_only",
+                            allowed_contexts=(self.context,),
+                            allowed_instances=("prod",),
+                        ),
+                    ),
                 }
             )
         )

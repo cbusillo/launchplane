@@ -5288,6 +5288,190 @@
         "summary": "Restart one lane service on its current artifact"
       }
     },
+    "/v1/live-target-runtime/apply": {
+      "post": {
+        "operationId": "apply_live_target_runtime",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "browser_review": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/components/schemas/BrowserRuntimeSyncRequest"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "context": {
+                    "title": "Context",
+                    "type": "string"
+                  },
+                  "deploy": {
+                    "default": false,
+                    "title": "Deploy",
+                    "type": "boolean"
+                  },
+                  "deploy_timeout_seconds": {
+                    "anyOf": [
+                      {
+                        "exclusiveMinimum": 0,
+                        "type": "integer"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Deploy Timeout Seconds"
+                  },
+                  "instance": {
+                    "title": "Instance",
+                    "type": "string"
+                  },
+                  "mode": {
+                    "title": "Mode",
+                    "type": "string"
+                  },
+                  "no_cache": {
+                    "default": false,
+                    "title": "No Cache",
+                    "type": "boolean"
+                  },
+                  "product": {
+                    "title": "Product",
+                    "type": "string"
+                  },
+                  "reviewed_binding_sha256": {
+                    "default": "",
+                    "title": "Reviewed Binding Sha256",
+                    "type": "string"
+                  },
+                  "schema_version": {
+                    "default": 1,
+                    "minimum": 1,
+                    "title": "Schema Version",
+                    "type": "integer"
+                  },
+                  "separation_only": {
+                    "default": false,
+                    "title": "Separation Only",
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "mode",
+                  "product",
+                  "context",
+                  "instance"
+                ],
+                "title": "LiveTargetRuntimeApplyEnvelope",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RuntimeSyncResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Plan or apply live target runtime"
+      }
+    },
     "/v1/local-consumer-deliveries": {
       "post": {
         "operationId": "deliver_testing_local_consumer",
@@ -11778,6 +11962,18 @@
           "product"
         ],
         "title": "BrowserRouteRepairRequest",
+        "type": "object"
+      },
+      "BrowserRuntimeSyncRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "reviewed_plan_sha256": {
+            "default": "",
+            "title": "Reviewed Plan Sha256",
+            "type": "string"
+          }
+        },
+        "title": "BrowserRuntimeSyncRequest",
         "type": "object"
       },
       "BusinessHoursWindow": {
@@ -28880,6 +29076,17 @@
             "title": "Runtime Settings",
             "type": "array"
           },
+          "runtime_sync": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RuntimeSyncAvailability"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
           "schema_version": {
             "default": 1,
             "minimum": 1,
@@ -39810,6 +40017,232 @@
           "instance"
         ],
         "title": "RuntimeKeySafetyTarget",
+        "type": "object"
+      },
+      "RuntimeSyncAvailability": {
+        "additionalProperties": false,
+        "properties": {
+          "apply": {
+            "$ref": "#/components/schemas/RuntimeSyncModeAvailability"
+          },
+          "plan": {
+            "$ref": "#/components/schemas/RuntimeSyncModeAvailability"
+          }
+        },
+        "required": [
+          "apply",
+          "plan"
+        ],
+        "title": "RuntimeSyncAvailability",
+        "type": "object"
+      },
+      "RuntimeSyncModeAvailability": {
+        "additionalProperties": false,
+        "properties": {
+          "available": {
+            "default": false,
+            "title": "Available",
+            "type": "boolean"
+          },
+          "reason": {
+            "default": "A signed-in administrator is required.",
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "title": "RuntimeSyncModeAvailability",
+        "type": "object",
+        "required": [
+          "available",
+          "reason"
+        ]
+      },
+      "RuntimeSyncResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "original_trace_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Original Trace Id"
+          },
+          "records": {
+            "additionalProperties": true,
+            "title": "Records",
+            "type": "object"
+          },
+          "replayed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Replayed"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result"
+          },
+          "review": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RuntimeSyncReview"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
+          "status": {
+            "const": "accepted",
+            "default": "accepted",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "original_trace_id",
+          "records",
+          "replayed",
+          "result",
+          "status",
+          "trace_id"
+        ],
+        "title": "RuntimeSyncResponse",
+        "type": "object"
+      },
+      "RuntimeSyncReview": {
+        "additionalProperties": false,
+        "properties": {
+          "applied": {
+            "default": false,
+            "title": "Applied",
+            "type": "boolean"
+          },
+          "changed_keys": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Changed Keys",
+            "type": "array"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "desired_key_count": {
+            "title": "Desired Key Count",
+            "type": "integer"
+          },
+          "different_keys": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Different Keys",
+            "type": "array"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "live_key_count": {
+            "title": "Live Key Count",
+            "type": "integer"
+          },
+          "missing_keys": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Missing Keys",
+            "type": "array"
+          },
+          "operation": {
+            "const": "runtime-sync",
+            "default": "runtime-sync",
+            "title": "Operation",
+            "type": "string"
+          },
+          "plan_sha256": {
+            "title": "Plan Sha256",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "retired_keys_present": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Retired Keys Present",
+            "type": "array"
+          },
+          "target_fingerprint": {
+            "title": "Target Fingerprint",
+            "type": "string"
+          },
+          "target_id": {
+            "title": "Target Id",
+            "type": "string"
+          },
+          "target_name": {
+            "title": "Target Name",
+            "type": "string"
+          },
+          "target_type": {
+            "enum": [
+              "application",
+              "compose"
+            ],
+            "title": "Target Type",
+            "type": "string"
+          },
+          "unchanged_key_count": {
+            "title": "Unchanged Key Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "applied",
+          "changed_keys",
+          "context",
+          "desired_key_count",
+          "different_keys",
+          "instance",
+          "live_key_count",
+          "missing_keys",
+          "operation",
+          "plan_sha256",
+          "product",
+          "retired_keys_present",
+          "target_fingerprint",
+          "target_id",
+          "target_name",
+          "target_type",
+          "unchanged_key_count"
+        ],
+        "title": "RuntimeSyncReview",
         "type": "object"
       },
       "SecretBinding": {

@@ -33372,6 +33372,17 @@
             "title": "Runtime Settings",
             "type": "array"
           },
+          "runtime_sync": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RuntimeSyncAvailability"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
           "schema_version": {
             "default": 1,
             "minimum": 1.0,
@@ -48813,6 +48824,222 @@
           "settings"
         ],
         "title": "RuntimeSettingsResponse",
+        "type": "object"
+      },
+      "RuntimeSyncAvailability": {
+        "additionalProperties": false,
+        "properties": {
+          "apply": {
+            "$ref": "#/components/schemas/RuntimeSyncModeAvailability"
+          },
+          "plan": {
+            "$ref": "#/components/schemas/RuntimeSyncModeAvailability"
+          }
+        },
+        "required": [
+          "plan",
+          "apply"
+        ],
+        "title": "RuntimeSyncAvailability",
+        "type": "object"
+      },
+      "RuntimeSyncModeAvailability": {
+        "additionalProperties": false,
+        "properties": {
+          "available": {
+            "default": false,
+            "title": "Available",
+            "type": "boolean"
+          },
+          "reason": {
+            "default": "A signed-in administrator is required.",
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "title": "RuntimeSyncModeAvailability",
+        "type": "object"
+      },
+      "RuntimeSyncResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "original_trace_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Original Trace Id"
+          },
+          "records": {
+            "additionalProperties": true,
+            "title": "Records",
+            "type": "object"
+          },
+          "replayed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Replayed"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result"
+          },
+          "review": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RuntimeSyncReview"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
+          "status": {
+            "const": "accepted",
+            "default": "accepted",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "records"
+        ],
+        "title": "RuntimeSyncResponse",
+        "type": "object"
+      },
+      "RuntimeSyncReview": {
+        "additionalProperties": false,
+        "properties": {
+          "applied": {
+            "default": false,
+            "title": "Applied",
+            "type": "boolean"
+          },
+          "changed_keys": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Changed Keys",
+            "type": "array"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "desired_key_count": {
+            "title": "Desired Key Count",
+            "type": "integer"
+          },
+          "different_keys": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Different Keys",
+            "type": "array"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "live_key_count": {
+            "title": "Live Key Count",
+            "type": "integer"
+          },
+          "missing_keys": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Missing Keys",
+            "type": "array"
+          },
+          "operation": {
+            "const": "runtime-sync",
+            "default": "runtime-sync",
+            "title": "Operation",
+            "type": "string"
+          },
+          "plan_sha256": {
+            "title": "Plan Sha256",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "retired_keys_present": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Retired Keys Present",
+            "type": "array"
+          },
+          "target_fingerprint": {
+            "title": "Target Fingerprint",
+            "type": "string"
+          },
+          "target_id": {
+            "title": "Target Id",
+            "type": "string"
+          },
+          "target_name": {
+            "title": "Target Name",
+            "type": "string"
+          },
+          "target_type": {
+            "enum": [
+              "application",
+              "compose"
+            ],
+            "title": "Target Type",
+            "type": "string"
+          },
+          "unchanged_key_count": {
+            "title": "Unchanged Key Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "product",
+          "context",
+          "instance",
+          "plan_sha256",
+          "target_fingerprint",
+          "target_id",
+          "target_type",
+          "target_name",
+          "missing_keys",
+          "different_keys",
+          "retired_keys_present",
+          "changed_keys",
+          "desired_key_count",
+          "live_key_count",
+          "unchanged_key_count"
+        ],
+        "title": "RuntimeSyncReview",
         "type": "object"
       },
       "SecretBinding": {
@@ -77439,8 +77666,32 @@
           "content": {
             "application/json": {
               "schema": {
+                "$defs": {
+                  "BrowserRuntimeSyncRequest": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "reviewed_plan_sha256": {
+                        "default": "",
+                        "title": "Reviewed Plan Sha256",
+                        "type": "string"
+                      }
+                    },
+                    "title": "BrowserRuntimeSyncRequest",
+                    "type": "object"
+                  }
+                },
                 "additionalProperties": false,
                 "properties": {
+                  "browser_review": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/BrowserRuntimeSyncRequest"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
                   "context": {
                     "title": "Context",
                     "type": "string"
@@ -77514,7 +77765,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                  "$ref": "#/components/schemas/RuntimeSyncResponse"
                 }
               }
             },
@@ -102586,6 +102837,7 @@
   "x-launchplane-ui-write-operations": {
     "/v1/dokploy-targets/setup": "setup_dokploy_target",
     "/v1/drivers/odoo/service-restart": "restart_lane_service",
+    "/v1/live-target-runtime/apply": "apply_live_target_runtime",
     "/v1/local-consumer-deliveries": "deliver_testing_local_consumer",
     "/v1/odoo-prod-promotions": "enqueue_odoo_prod_promotion",
     "/v1/odoo-prod-rollbacks": "enqueue_odoo_prod_rollback",

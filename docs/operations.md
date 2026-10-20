@@ -2868,11 +2868,18 @@ return a typed blocked result rather than guessing a domain.
   the live target env by key, and can apply those keys without requiring an
   artifact manifest. It preserves unrelated live env keys, verifies persistence
   by key/count metadata only, and never prints plaintext env or secret values.
-  Use `mode: "dry-run"` first, confirm the returned `changed_keys` are expected,
-  then use `mode: "apply"` through an authorized workflow or admin API
-  caller. The `live-target-runtime.yml` workflow wraps this route with the
-  shared Launchplane request action and uploads sanitized request/response
-  artifacts.
+  On a qualified generic-web lane, a signed-in administrator uses **Actions →
+  Runtime sync**: review the target, changed key names and counts, then confirm
+  and apply that review. This control never requests deployment and does not
+  prove website health. Stale reviews need a fresh review. An uncertain result
+  retains the original request and operation key; use **Resume original** to
+  recover it, including after reload. Current readback is separate from the
+  completed original receipt. Odoo lanes currently show that runtime sync is
+  unsupported; their durable ownership integration is tracked in #4190.
+  Existing authorized machine callers still use `mode: "dry-run"` before
+  `mode: "apply"`. The `live-target-runtime.yml` compatibility workflow remains
+  for modes not yet covered by the UI; it cannot borrow a human session's
+  authorization or bypass a denied request.
 - TOML/env files are not runtime import surfaces; use DB-native
   runtime-environment records and managed secrets instead.
 - VeriReel production promotion runs Prisma migrations with the runtime image's
@@ -2915,8 +2922,8 @@ context only, and `context_instance` has both context and instance.
   tracked route and reports whether the target is ready for artifact-backed
   split-repo execution.
 - Shared and production live target runtime changes use
-  `POST /v1/live-target-runtime/apply` or the `live-target-runtime.yml` workflow
-  instead of a local checkout command.
+  the supported Runtime sync UI or `POST /v1/live-target-runtime/apply` under
+  the caller's own authorization. Local checkout commands are not a fallback.
 - `ship execute` and `promote execute` can take an explicit `--env-file` overlay
   for the compose post-deploy update path.
 - The post-deploy overlay supports only `ODOO_DB_NAME`, `ODOO_FILESTORE_PATH`,

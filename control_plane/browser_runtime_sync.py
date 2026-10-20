@@ -125,9 +125,7 @@ def runtime_sync_availability(
             try:
                 profile = store.read_product_profile_record(product)
                 if profile.driver_id != "generic-web":
-                    reason = (
-                        "Browser runtime sync requires a shared durable lane fence for this driver."
-                    )
+                    reason = "Runtime sync is not supported for this lane yet."
                 else:
                     require_runtime_sync_lane(store, product, context, instance)
                     secrets.validate_secret_key_configuration()

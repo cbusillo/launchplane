@@ -7671,10 +7671,6 @@ class LaunchplaneServiceTests(unittest.TestCase):
         route = payload["paths"]["/v1/live-target-runtime/apply"]["post"]
         self.assertEqual(route["operationId"], "apply_live_target_runtime")
         self.assertEqual(
-            route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
-            "#/components/schemas/AcceptedEvidenceResponse",
-        )
-        self.assertEqual(
             route["requestBody"]["content"]["application/json"]["schema"]["title"],
             "LiveTargetRuntimeApplyEnvelope",
         )

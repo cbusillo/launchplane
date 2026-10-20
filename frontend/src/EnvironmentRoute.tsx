@@ -108,6 +108,7 @@ export function ProductEnvironmentRoute({
     () => setEvidenceRefreshToken(value => value + 1),
     detailResource.data ? environmentEvidenceDeadlines(detailResource.data) : []);
   const needsConfig =
+    view === "actions" ||
     view === "runtime-settings" ||
     view === "managed-secrets" ||
     view === "diagnostics";
@@ -484,6 +485,7 @@ function EnvironmentPage({
       ) : null}
       {view === "actions" ? (
         <EnvironmentActionsView
+          configResource={configResource}
           detail={detail}
           fixtureMode={fixtureMode}
           onRefresh={onConfigApplied}

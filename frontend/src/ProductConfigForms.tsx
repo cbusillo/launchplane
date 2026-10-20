@@ -11,6 +11,7 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { AppLink, productEnvironmentPath } from "./router";
 
 import { applyProductEnvironmentConfig, readOwnerSecretInputs } from "./api";
 import type { BrowserOperationState } from "./browser-operation";
@@ -1028,12 +1029,12 @@ function ProductConfigEvidence({
       ) : null}
       {result.next_actions.length ? (
         <div className="inspect-only-actions">
-          <strong>Inspect-only next actions</strong>
+          <strong>Runtime sync required</strong>
           {result.next_actions.map((nextAction) => (
             <div key={`${nextAction.kind}:${nextAction.target.target_name}`}>
-              <span><Eye aria-hidden="true" /> Separate typed operation required</span>
-              <p>{nextAction.instruction}</p>
-              <code>{nextAction.dry_run.method} {nextAction.dry_run.endpoint}</code>
+              <p>{nextAction.target.target_name} · {nextAction.changed_keys.length} changed keys</p>
+              <ul>{nextAction.changed_keys.map(key => <li key={key}><code>{key}</code></li>)}</ul>
+              <AppLink to={productEnvironmentPath(result.product, nextAction.target.instance, "actions")}>Review runtime sync</AppLink>
             </div>
           ))}
         </div>

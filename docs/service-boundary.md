@@ -2911,21 +2911,33 @@ metadata.
 Live target runtime sync uses the native FastAPI
 `POST /v1/live-target-runtime/apply` route. The route accepts `mode: "dry-run"`
 or `mode: "apply"`, product/context/instance, and optional apply-only deploy
-controls. Dry-run requires `live_target_runtime.plan`; apply requires
-`live_target_runtime.apply`. The route resolves DB-backed runtime environment
-records, managed runtime secrets, and the tracked Dokploy target in the deployed
-Launchplane service, evaluates runtime key-safety policy, compares desired and
-live env by key, and returns sanitized key/count evidence without runtime values
-or secret plaintext. Apply updates only the product profile's expected runtime
-environment keys and runtime managed-secret binding keys for the selected lane,
-preserves unrelated live env, verifies persistence by key metadata, and can
-explicitly trigger a deploy when requested.
+controls for existing machine callers. Those callers require
+`live_target_runtime.plan` or `live_target_runtime.apply`. The route resolves
+DB-backed runtime environment records, managed runtime secrets, and tracked
+target authority in the deployed service. It renders the driver's canonical
+environment, preserves unrelated live keys, removes keys explicitly retired by
+the profile, and returns key/count evidence without runtime values or secret
+plaintext. Existing machine apply can explicitly request deployment; its
+ordinary post-success receipt is separate from the browser operation contract.
+
+A signed-in, explicitly named administrator can use `browser_review` on this
+route for qualified, exclusively owned generic-web lanes. This path requires
+current session authorization, same-origin CSRF checks, and an apply idempotency
+key. Review returns key names/counts, target identity, a plan digest and an opaque
+target fingerprint. Apply binds the exact reviewed desired environment, live
+baseline, target authority and key-safety policy, rechecks them under the lane
+guard, and uses the shared durable provider-operation fence. It cannot request
+deployment. A durably recorded stale review requires a new review; an uncertain
+effect retains the original request and key for observation and recovery without
+duplicate dispatch. Completed original receipts remain replayable after later
+configuration changes. Odoo browser sync stays unavailable until its operation
+ownership also participates in this durable fence (tracked in #4190).
 
 Live target runtime applies are service-boundary work. Admins and agents must
 not run local CLI live-target mutation commands from arbitrary checkouts to make
 shared or production changes, because the local process may lack DB-backed
 tracked target authority or use stale bootstrap context. Use the deployed
-service route or a workflow that calls it so Launchplane can authorize with
+service route or its supported UI so Launchplane can authorize with
 OIDC/session identity, resolve current DB-backed target records in the deployed
 runtime, and audit sanitized key/count evidence.
 

@@ -22,6 +22,7 @@ import { ServiceRestartPanel } from "./ServiceRestartPanel";
 import { TestingRebuildPanel } from "./TestingRebuildPanel";
 import { HealthMonitoringPanel } from "./HealthMonitoringPanel";
 import { RouteRecordRepairPanel } from "./RouteRecordRepairPanel";
+import { RuntimeSyncPanel } from "./RuntimeSyncPanel";
 import { BackupWorkerCredentialsPanel } from "./BackupWorkerCredentialsPanel";
 import { ProductionBackupAuthorityPanel } from "./ProductionBackupAuthorityPanel";
 import { ProductPromotionFlow } from "./ProductPromotionFlow";
@@ -31,6 +32,7 @@ import type { ResourceState } from "./resource";
 
 import type {
   ProductEnvironmentDetail,
+  ProductEnvironmentConfigStatus,
   ProductPromotionStatus,
 } from "./generated/openapi.ts";
 
@@ -44,12 +46,14 @@ const ACTION_KINDS: BrowserActionKind[] = [
 ];
 
 export function EnvironmentActionsView({
+  configResource,
   detail,
   fixtureMode,
   onRefresh,
   promotionResource,
   refreshToken,
 }: {
+  configResource: ResourceState<ProductEnvironmentConfigStatus>;
   detail: ProductEnvironmentDetail;
   fixtureMode: DevFixtureMode;
   onRefresh: () => void;
@@ -69,6 +73,8 @@ export function EnvironmentActionsView({
 
   return (
     <section className="environment-actions-view">
+      <RuntimeSyncPanel key={`runtime-sync:${detail.product}:${detail.context}:${detail.environment}`}
+        detail={detail} configResource={configResource} fixtureMode={!!fixtureMode} onRefresh={onRefresh} refreshToken={refreshToken} />
       <RouteRecordRepairPanel key={`route-repair:${detail.product}:${detail.context}:${detail.environment}`}
         detail={detail} fixtureMode={!!fixtureMode} onRefresh={onRefresh} refreshToken={refreshToken} />
       {testingRebuild ? <TestingRebuildPanel

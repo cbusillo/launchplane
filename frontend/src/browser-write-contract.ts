@@ -1,4 +1,5 @@
 import type {
+  ApplyLiveTargetRuntimeData,
   SetupDokployTargetData,
   ReconcileRouteBindingData,
   SubmitTestingRebuildData,
@@ -41,6 +42,7 @@ import type {
 } from "./generated/openapi.ts";
 
 export const BROWSER_WRITE_ROUTES = {
+  liveTargetRuntimeApply: "/v1/live-target-runtime/apply" satisfies ApplyLiveTargetRuntimeData["url"],
   domainAuthorityRepair: "/v1/dokploy-targets/setup" satisfies SetupDokployTargetData["url"],
   routeBindingRepair: "/v1/route-bindings/reconcile" satisfies ReconcileRouteBindingData["url"],
   testingRebuild: "/v1/products/{product}/testing-rebuild" satisfies SubmitTestingRebuildData["url"],

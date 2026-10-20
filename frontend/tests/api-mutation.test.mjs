@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 
 import {
+  applyLiveTargetRuntime,
   applyProductEnvironmentConfig,
   dispatchProductPromotionWorkflow,
   dryRunProductPromotion,
@@ -9,6 +10,23 @@ import {
 } from "../src/api.ts";
 
 const originalFetch = globalThis.fetch;
+
+test("runtime sync uses the fixed generated route and only reviewed browser metadata", async () => {
+  const calls = [];
+  globalThis.fetch = async (input, init = {}) => {
+    calls.push({ input: String(input), init });
+    return jsonResponse(String(input) === "/v1/auth/session" ? { csrf_token: "current-csrf" } : acceptedResponse("runtime-sync-trace"));
+  };
+  const body = { product: "sample-site", context: "sample-testing", instance: "testing", mode: "apply", browser_review: { reviewed_plan_sha256: "a".repeat(64) } };
+  await applyLiveTargetRuntime(body, { idempotencyKey: "original-runtime-key" });
+  assert.equal(calls[1].input, "/v1/live-target-runtime/apply");
+  assert.equal(calls[1].init.credentials, "same-origin");
+  assert.deepEqual(JSON.parse(calls[1].init.body), body);
+  const headers = new Headers(calls[1].init.headers);
+  assert.equal(headers.get("X-CSRF-Token"), "current-csrf");
+  assert.equal(headers.get("Idempotency-Key"), "original-runtime-key");
+  assert.equal(headers.has("Authorization"), false);
+});
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
