@@ -8,6 +8,7 @@ from control_plane.contracts.every_code_work_request import EveryCodeWorkRequest
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     RepoProductClassification,
+    product_profiles_share_repository,
 )
 
 
@@ -88,17 +89,18 @@ def build_repo_product_mapping_from_records(
     work_requests: tuple[EveryCodeWorkRequestRecord, ...] = (),
 ) -> RepoProductMapping:
     entries: dict[str, RepoProductMappingEntry] = {}
-    ambiguous: set[str] = set()
+    ambiguous = {
+        profile.repository.strip().lower()
+        for profile in product_profiles
+        for other in product_profiles
+        if profile.product != other.product and product_profiles_share_repository(profile, other)
+    }
     for profile in product_profiles:
         repository = profile.repository.strip()
         if not repository or "/" not in repository:
             continue
         key = repository.lower()
         if key in ambiguous:
-            continue
-        if key in entries and entries[key].product != profile.product:
-            ambiguous.add(key)
-            del entries[key]
             continue
         entries[key] = _product_profile_entry(profile)
 

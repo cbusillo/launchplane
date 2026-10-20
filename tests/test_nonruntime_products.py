@@ -13,9 +13,11 @@ from pydantic import ValidationError
 
 from control_plane.artifact_retention import product_retention_dry_run
 from control_plane.artifact_scan import qualify_product_artifact
+from control_plane.contracts.every_code_work_request import EveryCodeWorkRequestRecord
 from control_plane.contracts.product_onboarding_manifest import ProductOnboardingManifest
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
+    ProductClassificationChangeError,
     ProductOwnerProfile,
 )
 from control_plane.contracts.product_environment_read_model import build_product_site_overview
@@ -197,16 +199,50 @@ class NonruntimeProductTests(unittest.TestCase):
                 "repository": profile.repository.upper(),
             }
         )
-        for profiles in ((runtime, profile), (profile, runtime)):
+        runtime = LaunchplaneProductProfileRecord.model_validate(
+            {
+                **runtime.model_dump(mode="json"),
+                "repository_id": "42",
+                "repository_owner_id": "7",
+            }
+        )
+        alias = LaunchplaneProductProfileRecord.model_validate(
+            {
+                **runtime.model_dump(mode="json"),
+                "product": "alias",
+                "repository": "example/renamed",
+            }
+        )
+        requests = tuple(
+            EveryCodeWorkRequestRecord(
+                request_id=f"request-{number}",
+                source="manual",
+                state="queued",
+                repository=repository,
+                issue_number=number,
+                issue_url=f"https://github.com/{repository}/issues/{number}",
+                trigger_label="agent-work",
+                queued_at=NOW,
+                updated_at=NOW,
+            )
+            for number, repository in enumerate(
+                (profile.repository, alias.repository, "example/unrelated"), start=1
+            )
+        )
+        for profiles in ((runtime, profile, alias), (alias, profile, runtime)):
             with self.subTest(order=profiles[0].product):
                 safe = inert_profile("safe").model_copy(update={"repository": "example/safe"})
                 mapping = build_repo_product_mapping_from_records(
-                    generated_at=NOW, product_profiles=(*profiles, safe)
+                    generated_at=NOW, product_profiles=(*profiles, safe), work_requests=requests
                 )
                 self.assertEqual(
-                    tuple(entry.product for entry in mapping.repositories), (safe.product,)
+                    tuple(entry.repository for entry in mapping.repositories),
+                    (safe.repository, requests[-1].repository),
                 )
-                self.assertEqual(mapping.ambiguous_repositories, (profile.repository,))
+                self.assertEqual(
+                    mapping.ambiguous_repositories,
+                    tuple(sorted((profile.repository, alias.repository))),
+                )
 
     def test_store_absence_repository_and_classification_guards(self) -> None:
         with TemporaryDirectory() as directory:
@@ -235,7 +271,7 @@ class NonruntimeProductTests(unittest.TestCase):
                             "repository": profile.repository,
                         }
                     )
-                    with self.assertRaises(ProductProfileConflictError):
+                    with self.assertRaises(ProductClassificationChangeError):
                         store.write_product_profile_record(runtime)
                     self.assertEqual(store.read_product_profile_record(profile.product), profile)
                     self.assertEqual(len(store.list_product_profile_records()), 1)
@@ -416,7 +452,7 @@ class NonruntimeProductHttpTests(unittest.IsolatedAsyncioTestCase):
                 app, "POST", "/v1/product-profiles", headers=headers, payload=conflicting
             )
             self.assertEqual(refused.status_code, 409, refused.text)
-            self.assertEqual(refused.json()["error"]["code"], "repository_owned_by_other_product")
+            self.assertEqual(refused.json()["error"]["code"], ProductRepositoryOwnershipError.code)
             runtime_onboarding: dict[str, object] = {
                 "product": "launchplane",
                 "manifest": {
@@ -435,7 +471,7 @@ class NonruntimeProductHttpTests(unittest.IsolatedAsyncioTestCase):
                 payload=runtime_onboarding,
             )
             self.assertEqual(refused.status_code, 409, refused.text)
-            self.assertEqual(refused.json()["error"]["code"], "repository_owned_by_other_product")
+            self.assertEqual(refused.json()["error"]["code"], ProductRepositoryOwnershipError.code)
             self.assertEqual(store.list_physical_provider_target_records(), ())
             self.assertEqual(store.list_runtime_environment_records(), ())
             self.assertEqual(store.list_secret_bindings(), ())
@@ -490,6 +526,69 @@ class NonruntimeProductHttpTests(unittest.IsolatedAsyncioTestCase):
                     record_store=store,
                     manifest=ProductOnboardingManifest.model_validate(inert_manifest()),
                 )
+
+            # Reuse the existing full-profile service for an inert record's lifecycle.
+            current = store.read_product_profile_record(readback.product)
+            converted = {
+                **product_profile_payload(current.product),
+                "repository": current.repository,
+                "owner": current.owner.model_dump(mode="json"),
+            }
+            refused = await _asgi_request(
+                app, "POST", "/v1/product-profiles", headers=headers, payload=converted
+            )
+            self.assertEqual(refused.status_code, 409, refused.text)
+            self.assertEqual(refused.json()["error"]["code"], ProductClassificationChangeError.code)
+            self.assertEqual(store.read_product_profile_record(current.product), current)
+            retired = current.model_copy(update={"lifecycle_state": "retired"})
+            retirement = await _asgi_request(
+                app,
+                "POST",
+                "/v1/product-profiles",
+                headers={**headers, "Idempotency-Key": "retire-inert"},
+                payload=retired.model_dump(mode="json"),
+            )
+            self.assertEqual(retirement.status_code, 202, retirement.text)
+            old_read = await _asgi_request(
+                app, "GET", f"/v1/product-profiles/{current.product}", headers=headers
+            )
+            self.assertEqual(old_read.status_code, 200, old_read.text)
+            self.assertEqual(
+                LaunchplaneProductProfileRecord.model_validate(old_read.json()["profile"]),
+                retired,
+            )
+            no_mapping = await _asgi_request(
+                app, "GET", "/v1/repo-product-mapping", headers=headers
+            )
+            self.assertEqual(no_mapping.status_code, 200, no_mapping.text)
+            self.assertEqual(no_mapping.json()["mapping"]["repositories"], [])
+            replacement = await _asgi_request(
+                app,
+                "POST",
+                ROUTE,
+                headers={**headers, "Idempotency-Key": "runtime-replacement"},
+                payload=runtime_onboarding,
+            )
+            self.assertEqual(replacement.status_code, 202, replacement.text)
+            new_read = await _asgi_request(
+                app, "GET", "/v1/product-profiles/another", headers=headers
+            )
+            self.assertEqual(new_read.status_code, 200, new_read.text)
+            new_profile = LaunchplaneProductProfileRecord.model_validate(new_read.json()["profile"])
+            self.assertTrue(new_profile.is_managed_runtime)
+            self.assertFalse(new_profile.owner.is_set)
+            self.assertEqual(
+                new_profile.release_on_acceptance, inert_profile().release_on_acceptance
+            )
+            self.assertEqual(store.read_product_profile_record(current.product), retired)
+            new_mapping = await _asgi_request(
+                app, "GET", "/v1/repo-product-mapping", headers=headers
+            )
+            self.assertEqual(new_mapping.status_code, 200, new_mapping.text)
+            self.assertEqual(
+                [entry["product"] for entry in new_mapping.json()["mapping"]["repositories"]],
+                [new_profile.product],
+            )
 
     async def test_ambiguous_repository_reads_fail_without_selecting_a_product(self) -> None:
         with (

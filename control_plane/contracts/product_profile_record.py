@@ -32,6 +32,12 @@ class ProductProfileChangedError(ValueError):
     """The stored product profile no longer matches the compare-and-write snapshot."""
 
 
+class ProductClassificationChangeError(ValueError):
+    """An existing product key cannot be repurposed for another classification."""
+
+    code = "product_classification_change_blocked"
+
+
 class ProductImageProfile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -943,14 +949,35 @@ def product_profile_historical_context_overlap(
     return frozenset(overlaps)
 
 
+def product_profiles_share_repository(
+    first: LaunchplaneProductProfileRecord, second: LaunchplaneProductProfileRecord
+) -> bool:
+    """Names and known copied IDs are conflict evidence, not an identity resolver."""
+    return first.repository.strip().lower() == second.repository.strip().lower() or (
+        bool(first.repository_id) and first.repository_id == second.repository_id
+    )
+
+
+def validate_product_profile_classification_transition(
+    *,
+    existing_profile: LaunchplaneProductProfileRecord | None,
+    replacement_profile: LaunchplaneProductProfileRecord,
+) -> None:
+    if (
+        existing_profile is not None
+        and existing_profile.classification != replacement_profile.classification
+    ):
+        raise ProductClassificationChangeError(
+            "Product classification cannot change on an existing profile."
+        )
+
+
 def validate_product_profile_history_transition(
     *,
     existing_profile: LaunchplaneProductProfileRecord | None,
     replacement_profile: LaunchplaneProductProfileRecord,
 ) -> None:
     if existing_profile is not None:
-        if existing_profile.classification != replacement_profile.classification:
-            raise ValueError("Product classification cannot change on an existing profile.")
         existing_history = {
             context.strip() for context in existing_profile.historical_contexts if context.strip()
         }

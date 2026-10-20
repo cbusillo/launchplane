@@ -16,7 +16,9 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     is_exclusive_product_context,
     product_context_owner_map,
+    product_profiles_share_repository,
     product_target_owner_products,
+    validate_product_profile_classification_transition,
 )
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.runtime_environment_record import (
@@ -86,6 +88,8 @@ class ProductProfileConflictError(ValueError):
 class ProductRepositoryOwnershipError(ValueError):
     """A repository is already owned; repeating a dry run cannot resolve it."""
 
+    code = "repository_owned_by_other_product"
+
 
 def require_product_profile_writes(
     records: Iterable[LaunchplaneProductProfileRecord],
@@ -99,23 +103,16 @@ def require_product_profile_writes(
         raise ProductProfileConflictError("Product was registered before commit.")
     for record in records:
         current = profiles.get(record.product)
-        if current is not None and current.classification != record.classification:
-            raise ProductProfileConflictError(
-                "Product classification cannot change on an existing profile."
-            )
+        validate_product_profile_classification_transition(
+            existing_profile=current, replacement_profile=record
+        )
         if record.is_active:
             for other in profiles.values():
                 if other.product == record.product or not other.is_active:
                     continue
                 if record.is_managed_runtime and other.is_managed_runtime:
                     continue
-                same_repository = (
-                    other.repository.strip().lower() == record.repository.strip().lower()
-                )
-                same_identity = (
-                    bool(record.repository_id) and record.repository_id == other.repository_id
-                )
-                if same_repository or same_identity:
+                if product_profiles_share_repository(record, other):
                     raise ProductRepositoryOwnershipError(
                         "Repository already belongs to another product."
                     )

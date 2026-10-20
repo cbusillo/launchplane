@@ -733,6 +733,8 @@ from control_plane.contracts.product_profile_record import (
     ProductSecretConfigRequirement,
     product_profile_record_sha256,
     validate_product_profile_history_transition,
+    validate_product_profile_classification_transition,
+    ProductClassificationChangeError,
 )
 from control_plane.contracts.product_retirement import (
     ProductRetirementIdentity,
@@ -13872,6 +13874,10 @@ def create_launchplane_fastapi_app(
                     "change the Client through the Client setting endpoint."
                 ),
             )
+        validate_product_profile_classification_transition(
+            existing_profile=existing_profile,
+            replacement_profile=profile,
+        )
         try:
             validate_product_profile_history_transition(
                 existing_profile=existing_profile,
@@ -18801,7 +18807,7 @@ def create_launchplane_fastapi_app(
                 record_store=database_store,
                 manifest=onboarding_manifest,
             )
-        except ProductRepositoryOwnershipError:
+        except (ProductRepositoryOwnershipError, ProductClassificationChangeError):
             raise
         except ProductProfileConflictError as error:
             raise _launchplane_http_error(
@@ -31423,12 +31429,29 @@ def create_launchplane_fastapi_app(
             _launchplane_http_error(
                 status_code=409,
                 trace_id=next_trace_id(),
-                code="repository_owned_by_other_product",
+                code=ProductRepositoryOwnershipError.code,
                 message=str(error),
             ),
         )
 
     app.add_exception_handler(ProductRepositoryOwnershipError, product_repository_ownership_handler)
+
+    async def product_classification_change_handler(
+        request: Request, error: Exception
+    ) -> JSONResponse:
+        return await launchplane_http_exception_handler(
+            request,
+            _launchplane_http_error(
+                status_code=409,
+                trace_id=next_trace_id(),
+                code=ProductClassificationChangeError.code,
+                message=str(error),
+            ),
+        )
+
+    app.add_exception_handler(
+        ProductClassificationChangeError, product_classification_change_handler
+    )
     app.add_exception_handler(HTTPException, launchplane_http_exception_handler)
     app.add_exception_handler(
         STARLETTE_HTTP_EXCEPTION,

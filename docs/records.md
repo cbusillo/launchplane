@@ -930,6 +930,27 @@ build, deploy, preview, promotion and health admissions do not activate a
 non-runtime record. Lifecycle activity continues to control repository and
 Client visibility independently of runtime classification.
 
+To replace an inert record with a managed runtime, first read the inert profile
+and submit that complete profile to `POST /v1/product-profiles` with only its
+`lifecycle_state` changed to `retired`, using the existing `product_profile.write`
+authorization and an `Idempotency-Key`. Read it back to verify that its Client
+and acceptance evidence remain, and verify its removal from the active repository
+mapping. Then use existing runtime onboarding with a new product key. Set that
+new record's Client and acceptance mode through their existing bounded routes;
+they are not inherited. An attempted classification change on the old key returns
+`product_classification_change_blocked`. This lifecycle-only replacement applies
+to an inert profile, which cannot own runtime configuration. Retiring runtime
+resources still requires the existing resource-retirement service.
+
+Repository collisions mean equal normalized names or equal nonempty copied
+repository IDs when present. Writes involving an inert record refuse those
+collisions atomically; mapping suppresses all known conflicting names, including
+legacy runtime aliases, without choosing a winner. Repository inventory remains
+the runtime identity authority. Different names with omitted IDs cannot be
+established as aliases from profiles alone, so registration must use the current
+canonical repository name. Actual stale names use the existing identity/profile
+administration; registering an inert record is not a repository-rename repair.
+
 Product profiles may also declare expected config requirements for stable lanes:
 runtime-environment key names and managed secret binding keys by context and
 instance. These requirements are declarative intent for admin readiness
