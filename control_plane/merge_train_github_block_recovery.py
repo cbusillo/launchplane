@@ -258,7 +258,7 @@ def recover_candidate_block(
     legacy_writer_app_id: int | None,
     mutate: bool,
     before_remove: Callable[[], None],
-    setup_failure_evidence: MergeTrainSetupFailureRecovery | None = None,
+    setup_failure_evidence: Callable[[], MergeTrainSetupFailureRecovery | None] | None = None,
 ) -> bool:
     from control_plane.merge_train_github import (
         GitHubMergeTrainSnapshotReader,
@@ -299,6 +299,8 @@ def recover_candidate_block(
             legacy_writer_app_id=legacy_writer_app_id,
         )
 
+    accepted_evidence: MergeTrainSetupFailureRecovery | None = None
+
     def qualified(*, recheck_setup: bool = False) -> bool:
         pr = client.read_pull_request_snapshot(repository=repository, pull_request_number=number)
         reader = GitHubMergeTrainSnapshotReader(transport=client.transport)
@@ -330,7 +332,7 @@ def recover_candidate_block(
         if not eligible:
             return False
         if same_head:
-            if setup_failure_evidence is None:
+            if recheck_setup and accepted_evidence is None:
                 return False
             if not recheck_setup:
                 return True
@@ -338,20 +340,27 @@ def recover_candidate_block(
                 read_setup_failure_recovery,
             )
 
+            assert accepted_evidence is not None
             fresh = read_setup_failure_recovery(client, candidate=candidate.candidate)
             if (
                 fresh is None
                 or fresh.model_copy(
-                    update={"ready_comment_floor": setup_failure_evidence.ready_comment_floor}
+                    update={"ready_comment_floor": accepted_evidence.ready_comment_floor}
                 )
-                != setup_failure_evidence
+                != accepted_evidence
             ):
                 return False
         return True
 
     try:
-        if (event := label_event()) is None or not qualified():
+        if not qualified() or (event := label_event()) is None:
             return False
+        if expected_head_sha == candidate.candidate.entries[0].head_sha:
+            if setup_failure_evidence is None:
+                return False
+            accepted_evidence = setup_failure_evidence()
+            if accepted_evidence is None:
+                return False
         if not mutate:
             return True
         before_remove()

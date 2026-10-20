@@ -21,19 +21,12 @@ from control_plane.merge_train_pr_feedback import MergeTrainPrFeedbackRecordStor
 from control_plane.merge_train_setup_recovery_receipt import (
     read_setup_recovery_receipt,
     reserve_setup_recovery,
+    receipt_id,
+    SetupRecoveryReceipt,
 )
 
 
 class CandidateBlockRecoveryClient(Protocol):
-    def candidate_block_recovery_provenance(
-        self,
-        *,
-        candidate: MergeTrainBatchCandidateRecord,
-        feedback: MergeTrainPrFeedbackRecord | None,
-        policy: MergeTrainRepositoryPolicy,
-        legacy_writer_app_id: int | None,
-    ) -> bool: ...
-
     def read_setup_failure_recovery(
         self, *, candidate: MergeTrainBatchCandidate
     ) -> MergeTrainSetupFailureRecovery | None: ...
@@ -48,7 +41,7 @@ class CandidateBlockRecoveryClient(Protocol):
         legacy_writer_app_id: int | None,
         mutate: bool,
         before_remove: Callable[[], None],
-        setup_failure_evidence: MergeTrainSetupFailureRecovery | None = None,
+        setup_failure_evidence: Callable[[], MergeTrainSetupFailureRecovery | None] | None = None,
     ) -> bool: ...
 
 
@@ -90,6 +83,16 @@ def recover_candidate_block(
     candidates = store.list_merge_train_batch_candidate_records(
         repository=snapshot.repository, base_branch=snapshot.base_branch, status="superseded"
     )
+    reservation_cache: dict[tuple[int, str], SetupRecoveryReceipt | None] = {}
+
+    def reservation_for(number: int, head: str) -> SetupRecoveryReceipt | None:
+        key = (number, head)
+        if key not in reservation_cache:
+            reservation_cache[key] = read_setup_recovery_receipt(
+                store, snapshot.repository, number, head
+            )
+        return reservation_cache[key]
+
     recorded_policies: tuple[MergeTrainPolicyRecord, ...] | None = None
     explicit_batches = {
         record.candidate.batch_id for record in candidates if record.block_intent is not None
@@ -101,22 +104,6 @@ def recover_candidate_block(
     ):
         feedback = receipts.get(candidate.record_id)
         failed = candidate.candidate
-        if feedback is None and candidate.block_intent is None and len(failed.entries) == 1:
-            # Later feedback can supersede the latest blocked projection. The
-            # exact committed reservation retains this legacy decision itself.
-            from control_plane.merge_train_setup_recovery_receipt import receipt_id
-
-            entry = failed.entries[0]
-            try:
-                saved = read_setup_recovery_receipt(
-                    store, snapshot.repository, entry.pull_request_number, entry.head_sha
-                )
-                if saved is not None and saved.failed_record_id == candidate.record_id:
-                    feedback = feedback_store.read_merge_train_pr_feedback_record(
-                        receipt_id(snapshot.repository, entry.pull_request_number, entry.head_sha)
-                    )
-            except (AttributeError, OSError, ValueError, TypeError, KeyError):
-                continue
         if candidate.block_intent is None and failed.batch_id in explicit_batches:
             # A saved decision owns this failure's provenance. An older
             # generic outcome must not replace its missing current event proof.
@@ -128,8 +115,7 @@ def recover_candidate_block(
         ):
             continue
         if (
-            (feedback is None and candidate.block_intent is None)
-            or candidate.ordinary_job_binding is not None
+            candidate.ordinary_job_binding is not None
             or not candidate.source.startswith("service:controller:")
             or failed.status != "failed"
             or failed.required_checks_status != "fail"
@@ -143,6 +129,19 @@ def recover_candidate_block(
         if entry.pull_request_number not in blocked or (
             feedback is not None and entry.pull_request_number != feedback.pull_request_number
         ):
+            continue
+        if feedback is None and candidate.block_intent is None:
+            # Later feedback can supersede the latest blocked projection. The
+            # exact committed reservation retains this legacy decision itself.
+            try:
+                saved = reservation_for(entry.pull_request_number, entry.head_sha)
+                if saved is not None and saved.failed_record_id == candidate.record_id:
+                    feedback = feedback_store.read_merge_train_pr_feedback_record(
+                        receipt_id(snapshot.repository, entry.pull_request_number, entry.head_sha)
+                    )
+            except (AttributeError, OSError, ValueError, TypeError, KeyError):
+                continue
+        if feedback is None and candidate.block_intent is None:
             continue
         current = blocked[entry.pull_request_number]
         legacy_writer_app_id = None
@@ -174,6 +173,7 @@ def recover_candidate_block(
             source_app = targets[0].github_token.github_app
             legacy_writer_app_id = source_app.app_id if source_app is not None else None
         setup_failure_evidence = None
+        reservation = None
         if current.head_sha == entry.head_sha:
             if (
                 current.required_checks_status != "pass"
@@ -187,36 +187,29 @@ def recover_candidate_block(
                 or failed.batch_body_retry_of
             ):
                 continue
-            from control_plane.merge_train_github import MergeTrainGitHubError
-
             try:
-                if not client.candidate_block_recovery_provenance(
-                    candidate=candidate,
-                    feedback=feedback,
-                    policy=policy,
-                    legacy_writer_app_id=legacy_writer_app_id,
-                ):
-                    continue
-                reservation = read_setup_recovery_receipt(
-                    store, snapshot.repository, entry.pull_request_number, entry.head_sha
-                )
+                reservation = reservation_for(entry.pull_request_number, entry.head_sha)
                 if reservation is not None and reservation.failed_record_id != candidate.record_id:
                     continue
-                setup_failure_evidence = client.read_setup_failure_recovery(candidate=failed)
-            except MergeTrainGitHubError as error:
-                if error.rate_limited or error.status_code in {401, 403}:
-                    raise
-                continue
             except (OSError, ValueError, TypeError, KeyError):
                 continue
+
+        def load_setup_evidence() -> MergeTrainSetupFailureRecovery | None:
+            nonlocal setup_failure_evidence
+            setup_failure_evidence = client.read_setup_failure_recovery(candidate=failed)
             if setup_failure_evidence is None:
-                continue
+                return None
             if reservation is not None:
                 setup_failure_evidence = setup_failure_evidence.model_copy(
                     update={"ready_comment_floor": reservation.evidence.ready_comment_floor}
                 )
                 if reservation.evidence != setup_failure_evidence:
-                    continue
+                    return None
+            cast(dict[str, object], result["details"])["setup_failure_evidence"] = (
+                setup_failure_evidence.model_dump(mode="json")
+            )
+            return setup_failure_evidence
+
         result: dict[str, object] = {
             "repository": snapshot.repository,
             "base_branch": snapshot.base_branch,
@@ -224,7 +217,7 @@ def recover_candidate_block(
             "controller_action": "recover_candidate_block",
             "reason_code": (
                 "candidate_block_unrelated_setup_reviewed"
-                if setup_failure_evidence
+                if current.head_sha == entry.head_sha
                 else "candidate_block_new_head_reviewed"
             ),
             "merge_train_batch_candidate_record_id": candidate.record_id,
@@ -240,11 +233,6 @@ def recover_candidate_block(
                 ),
                 "block_feedback_id": feedback.feedback_id if feedback is not None else "",
                 "block_removed": mutate,
-                **(
-                    {"setup_failure_evidence": setup_failure_evidence.model_dump(mode="json")}
-                    if setup_failure_evidence
-                    else {}
-                ),
                 "next_action": "Post a fresh checked gh-pr.py ready handoff for the current head.",
             },
         }
@@ -268,7 +256,9 @@ def recover_candidate_block(
             legacy_writer_app_id=legacy_writer_app_id,
             mutate=mutate,
             before_remove=checkpoint,
-            setup_failure_evidence=setup_failure_evidence,
+            setup_failure_evidence=(
+                load_setup_evidence if current.head_sha == entry.head_sha else None
+            ),
         ):
             return result
     return None

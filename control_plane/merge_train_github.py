@@ -2464,27 +2464,6 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
 
         return candidate_block_application(self, candidate=candidate, policy=policy)
 
-    def candidate_block_recovery_provenance(
-        self,
-        *,
-        candidate: MergeTrainBatchCandidateRecord,
-        feedback: MergeTrainPrFeedbackRecord | None,
-        policy: MergeTrainRepositoryPolicy,
-        legacy_writer_app_id: int | None,
-    ) -> bool:
-        from control_plane.merge_train_github_block_recovery import candidate_block_label_event
-
-        return (
-            candidate_block_label_event(
-                client=self,
-                candidate=candidate,
-                feedback=feedback,
-                policy=policy,
-                legacy_writer_app_id=legacy_writer_app_id,
-            )
-            is not None
-        )
-
     def read_setup_failure_recovery(
         self, *, candidate: MergeTrainBatchCandidate
     ) -> MergeTrainSetupFailureRecovery | None:
@@ -2504,7 +2483,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         legacy_writer_app_id: int | None,
         mutate: bool,
         before_remove: Callable[[], None],
-        setup_failure_evidence: MergeTrainSetupFailureRecovery | None = None,
+        setup_failure_evidence: Callable[[], MergeTrainSetupFailureRecovery | None] | None = None,
     ) -> bool:
         from control_plane.merge_train_github_block_recovery import recover_candidate_block
 

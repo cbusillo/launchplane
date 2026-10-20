@@ -28,7 +28,7 @@ from control_plane.merge_train_github import (
     GitHubMergeTrainSnapshotReader,
     MergeTrainGitHubError,
 )
-from control_plane.merge_train_setup_recovery_receipt import read_setup_recovery_receipt
+from control_plane.merge_train_setup_recovery_receipt import read_setup_recovery_receipt, receipt_id
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy
@@ -464,6 +464,57 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
                 self.advance(mutate=True)["controller_action"], "recover_candidate_block"
             )
             self.assertEqual(len(self.mutations), 1)
+
+    def test_unreviewed_or_spent_recovery_does_not_fetch_causal_evidence(self) -> None:
+        self.setup_missing_store_failure()
+        read = Mock(wraps=self.client.read_setup_failure_recovery)
+        self.client.read_setup_failure_recovery = read  # type: ignore[method-assign]
+        comments = self.comments
+        self.comments = []
+        self.assertNotEqual(
+            self.advance(mutate=True)["controller_action"], "recover_candidate_block"
+        )
+        read.assert_not_called()
+        self.comments = comments
+        self.advance(mutate=True)
+        self.current = self.current.model_copy(update={"labels": (self.target.blocked_label,)})
+        different = self.record.model_copy(update={"record_id": "different-failure"})
+        self.transport.request.reset_mock()
+        with patch.object(
+            self.store, "list_merge_train_batch_candidate_records", return_value=(different,)
+        ):
+            self.assertNotEqual(
+                self.advance(mutate=True)["controller_action"], "recover_candidate_block"
+            )
+        self.transport.request.assert_not_called()
+
+    def test_unblocked_legacy_history_needs_no_receipt_reads(self) -> None:
+        self.setup_missing_store_failure()
+        self.comments = []
+        for index in range(3):
+            entry = self.record.candidate.entries[0].model_copy(
+                update={"pull_request_number": 1000 + index}
+            )
+            self.store.write_merge_train_batch_candidate_record(
+                self.record.model_copy(
+                    update={
+                        "record_id": f"legacy-{index}",
+                        "block_intent": None,
+                        "candidate": self.record.candidate.model_copy(update={"entries": (entry,)}),
+                    }
+                )
+            )
+        with patch.object(
+            self.store,
+            "read_merge_train_pr_feedback_record",
+            wraps=self.store.read_merge_train_pr_feedback_record,
+        ) as read:
+            self.assertNotEqual(self.advance()["controller_action"], "recover_candidate_block")
+        historical_keys = {
+            receipt_id(self.target.repository, 1000 + index, self.old.head_sha)
+            for index in range(3)
+        }
+        self.assertTrue(historical_keys.isdisjoint(call.args[0] for call in read.call_args_list))
 
     def test_optional_setup_evidence_denial_preserves_hold_and_other_train_work(self) -> None:
         self.setup_missing_store_failure()
