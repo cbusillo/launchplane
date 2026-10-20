@@ -1008,7 +1008,11 @@ def apply_live_target_runtime_environment(
                 desired_env_map=desired_env_map,
                 retired_keys=retired_keys,
             )
-            env_text = dokploy_api.serialize_dokploy_env_text(updated_env_map)
+            env_text = dokploy_api.serialize_dokploy_env_text(
+                updated_env_map,
+                target_type=target_definition.target_type,
+                compose_type=str(refreshed_payload.get("composeType") or "docker-compose"),
+            )
             with provider_mutation_guard() if provider_mutation_guard else nullcontext():
                 if before_provider_mutation is not None:
                     before_provider_mutation()

@@ -78,3 +78,59 @@ class DokployEnvironmentTests(unittest.TestCase):
             api.parse_dokploy_env_text(rendered),
             {"KEEP": "first#second\nthird", "CHANGE": '"new"'},
         )
+
+    def test_compose_readback_merge_and_retirement_use_literal_values(self) -> None:
+        values = {"KEEP": '"quoted" $NAME\nnext', "REMOVE": "old"}
+        stored = api.serialize_dokploy_env_text(values, target_type="compose")
+        self.assertEqual(api.parse_dokploy_env_text(stored), values)
+        updated = api.render_dokploy_env_text_with_overrides(
+            stored, updates={"NEW": "new"}, removals=("REMOVE",), target_type="compose"
+        )
+        self.assertEqual(
+            api.parse_dokploy_env_text(updated), {"KEEP": values["KEEP"], "NEW": "new"}
+        )
+        self.assertEqual(
+            api.serialize_dokploy_env_text(
+                api.parse_dokploy_env_text(updated), target_type="compose"
+            ),
+            updated,
+        )
+
+    def test_compose_refuses_reserved_substitutions_and_unrepresentable_values(self) -> None:
+        from unittest.mock import patch
+
+        for value in ("${{project.INPUT}}", "nul\x00value", "'\"`#\\n\rvalue"):
+            with self.subTest(value=value), patch.object(api, "dokploy_request") as request:
+                with self.assertRaises(api.DokployEnvironmentEncodingError) as error:
+                    api.update_dokploy_target_env(
+                        host="https://provider.invalid",
+                        token="synthetic",
+                        target_type="compose",
+                        target_id="synthetic",
+                        target_payload={"env": ""},
+                        env_text=api.serialize_dokploy_env_text({"APP": value}),
+                    )
+                request.assert_not_called()
+                self.assertNotIn(value, str(error.exception))
+
+    def test_compose_encoding_does_not_hide_platform_credentials(self) -> None:
+        from unittest.mock import patch
+
+        import click
+
+        stored = api.serialize_dokploy_env_text(
+            {"DOKPLOY_TOKEN": '"synthetic token"'}, target_type="compose"
+        )
+        with (
+            patch.object(api, "dokploy_request") as request,
+            self.assertRaises(click.ClickException),
+        ):
+            api.update_dokploy_target_env(
+                host="https://provider.invalid",
+                token="synthetic",
+                target_type="compose",
+                target_id="synthetic",
+                target_payload={"env": ""},
+                env_text=stored,
+            )
+        request.assert_not_called()

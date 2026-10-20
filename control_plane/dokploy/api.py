@@ -831,6 +831,8 @@ def render_dokploy_env_text_with_overrides(
     *,
     updates: Mapping[str, str] | None = None,
     removals: tuple[str, ...] = (),
+    target_type: str = "application",
+    compose_type: str = "docker-compose",
 ) -> str:
     env_map = parse_dokploy_env_text(raw_env_text)
     for env_key in removals:
@@ -838,7 +840,7 @@ def render_dokploy_env_text_with_overrides(
     if updates is not None:
         for env_key, env_value in updates.items():
             env_map[env_key] = env_value
-    return serialize_dokploy_env_text(env_map)
+    return serialize_dokploy_env_text(env_map, target_type=target_type, compose_type=compose_type)
 
 
 def refuse_app_runtime_env_write(*, env_text: str, current_env_text: str, target: str) -> None:
@@ -875,6 +877,11 @@ def update_dokploy_target_env(
             target=f"Dokploy {target_type} {target_id}",
         )
     if target_type == "compose":
+        env_text = serialize_dokploy_env_text(
+            parse_dokploy_env_text(env_text),
+            target_type="compose",
+            compose_type=str(target_payload.get("composeType") or "docker-compose"),
+        )
         dokploy_request(
             host=host,
             token=token,

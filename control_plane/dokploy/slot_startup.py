@@ -79,6 +79,13 @@ def merge_startup_environment(
     return "".join(lines)
 
 
+def merge_provider_startup_environment(
+    raw: str, settings: dict[str, Any], payload_key: str, indexing_key: str
+) -> str:
+    merged = merge_startup_environment(raw, settings, payload_key, indexing_key)
+    return api.serialize_dokploy_env_text(api.parse_dokploy_env_text(merged), target_type="compose")
+
+
 def startup_file_program() -> str:
     # Use the same merger for provider records and the host's durable env file.
     # The host needs only its existing Python and Compose, not this package.
@@ -405,7 +412,7 @@ class DokploySlotStartup:
                     target_type="compose",
                     target_id=project.slot.compose_id,
                 )
-                merge_startup_environment(
+                merge_provider_startup_environment(
                     str(target.get("env") or ""),
                     intent.settings.model_dump(mode="json"),
                     ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY,
@@ -438,7 +445,7 @@ class DokploySlotStartup:
                 target_type="compose",
                 target_id=project.slot.compose_id,
             )
-            desired = merge_startup_environment(
+            desired = merge_provider_startup_environment(
                 str(current.get("env") or ""),
                 intent.settings.model_dump(mode="json"),
                 ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY,

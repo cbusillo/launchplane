@@ -2581,15 +2581,12 @@ def execute_odoo_stable_target_replacement_apply(
                 "replacement.",
                 tuple(provider_only_keys),
             )
-        # Preserve the Compose preflight's existing single-line/trim boundary:
-        # its later environment-file consumer is not the application consumer.
+        # Qualify both provider parsing and Compose's generated .env stage
+        # before allocation, schedule or provider effects.
         unportable_keys: list[str] = []
         for key, value in runtime_environment_values.items():
-            if value.rstrip() != value or (value and value.splitlines() != [value]):
-                unportable_keys.append(key)
-                continue
             try:
-                dokploy_api.serialize_dokploy_env_text({key: value})
+                dokploy_api.serialize_dokploy_env_text({key: value}, target_type="compose")
             except dokploy_api.DokployEnvironmentEncodingError:
                 unportable_keys.append(key)
         if unportable_keys:
@@ -2823,7 +2820,7 @@ def execute_odoo_stable_target_replacement_apply(
             target_type="compose",
             target_id=target_id_record.target_id,
             target_payload=target_payload,
-            env_text=dokploy_api.serialize_dokploy_env_text(desired_env_map),
+            env_text=dokploy_api.serialize_dokploy_env_text(desired_env_map, target_type="compose"),
         )
         refreshed_payload = dokploy_api.fetch_dokploy_target_payload(
             host=host,

@@ -51,6 +51,36 @@ Production callers import the canonical owning module. The
 and new code patch dependencies at the canonical module so the compatibility
 surface does not become a second implementation authority.
 
+### Environment wire formats
+
+Dokploy application targets consume one dotenv layer. Docker Compose targets
+consume two: Dokploy parses the stored environment and writes those values to
+the generated `.env`, which Compose then reads for interpolation and `env_file`.
+The adapter adds the second layer of quoting and dollar escaping for Compose,
+with a format comment so readback, merges, credential checks and retirement
+recover the literal values. Legacy unmarked environments keep their first-stage
+meaning and move to this encoding on the next ordinary environment write. The
+wire quotes are transport data, not extra quotes in product settings. Swarm
+stack targets retain their separate shell-export format.
+
+Render the target-specific environment before recording its write checkpoint.
+Multiline text, surrounding quotes, whitespace, backslashes and ordinary dollar
+expressions are supported when both provider stages can represent them. NUL,
+some combinations of quote delimiters and escape sequences, and literal
+Dokploy substitution expressions are refused without printing values or issuing
+the environment write. For a Compose-only encoding refusal, use an application
+target through the supported lane setup; do not flatten or encode product
+settings. Dokploy's reserved substitution expressions require a provider that
+can consume them literally if they are intended as literal input.
+
+`scripts/qualify-dokploy-compose-environment.sh` exercises the tracked pinned
+Dokploy generated-file functions and actual Compose `config`, covering both
+interpolation and service `env_file` consumption with synthetic values only.
+Provision Node through the repository's CI Node setup and Compose through
+`scripts/setup-ci-compose.sh` using the CI-declared version before running it.
+The frontend validation CI job runs this qualification; ordinary unit discovery
+does not depend on a developer's installed Node or Compose. No containers start.
+
 Odoo post-deploy sender verification follows the deployed image's bootstrap
 contract. On a rollback or exact artifact re-deploy, when a company email is
 requested, the maintenance schedule reads and

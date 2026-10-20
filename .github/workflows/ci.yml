@@ -574,6 +574,12 @@ jobs:
       - name: Install Python
         run: uv python install 3.14
 
+      - name: Set up Docker Compose
+        run: bash scripts/setup-ci-compose.sh
+
+      - name: Qualify Dokploy Compose environment consumer
+        run: bash scripts/qualify-dokploy-compose-environment.sh
+
       - name: Enable pnpm
         run: |
           corepack enable
