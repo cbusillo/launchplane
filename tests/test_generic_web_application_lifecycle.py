@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from contextlib import nullcontext
 from pathlib import Path
 from typing import cast
 import unittest
@@ -14,6 +15,7 @@ from control_plane.contracts.generic_web_extensions import (
 from control_plane.contracts.promotion_record import PostDeployUpdateEvidence
 from control_plane.dokploy import api
 from control_plane.generic_web_deploy_http import GenericWebDeployEnvelope
+from control_plane.generic_web_testing_inputs import TestingInputSafetyRefused
 from control_plane.generic_web_deploy_provider_adapter import (
     GenericWebDeployProviderMutationAdapter,
 )
@@ -96,7 +98,12 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
             raise click.ClickException("application command failed")
 
     def _deploy(
-        self, *, failure_command: str = "", verification_fails: bool = False, reset: bool = False
+        self,
+        *,
+        failure_command: str = "",
+        verification_fails: bool = False,
+        reset: bool = False,
+        input_refusal: bool = False,
     ) -> tuple[GenericWebDeployResult, _GenericWebDeployStore]:
         self.failure_command = failure_command
         profile = _profile()
@@ -127,6 +134,13 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
             )
 
         with (
+            patch.object(
+                provider,
+                "execute_artifact_deploy",
+                side_effect=TestingInputSafetyRefused("input authority changed"),
+            )
+            if input_refusal
+            else nullcontext(),
             patch(
                 "control_plane.dokploy.source.read_dokploy_config",
                 return_value=("https://provider.example", "test-token"),
@@ -145,6 +159,17 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
                 provider_effect_checkpoint=self.phases.append,
             )
         return result, store
+
+    def test_input_refusal_after_quiesce_restores_schedules_and_records_failure(self) -> None:
+        result, store = self._deploy(input_refusal=True)
+        self.assertEqual(result.deploy_status, "fail")
+        self.assertIn("application_schedule_quiesce", self.phases)
+        self.assertEqual(self.schedules["billing-recovery"], self.original)
+        record = store.read_deployment_record(result.deployment_record_id)
+        self.assertEqual(record.deploy.status, "fail")
+        receipt = recorded_application_lifecycle(record)
+        assert receipt is not None
+        self.assertEqual(receipt.state, "restored")
 
     def test_testing_reset_is_explicit_and_uses_the_disposable_lane_guard(self) -> None:
         reset_command = GenericWebMaintenanceCommand(

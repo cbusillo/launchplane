@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Callable, Literal, Protocol, cast
 
 import click
+from control_plane.generic_web_testing_inputs import TestingInputSafetyRefused
 from control_plane.provider_operations import ProviderMutationUnknownError
 from control_plane.lane_movement import (
     LaneBuild,
@@ -484,6 +485,7 @@ def execute_generic_web_deploy(
     deployment_record_id: str = "",
     provider_effect_checkpoint: Callable[[str], None] | None = None,
     before_records_commit: Callable[[], None] | None = None,
+    before_failure_records_commit: Callable[[], None] | None = None,
     recorded_artifact: bool = False,
     rollback: bool = False,
     proved_pre_image_retry: bool = False,
@@ -602,6 +604,7 @@ def execute_generic_web_deploy(
             deployment_record_id=deployment_record_id,
             provider_effect_checkpoint=provider_effect_checkpoint,
             before_records_commit=before_records_commit,
+            before_failure_records_commit=before_failure_records_commit,
             recorded_artifact=recorded_artifact,
             rollback=rollback,
             proved_pre_image_retry=proved_pre_image_retry,
@@ -625,6 +628,7 @@ def _execute_generic_web_deploy_unserialized(
     deployment_record_id: str = "",
     provider_effect_checkpoint: Callable[[str], None] | None = None,
     before_records_commit: Callable[[], None] | None = None,
+    before_failure_records_commit: Callable[[], None] | None = None,
     recorded_artifact: bool = False,
     rollback: bool = False,
     proved_pre_image_retry: bool = False,
@@ -670,6 +674,19 @@ def _execute_generic_web_deploy_unserialized(
     )
     started_at = utc_now_timestamp()
     fallback_request: ShipRequest | None = None
+    post_deploy_update = PostDeployUpdateEvidence()
+    verified_build_evidence: dict[str, str] = {}
+    try:
+        prior_attempt = record_store.read_deployment_record(record_id)
+    except FileNotFoundError:
+        pass
+    else:
+        # A refusal before dispatch must retain the original attempt's receipts.
+        verified_build_evidence = dict(prior_attempt.runtime_source)
+        if recorded_application_lifecycle(prior_attempt) is not None:
+            post_deploy_update = PostDeployUpdateEvidence(
+                evidence=prior_attempt.post_deploy_update.evidence
+            )
 
     try:
         fallback_request = _fallback_ship_request(
@@ -703,6 +720,8 @@ def _execute_generic_web_deploy_unserialized(
                 artifact_id=request.artifact_id,
                 include_deploy_reference=False,
             )
+        if before_failure_records_commit is not None:
+            before_failure_records_commit()
         record_store.write_deployment_record(
             build_deployment_record(
                 request=fallback_request,
@@ -712,6 +731,8 @@ def _execute_generic_web_deploy_unserialized(
                 started_at=started_at,
                 finished_at=finished_at,
                 delegated_executor=resolved_deploy_provider.delegated_executor,
+                post_deploy_update=post_deploy_update,
+                runtime_source=verified_build_evidence,
             )
         )
         return GenericWebDeployResult(
@@ -728,27 +749,30 @@ def _execute_generic_web_deploy_unserialized(
     deploy_completed = False
     provider_effect_attempted = False
     image_effect_attempted = False
+    last_provider_phase = ""
+    dispatch_refused = False
     provider_deployment_observation: GenericWebProviderDeploymentObservation | None = None
-    post_deploy_update = PostDeployUpdateEvidence()
-    try:
-        prior_attempt = record_store.read_deployment_record(record_id)
-    except FileNotFoundError:
-        pass
-    else:
-        if recorded_application_lifecycle(prior_attempt) is not None:
-            # Pre-effect refusals must not erase the original attempt's receipt.
-            post_deploy_update = PostDeployUpdateEvidence(
-                evidence=prior_attempt.post_deploy_update.evidence
-            )
     key_readback: IntegrationKeyReadbackEvidence | None = None
-    verified_build_evidence: dict[str, str] = {}
     application_lifecycle: GenericWebApplicationLifecycle | None = None
 
     def checkpoint_provider(phase: str) -> None:
-        nonlocal post_deploy_update
+        nonlocal post_deploy_update, last_provider_phase, dispatch_refused
         if provider_effect_checkpoint is not None:
             provider_effect_checkpoint(phase)
-        if phase == "provider_dispatch_prepared":
+        last_provider_phase = phase
+        from control_plane.generic_web_testing_inputs import TESTING_DISPATCH_REFUSED_PHASE
+
+        dispatch_refused = dispatch_refused or phase == TESTING_DISPATCH_REFUSED_PHASE
+        if phase in {"provider_dispatch_prepared", "runtime_inputs_verified"}:
+            from control_plane.generic_web_testing_inputs import DELIVERY_RECEIPT_KEY
+
+            if phase == "runtime_inputs_verified":
+                verified_build_evidence[DELIVERY_RECEIPT_KEY] = (
+                    prepared_deploy_target.testing_runtime_verified_digest
+                )
+            else:
+                # A retried dispatch earns delivery credit only at fresh readback.
+                verified_build_evidence.pop(DELIVERY_RECEIPT_KEY, None)
             # Value-free provider references join the already reserved original
             # request/target before any env write or deploy trigger can happen.
             post_deploy_update = post_deploy_update.model_copy(
@@ -781,12 +805,49 @@ def _execute_generic_web_deploy_unserialized(
         nonlocal provider_effect_attempted
         provider_effect_attempted = True
 
+    def require_cleanup_authority() -> None:
+        if prepared_deploy_target.testing_runtime_digest:
+            from control_plane.generic_web_testing_inputs import (
+                require_testing_application_target_authority,
+            )
+
+            require_testing_application_target_authority(
+                record_store,
+                resolved_profile,
+                resolved_lane,
+                target_id=resolved_target.target_id,
+                provider_id=resolved_deploy_provider.provider_id,
+            )
+
+    def lifecycle_checkpoint(phase: str) -> None:
+        if dispatch_refused:
+            require_cleanup_authority()
+        if provider_effect_checkpoint is not None:
+            provider_effect_checkpoint(phase)
+
     def mark_image_effect_started() -> None:
         nonlocal image_effect_attempted
-        image_effect_attempted = True
+        if last_provider_phase not in {"runtime_environment_update", "runtime_registry_prepare"}:
+            image_effect_attempted = True
         mark_provider_effect_started()
 
     try:
+        from control_plane.workflows.generic_web_deploy_provider import (
+            GenericWebTestingRuntimePreflightProvider,
+            prepare_generic_web_testing_runtime,
+        )
+
+        # Recovered targets carry captured authority, never serialized values.
+        # Legacy snapshots deliberately have no authority to backfill.
+        prepare_generic_web_testing_runtime(
+            prepared_deploy_target, record_store, resolved_profile, resolved_lane, capture=False
+        )
+        if prepared_deploy_target._testing_runtime_prepare is not None:
+            prepared_deploy_target._testing_runtime_prepare()
+        if isinstance(resolved_deploy_provider, GenericWebTestingRuntimePreflightProvider):
+            resolved_deploy_provider.preflight_testing_runtime(
+                control_plane_root=control_plane_root, target=prepared_deploy_target
+            )
         if request.reset:
             from control_plane.disposable_lanes import DisposableLaneStore, require_disposable_lane
 
@@ -851,7 +912,7 @@ def _execute_generic_web_deploy_unserialized(
         )
         if integration_key_refusal:
             raise click.ClickException(integration_key_refusal)
-        verified_build_evidence = lane_build_proof(desired_build)
+        verified_build_evidence.update(lane_build_proof(desired_build))
         snapshot = application_snapshot_for_deploy(
             store=record_store,
             product=resolved_profile.product,
@@ -876,7 +937,7 @@ def _execute_generic_web_deploy_unserialized(
             provider=resolved_deploy_provider,
             target_type=resolved_target.target_type,
             target_id=resolved_target.target_id,
-            checkpoint=provider_effect_checkpoint or (lambda _phase: None),
+            checkpoint=lifecycle_checkpoint,
             effect_started=mark_provider_effect_started,
         )
         if application_lifecycle is not None:
@@ -994,11 +1055,12 @@ def _execute_generic_web_deploy_unserialized(
                     **application_lifecycle.snapshot.evidence(),
                 },
             )
-    except click.ClickException as exc:
+    except (click.ClickException, TestingInputSafetyRefused) as exc:
         if isinstance(exc, GenericWebProviderDeploymentFailed):
             provider_deployment_observation = exc.observation
         if application_lifecycle is not None:
             try:
+                require_cleanup_authority()
                 if (
                     image_effect_attempted
                     or application_lifecycle.snapshot.resume_from_hold
@@ -1013,7 +1075,13 @@ def _execute_generic_web_deploy_unserialized(
                     application_lifecycle.snapshot.state = "restore_failed"
                     application_lifecycle.restore()
                     application_lifecycle.snapshot.state = "restored"
-            except click.ClickException as restore_error:
+            except (
+                click.ClickException,
+                TestingInputSafetyRefused,
+                FileNotFoundError,
+            ) as restore_error:
+                if dispatch_refused:
+                    application_lifecycle.snapshot.state = "held"
                 exc = click.ClickException(f"{exc}\n{restore_error}")
             post_deploy_update = PostDeployUpdateEvidence(
                 attempted=application_lifecycle.effect_attempted,
@@ -1077,9 +1145,15 @@ def _execute_generic_web_deploy_unserialized(
             deployment_record = deployment_record.model_copy(
                 update={"failure": exc.record_failure()}
             )
-        if before_records_commit is not None:
+        if before_failure_records_commit is not None:
+            before_failure_records_commit()
+        elif before_records_commit is not None:
             before_records_commit()
         record_store.write_deployment_record(deployment_record)
+        if isinstance(exc, TestingInputSafetyRefused) and not provider_effect_attempted:
+            # The durable runner releases a pre-effect refusal after publishing
+            # its failed record; effects already attempted stay result-classified.
+            raise exc
         if isinstance(exc, LaneMovementRefused) and exc.code == "source_order_unavailable":
             raise
         if deploy_completed:
@@ -1254,6 +1328,7 @@ def record_observed_generic_web_deploy(
         ),
         post_deploy_update=post_deploy_update,
         runtime_identity=runtime_identity,
+        runtime_source=existing_record.runtime_source if existing_record is not None else {},
     )
     record_store.write_deployment_record(deployment_record)
     if deploy_status == "pass":

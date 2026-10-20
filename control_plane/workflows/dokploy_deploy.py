@@ -17,6 +17,40 @@ from control_plane.contracts.runtime_identity import (
 )
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.dokploy import api as dokploy_api
+from control_plane.runtime_environments import merge_provider_environment
+from control_plane import runtime_platform_credentials
+from control_plane.generic_web_testing_inputs import TestingInputSafetyRefused
+
+
+def require_dokploy_testing_environment_representable(values: dict[str, str]) -> str:
+    env_text = dokploy_api.serialize_dokploy_env_text(values)
+    if dokploy_api.parse_dokploy_env_text(env_text) != values:
+        raise TestingInputSafetyRefused(
+            "Application testing runtime inputs cannot be represented by the provider environment format."
+        )
+    return env_text
+
+
+def prepare_dokploy_testing_environment(
+    *,
+    target_payload: dokploy_api.JsonObject,
+    desired: dict[str, str],
+    retired_keys: frozenset[str],
+) -> str:
+    """Validate the complete prospective environment without changing the provider."""
+    merged = merge_provider_environment(
+        current_env_map=dokploy_api.parse_dokploy_env_text(str(target_payload.get("env") or "")),
+        desired_env_map=desired,
+        retired_keys=retired_keys,
+    )
+    findings = runtime_platform_credentials.find_platform_credentials(merged)
+    if findings:
+        raise TestingInputSafetyRefused(
+            "Application testing provider environment contains platform credentials: "
+            + ", ".join(sorted({finding.key for finding in findings}))
+            + ". Retire these provider keys through product configuration first."
+        )
+    return require_dokploy_testing_environment_representable(merged)
 
 
 def dokploy_deploy_artifact_reference(
@@ -42,6 +76,9 @@ def update_dokploy_target_artifact(
     runtime_identity: RuntimeIdentity | None = None,
     before_provider_mutation: Callable[[str], None] | None = None,
     effect_started: Callable[[], None] | None = None,
+    runtime_environment: dict[str, str] | None = None,
+    retired_runtime_keys: frozenset[str] = frozenset(),
+    runtime_verified: Callable[[], None] | None = None,
 ) -> None:
     target_payload = dokploy_api.fetch_dokploy_target_payload(
         host=host,
@@ -57,19 +94,47 @@ def update_dokploy_target_artifact(
                 "Dokploy cannot save repo@sha256:<digest> on application targets with a "
                 "saved Registry Swarm."
             )
+        env_text: str | None = None
+        desired: dict[str, str] = {}
+        if runtime_identity is not None or runtime_environment is not None:
+            desired = {
+                **(runtime_environment or {}),
+                **(runtime_identity_env(runtime_identity) if runtime_identity else {}),
+            }
+            merged = merge_provider_environment(
+                current_env_map=dokploy_api.parse_dokploy_env_text(
+                    str(target_payload.get("env") or "")
+                ),
+                desired_env_map=desired,
+                retired_keys=retired_runtime_keys,
+            )
+            env_text = (
+                prepare_dokploy_testing_environment(
+                    target_payload=target_payload,
+                    desired=desired,
+                    retired_keys=retired_runtime_keys,
+                )
+                if runtime_environment is not None
+                else dokploy_api.serialize_dokploy_env_text(merged)
+            )
+        if runtime_environment is not None and target_payload.get("registryId"):
+            if before_provider_mutation is not None:
+                before_provider_mutation("runtime_registry_prepare")
+            if effect_started is not None:
+                effect_started()
         _prepare_saved_registry_login(
             host=host,
             token=token,
             artifact_id=artifact_id,
             target_payload=target_payload,
         )
-        if runtime_identity is not None:
-            env_text = dokploy_api.render_dokploy_env_text_with_overrides(
-                str(target_payload.get("env") or ""),
-                updates=runtime_identity_env(runtime_identity),
-            )
+        if env_text is not None:
             if before_provider_mutation is not None:
-                before_provider_mutation("target_update")
+                before_provider_mutation(
+                    "runtime_environment_update"
+                    if runtime_environment is not None
+                    else "target_update"
+                )
             if effect_started is not None:
                 effect_started()
             dokploy_api.update_dokploy_target_env(
@@ -80,6 +145,20 @@ def update_dokploy_target_artifact(
                 target_payload=target_payload,
                 env_text=env_text,
             )
+            if runtime_environment is not None:
+                persisted = dokploy_api.fetch_dokploy_target_payload(
+                    host=host, token=token, target_type=target_type, target_id=target_id
+                )
+                values = dokploy_api.parse_dokploy_env_text(str(persisted.get("env") or ""))
+                if (
+                    any(values.get(key) != value for key, value in desired.items())
+                    or retired_runtime_keys & values.keys()
+                ):
+                    raise TestingInputSafetyRefused(
+                        "Application testing runtime environment readback failed."
+                    )
+                if runtime_verified is not None:
+                    runtime_verified()
         if before_provider_mutation is not None:
             before_provider_mutation("target_update")
         if effect_started is not None:
@@ -219,6 +298,9 @@ def execute_dokploy_artifact_deploy(
     deployment_title: str = "",
     before_provider_mutation: Callable[[str], None] | None = None,
     effect_started: Callable[[], None] | None = None,
+    runtime_environment: dict[str, str] | None = None,
+    retired_runtime_keys: frozenset[str] = frozenset(),
+    runtime_verified: Callable[[], None] | None = None,
     accept_sole_new_deployment: bool = False,
     dispatch_evidence_checkpoint: Callable[[frozenset[str]], None] | None = None,
 ) -> dokploy_api.JsonObject | None:
@@ -268,6 +350,9 @@ def execute_dokploy_artifact_deploy(
         runtime_identity=runtime_identity,
         before_provider_mutation=before_provider_mutation,
         effect_started=effect_started,
+        runtime_environment=runtime_environment,
+        retired_runtime_keys=retired_runtime_keys,
+        runtime_verified=runtime_verified,
     )
     if before_provider_mutation is not None:
         before_provider_mutation("deploy_trigger")

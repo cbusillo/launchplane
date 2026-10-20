@@ -14,7 +14,11 @@ from control_plane.contracts.idempotency_record import (
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.generic_web_deploy_http import GENERIC_WEB_DEPLOY_ROUTE
-from control_plane.provider_operations import build_provider_operation_key, provider_operation_title
+from control_plane.provider_operations import (
+    DurableProviderOperationResult,
+    build_provider_operation_key,
+    provider_operation_title,
+)
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.generic_web_deploy_provider import (
     GenericWebDeployNoLiveEffectProvider,
@@ -33,6 +37,92 @@ from control_plane.workflows.generic_web_post_deploy import (
 
 def testing_event_execution_lock_name(target_key: str) -> str:
     return f"event-deploy:{target_key}"
+
+
+def settle_obsolete_testing_event_deploy(
+    *,
+    store: object,
+    reservation: LaunchplaneIdempotencyRecord,
+    profile: LaunchplaneProductProfileRecord,
+    context: str,
+    current_target_key: str,
+    desired_fingerprint: str,
+    provider: GenericWebDeployProvider,
+    root: Path,
+    trace_id: str,
+    check_execution_lock: Callable[[], None],
+) -> DurableProviderOperationResult | None:
+    """Recover the original request before considering a different candidate."""
+    from control_plane.event_deploy_recovery_reference import (
+        resolve_event_deploy_recovery_coordinates,
+    )
+    from control_plane.generic_web_deploy_provider_adapter import (
+        GenericWebDeployProviderMutationAdapter,
+    )
+    from control_plane.http_app import idempotency_request_fingerprint
+    from control_plane.provider_operations import (
+        run_durable_provider_operation,
+    )
+
+    if (
+        not isinstance(store, PostgresRecordStore)
+        or reservation.provider_target_key != current_target_key
+    ):
+        return None
+    try:
+        coordinates = resolve_event_deploy_recovery_coordinates(
+            store=store,
+            product=profile.product,
+            context=context,
+            fingerprint=idempotency_request_fingerprint,
+        )
+        if coordinates.reservation != reservation:
+            return None
+        lane = next(
+            item for item in profile.lanes if item.context == context and item.instance == "testing"
+        )
+        adapter = GenericWebDeployProviderMutationAdapter(
+            control_plane_root=root,
+            record_store=store,
+            deploy_request=coordinates.original_deploy,
+            profile=profile,
+            lane=lane,
+            trace_id=trace_id,
+            deploy_provider=provider,
+            recorded_artifact=True,
+            retain_event_request=True,
+            superseded_testing_candidate=reservation.request_fingerprint != desired_fingerprint,
+        )
+        adapter.execution_check = check_execution_lock
+        operation_key = build_provider_operation_key(
+            scope=reservation.scope,
+            route_path=reservation.route_path,
+            idempotency_key=reservation.idempotency_key,
+            request_fingerprint=reservation.request_fingerprint,
+            reconciliation_key=reservation.reconciliation_key,
+        )
+        adapter.inspect(
+            provider_operation_key=operation_key,
+            provider_effect_phase=reservation.provider_effect_phase,
+            reconciliation_key=reservation.reconciliation_key,
+            expected_provider_target_key=current_target_key,
+            no_effect_checkpoint=not reservation.provider_effect_phase
+            and not reservation.provider_effect_started_at,
+        )
+        if not adapter.testing_settlement_pending:
+            return None
+        return run_durable_provider_operation(
+            store=store,
+            scope=reservation.scope,
+            route_path=reservation.route_path,
+            idempotency_key=reservation.idempotency_key,
+            request_fingerprint=reservation.request_fingerprint,
+            lease_owner=trace_id,
+            response_trace_id=trace_id,
+            adapter=adapter,
+        )
+    except (FileNotFoundError, ValueError, click.ClickException):
+        return None
 
 
 def retire_unavailable_testing_event_deploy(
