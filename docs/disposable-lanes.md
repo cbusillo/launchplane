@@ -2597,13 +2597,18 @@ execution. Existing read authority covers planning and readback. It is a source
 capability until the completing PR is deployed; a missing route is unavailable,
 not a reason to invoke a local live-target command.
 
-For a held execute that never produced its sanitized recovery copies, use
+For a held initial execute that never published its recovery copies, use
 `action: retire-incomplete` with the **unchanged original execute intent and
 execute key**. Take it through the same client dry-run, saved review, apply and
 readback. It accepts only `prepared` with no copy receipts and an exact original
-`reconcile_required` execute checkpoint. Its native scope is before the
-target-runtime switch, with no recorded copies: the source database
-must still be selected and the web writer stopped. Later-phase incomplete
+`reconcile_required` execute checkpoint. Its native scope covers both the
+source-selected runtime before the switch and an idle upgrade-selected runtime
+after the initial switch. The latter requires a verified initial sanitized
+source snapshot, with exact witness, capture lineage and database/filestore
+hashes. The review binds that receipt into its native disposal manifest;
+apply and readback retain it as `host_disposal.initial_source_snapshot` after
+disposal. It is initial input evidence, never a final-source, upgraded or
+post-write recovery tuple. The web writer must be stopped. Later-phase incomplete
 runtimes remain held for their qualified disposition. Verified, running,
 unbound or production-aliased operations refuse. Ordinary `retire` still requires both
 verified final recovery tuples; incomplete retirement produces neither tuple.
@@ -2615,8 +2620,11 @@ writer is stopped. A provider schedule reporting success without a valid,
 operation-bound host result is a refusal, not a qualified plan. It preserves
 the original hold and custody. Apply rechecks the reviewed binding, acquires
 the existing host lock, and records a private disposal manifest before
-stopping/removing only those containers, volumes and network. It deletes raw capture and partial host
-storage, including partial source snapshots, retaining only disposal/refusal
+stopping/removing only those containers, volumes and network. It independently
+confirms all three resource classes absent before deleting raw capture and
+partial host storage, including the verified initial source snapshot. Unknown
+or failed absence checks preserve that host custody for same-key continuation.
+It retains only disposal/refusal
 receipts and the unlocked lock file. It removes
 the isolated provider compose through the existing compose retirement path,
 then its empty project. No source read, source mutation, credential creation,
@@ -2658,6 +2666,11 @@ the placement has been removed. The client rejects a
 retirement result when an old execute request is replayed, so cancellation
 cannot be reported as a successful execute. A failed readback never authorizes
 a new capture.
+
+Retirement does not rerun the failed upgrade or reconstruct missing diagnostics.
+If a historical failure discarded the child error or exit status, they remain
+unknown. A later fresh rehearsal records its own error through the current
+diagnostic path; retirement itself supplies no diagnosis or upgrade proof.
 
 The existing disabled manual server schedule and purpose-local managed-secret
 records remain as audit/configuration metadata with no runtime consumer. The
