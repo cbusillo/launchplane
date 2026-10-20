@@ -4230,7 +4230,7 @@ for the Director's recorded decision to withdraw a pending labeled request.
 The request names `{product, repository, pull_request, expected_head_sha,
 reason, director_decision_url, mode, reviewed_plan_sha256}`. Apply and readback
 require the same original `Idempotency-Key`; apply binds the reviewed dry-run
-plan. Only an authenticated Director agent or admin may call it. The service
+plan. Only an authenticated Director agent or admin may apply it; dry-run and readback use product read authority. The service
 refuses any current-head Client decision before removing the configured label,
 records withdrawal history, and never supplies acceptance or changes release
 acceptance. See [pending request withdrawal](owner-acceptance.md#withdrawing-a-pending-request)

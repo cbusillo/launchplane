@@ -256,8 +256,16 @@ and adds a withdrawal entry to the PR history. Its durable operation retains
 the actor, head, reason and Director-decision citation. An uncertain response
 keeps the same request, digest and key; read back before recovery. Recovery can
 finish undelivered history after the label is absent, but never removes a label
-again. A completed-key replay returns its original receipt; readback reports
-whether it still matches current state.
+again. A pre-dispatch failure can resume the same reviewed operation. If a
+request is present after an uncertain dispatch, or the head or review authority
+changed, recovery settles the original key with `applied=false` and
+`replan_required=true`, preserving any unknown prior effects. It neither removes
+the current label nor claims withdrawal. Review a fresh dry run and use a new
+key to withdraw that request; the old operation no longer holds the PR busy.
+Unsettled calls report `product_review_withdrawal_unsettled`, distinct from a
+definite refusal. A completed-key replay returns its original receipt; readback reports
+whether it still matches current state. Replay and readback validate the saved
+original intent, so later unrelated profile edits do not invalidate receipts.
 
 Withdrawal records no acceptance or rejection, changes no saved Client decision,
 and changes no release acceptance. It does not rewrite test notes or publish a

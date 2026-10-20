@@ -27,6 +27,10 @@ class ReviewWithdrawalRefused(ValueError):
     pass
 
 
+class ReviewWithdrawalUnsettled(ReviewWithdrawalRefused):
+    """The provider effect is not yet settled; retain the original operation key."""
+
+
 class ReviewWithdrawalRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -68,13 +72,27 @@ class ReviewWithdrawalService:
     profile: LaunchplaneProductProfileRecord
     actor: str
 
+    def _authority_digest(self) -> str:
+        return hashlib.sha256(
+            json.dumps(
+                {
+                    "product": self.profile.product,
+                    "repository": self.profile.repository.casefold(),
+                    "owner": self.profile.owner.model_dump(mode="json"),
+                    "active": self.profile.is_active,
+                    "release_on_acceptance": self.profile.release_on_acceptance,
+                },
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+
     def _plan(self, request: ReviewWithdrawalRequest) -> dict[str, object]:
         return {
             **request.model_dump(mode="json", exclude={"mode", "reviewed_plan_sha256"}),
             "actor": self.actor,
             "review_label": self.profile.owner.review_label,
-            # Bind the Client and profile revision too, so rerouting cannot use a stale plan.
-            "profile_sha256": hashlib.sha256(self.profile.model_dump_json().encode()).hexdigest(),
+            # Bind review authority, so rerouting cannot use a stale Client or label.
+            "profile_sha256": self._authority_digest(),
         }
 
     def _pending(self, request: ReviewWithdrawalRequest, *, require_label: bool = True) -> None:
@@ -116,8 +134,24 @@ class ReviewWithdrawalService:
                 if key
                 else None
             )
-            if original is not None and original.request_fingerprint != fingerprint:
-                raise ReviewWithdrawalRefused("The key belongs to another withdrawal request.")
+            if original is not None:
+                saved_plan = self.store.read_original_mutation_intent(original)
+                submitted = request.model_dump(
+                    mode="json", exclude={"mode", "reviewed_plan_sha256"}
+                )
+                if (
+                    any(saved_plan.get(name) != value for name, value in submitted.items())
+                    or saved_plan.get("actor") != self.actor
+                ):
+                    raise ReviewWithdrawalRefused("The key belongs to another withdrawal request.")
+                plan = saved_plan
+                encoded = json.dumps(plan, sort_keys=True, separators=(",", ":"))
+                digest = hashlib.sha256(encoded.encode()).hexdigest()
+                fingerprint = hashlib.sha256(
+                    (encoded + request.reviewed_plan_sha256).encode()
+                ).hexdigest()
+                if original.request_fingerprint != fingerprint:
+                    raise ReviewWithdrawalRefused("The key belongs to another withdrawal request.")
             if request.mode == "readback":
                 if original is None:
                     raise ReviewWithdrawalRefused("No saved withdrawal exists for this key.")
@@ -127,19 +161,21 @@ class ReviewWithdrawalService:
                 # This is observation only. A later request is never removed on readback.
                 return {
                     **saved,
-                    "applied": original.state == "completed",
+                    "applied": original.state == "completed" and saved.get("applied") is True,
                     "head_sha": request.expected_head_sha,
                     "plan_sha256": digest,
                     "readback_matches": original.state == "completed"
+                    and saved.get("applied") is True
                     and head == request.expected_head_sha
-                    and self.profile.owner.review_label.casefold()
+                    and str(plan["review_label"]).casefold()
                     not in {label.casefold() for label in labels}
                     and bool(history_url)
                     and self.source.history(str(saved.get("history_marker", ""))) == history_url,
                 }
             if original is not None and original.state == "completed":
                 return cast(dict[str, object], original.response_payload["result"])
-            self._pending(request, require_label=original is None)
+            if original is None:
+                self._pending(request)
             if request.mode == "dry-run":
                 return {
                     "applied": False,
@@ -149,7 +185,12 @@ class ReviewWithdrawalService:
             if request.reviewed_plan_sha256 != digest:
                 raise ReviewWithdrawalRefused("The reviewed withdrawal plan changed. Review again.")
             adapter = _WithdrawalAdapter(
-                self, request, encoded, digest, trace, recovering=original is not None
+                self,
+                request,
+                encoded,
+                digest,
+                trace,
+                recovering=original is not None and bool(original.provider_effect_phase),
             )
             result = run_durable_provider_operation(
                 store=self.store,
@@ -165,7 +206,7 @@ class ReviewWithdrawalService:
                 original_intent=plan,
             )
             if result.status not in {"completed", "replayed", "adopted"}:
-                raise ReviewWithdrawalRefused(
+                raise ReviewWithdrawalUnsettled(
                     "Withdrawal outcome is unsettled. Preserve the original key and read back."
                 )
             return cast(dict[str, object], result.response_payload["result"])
@@ -210,23 +251,50 @@ class _WithdrawalAdapter:
         head, labels = self.service.source.change()
         marker = self._marker(provider_operation_key)
         url = self.service.source.history(marker)
+        if url:
+            # Published only after confirmed removal: a later request cannot undo
+            # the historical receipt, and is never removed by its recovery.
+            return ProviderObservation("present", response_payload=self._result(marker, url))
+        authority = json.loads(self.encoded_plan)
+        has_label = str(authority["review_label"]).casefold() in {
+            label.casefold() for label in labels
+        }
+        decided = any(
+            decision.product == self.request.product
+            and decision.head_sha == self.request.expected_head_sha
+            for decision in self.service.store.list_product_review_decision_records(
+                repository=self.service.profile.repository,
+                pull_request_number=self.request.pull_request,
+            )
+        )
         if (
             head == self.request.expected_head_sha
-            and self.service.profile.owner.review_label.casefold()
-            not in {label.casefold() for label in labels}
-            and url
+            and authority["profile_sha256"] == self.service._authority_digest()
+            and not decided
         ):
-            return ProviderObservation("present", response_payload=self._result(marker, url))
-        if (
-            provider_effect_phase == "withdraw-review-request"
-            and head == self.request.expected_head_sha
-            and self.service.profile.owner.review_label.casefold()
-            not in {label.casefold() for label in labels}
-        ):
-            # Only complete history after the original label is observably absent.
-            # Recovery never removes a label, so a renewed request is preserved.
-            return ProviderObservation("absent", retry_safe=True, preserve_effect_checkpoint=True)
-        return ProviderObservation("unknown")
+            if not provider_effect_phase and has_label:
+                # No mutation was dispatched. Resume with the same reviewed request.
+                return ProviderObservation("absent", retry_safe=True)
+            if provider_effect_phase and not has_label:
+                # Only finish history; never issue another label removal.
+                return ProviderObservation(
+                    "absent", retry_safe=True, preserve_effect_checkpoint=True
+                )
+        # The current labeled request may be newer, or its authority/head changed.
+        # Settle this original intent without claiming success or absence of prior
+        # effects. A fresh reviewed plan and new key can then address the request.
+        return ProviderObservation(
+            "present",
+            response_payload={
+                "result": {
+                    "applied": False,
+                    "replan_required": True,
+                    "prior_effects_unknown": bool(provider_effect_phase),
+                    "plan_sha256": self.digest,
+                    "head_sha": self.request.expected_head_sha,
+                }
+            },
+        )
 
     def apply(
         self, provider_operation_key: str, lease: ProviderOperationLease

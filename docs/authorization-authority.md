@@ -1202,8 +1202,8 @@ change alone is neither activation nor proof of the deployed policy version.
 `product_review.withdraw` is a write under the Director agent's existing
 standing permission. It creates no DB policy grant, credential, Client decision,
 release acceptance or merge authority. Only an authenticated Director agent or
-admin can withdraw; read-only identities, ordinary scoped agents and workflow
-identities cannot. Dry-run and readback reuse `product_profile.read` within the
-same caller boundary. The [withdrawal contract](owner-acceptance.md#withdrawing-a-pending-request)
+admin can apply withdrawal; read-only identities, ordinary scoped agents and workflow
+identities cannot. Dry-run and readback use `product_profile.read`; saved operation
+keys remain bound to the original caller. The [withdrawal contract](owner-acceptance.md#withdrawing-a-pending-request)
 requires a recorded Director decision, reason and exact reviewed head and
 refuses after a current-head Client decision.

@@ -23,6 +23,7 @@ from control_plane.product_review_withdrawal import (
     ReviewWithdrawalRequest,
     ReviewWithdrawalService,
     ReviewWithdrawalRefused,
+    ReviewWithdrawalUnsettled,
 )
 from control_plane.product_review_withdrawal_github import GitHubReviewWithdrawalSource
 from control_plane.service_auth import (
@@ -61,7 +62,7 @@ def register_product_review_withdrawal_route(
             or (isinstance(identity, GitHubHumanIdentity) and identity.role == "admin")
         )
         action = WITHDRAWAL_ACTION if body.mode == "apply" else "product_profile.read"
-        if not trusted or not dependencies.authorization_allows(
+        if (body.mode == "apply" and not trusted) or not dependencies.authorization_allows(
             identity=identity,
             action=action,
             product=body.product,
@@ -106,6 +107,8 @@ def register_product_review_withdrawal_route(
             result = await run_in_worker_thread(execute)
         except FileNotFoundError:
             refuse(404, "not_found", "The product profile was not found.")
+        except ReviewWithdrawalUnsettled as error:
+            refuse(409, "product_review_withdrawal_unsettled", str(error))
         except ReviewWithdrawalRefused as error:
             refuse(409, "product_review_withdrawal_refused", str(error))
         except (ValueError, click.ClickException, OSError):

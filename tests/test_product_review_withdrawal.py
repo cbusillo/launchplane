@@ -10,6 +10,7 @@ from control_plane.product_review_withdrawal import (
     ReviewWithdrawalRequest,
     ReviewWithdrawalService,
     ReviewWithdrawalRefused,
+    ReviewWithdrawalUnsettled,
 )
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.storage.postgres import PostgresRecordStore
@@ -202,6 +203,68 @@ class ReviewWithdrawalTests(unittest.TestCase):
         self.assertEqual(self.source.deletes, 1)
         self.assertEqual(len(self.source.comments), 1)
 
+    def test_before_checkpoint_failure_can_retry_the_original_request(self) -> None:
+        from unittest.mock import patch
+
+        plan = self.service.run(self.request, key="", trace="plan")
+        self.reviewed_request = self.request.model_copy(
+            update={"mode": "apply", "reviewed_plan_sha256": plan["plan_sha256"]}
+        )
+        current = self.source.change()
+        with patch.object(
+            self.source, "change", side_effect=[current, OSError("temporary evidence outage")]
+        ):
+            with self.assertRaises((OSError, ReviewWithdrawalRefused)):
+                self.apply()
+        self.assertEqual(self.source.deletes, 0)
+        self.assertTrue(self.apply()["applied"])
+
+    def test_renewed_request_settles_old_key_without_deletion_then_allows_fresh_review(
+        self,
+    ) -> None:
+        from unittest.mock import patch
+
+        remove = self.source.remove_label
+
+        def interrupted(label: str) -> None:
+            remove(label)
+            self.source.labels.add(label)
+            raise OSError("response lost after a later request")
+
+        with patch.object(self.source, "remove_label", side_effect=interrupted):
+            with self.assertRaises(ReviewWithdrawalRefused):
+                self.apply()
+        settled = self.apply()
+        self.assertFalse(settled["applied"])
+        self.assertTrue(settled["replan_required"])
+        self.assertIn(REVIEW_LABEL, self.source.labels)
+        self.assertEqual(self.source.deletes, 1)
+        plan = self.service.run(self.request, key="", trace="fresh-plan")
+        fresh = self.service.run(
+            self.request.model_copy(
+                update={"mode": "apply", "reviewed_plan_sha256": plan["plan_sha256"]}
+            ),
+            key="fresh-reviewed-withdrawal",
+            trace="fresh-apply",
+        )
+        self.assertTrue(fresh["applied"])
+        self.assertNotIn(REVIEW_LABEL, self.source.labels)
+
+    def test_profile_edit_preserves_original_receipt_and_readback(self) -> None:
+        original = self.apply()
+        changed = self.profile.model_copy(update={"display_name": "Changed display name"})
+        self.store.write_product_profile_record(changed)
+        self.service = ReviewWithdrawalService(
+            self.store, self.source, changed, actor=self.service.actor
+        )
+        self.assertEqual(self.apply(), original)
+        read = self.service.run(
+            self.reviewed_request.model_copy(update={"mode": "readback"}),
+            key="withdraw-1",
+            trace="later-audit",
+        )
+        self.assertTrue(read["readback_matches"])
+
 
 class ReviewWithdrawalHttpTests(unittest.IsolatedAsyncioTestCase):
     async def test_director_agent_uses_standing_permission_and_scoped_agents_refuse(self) -> None:
@@ -285,6 +348,21 @@ class ReviewWithdrawalHttpTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result.status_code, 202, result.text)
                 self.assertTrue(result.json()["result"]["applied"])
                 # A generic agent with no Director marker cannot attest a Director decision.
+                with patch(
+                    "control_plane.http_routes.product_review_withdrawal.ReviewWithdrawalService.run",
+                    side_effect=ReviewWithdrawalUnsettled("Outcome is unsettled"),
+                ):
+                    unsettled = await request(
+                        app,
+                        "POST",
+                        "/v1/product-review/withdrawal",
+                        payload=apply,
+                        headers={"Idempotency-Key": "unsettled"},
+                    )
+                    self.assertEqual(unsettled.status_code, 409)
+                    self.assertEqual(
+                        unsettled.json()["detail"]["code"], "product_review_withdrawal_unsettled"
+                    )
                 identity = LocalOperatorIdentity("other-agent", "other-token")
                 denied = await request(
                     app, "POST", "/v1/product-review/withdrawal", payload=payload
