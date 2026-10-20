@@ -37,6 +37,9 @@ from control_plane.dokploy.testing_route import (
     route_document_content,
     route_document_digest,
     redirects_to_https,
+    select_testing_route_raw,
+    canonical_acme_challenge,
+    router_configuration,
 )
 from control_plane.dokploy.testing_retained_copy import (
     retained_inventory_sha256,
@@ -76,6 +79,9 @@ def testing_route_host_program() -> str:
         + inspect.getsource(host_rule_may_match)
         + "\n"
         + inspect.getsource(redirects_to_https)
+        + inspect.getsource(router_configuration)
+        + inspect.getsource(canonical_acme_challenge)
+        + inspect.getsource(select_testing_route_raw)
         + "\n"
         + inspect.getsource(docker_daemon_authorization_denied)
         + "\n"
@@ -107,39 +113,6 @@ def docker(*arguments, stdin=None):
             raise PermissionError('The managed testing route operation was refused')
         raise RuntimeError('The managed testing route operation did not complete')
     return result.stdout
-
-def selected_raw(raw, host, points):
-    routers=raw.get('routers')
-    if not isinstance(routers,dict):
-        raise RuntimeError('Applied router inventory is unavailable')
-    selected={}
-    services={}
-    middlewares={}
-    # Declared stopped-container routes may reference this already-applied,
-    # value-free HTTPS redirect without any application router being present.
-    for name,item in raw.get('middlewares',{}).items():
-        if name.endswith('@file') and isinstance(item,dict) and item.get('redirectScheme',{}).get('scheme')=='https':
-            middlewares[name]={key:item[key] for key in ('redirectScheme','status') if key in item}
-    for name,item in routers.items():
-        if not isinstance(item,dict) or not isinstance(item.get('entryPoints'),list):
-            raise RuntimeError('Applied router inventory is incomplete')
-        if (points and not set(item['entryPoints']) & set(points)) or not host_rule_may_match(str(item.get('rule') or ''),host):
-            continue
-        selected[name]={key:item[key] for key in ('rule','ruleSyntax','service','entryPoints','priority','middlewares','tls','status') if key in item}
-        provider=name.rsplit('@',1)[-1]
-        service=str(item.get('service') or '')
-        service=service if '@' in service else service+'@'+provider
-        value=raw.get('services',{}).get(service)
-        if not isinstance(value,dict):
-            raise RuntimeError('Applied backend inventory is incomplete')
-        services[service]={'status':value.get('status'),'loadBalancer':value.get('loadBalancer')}
-        for reference in item.get('middlewares',[]):
-            qualified=reference if '@' in reference else reference+'@'+provider
-            middleware=raw.get('middlewares',{}).get(qualified)
-            if not isinstance(middleware,dict):
-                raise RuntimeError('Applied middleware inventory is incomplete')
-            middlewares[qualified]={key:middleware[key] for key in ('headers','redirectScheme','status') if key in middleware}
-    return {'routers':selected,'services':services,'middlewares':middlewares}
 
 WRITE_STARTED=False
 
@@ -256,7 +229,7 @@ def main(spec):
     if len(response)>MAX_API_BYTES:
         raise RuntimeError('Managed proxy API response exceeds its bound')
     raw=json.loads(response)
-    raw=selected_raw(raw,spec['host'],spec['entrypoints'])
+    raw=select_testing_route_raw(raw,spec['host'],spec['entrypoints'])
     name=spec['route_id']+'.yml'
     file_read=docker('exec',proxy['Id'],'sh','-c','set -eu; p="$1/$2"; test ! -L "$1"; test ! -L "$p"; if test -e "$p"; then test -f "$p"; printf "present\\n"; cat "$p"; else printf "absent\\n"; fi','_',DIRECTORY,name).decode()
     presence, separator, content=file_read.partition('\n')
@@ -696,6 +669,7 @@ class DokployTestingRouteTransport:
         frame = self.read()
         if (
             plan.unavailable_preimage is not None
+            and backend is not None
             and hashlib.sha256(frame["static_configuration"].encode()).hexdigest()
             != plan.unavailable_preimage.static_sha256
         ):

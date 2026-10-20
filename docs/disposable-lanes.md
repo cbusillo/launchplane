@@ -63,11 +63,18 @@ the old application is not an admission step. Forward checkpoints retain the
 original declaration and listener witnesses. Candidate preparation, generated
 local credentials, sanitation, immutable build, private identity and public
 health checks use the ordinary lifecycle.
+Transient provider-inventory reads keep the original operation pending; provider
+authorization denials keep their denial boundary. Incomplete inventory never
+proves that placement changed or that an old copy is absent.
 
 Failure restores the captured route file's exact bytes or original absence and
 the original metadata. The same physical writer lock, generation, CAS and durable
 receipt cover restoration, including removal of only that lane's newly created
 file; a lost response is settled through its original writer. An unavailable
+route preimage covers its public listeners and middleware dependencies, excluding
+unrelated proxy management routes and canonical certificate challenges. Inverse
+restoration uses the current proxy/file CAS; unrelated static configuration edits
+do not require keeping a failed candidate selected. An unavailable
 original stays unavailable after rollback. After successful publication, automatic
 deployment of the old target is disabled and its stop is recorded as undispatched
 because it was already unavailable. That success receipt does not itself request

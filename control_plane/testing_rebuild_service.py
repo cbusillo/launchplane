@@ -236,6 +236,15 @@ def unavailable_provider_placement(
         ):
             raise ValueError("The existing provider target changed placement.")
     except (InventoryUnavailable, ValueError) as error:
+        if isinstance(error, InventoryUnavailable) and str(error) in {
+            "provider_read_failed",
+            "read_budget",
+        }:
+            if isinstance(error.__cause__, api.DokployRequestFailed):
+                raise error.__cause__ from None
+            raise NativeSourceUnavailable(
+                "The owned testing provider inventory needs another observation."
+            ) from error
         raise TestingRebuildRefused(
             "testing_rebuild_provider_inventory_unverified",
             "Complete current provider inventory must identify the owned testing target on its recorded managed server.",
@@ -388,11 +397,14 @@ def capture_rebuild_intent(
             )
             transport.payload["entrypoints"] = route.public_entrypoints
             bound = transport.read()
-            if (bound["raw"], bound["owned_file"], bound["static_configuration"]) != (
-                frame["raw"],
+            if (bound["owned_file"], bound["static_configuration"]) != (
                 frame["owned_file"],
                 frame["static_configuration"],
-            ):
+            ) or observe_testing_route(
+                route,
+                bound["raw"],
+                json.loads(bound["owned_file"]) if bound["owned_file"] is not None else None,
+            ) is not None:
                 raise ValueError("Testing ingress changed while binding its declared listeners.")
         except ValueError as error:
             raise TestingRebuildRefused(
@@ -840,16 +852,28 @@ class NativeTestingRebuildExecution:
             raise NativeTestingRebuildPending("Staff testing holds this lane.")
         self.old_provider()
         if not recovery and self.intent.unavailable_route is not None:
-            if (
-                unavailable_provider_placement(
+            try:
+                placement = unavailable_provider_placement(
                     host=self.host,
                     token=self.token,
                     target_id=self.intent.old.target_id,
                     target_name=self.intent.before.target.target_name,
                     server_id=self.intent.server_id,
                 )
-                != self.intent.provider_inventory_binding
-            ):
+            except TestingRebuildRefused as error:
+                cause = error.__cause__
+                if isinstance(cause, InventoryUnavailable) and str(cause) not in {
+                    "target_identity_changed",
+                    "server_identity_changed",
+                    "missing_placement",
+                }:
+                    raise NativeTestingRebuildPending(
+                        "Complete current testing provider inventory is unavailable."
+                    ) from error
+                raise NativeTestingRebuildAdmissionChanged(
+                    "The admitted testing provider placement changed."
+                ) from error
+            if placement != self.intent.provider_inventory_binding:
                 raise NativeTestingRebuildAdmissionChanged(
                     "The admitted testing provider inventory placement changed."
                 )

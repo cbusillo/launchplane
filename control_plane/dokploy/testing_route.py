@@ -17,6 +17,90 @@ from control_plane.dokploy.route_rules import host_rule_may_match
 from control_plane.dokploy.traefik_cutover import http_route_payload
 
 
+def select_testing_route_raw(
+    raw: dict[str, Any],
+    host: str,
+    points: tuple[str, ...],
+    external_middlewares: tuple[str, ...] | None = None,
+) -> dict[str, Any]:
+    routers = raw.get("routers")
+    if not isinstance(routers, dict):
+        raise RuntimeError("Applied router inventory is unavailable")
+    selected = {}
+    services = {}
+    middlewares = {}
+    # Declared stopped-container routes may reference this already-applied,
+    # value-free HTTPS redirect without any application router being present.
+    for name, item in raw.get("middlewares", {}).items():
+        if (
+            (external_middlewares is None or name in external_middlewares)
+            and name.endswith("@file")
+            and isinstance(item, dict)
+            and item.get("redirectScheme", {}).get("scheme") == "https"
+        ):
+            middlewares[name] = {
+                key: item[key] for key in ("redirectScheme", "status") if key in item
+            }
+    for name, item in routers.items():
+        if not isinstance(item, dict) or not isinstance(item.get("entryPoints"), list):
+            raise RuntimeError("Applied router inventory is incomplete")
+        if external_middlewares is not None and canonical_acme_challenge(name, item):
+            continue
+        if (points and not set(item["entryPoints"]) & set(points)) or not host_rule_may_match(
+            str(item.get("rule") or ""), host
+        ):
+            continue
+        selected[name] = {
+            key: item[key]
+            for key in (
+                "rule",
+                "ruleSyntax",
+                "service",
+                "entryPoints",
+                "priority",
+                "middlewares",
+                "tls",
+                "status",
+            )
+            if key in item
+        }
+        provider = name.rsplit("@", 1)[-1]
+        service = str(item.get("service") or "")
+        service = service if "@" in service else service + "@" + provider
+        value = raw.get("services", {}).get(service)
+        if not isinstance(value, dict):
+            raise RuntimeError("Applied backend inventory is incomplete")
+        services[service] = {
+            "status": value.get("status"),
+            "loadBalancer": value.get("loadBalancer"),
+        }
+        for reference in item.get("middlewares", []):
+            qualified = reference if "@" in reference else reference + "@" + provider
+            middleware = raw.get("middlewares", {}).get(qualified)
+            if not isinstance(middleware, dict):
+                raise RuntimeError("Applied middleware inventory is incomplete")
+            middlewares[qualified] = {
+                key: middleware[key]
+                for key in ("headers", "redirectScheme", "status")
+                if key in middleware
+            }
+    return {"routers": selected, "services": services, "middlewares": middlewares}
+
+
+def testing_route_external_middlewares(template: dict[str, Any]) -> tuple[str, ...]:
+    owned = {name + "@file" for name in template["http"].get("middlewares", {})}
+    return tuple(
+        sorted(
+            {
+                reference
+                for router in template["http"]["routers"].values()
+                for reference in router.get("middlewares", [])
+                if reference.endswith("@file") and reference not in owned
+            }
+        )
+    )
+
+
 class TestingRoutePending(ValueError):
     """The owned file and applied provider view have not converged."""
 
@@ -509,6 +593,8 @@ def compile_unavailable_testing_route(
             raise ValueError("The provider has no declared router for the owned testing address.")
         template = {"http": {"routers": {}, "services": {}, "middlewares": {}}}
         connections = identifier + "-connections"
+        used_entrypoints: set[str] = set()
+        equivalent_routers: dict[tuple[str, ...], dict[str, Any]] = {}
         for index, (name, rule) in enumerate(sorted(declared.items())):
             prefix = "traefik.http.routers." + name + "."
             fields = {
@@ -613,6 +699,13 @@ def compile_unavailable_testing_route(
                 raise ValueError(
                     "Declared TLS options require an original recorded testing template."
                 )
+            group = tuple(sorted(set(points)))
+            if used_entrypoints & set(points):
+                if equivalent_routers.get(group) != router:
+                    raise ValueError("Declared testing aliases have conflicting routing behavior.")
+                continue
+            equivalent_routers[group] = router
+            used_entrypoints.update(points)
             template["http"]["routers"][identifier + "-" + str(index)] = router
             template["http"]["services"] = document["http"]["services"]
         template["http"]["middlewares"][connections] = {
@@ -637,6 +730,7 @@ def compile_unavailable_testing_route(
             resolver = tls_config.get("certResolver")
             if resolver and resolver not in static.get("certificatesResolvers", {}):
                 raise ValueError("The testing template's certificate resolver is unavailable.")
+    raw = select_testing_route_raw(raw, host, points, testing_route_external_middlewares(template))
     matches = possible_lane_routers(raw, host, points)
     if file_content is None:
         if matches:
@@ -685,7 +779,13 @@ def observe_testing_route(
     preimage = plan.unavailable_preimage
     if preimage is not None:
         original = json.loads(preimage.file_content) if preimage.file_content is not None else None
-        if owned_document == original and raw == preimage.raw:
+        scoped = select_testing_route_raw(
+            raw,
+            plan.host,
+            plan.public_entrypoints,
+            testing_route_external_middlewares(plan.template),
+        )
+        if owned_document == original and scoped == preimage.raw:
             return None
     matches = possible_lane_routers(raw, plan.host, plan.public_entrypoints)
     owned = plan.template["http"]["routers"]

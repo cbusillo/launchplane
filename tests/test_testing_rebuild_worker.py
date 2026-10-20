@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 import json
 import yaml
 from urllib.parse import urlsplit
-from typing import Any, Literal
+from typing import Any, Literal, cast
 import unittest
 from unittest.mock import Mock, patch
 
@@ -31,7 +31,11 @@ from control_plane.contracts.testing_candidate import (
     testing_candidate_namespace,
 )
 from control_plane.contracts.testing_candidate_application import TestingCandidatePrepared
-from control_plane.dokploy.testing_route import route_document, compile_testing_route
+from control_plane.dokploy.testing_route import (
+    route_document,
+    compile_testing_route,
+    select_testing_route_raw,
+)
 from control_plane.dokploy.testing_route_transport import DokployTestingRouteTransport
 from control_plane.dokploy import post_deploy, api, source, compose
 from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
@@ -196,7 +200,12 @@ class NativeTestingWorkerTests(unittest.TestCase):
             for name in ("read", "publish", "settle_attempt")
         }
         self.enterContext(
-            patch.object(DokployTestingRouteTransport, "read", side_effect=self.route_read)
+            patch.object(
+                DokployTestingRouteTransport,
+                "read",
+                autospec=True,
+                side_effect=lambda transport: self.route_read(transport=transport),
+            )
         )
         self.enterContext(
             patch.object(DokployTestingRouteTransport, "publish", side_effect=self.switch)
@@ -291,14 +300,22 @@ class NativeTestingWorkerTests(unittest.TestCase):
             result["healthy"] = self.old_private_healthy
         return result
 
-    def route_read(self) -> dict[str, Any]:
+    def route_read(
+        self, *, transport: DokployTestingRouteTransport | None = None
+    ) -> dict[str, Any]:
         endpoints = [] if self.retained["stopped"] else [self.intent.old.private_url]
         legacy = self.raw["services"].get("old@docker")
         if endpoints and legacy is not None:
             endpoints.extend(item["url"] for item in legacy["loadBalancer"]["servers"])
         return {
             "static_configuration": "entryPoints:\n  web:\n    address: ':80'\n  websecure:\n    address: ':443'\n",
-            "raw": deepcopy(self.raw),
+            "raw": select_testing_route_raw(
+                deepcopy(self.raw),
+                str(transport.payload["host"]),
+                cast(tuple[str, ...], transport.payload["entrypoints"]),
+            )
+            if transport is not None
+            else deepcopy(self.raw),
             "owned_file": json.dumps(self.owned) if self.owned is not None else None,
             "old_endpoints": tuple(endpoints),
             "file_sha256": canonical_json_sha256(self.owned)
@@ -345,10 +362,16 @@ class NativeTestingWorkerTests(unittest.TestCase):
                 self.assertFalse(self.retained["stopped"])
             self.effects.append("switch-new" if backend == plan.new_backend else "switch-old")
             if backend is None:
-                self.owned = None
-                self.raw = deepcopy(plan.unavailable_preimage.raw)
-                return
-            self.owned = route_document(plan, backend)
+                if self.owned is not None:
+                    for section in ("routers", "services", "middlewares"):
+                        for name in self.owned["http"].get(section, {}):
+                            self.raw[section].pop(name + "@file", None)
+                content = plan.unavailable_preimage.file_content
+                self.owned = json.loads(content) if content is not None else None
+                if self.owned is None:
+                    return
+            else:
+                self.owned = route_document(plan, backend)
             for section in ("routers", "services", "middlewares"):
                 for name, value in self.owned["http"].get(section, {}).items():
                     self.raw[section][name + "@file"] = {**value, "status": "enabled"}
@@ -396,6 +419,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
             for field in ("web_id", "identity", "resource_binding", "physical_binding"):
                 self.retained.pop(field, None)
         self.raw = {"routers": {}, "services": {}, "middlewares": {}}
+        route_tests.add_proxy_internal_routes(self.raw)
         configured = yaml.safe_dump(
             {
                 "services": {
@@ -463,6 +487,49 @@ class NativeTestingWorkerTests(unittest.TestCase):
             self.admit_unavailable("absent")
         self.assertEqual(self.effects, [])
         self.assertEqual(self.current(), self.fixture.before)
+
+    def test_transient_unavailable_inventory_preserves_the_original_request(self) -> None:
+        self.operation = self.operation.model_copy(
+            update={"operation_id": "unavailable-inventory-before-effects"}
+        )
+        self.admit_unavailable("absent")
+        digest = self.intent.digest
+        for status in (None, 503):
+
+            def unavailable(**kwargs: Any) -> Any:
+                if kwargs["path"] == "/api/project.all":
+                    raise api.DokployRequestFailed(
+                        method="GET",
+                        path=kwargs["path"],
+                        status_code=status,
+                        detail="fixture unavailable inventory",
+                    )
+                return self.provider_request(**kwargs)
+
+            with (
+                self.subTest(status=status),
+                patch.object(api, "dokploy_request", side_effect=unavailable),
+                patch.object(service, "prepare_candidate_application") as prepare,
+                self.assertRaises(service.NativeTestingRebuildPending),
+            ):
+                self.execute()
+            prepare.assert_not_called()
+            self.assertEqual(self.intent.digest, digest)
+            self.assertEqual(self.effects, [])
+            self.assertEqual(self.current(), self.fixture.before)
+            self.assertFalse(service.native_rebuild_effects_started(self.store, self.operation))
+        with (
+            patch.object(
+                service,
+                "prepare_candidate_storage",
+                side_effect=NativeSourceUnavailable("fixture pauses at first preparation"),
+            ) as prepare,
+            self.assertRaises(service.NativeTestingRebuildPending),
+        ):
+            self.execute()
+        prepare.assert_called_once()
+        self.assertEqual(self.intent.digest, digest)
+        self.assertEqual(self.effects, [])
 
     def test_failed_unavailable_preparation_preserves_unrouted_original_and_metadata(self) -> None:
         from control_plane.workflows.testing_rebuild import TestingRebuildPreparationFailure
@@ -2597,6 +2664,28 @@ class NativeTestingWorkerTests(unittest.TestCase):
         request.assert_called_once()
         self.assertEqual(self.effects, [])
 
+    def test_unavailable_inventory_denial_preserves_the_authorization_boundary(self) -> None:
+        from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
+
+        self.admit_unavailable("absent")
+
+        def denied_inventory(**kwargs: Any) -> Any:
+            if kwargs["path"] == "/api/project.all":
+                raise api.DokployRequestFailed(
+                    method="GET",
+                    path=kwargs["path"],
+                    status_code=403,
+                    detail="fixture inventory refusal",
+                )
+            return self.provider_request(**kwargs)
+
+        with (
+            patch.object(api, "dokploy_request", side_effect=denied_inventory),
+            self.assertRaises(NativeSourceAuthorizationDenied),
+        ):
+            self.execute()
+        self.assertEqual(self.effects, [])
+
     def test_post_effect_denial_keeps_the_lane_fenced_without_another_worker_attempt(self) -> None:
         from datetime import timedelta
         from control_plane.contracts.durable_operation_authorization import (
@@ -3232,8 +3321,13 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.fail_public = True
         observe = service.NativeTestingRebuildExecution.retirement_exclusion
 
-        def lost(executor: service.NativeTestingRebuildExecution, plan: Any) -> Any:
-            proof = observe(executor, plan)
+        def lost(
+            executor: service.NativeTestingRebuildExecution,
+            plan: Any,
+            *,
+            after_health_failure: bool = False,
+        ) -> Any:
+            proof = observe(executor, plan, after_health_failure=after_health_failure)
             if proof is not None:
                 self.fail_public = False
                 raise TimeoutError("fixture lost exclusion reply")

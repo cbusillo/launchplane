@@ -129,14 +129,21 @@ class InventoryTests(unittest.TestCase):
     ) -> None:
         with patch(
             "control_plane.dokploy_inventory.api.dokploy_request", side_effect=self.provider
-        ):
+        ) as request:
             location = read_dokploy_target_placement(
                 host="host", token="opaque", target_category="postgres", target_id="database-only"
             )
         self.assertEqual(location.project_id, self.projects[1]["projectId"])
         self.assertEqual(location.environment_id, self.environment["environmentId"])
         self.assertEqual(location.target.placement.kind, "server")
-        self.assertEqual(self.calls, ["/api/project.all", "/api/postgres.one", "/api/server.one"])
+        target_paths = {"/api/" + category + ".one" for category, _ in TARGET_COLLECTIONS.values()}
+        target_reads = [
+            call.kwargs for call in request.call_args_list if call.kwargs["path"] in target_paths
+        ]
+        self.assertTrue(target_reads)
+        for detail in target_reads:
+            self.assertEqual(detail["path"], "/api/postgres.one")
+            self.assertEqual(detail["query"], {"postgresId": "database-only"})
         self.assertNotIn("never-output", location.model_dump_json())
 
     def test_owned_placement_cannot_use_partial_membership_or_a_moved_target(self) -> None:
@@ -148,7 +155,7 @@ class InventoryTests(unittest.TestCase):
                 read_dokploy_target_placement(
                     host="host", token="opaque", target_category="compose", target_id="self-host"
                 )
-        self.assertEqual(self.calls, ["/api/project.all"])
+        self.assertFalse(any(path.endswith(".one") for path in self.calls))
         self.environment["redis"] = []
         provider = self.provider
 

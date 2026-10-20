@@ -26,6 +26,7 @@ from control_plane.dokploy.native_copy_stream import (
     NativeSourceUnavailable,
 )
 from control_plane.dokploy.testing_route import (
+    TestingLaneRoute,
     TestingRoutePending,
     route_document,
     observe_testing_route,
@@ -941,6 +942,7 @@ class TestingRouteTransportTests(unittest.TestCase):
                 for name, value in self.raw[section].items()
                 if not name.endswith("@docker")
             }
+        route_tests.add_proxy_internal_routes(self.raw)
         self.static += (
             "entryPoints:\n  web:\n    address: ':80'\n  websecure:\n    address: ':443'\n"
         )
@@ -995,6 +997,13 @@ class TestingRouteTransportTests(unittest.TestCase):
                     before = fixture.unavailable_route(preserve_file=present)
                     fixture.publish(fixture.plan.new_backend, None)
                     self.assertTrue(fixture.route_file.exists())
+                    fixture.static += "# unrelated proxy management edit\n"
+                    fixture.raw["middlewares"]["unrelated-redirect@file"] = {
+                        "status": "enabled",
+                        "redirectScheme": {"scheme": "https"},
+                    }
+                    fixture.raw["routers"].pop("acme-http@internal", None)
+                    fixture.raw["services"].pop("acme-http@internal", None)
                     fixture.publish(None, fixture.plan.new_backend)
                     self.assertEqual(
                         fixture.route_file.read_text() if fixture.route_file.exists() else None,
@@ -1114,3 +1123,39 @@ class TestingRouteTransportTests(unittest.TestCase):
                 configured_compose=configured,
             )
         self.assertEqual(self.effect_count, 0)
+
+    def test_declared_unavailable_aliases_require_equivalent_listener_behavior(self) -> None:
+        self.unavailable_route()
+        self.static += "certificatesResolvers: {one: {}, two: {}}\n"
+        frame = self.client.read()
+        labels = {"traefik.enable": "true", "traefik.docker.network": "dokploy-network"}
+        for name, resolver in (("first", "one"), ("alias", "two")):
+            prefix = "traefik.http.routers." + name + "."
+            labels.update(
+                {
+                    prefix + "rule": f"Host(`{self.plan.host}`)",
+                    prefix + "entrypoints": "websecure",
+                    prefix + "tls": "true",
+                    prefix + "tls.certresolver": resolver,
+                }
+            )
+
+        def compile_aliases() -> TestingLaneRoute:
+            return compile_unavailable_testing_route(
+                product=self.plan.product,
+                context=self.plan.context,
+                host=self.plan.host,
+                new_backend=self.plan.new_backend,
+                raw=frame["raw"],
+                file_content=None,
+                observation_sha256="c" * 64,
+                static_configuration=self.static,
+                configured_compose=yaml.safe_dump({"services": {"web": {"labels": labels}}}),
+            )
+
+        with self.assertRaises(ValueError):
+            compile_aliases()
+        labels["traefik.http.routers.alias.tls.certresolver"] = "one"
+        self.plan = compile_aliases()
+        self.publish(self.plan.new_backend, None)
+        self.assertTrue(self.route_file.exists())

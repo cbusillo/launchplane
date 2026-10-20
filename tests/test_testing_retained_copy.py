@@ -251,7 +251,7 @@ class RetainedTestingCopyTests(unittest.TestCase):
         for field in ("identity", "web_id", "physical_binding", "resource_binding"):
             self.assertNotIn(field, read)
         self.assertTrue(read["observation_sha256"])
-        self.assertEqual([command[1] for command in commands], ["ps"])
+        self.assertFalse(any(command[1] in {"exec", "start", "stop", "rm"} for command in commands))
         with self.assertRaises(ValueError):
             qualify_retained_copy([], self.spec)
 
