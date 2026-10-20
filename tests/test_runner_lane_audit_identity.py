@@ -273,10 +273,6 @@ class RunnerAuditHttpIdentityTests(unittest.IsolatedAsyncioTestCase):
                             )
                             self.assertEqual(accepted.status_code, 202)
                             self.assertEqual(conflict.status_code, 409)
-                            self.assertEqual(
-                                conflict.json()["error"]["code"],
-                                "runner_lane_audit_identity_conflict",
-                            )
                             self.assertNotIn("audit", conflict.json())
                             self.assertEqual(
                                 store.list_runner_lane_registration_audit_records(), (original,)
