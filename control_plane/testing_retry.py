@@ -111,7 +111,9 @@ def build_testing_retry_plan(
         profile=profile,
         lane=lane,
         artifact_id=request.artifact_id,
-        generation_prepared_at=generation.prepared_at if generation else "",
+        generation_budget_started_at=(generation.completed_at or generation.prepared_at)
+        if generation
+        else "",
         generation_binding_sha256=generation_sha256,
     )
     if attempt.active is not None or attempt.failed_attempts < TESTING_DEPLOY_MAX_FAILED_ATTEMPTS:

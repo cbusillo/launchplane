@@ -392,6 +392,114 @@ class TestingRetryTests(reconcile_fixtures.ProductReconcileTestCase):
         self.assertEqual(operation.request.data_source_mode, "existing")
         self.assertFalse(operation.request.allow_empty_data)
 
+    def fresh_rearm_transition(self, transition: str, *, long_history: bool) -> None:
+        generation = self.fresh_generation(after_history=True)
+        with (
+            patch(
+                "control_plane.odoo_testing_restore.read_current_testing_generation",
+                return_value=generation,
+            ),
+            patch("control_plane.product_reconcile._utc_now", return_value=generation.prepared_at),
+        ):
+            cycles = (
+                TESTING_DEPLOY_MAX_ATTEMPT_CHAIN // TESTING_DEPLOY_MAX_FAILED_ATTEMPTS + 1
+                if long_history
+                else 0
+            )
+            for cycle in range(cycles + 1):
+                for _ in range(TESTING_DEPLOY_MAX_FAILED_ATTEMPTS):
+                    self.request()
+                    queued = str(self.reconcile()["queued_operation_id"])
+                    self.finish(queued, "fail")
+                if cycle < cycles:
+                    self.assertEqual(self.post(self.reviewed(), f"fresh-{cycle}").status_code, 202)
+            if transition != "successor":
+                self.assertEqual(self.post(self.reviewed(), "finish-copy").status_code, 202)
+                self.request()
+                queued = str(self.reconcile()["queued_operation_id"])
+                # Completion is persisted before tuple publication. Cover both
+                # success and failure of that final publication step.
+                self.finish(queued, "pass" if transition == "completed-pass" else "fail")
+            if long_history:
+                # A different artifact can be desired and reviewed in between.
+                # Returning to A must retain A's own traversal checkpoint.
+                original_draft = self.draft
+                self.github.add_run(30, reconcile_fixtures.NEWEST)
+                for _ in range(TESTING_DEPLOY_MAX_FAILED_ATTEMPTS):
+                    self.request()
+                    self.finish(str(self.reconcile()["queued_operation_id"]), "fail")
+                self.request()
+                with self.assertLogs("control_plane.product_reconcile", "WARNING"):
+                    exhausted = self.run_once()
+                self.draft = {
+                    **self.draft,
+                    "artifact_id": exhausted.last_plan["desired_artifact_id"],
+                    "source_git_ref": exhausted.last_plan["desired_commit"],
+                }
+                self.assertEqual(self.post(self.reviewed(), "artifact-b").status_code, 202)
+                self.draft = original_draft
+                self.github.runs.pop(30)
+        operations = self.store.list_odoo_stable_target_replacement_operation_records()
+        changed_at = (
+            max(datetime.fromisoformat(op.created_at) for op in operations) + timedelta(seconds=1)
+        ).isoformat()
+        if transition == "successor":
+            generation = generation.model_copy(
+                update={
+                    "operation_id": "successor-copy",
+                    "prepared_at": changed_at,
+                    "reconcile_requested_at": changed_at,
+                }
+            )
+        else:
+            generation = generation.model_copy(update={"completed_at": changed_at})
+            if transition == "completed-pass":
+                self.running_release(20, reconcile_fixtures.DEPLOYABLE)
+                self.running_release(10, reconcile_fixtures.OLDER)
+        with self.store._session_factory() as session:
+            row = session.get(LaunchplaneFreshOdooTestingGenerationRow, ("site", "cm"))
+            assert row is not None
+            row.payload = generation.model_dump(mode="json")
+            session.commit()
+        with (
+            patch(
+                "control_plane.odoo_testing_restore.read_current_testing_generation",
+                return_value=generation,
+            ),
+            patch("control_plane.product_reconcile._utc_now", return_value=changed_at),
+        ):
+            self.request()
+            self.reconcile()
+            review = self.post(self.draft)
+            self.assertEqual(review.status_code, 409, review.text)
+            self.assertEqual(review.json()["error"]["code"], "testing_retry_not_exhausted")
+            # Each phase gets its own bounded attempts; a traversal checkpoint
+            # must neither lose old history nor spend the new phase's budget.
+            for _ in range(TESTING_DEPLOY_MAX_FAILED_ATTEMPTS):
+                self.request()
+                queued = str(self.reconcile()["queued_operation_id"])
+                operation = self.store.read_odoo_stable_target_replacement_operation_record(queued)
+                self.assertEqual(
+                    operation.request.data_source_mode,
+                    "upstream_restore" if transition == "successor" else "existing",
+                )
+                self.finish(queued, "fail")
+            self.request()
+            with self.assertLogs("control_plane.product_reconcile", "WARNING"):
+                stopped = self.run_once()
+            self.assertEqual(stopped.state, "failed")
+            self.assertNotIn("queued_operation_id", stopped.last_plan)
+            self.assertEqual(self.post(self.reviewed(), "new-phase-review").status_code, 202)
+
+    def test_successor_preserves_long_fresh_history_with_independent_budget(self) -> None:
+        self.fresh_rearm_transition("successor", long_history=True)
+
+    def test_completed_copy_preserves_long_history_after_rollback(self) -> None:
+        self.fresh_rearm_transition("completed-pass", long_history=True)
+
+    def test_completed_copy_starts_existing_data_budget_after_publication_failure(self) -> None:
+        self.fresh_rearm_transition("completed-fail", long_history=False)
+
     def test_fresh_generation_does_not_inherit_existing_data_rearm(self) -> None:
         self.assertEqual(self.post(self.reviewed(), "existing-data-rearm").status_code, 202)
         operations = self.store.list_odoo_stable_target_replacement_operation_records()

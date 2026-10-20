@@ -52,12 +52,18 @@ is complete. For an unfinished, queued fresh generation it retains
 belongs to that exact generation: an existing-data or predecessor-generation
 receipt cannot replenish its budget. The generation identity is compared again
 under the lane lock at commit. Ordinary execution observations do not change
-that identity. A failed legacy restore without a qualified current generation
+that identity. Preparation starts the fresh-copy budget; recorded copy completion
+starts the existing-data budget, including when later release publication fails.
+Terminal failures from the preceding phase stay in history. A failed legacy
+restore without a qualified current generation
 still refuses; this control never turns an incomplete copy into an existing-data
 deployment or releases an unknown provider effect.
 
 Fresh-generation boundaries use separate keys in the existing metadata store,
-with the unchanged record format. Older workers ignore these boundaries and
+with the unchanged record format. A separate per-artifact traversal checkpoint
+survives generation changes, completion and intervening desired artifacts. It
+skips only previously reviewed terminal history and never authorizes a budget
+reset. Older workers ignore these boundaries and
 retain their original attempt stop. Keep the API and worker on compatible source
 to use this continuation; storage rollback or counter edits are not recovery.
 

@@ -452,6 +452,7 @@ from control_plane.contracts.testing_retry import (
     TESTING_RETRY_REARM_SCOPE,
     TESTING_RETRY_REARM_ROUTE,
     testing_retry_rearm_key,
+    testing_retry_history_key,
 )
 from control_plane.contracts.product_reconcile import (
     PRODUCT_RECONCILE_REQUEST_STATES,
@@ -24291,6 +24292,16 @@ class PostgresRecordStore(HumanSessionStore):
         )
         return TestingRetryRearm.model_validate(record.response_payload) if record else None
 
+    def read_testing_retry_history(
+        self, product: str, artifact_id: str
+    ) -> TestingRetryRearm | None:
+        record = self.read_idempotency_record(
+            scope=TESTING_RETRY_REARM_SCOPE,
+            route_path=TESTING_RETRY_REARM_ROUTE,
+            idempotency_key=testing_retry_history_key(product, artifact_id),
+        )
+        return TestingRetryRearm.model_validate(record.response_payload) if record else None
+
     def commit_testing_retry_rearm(
         self,
         *,
@@ -24393,6 +24404,21 @@ class PostgresRecordStore(HumanSessionStore):
                 response_payload=rearm.model_dump(mode="json"),
             )
             session.merge(self._idempotency_row(marker))
+            history_key = testing_retry_history_key(expected.product, rearm.artifact_id)
+            session.merge(
+                self._idempotency_row(
+                    marker.model_copy(
+                        update={
+                            "record_id": build_launchplane_mutation_reservation_id(
+                                scope=TESTING_RETRY_REARM_SCOPE,
+                                route_path=TESTING_RETRY_REARM_ROUTE,
+                                idempotency_key=history_key,
+                            ),
+                            "idempotency_key": history_key,
+                        }
+                    )
+                )
+            )
             self._fold_product_reconcile_request(
                 session,
                 target=ProductReconcileTarget(product=expected.product, target_kind="testing"),

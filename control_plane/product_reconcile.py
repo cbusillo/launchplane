@@ -659,7 +659,9 @@ def reconcile_testing_target(
             f"{manifest.artifact_id}"
         ),
         idempotency_scope=idempotency_scope,
-        generation_prepared_at=generation.prepared_at if generation is not None else "",
+        generation_budget_started_at=(generation.completed_at or generation.prepared_at)
+        if generation is not None
+        else "",
         rearmed_after_operation_id=rearmed_after,
         history_after_operation_id=testing_retry_after_operation(
             record_store=record_store,
@@ -1237,16 +1239,20 @@ def testing_retry_after_operation(
 ) -> str:
     if not isinstance(record_store, PostgresRecordStore):
         return ""
-    rearm = record_store.read_testing_retry_rearm(
-        profile.product, generation_binding_sha256=generation_binding_sha256
-    )
+    rearm = None
+    if not require_current_binding:
+        rearm = record_store.read_testing_retry_history(profile.product, artifact_id)
+    if rearm is None:
+        rearm = record_store.read_testing_retry_rearm(
+            profile.product, generation_binding_sha256=generation_binding_sha256
+        )
     if (
         not require_current_binding
         and generation_binding_sha256
         and (rearm is None or (rearm.context, rearm.artifact_id) != (lane.context, artifact_id))
     ):
-        # A predecessor's terminal boundary can skip immutable history, but it
-        # can never replenish this generation's budget.
+        # Legacy product boundaries remain usable for traversal, never as a
+        # successor generation's permission to reset its budget.
         rearm = record_store.read_testing_retry_rearm(profile.product)
     if rearm is None or (rearm.context, rearm.artifact_id) != (lane.context, artifact_id):
         return ""
@@ -1264,7 +1270,7 @@ def testing_artifact_attempt(
     profile: LaunchplaneProductProfileRecord,
     lane: ProductLaneProfile,
     artifact_id: str,
-    generation_prepared_at: str = "",
+    generation_budget_started_at: str = "",
     generation_binding_sha256: str = "",
 ) -> _TestingAttempt:
     return _next_testing_attempt(
@@ -1272,7 +1278,7 @@ def testing_artifact_attempt(
         testing_runs_desired=lambda: False,
         base_key=f"{RECONCILE_SOURCE}:{profile.product}:{lane.context}:testing:{artifact_id}",
         idempotency_scope=reconcile_reservation_scope(profile.product),
-        generation_prepared_at=generation_prepared_at,
+        generation_budget_started_at=generation_budget_started_at,
         rearmed_after_operation_id=testing_retry_after_operation(
             record_store=record_store,
             profile=profile,
@@ -1297,7 +1303,7 @@ def _next_testing_attempt(
     testing_runs_desired: Callable[[], bool],
     base_key: str,
     idempotency_scope: str,
-    generation_prepared_at: str = "",
+    generation_budget_started_at: str = "",
     rearmed_after_operation_id: str = "",
     history_after_operation_id: str = "",
 ) -> _TestingAttempt:
@@ -1309,9 +1315,9 @@ def _next_testing_attempt(
     operation_store = odoo_target_replacement_apply_operation_store(record_store)
     generation_started = (
         parse_launchplane_mutation_timestamp(
-            generation_prepared_at, field_name="testing generation preparation"
+            generation_budget_started_at, field_name="testing generation phase"
         )
-        if generation_prepared_at
+        if generation_budget_started_at
         else None
     )
     # The prefix was terminal and exhausted when re-arm committed under the lane
@@ -1363,8 +1369,8 @@ def _next_testing_attempt(
                     idempotency_key=key, deployed_operation_id=existing.operation_id
                 )
         elif existing.status != "superseded" and not is_staff_testing_hold_cancellation(existing):
-            # A qualified independent generation preserves the retained target's
-            # failures, but they cannot spend this recipient's retry budget.
+            # Preparation and copy completion start independent phase budgets.
+            # Earlier terminal failures remain history, without spending it.
             # Follow the original chain, including every unresolved attempt.
             if generation_started is None or (
                 parse_launchplane_mutation_timestamp(

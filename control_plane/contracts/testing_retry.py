@@ -17,6 +17,12 @@ def testing_retry_rearm_key(product: str, generation_binding_sha256: str = "") -
     )
 
 
+def testing_retry_history_key(product: str, artifact_id: str) -> str:
+    # Traversal survives generation/phase changes and A/B/A desired builds.
+    # This checkpoint never grants another attempt budget.
+    return f"{product}:artifact:{artifact_id}"
+
+
 class TestingRetryRearm(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
