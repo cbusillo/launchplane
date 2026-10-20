@@ -648,6 +648,44 @@ class LegacyPreviewReconciliationTests(LegacyPreviewReconciliationFixture):
             response = await self.call("plan", key="mixed-case")
         self.assertEqual(response.status_code, 409)
 
+    def test_integrated_retirement_source_proof_accepts_equivalent_git_url_forms(self) -> None:
+        from control_plane.legacy_preview_reconciliation import observe_legacy_preview
+
+        bound = bind_legacy_preview(
+            self.store,
+            LegacyPreviewReconciliationRequest(
+                product=self.profile.product, preview_id=self.preview.preview_id, reason="fixture"
+            ),
+            allow_tracked=True,
+        )
+        self.search.return_value = ({"applicationId": "untracked-preview"},)
+        for source in (
+            "https://git.example/" + self.profile.repository + ".git",
+            "ssh://git@git.example/" + self.profile.repository + ".git",
+            "git@git.example:" + self.profile.repository + ".git",
+        ):
+            with (
+                self.subTest(source=source),
+                patch(
+                    "control_plane.legacy_preview_reconciliation.dokploy_api.fetch_dokploy_target_payload",
+                    return_value={
+                        "applicationId": "untracked-preview",
+                        "name": bound.application_name,
+                        "appName": bound.application_name + "-suffix",
+                        "customGitUrl": source,
+                    },
+                ),
+                patch(
+                    "control_plane.legacy_preview_reconciliation.dokploy_api.fetch_dokploy_application_domains",
+                    return_value=({"host": "pr-1.example.test"},),
+                ),
+            ):
+                result = observe_legacy_preview(
+                    control_plane_root=self.root, bound=bound, retirement_peers=(bound,)
+                )
+                self.assertEqual(result["provider_state"], "present")
+                self.assertEqual(result["candidate_target_ids"], ("untracked-preview",))
+
     async def test_malformed_domain_inventory_is_not_absence(self) -> None:
         self.search.return_value = ({"applicationId": "other-app"},)
         with (

@@ -8068,6 +8068,35 @@ class PostgresRecordStore(HumanSessionStore):
                 else None
             )
 
+    def find_generic_preview_refresh_receipts(
+        self, runtime_deployment_record_id: str
+    ) -> tuple[LaunchplaneIdempotencyRecord, ...]:
+        from control_plane.generic_web_preview_http import GENERIC_WEB_PREVIEW_REFRESH_ROUTE
+
+        if not runtime_deployment_record_id.strip():
+            raise ValueError("Generic preview receipt lookup requires runtime identity.")
+        statement = (
+            select(LaunchplaneIdempotencyRow)
+            .where(
+                LaunchplaneIdempotencyRow.route_path == GENERIC_WEB_PREVIEW_REFRESH_ROUTE,
+                LaunchplaneIdempotencyRow.payload["response_payload"]["result"]["runtime_identity"][
+                    "deployment_record_id"
+                ].as_string()
+                == runtime_deployment_record_id,
+            )
+            .limit(2)
+        )
+        with self._session_factory() as session:
+            records = []
+            for row in session.scalars(statement):
+                record = self._read_payload(
+                    model_type=LaunchplaneIdempotencyRecord, payload=row.payload
+                )
+                if not self._idempotency_row_matches_record(row, record):
+                    raise ValueError("Generic preview receipt storage identity is inconsistent.")
+                records.append(record)
+            return tuple(records)
+
     def read_idempotency_record(
         self,
         *,
@@ -16712,6 +16741,12 @@ class PostgresRecordStore(HumanSessionStore):
             old_generation = session.get(
                 LaunchplanePreviewGenerationRow, generation.generation_id, populate_existing=True
             )
+            if old_generation is not None and old_generation.preview_id != generation.preview_id:
+                from control_plane.legacy_preview_completion import LegacyPreviewRetirementConflict
+
+                raise LegacyPreviewRetirementConflict(
+                    "A generation identity cannot move to another preview."
+                )
             preview_ids.add(generation.preview_id)
             if old_generation is not None:
                 preview_ids.add(old_generation.preview_id)
@@ -16869,22 +16904,27 @@ class PostgresRecordStore(HumanSessionStore):
             self._lock_preview_authority_write(session, generation=record)
             preview_row = session.get(LaunchplanePreviewRow, record.preview_id)
             existing = session.get(LaunchplanePreviewGenerationRow, record.generation_id)
-            if preview_row is not None and existing is not None:
+            if preview_row is not None:
                 current = self._read_payload(model_type=PreviewRecord, payload=preview_row.payload)
-                original = self._read_payload(
-                    model_type=PreviewGenerationRecord, payload=existing.payload
-                )
-                if (
-                    self._preview_retirement_barrier(session, current)
-                    and original.requested_at != record.requested_at
-                ):
+                barrier = self._preview_retirement_barrier(session, current)
+                if barrier:
                     from control_plane.legacy_preview_completion import (
                         LegacyPreviewRetirementConflict,
+                        requested_after_retirement,
                     )
 
-                    raise LegacyPreviewRetirementConflict(
-                        "An old generation cannot be redated after retirement."
-                    )
+                    if existing is not None:
+                        original = self._read_payload(
+                            model_type=PreviewGenerationRecord, payload=existing.payload
+                        )
+                        if original.requested_at != record.requested_at:
+                            raise LegacyPreviewRetirementConflict(
+                                "An old generation cannot be redated after retirement."
+                            )
+                    elif not requested_after_retirement(record.requested_at, barrier):
+                        raise LegacyPreviewRetirementConflict(
+                            "Preview retirement supersedes this generation; request a fresh generation."
+                        )
             session.merge(
                 LaunchplanePreviewGenerationRow(
                     generation_id=record.generation_id,
@@ -27521,6 +27561,29 @@ class PostgresRecordStore(HumanSessionStore):
                 )
                 session.execute(text(f"LOCK TABLE {tables} IN SHARE ROW EXCLUSIVE MODE"))
             current = bind_legacy_preview(self, reconciliation)
+            if current.sibling_receipt_ids and self.database_dialect_name == "postgresql":
+                # Provider recovery takes receipt rows before authority. Never wait
+                # for those rows while holding authority tables in the inverse order.
+                try:
+                    receipt_rows = tuple(
+                        session.scalars(
+                            select(LaunchplaneIdempotencyRow)
+                            .where(
+                                LaunchplaneIdempotencyRow.record_id.in_(current.sibling_receipt_ids)
+                            )
+                            .order_by(LaunchplaneIdempotencyRow.record_id)
+                            .with_for_update(read=True, nowait=True)
+                        )
+                    )
+                except SQLAlchemyError as error:
+                    raise ValueError(
+                        "Sibling operation evidence is busy; retry reconciliation."
+                    ) from error
+                if len(receipt_rows) != len(current.sibling_receipt_ids):
+                    raise ValueError("Sibling operation evidence changed before completion.")
+                # Re-read after acquiring the exact proof-row locks. Completion
+                # and retained intent stay stable through this transaction's commit.
+                current = bind_legacy_preview(self, reconciliation)
             if current.digest != expected_authority_digest:
                 raise ValueError("Legacy preview authority changed before completion.")
             closed = reconciled_preview(

@@ -40,9 +40,9 @@ def _images(payload: Mapping[str, object]) -> tuple[str, ...]:
         if not isinstance(service, dict) or "build" in service:
             raise ValueError("Unowned compose build source is uncertain.")
         image = _text(service.get("image"))
-        variable = re.fullmatch(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", image)
+        variable = re.fullmatch(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?:(:-|-)([^${}]*))?\}", image)
         if variable:
-            environment = payload.get("env")
+            environment = payload.get("env", "")
             if not isinstance(environment, str):
                 raise ValueError("Unowned compose image binding is unavailable.")
             key = variable.group(1)
@@ -50,9 +50,13 @@ def _images(payload: Mapping[str, object]) -> tuple[str, ...]:
                 line.strip().removeprefix("export ").lstrip() for line in environment.splitlines()
             ]
             matches = [line for line in lines if line.partition("=")[0].strip() == key]
-            if len(matches) != 1:
+            if len(matches) > 1:
                 raise ValueError("Unowned compose image binding is ambiguous.")
-            image = _text(api.parse_dokploy_env_text(environment).get(key))
+            value = api.parse_dokploy_env_text(environment).get(key) if matches else None
+            operator, default = variable.group(2, 3)
+            if value is None or operator == ":-" and not value:
+                value = default if operator else None
+            image = _text(value)
         if "$" in image:
             raise ValueError("Unowned compose image cannot be resolved safely.")
         images.append(image)
@@ -99,6 +103,7 @@ def observe_legacy_odoo_preview(
     seen: dict[str, object] = {}
     present = False
     repository = bound.profile.repository.casefold()
+    sibling_names = dict(bound.sibling_target_names)
     for environment, identifier, name in inventory:
         payload = api.fetch_dokploy_target_payload(
             host=host, token=token, target_type="compose", target_id=identifier
@@ -133,6 +138,8 @@ def observe_legacy_odoo_preview(
         if exact and identifier in bound.known_other_target_ids:
             raise ValueError("Preview candidate belongs to a stable lane or sibling.")
         known_other = identifier in bound.known_other_target_ids
+        if identifier in sibling_names and name != sibling_names[identifier]:
+            raise ValueError("Sibling compose naming no longer matches its physical receipt.")
         product_source = False
         if not known_other and not exact:
             images = _images(payload)

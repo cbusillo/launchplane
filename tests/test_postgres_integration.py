@@ -18,6 +18,7 @@ import time
 from typing import Any
 import unittest
 from tests import test_product_retirement_previews as integrated_retirement_tests
+from tests import test_legacy_preview_sibling_ownership as generic_sibling_tests
 from tests import test_odoo_secret_transport as secret_transport_tests
 from tests import test_testing_runtime_separation as testing_separation
 from tests import test_testing_separation_resources as independent_storage
@@ -15208,11 +15209,78 @@ class RealPostgresNativeTestingWorkerTests(unittest.TestCase):
         )
 
 
+class RealPostgresGenericSiblingOwnershipTests(
+    generic_sibling_tests.LegacyGenericSiblingOwnershipTests
+):
+    def database_url(self) -> str:
+        return self.enterContext(_head_postgres_database())
+
+    async def test_http_ownership_receipt_contention_refuses_and_recovers(self) -> None:
+        from control_plane.storage.postgres import LaunchplaneIdempotencyRow
+
+        runtime = await self.produced_sibling()
+        receipt = self.store.find_generic_preview_refresh_receipts(runtime.deployment_record_id)[0]
+        peer = PostgresRecordStore(database_url=self.store.database_url)
+        self.addCleanup(peer.close)
+        with self.provider_inventory():
+            plan = await self.plan()
+            with peer._session_factory() as session:
+                session.scalar(
+                    select(LaunchplaneIdempotencyRow)
+                    .where(LaunchplaneIdempotencyRow.record_id == receipt.record_id)
+                    .with_for_update()
+                )
+                blocked = await asyncio.wait_for(self.apply(plan), 5)
+                self.assertEqual(blocked.status_code, 409, blocked.text)
+                self.assertEqual(
+                    self.store.read_preview_record(self.preview.preview_id), self.preview
+                )
+                peer.write_preview_record(self.preview)
+                session.rollback()
+            self.assertEqual((await self.apply(plan)).status_code, 202)
+
+
 class RealPostgresLegacyOdooPreviewReconciliationTests(
     legacy_odoo_tests.LegacyOdooPreviewReconciliationTests
 ):
     def database_url(self) -> str:
         return self.enterContext(_head_postgres_database())
+
+    async def test_sibling_receipt_contention_refuses_without_authority_lock_cycle(self) -> None:
+        from control_plane.legacy_preview_reconciliation import (
+            bind_legacy_preview,
+            LegacyPreviewReconciliationRequest,
+        )
+        from control_plane.storage.postgres import LaunchplaneIdempotencyRow
+
+        runtime = self.produced_sibling()
+        self.compose(name=runtime.instance, image=self.profile.image.repository + ":current")
+        plan = await self.plan()
+        request = LegacyPreviewReconciliationRequest(
+            product=self.profile.product, preview_id=self.preview.preview_id, reason="fixture"
+        )
+        bound = bind_legacy_preview(self.store, request)
+        self.assertIn(runtime.deployment_record_id, bound.sibling_receipt_ids)
+        peer = PostgresRecordStore(database_url=self.store.database_url)
+        self.addCleanup(peer.close)
+        for identifier in bound.sibling_receipt_ids:
+            with self.subTest(receipt=identifier), peer._session_factory() as session:
+                session.scalar(
+                    select(LaunchplaneIdempotencyRow)
+                    .where(LaunchplaneIdempotencyRow.record_id == identifier)
+                    .with_for_update()
+                )
+                # A writer that owns the receipt can need authority next. Apply
+                # must fail immediately rather than waiting in the inverse order.
+                blocked = await asyncio.wait_for(self.apply(plan), 5)
+                self.assertEqual(blocked.status_code, 409, blocked.text)
+                self.assertEqual(
+                    self.store.read_preview_record(self.preview.preview_id), self.preview
+                )
+                peer.write_preview_record(self.preview)
+                session.rollback()
+        response = await self.apply(plan)
+        self.assertEqual(response.status_code, 202, response.text)
 
     async def test_pointed_legacy_verifying_history_is_retained_under_actual_exclusion(
         self,

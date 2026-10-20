@@ -21,6 +21,7 @@ from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.launchplane_mutations import (
     apply_launchplane_destroy_preview as shared_apply_launchplane_destroy_preview,
     apply_launchplane_generation_evidence as shared_apply_launchplane_generation_evidence,
+    build_launchplane_preview_from_request,
     upsert_launchplane_preview_from_request as shared_upsert_launchplane_preview_from_request,
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -405,8 +406,9 @@ def launchplane_previews_mark_generation_ready(
         preview=preview_record,
         generation=generation_record,
     )
-    generation_path = record_store.write_preview_generation_record(generation_record)
-    preview_path = record_store.write_preview_record(transitioned_preview)
+    generation_path, preview_path = record_store.write_preview_generation_evidence_records(
+        preview_record=transitioned_preview, generation_record=generation_record
+    )
     click.echo(
         json.dumps(
             _generation_transition_payload(
@@ -465,8 +467,9 @@ def launchplane_previews_mark_generation_failed(
         preview=preview_record,
         generation=generation_record,
     )
-    generation_path = record_store.write_preview_generation_record(generation_record)
-    preview_path = record_store.write_preview_record(transitioned_preview)
+    generation_path, preview_path = record_store.write_preview_generation_evidence_records(
+        preview_record=transitioned_preview, generation_record=generation_record
+    )
     click.echo(
         json.dumps(
             _generation_transition_payload(
@@ -738,21 +741,24 @@ def _apply_launchplane_request_generation(
     preview_request: PreviewMutationRequest,
     generation_request: PreviewGenerationMutationRequest,
 ) -> dict[str, object]:
-    preview_record = _upsert_launchplane_preview_from_request(
-        control_plane_root=control_plane_root,
+    preview_record = build_launchplane_preview_from_request(
+        control_plane_root_path=control_plane_root,
         record_store=record_store,
         request=preview_request,
     )
     generation_record = build_preview_generation_record_from_request(
         record_store=record_store,
         request=generation_request,
+        preview_record=preview_record,
     )
     transitioned_preview = apply_generation_requested_transition(
         preview=preview_record,
         generation=generation_record,
     )
-    generation_path = record_store.write_preview_generation_record(generation_record)
-    preview_path = record_store.write_preview_record(transitioned_preview)
+    generation_path, preview_path = record_store.write_preview_generation_evidence_records(
+        preview_record=transitioned_preview,
+        generation_record=generation_record,
+    )
     return {
         "generation_id": generation_record.generation_id,
         "generation_path": _record_locator(generation_path, generation_record.generation_id),

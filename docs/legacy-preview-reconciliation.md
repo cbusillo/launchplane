@@ -74,11 +74,35 @@ joined compose details and all live domains, and enumerates again. It also check
 applications for preview identity or domain residue. Physical IDs include their
 provider category: an application ID cannot exclude a compose with the same ID.
 A legacy target ID needs its matching typed target configuration before it can
-exclude an owned sibling or stable target. Unknown renamed raw composes require
-safe image-source classification. YAML and environment values are inspected only
+exclude an owned sibling or stable target. A current Odoo serving generation can
+also prove a sibling's compose through its exact successful durable operation,
+retained issued intent and returned compose ID. A deployment-record locator or
+runtime instance name alone is insufficient. Its current runtime identity and
+the applied lifecycle response must agree, and physical ownership must be unique.
+The reviewed digest binds this sibling evidence. Completion locks its exact
+operation and original-intent rows without waiting; contention requires retry
+instead of reversing the provider recovery lock order. Existing typed target
+ownership remains valid for older producers without durable Odoo operations.
+For generic-web, a current READY serving generation can identify its application
+through a successful keyed HTTP refresh receipt or a qualified configured
+application lifecycle receipt. The runtime's generated deployment locator is
+neither receipt's record ID. HTTP proof uses the exact refresh route and runtime
+nonce, requires one receipt, and checks the complete successful response against
+the current preview, generation and runtime. A lifecycle receipt must bind the
+same artifact and source within that serving generation's attempt; older qualified
+receipts, later holds and conflicting physical IDs cannot establish ownership.
+These proofs share the category/unique-owner checks and reviewed authority digest.
+Completion protects HTTP receipts with the exact nonblocking row locks above;
+lifecycle receipts use the existing deployment-authority table lock and fresh
+commit-time binding. Missing physical proof grants no new exclusion, including
+event-only history with no persisted physical evidence.
+Unknown renamed raw composes require safe image-source classification.
+YAML and environment values are inspected only
 in memory; returned evidence contains identities and classifications, never raw
-compose source or environment values. Unresolved image expressions, malformed
-joins or uncertain source cannot prove absence. Historical compose names that
+compose source or environment values. Bare image variables and literal defaults
+such as `${IMAGE:-registry.example/service:tag}` use unambiguous environment
+bindings; unresolved image expressions, malformed joins or uncertain source
+cannot prove absence. Historical compose names that
 disagree with the current profile's name remain uncertain and refuse.
 
 Odoo records must use the canonical repository basename and preview ID produced
@@ -92,7 +116,9 @@ plan with a custom physical slug shares the same fence. Original PostgreSQL lock
 transactions must remain alive. Durable running or uncertain reservations also
 block reconciliation, including legacy raw target keys. Settle or tear down the
 original operation through its supported recovery path before inspecting again;
-never delete reservations or substitute provider absence for their settlement.
+only retained original logical ownership can exempt another preview's held work.
+Physical sibling naming alone cannot exempt it. Never delete reservations or
+substitute provider absence for their settlement.
 
 A legacy Odoo generation with no runtime identity may retain interrupted
 nonterminal state, including current pointers, when those executor fences exclude
@@ -105,6 +131,8 @@ Bare preview evidence cannot erase that terminal proof. Generation evidence can
 resume the preview only with a fresh generation requested strictly after completion;
 changing an old generation's timestamps does not qualify. Stale evidence returns
 `409 preview_retirement_conflict` without partially writing generation or preview.
+A globally existing generation ID cannot be reassigned to another preview by
+either standalone or bundled writers; a new preview needs its own generation ID.
 A genuine later service-issued Odoo destroy also retains its normal lifecycle flow.
 Unproven older destroyed records keep their existing fail-closed ordering behavior.
 

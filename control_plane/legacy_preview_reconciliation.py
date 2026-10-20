@@ -28,6 +28,7 @@ from control_plane.contracts.preview_execution import (
 from control_plane.legacy_preview_completion import (
     LEGACY_PREVIEW_RECONCILIATION_ROUTE as LEGACY_PREVIEW_RECONCILIATION_ROUTE,
 )
+from control_plane.legacy_odoo_preview import _repository_matches
 from control_plane.workflows.launchplane import generate_preview_id
 from control_plane.workflows.generic_web_preview import (
     effective_preview_app_name_prefix,
@@ -79,6 +80,8 @@ class LegacyPreviewAuthority:
     known_other_target_ids: frozenset[str]
     preview_target_ids: frozenset[str]
     known_other_application_ids: frozenset[str] = frozenset()
+    sibling_target_names: tuple[tuple[str, str], ...] = ()
+    sibling_receipt_ids: tuple[str, ...] = ()
 
 
 def bind_legacy_preview(
@@ -227,35 +230,40 @@ def _require_no_held_odoo_work(
     target_key = odoo_preview_target_key(
         context=profile.preview.context, compose_name=_preview_name(profile, slug)
     )
-    siblings: set[str] = set()
-    for preview in previews:
-        other_slug = resolve_generic_web_preview_slug(
+    from control_plane.preview_reservation_recovery import original_preview_intent
+
+    other_numbers = {
+        preview.anchor_pr_number
+        for preview in previews
+        if preview.state != "destroyed"
+        and preview.anchor_repo == profile.repository.partition("/")[2]
+        and resolve_generic_web_preview_slug(
             profile=profile,
             preview_slug="",
             anchor_pr_number=preview.anchor_pr_number,
             label="Reconciliation",
         )
-        if (
-            other_slug != slug
-            and preview.state != "destroyed"
-            and preview.anchor_repo in {profile.repository, profile.repository.partition("/")[2]}
-            and sum(p.anchor_pr_number == preview.anchor_pr_number for p in previews) == 1
-        ):
-            siblings.add(
-                odoo_preview_reconciliation_key(
-                    context=profile.preview.context, compose_name=_preview_name(profile, other_slug)
-                )
-            )
+        != slug
+        and sum(p.anchor_pr_number == preview.anchor_pr_number for p in previews) == 1
+    }
     prefix = f"dokploy:compose:{profile.preview.context.strip()}:"
     for held in store.list_held_provider_target_reservations():
-        if (
+        relevant = (
             held.provider_target_key in {key, target_key}
             or held.reconciliation_key == key
-            or (
-                held.reconciliation_key.startswith(prefix)
-                and held.reconciliation_key not in siblings
-            )
-        ):
+            or held.reconciliation_key.startswith(prefix)
+        )
+        if not relevant:
+            continue
+        if held.provider_target_key not in {key, target_key} and held.reconciliation_key != key:
+            try:
+                intent = original_preview_intent(held, profile=profile, store=store)
+            except ValueError:
+                pass
+            else:
+                if intent.issued_plan.plan_request.pr_number in other_numbers:
+                    continue
+        if relevant:
             raise ValueError(
                 "Held preview work needs original-operation recovery before reconciliation."
             )
@@ -481,12 +489,69 @@ def _bind_legacy_preview(
 
     other_target_ids = other_ids(category)
     other_application_ids = other_ids("application") if odoo else other_target_ids
+    sibling_evidence: list[dict[str, object]] = []
+    sibling_names: dict[str, str] = {}
+    sibling_receipt_ids: set[str] = set()
+    if sibling_scopes:
+        from control_plane.legacy_odoo_preview_ownership import current_odoo_sibling_ownership
+        from control_plane.legacy_preview_sibling_ownership import current_generic_sibling_ownership
+
+        sibling_owners: dict[str, tuple[str, str]] = {}
+        for other in sorted(previews, key=lambda p: p.preview_id):
+            other_slug = resolve_generic_web_preview_slug(
+                profile=profile,
+                preview_slug="",
+                anchor_pr_number=other.anchor_pr_number,
+                label="Reconciliation",
+            )
+            owner = (other.context, other_slug)
+            if other.preview_id == preview.preview_id or owner not in sibling_scopes:
+                continue
+            # A typed catalog target independently proves its physical category
+            # and owner, including older producers without durable Odoo receipts.
+            if any((target.context, target.instance) == owner for target in physical_targets):
+                continue
+            proof = (
+                current_odoo_sibling_ownership(store, profile, other)
+                if odoo
+                else current_generic_sibling_ownership(store, profile, other, other_slug)
+            )
+            if proof is None:
+                continue
+            typed_owners = {
+                (target.context, target.instance)
+                for target in physical_targets
+                if target.target_id == proof.target_id
+            }
+            untyped_conflict = any(
+                target.target_id == proof.target_id
+                and (target.context, target.instance) != owner
+                and not any(
+                    (config.context, config.instance) == (target.context, target.instance)
+                    for config in target_configs
+                )
+                for target in target_ids
+            )
+            if (
+                proof.target_id in preview_target_ids
+                or typed_owners - {owner}
+                or untyped_conflict
+                or proof.target_id in sibling_owners
+                and sibling_owners[proof.target_id] != owner
+            ):
+                raise ValueError("Sibling target has conflicting physical ownership.")
+            sibling_owners[proof.target_id] = owner
+            sibling_names[proof.target_id] = proof.target_name
+            sibling_evidence.append(proof.evidence)
+            sibling_receipt_ids.update(proof.receipt_ids)
+        other_target_ids = other_target_ids | frozenset(sibling_names)
     digest = canonical_sha256(
         {
             "profile": profile.model_dump(mode="json"),
             "preview": preview.model_dump(mode="json"),
             "generations": [g.model_dump(mode="json") for g in generations],
             "deployments": deployment_evidence,
+            "sibling_evidence": sibling_evidence,
             "known_other_target_ids": sorted(other_target_ids),
             "targets": [
                 t.model_dump(mode="json")
@@ -515,6 +580,8 @@ def _bind_legacy_preview(
         other_target_ids,
         frozenset(preview_target_ids),
         other_application_ids,
+        tuple(sorted(sibling_names.items())),
+        tuple(sorted(sibling_receipt_ids)),
     )
 
 
@@ -552,6 +619,9 @@ def observe_legacy_preview(
         app_name = str(app.get("appName") or "").strip()
         if not name or not app_name:
             raise ValueError("Provider application naming evidence is incomplete.")
+        sibling_name = dict(bound.sibling_target_names).get(target_id)
+        if sibling_name is not None and sibling_name != name:
+            raise ValueError("Sibling application naming disagrees with its physical receipt.")
         domains = dokploy_api.fetch_dokploy_application_domains(
             host=host, token=token, application_id=target_id, strict=True
         )
@@ -601,12 +671,7 @@ def observe_legacy_preview(
             if (
                 retirement_peers
                 and target_id not in bound.preview_target_ids
-                and not any(
-                    value == repository
-                    or value.endswith("/" + repository)
-                    or value == repository.partition("/")[2]
-                    for value in repository_values
-                )
+                and not _repository_matches(app, repository)
                 and not (
                     image == image_repository
                     or image.startswith((image_repository + ":", image_repository + "@"))
