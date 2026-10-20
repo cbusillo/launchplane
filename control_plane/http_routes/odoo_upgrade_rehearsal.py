@@ -13,6 +13,7 @@ from control_plane.contracts.odoo_upgrade_rehearsal import (
     REHEARSAL_PUBLIC_FAILURE_MESSAGES,
     OdooUpgradeRehearsalRequest,
     RehearsalPrerequisite,
+    REHEARSAL_RELEASED_RESERVATION_HEADERS,
     rehearsal_identity,
 )
 from control_plane.contracts.canonical_json import canonical_json_sha256
@@ -31,6 +32,7 @@ from control_plane.http_routes.support import (
 from control_plane.odoo_upgrade_rehearsal import (
     OdooRehearsalAdapter,
     RehearsalRefused,
+    RehearsalPreparationReadRefused,
     rehearsal_inputs,
     require_rehearsal_transition,
     require_unaliased_rehearsal,
@@ -38,6 +40,7 @@ from control_plane.odoo_upgrade_rehearsal import (
 from control_plane.service_auth import LaunchplaneIdentity, director_agent_identity
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.dokploy import api
+from control_plane.dokploy.network_capacity import BridgeNetworkCapacityRefused
 from control_plane.odoo_rehearsal_preflight import rehearsal_preflight
 
 
@@ -313,6 +316,19 @@ def register_odoo_upgrade_rehearsal_routes(
             return accepted_evidence_response(
                 trace_id=trace, records={"rehearsal": body.rehearsal_id}, result=result
             )
+        except RehearsalPreparationReadRefused as error:
+            refusal = dependencies.http_error(
+                status_code=error.status_code,
+                trace_id=trace,
+                code=error.code,
+                message=str(error),
+            )
+            refusal.headers = dict(REHEARSAL_RELEASED_RESERVATION_HEADERS)
+            raise refusal from None
+        except BridgeNetworkCapacityRefused as error:
+            raise dependencies.http_error(
+                status_code=409, trace_id=trace, code=error.code, message=str(error)
+            ) from None
         except RehearsalRefused as error:
             if error.prerequisite is not None:
                 raise dependencies.http_error(

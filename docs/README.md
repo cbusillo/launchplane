@@ -69,6 +69,8 @@ not describe runtime authority until it is implemented, deployed, and activated.
   graph.
 - [work-graph-read-model.md](work-graph-read-model.md) — record-backed work graph,
   ranking, and the removed Project/inbox source boundary.
+- [discussion-topics.md](discussion-topics.md) — product-scoped neutral topics,
+  supported add/close API, and separate page/reminder delivery slices.
 - [merge-train-policy.md](merge-train-policy.md) — repository/base-branch merge
   train policy contract, enqueue authority, and smoke-target policy.
 - [merge-train-events.md](merge-train-events.md) — signed App events, worker wake hints,

@@ -988,6 +988,7 @@ from control_plane.http_routes.product_generic_web_transition import (
     register_product_generic_web_transition_routes,
 )
 from control_plane.http_routes.product_display_name import register_product_display_name_routes
+from control_plane.http_routes.discussion_topics import register_discussion_topic_routes
 from control_plane.http_routes.product_testing_restore_policy import (
     register_testing_restore_policy_routes,
 )
@@ -30910,6 +30911,9 @@ def create_launchplane_fastapi_app(
         mutation_identity=read_browser_mutation_identity,
     )
     register_product_display_name_routes(
+        app, dependencies=read_route_dependencies, mutation_identity=read_browser_mutation_identity
+    )
+    register_discussion_topic_routes(
         app, dependencies=read_route_dependencies, mutation_identity=read_browser_mutation_identity
     )
     register_testing_restore_policy_routes(

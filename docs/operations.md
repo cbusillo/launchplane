@@ -4948,24 +4948,30 @@ health-alert policies and historical delivery evidence intact.
 ### Prepared retired-delivery table migration
 
 Issue #2437's migration `e7c1d5e9a3b6` removes only the 22 tables named by
-`RETIRED_TABLES` in that revision. Normal service startup applies the separately
-approved Q533 preview-enablement drop, `e8d2f6a0b4c7`, which branches from
+`RETIRED_TABLES` in that revision. Normal service startup targets discussion-topic
+revision `b81ca763d924`, which follows the separately approved Q533
+preview-enablement drop, `e8d2f6a0b4c7`. That preview branch starts at
 `e6b0c4d8f2a5` alongside the held migration. This is an explicit expand/contract hold: source delivery
 and a green PR do not authorize applying the drop to the shared database.
 The candidate runtime accepts the common predecessor, either branch revision,
-or their empty merge revision, `e9e3a7b1c5d8`, and retains expiry/key-retirement,
+their original empty merge revision, `e9e3a7b1c5d8`, the additive topics revision,
+or the new empty join `da72490fce13`, and retains expiry/key-retirement,
 activation/history/policy maintenance, custody evidence and native train fences.
+These are recognized revision paths; the HTTP service also requires the topics
+table and starts only after the release migration has added it.
 While this hold is active, schema initialization refuses a migration graph whose
-head has advanced beyond the reviewed join of these two paths. A later schema change must
+head has advanced beyond the reviewed topics/retirement join. A later schema change must
 reconcile the hold, runtime compatibility and supported migration targets in the
 same change. Keep an independently approved application path for the destructive
 step; advancing an unrelated additive migration does not authorize it. Lifting
 the hold requires the shared-data/release approval below.
 
 The release default never traverses the held branch. If a database has already
-applied the held drop, startup applies only the preview drop and joins the paths.
+applied the held drop or the original join, startup applies the missing preview
+and topic migrations and joins the paths at `da72490fce13`.
 After explicit approval, requesting the held revision on a database already at
-the preview revision applies the held drop and the empty join. Both routes leave
+the preview or topics revision applies the held drop, adds topics if missing,
+and joins at `da72490fce13`. These routes leave
 one recorded Alembic revision; startup never mistakes incomparable branches for
 ordered versions. Do not substitute Alembic `head` for the release migration
 target: `head` includes the held drop and is reserved for disposable rehearsals
@@ -4977,6 +4983,10 @@ across that boundary requires the pre-deploy database backup or host snapshot
 and its matching image; restoring that recovery point also discards later writes.
 The preview migration does not create a backup, and its downgrade cannot recover
 the retired rows.
+
+Although the topics migration is additive, older images reject its revision.
+Rolling back across it requires a compatible image or the pre-deploy database
+backup and matching image; downgrade does not erase discussion history.
 
 Before application, obtain the Director's explicit shared-data/release approval
 on #2437. From the approved Launchplane host and exact reviewed image, verify

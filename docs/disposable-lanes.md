@@ -1542,6 +1542,35 @@ supersession and queue receipt. It does not rerun bootstrap planning after that
 queue has started deploying. Omitted delivery keys come from the generation's
 immutable receipt; readback is never permission to replay bootstrap.
 
+A deployment continuing a fresh generation must carry that generation's
+certificate setting into every provider route write, including failed deploys.
+Changing it silently breaks original-bootstrap readback before the copy finishes.
+
+For an existing certificate mismatch, the same endpoint and repository client
+support `route-repair-dry-run`, `route-repair-apply`, and `route-repair-readback`.
+Supply the exact original bootstrap inputs, including certificate/source settings
+and reason. Keep its original key and evidence untouched. Save the repair plan in
+a **new** private evidence file, review it, then apply using that repair evidence,
+`--reviewed-dry-run`, and a **separate repair idempotency key**. Reusing a bootstrap
+key conflicts with its original request; it never repurposes that receipt.
+
+The repair binds the complete current generation and live provider domain row.
+It requires the original unfinished generation, valid allocation/queue receipts,
+current source/resource/credential qualification, unprotected testing use and
+executor/authority locks. Held uncertain provider effects refuse. Only one
+existing route with all other reviewed fields intact qualifies. The service
+updates that existing row's certificate setting only, then verifies the full
+original bootstrap again. It never creates a route, restarts or deploys, changes
+a generation, rewrites credentials, restores a copy, queues work, resets an
+attempt budget or releases historical uncertainty. Lost replies stay unknown
+unless original-key read-only reconciliation proves the same route and stable
+generation identity. Later copy completion or protected use does not authorize
+a write and does not erase an already-dispatched effect. A reservation with no
+effect checkpoint may retry only through the durable runner's no-effect-timestamp
+check; checkpointed uncertainty is never blindly repeated. `runtime_verified` remains false. After repair,
+use original-bootstrap readback and obtain a **new** supported exact-artifact retry
+review separately. Repair alone does not establish copy completion or testing readiness.
+
 New fresh-generation recovery journals bind override intent independently of
 apply status, time, detail, `updated_at` and `source_label`. Website-setting
 history that still affects rendering remains bound. Publishing post-deploy success or
@@ -2521,6 +2550,46 @@ product, authenticated principal and original prepare key. Sizing comes from the
 product's production records; application, database and runner topology comes
 from the common Odoo renderer. Only explicit sizing keys are inherited. Routing,
 volumes, credentials, database names, cron and connections are isolated.
+
+Before a rehearsal prepare creates credentials or dispatches its first provider
+create, Launchplane reads the selected server's IPv4 bridge-network headroom
+over Dokploy's existing registered-server terminal transport. The fixed reader
+uses the daemon's effective `DefaultAddressPools`, complete network IPAM and
+all IPv4 route tables. Each overlapping allocation or non-default route consumes
+the pool slots it intersects; duplicate overlaps count once. The rehearsal needs
+one private bridge plus two spare slots. Exactly that headroom passes.
+Route exclusions are conservative: a summary route covering a whole pool makes
+that pool unavailable to admission even if Docker would otherwise allocate it.
+
+HTTP 409 `host_bridge_network_capacity_short` means the measured free capacity
+is below that requirement. `host_bridge_network_capacity_unavailable` means
+capacity is unproved, including absent daemon pool evidence, malformed or
+incomplete reads, or network inventory changing during the read. Neither
+refusal creates credentials or provider placement, and a fresh pre-effect
+operation reservation is released. Provider authorization denials retain their
+403 classification and never select another transport or identity. An already
+partial placement keeps its original-key observation and custody rules, without
+another capacity read; discovering existing placement takes precedence over
+fresh-create admission. Missing provider configuration rejects the fresh
+operation before effects instead of holding an uncertain reservation.
+
+A provider-read refusal carries `X-Launchplane-Mutation-Reservation: released`
+only after the durable runner successfully releases that request's fresh,
+effect-free reservation. The rehearsal helper uses this evidence to distinguish
+a clean refusal from an uncertain operation requiring its original key. This
+header does not assert that older placement is absent. Configuration failures
+use the placement prerequisite; uncertain physical placement keeps the recovery
+prerequisite and cannot be misreported as a capacity shortage.
+
+The reader creates no probe network, schedule, container or host file, and emits
+only capacity counts. It does not assume Docker's stock pool capacity. Hosts
+must expose their configured pools in daemon info; the fleet pool rollout is
+owned by shiny-infra-ops#615. This is a fresh admission check, not a reservation
+against concurrent allocations by other actors. Once placement preparation has
+completed, continuation and retirement do not require another free network.
+Issue #4228 separately tracks ordinary lanes, previews, isolated testing
+candidates and the existing health/host view projection; this slice protects
+standalone upgrade-rehearsal placement only.
 
 Before planning, use the read-only
 `GET /v1/products/{product}/odoo-upgrade-rehearsal/preflight?source_context=…`

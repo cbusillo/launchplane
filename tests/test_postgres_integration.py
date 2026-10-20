@@ -4000,7 +4000,7 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                 self.assertEqual(_current_alembic_version(engine), migration.down_revision)
                 with engine.begin() as connection:
                     connection.execute(text("DROP VIEW retained_preview_dependency"))
-                self.assertEqual(migrate_schema(database_url=url), migration.revision)
+                self.assertEqual(migrate_schema(database_url=url), SCHEMA_MIGRATION_TARGET_REVISION)
                 verify_postgres_schema_invariants(engine)
             finally:
                 engine.dispose()
@@ -5579,6 +5579,32 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                         second.close()
                 finally:
                     fixture.doCleanups()
+
+    def test_discussion_topic_retries_are_atomic_on_independent_connections(self) -> None:
+        from control_plane.contracts.discussion_topic import DiscussionTopicInput
+
+        topic = DiscussionTopicInput(
+            title="Decide: Contact links", issue_url="https://git.example.test/issues/7"
+        )
+        with _store_for_fresh_head_database() as store:
+            barrier = threading.Barrier(2)
+
+            def add(_: int) -> object:
+                barrier.wait(timeout=10)
+                return store.add_discussion_topic("site-a", "contact", topic)
+
+            def close(_: int) -> object:
+                barrier.wait(timeout=10)
+                return store.close_discussion_topic("site-a", "contact")
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                added = list(pool.map(add, range(2)))
+                closed = list(pool.map(close, range(2)))
+            self.assertEqual(added[0], added[1])
+            self.assertEqual(closed[0], closed[1])
+            self.assertNotEqual(added[0], closed[0])
+            self.assertEqual(store.list_discussion_topics("site-b"), ())
+            self.assertEqual(len(store.list_discussion_topics("site-a", include_closed=True)), 1)
 
     def test_delivery_projection_uses_canonical_times_and_candidate_identities(self) -> None:
         from tests.test_delivery_evidence_index import DeliveryEvidenceIndexTests
@@ -10035,7 +10061,9 @@ class RealPostgresChangeImpactAuditTests(unittest.TestCase):
                 )
             finally:
                 engine.dispose()
-            alembic_command.upgrade(config, PRE_RETIREMENT_ALEMBIC_REVISION)
+            # Historical data is checked by the current runtime only after the
+            # additive release migrations have supplied its required tables.
+            alembic_command.upgrade(config, SCHEMA_MIGRATION_TARGET_REVISION)
             store = PostgresRecordStore(database_url=database_url)
             try:
                 store.verify_schema()
@@ -14275,27 +14303,37 @@ class RealPostgresTestingGenerationRetirementTests(unittest.TestCase):
             self.assertIsNone(superseded.cancellation)
             self.assertTrue(current.reconcile_requested_at)
 
-    def test_retirement_custody_survives_schema_downgrade_and_reupgrade(self) -> None:
+    def test_retirement_custody_survives_its_migration_downgrade_and_reupgrade(self) -> None:
+        from alembic.migration import MigrationContext
+        from alembic.operations import Operations
         from tests.test_testing_generation_retirement import TestingGenerationRetirementTests
         from control_plane.storage.migrations.versions import (
             cd192c59f009_retained_testing_generations as migration,
         )
 
-        with _isolated_postgres_database() as url:
-            alembic_command.upgrade(_alembic_config(url), PRE_RETIREMENT_ALEMBIC_REVISION)
+        with _head_postgres_database() as url:
             fixture = TestingGenerationRetirementTests()
             fixture.database_url = url
             fixture.setUp()
             self.addCleanup(fixture.doCleanups)
             fixture.apply()
             before = fixture.store.read_retained_testing_generation(fixture.operation.operation_id)
-            config = _alembic_config(url)
-            alembic_command.downgrade(config, migration.down_revision)
+            # Exercise this history-preserving migration itself. Unrelated later
+            # irreversible migrations deliberately refuse a whole-chain downgrade.
+            with (
+                fixture.store._engine.begin() as connection,
+                Operations.context(MigrationContext.configure(connection)),
+            ):
+                migration.downgrade()
             self.assertEqual(
                 fixture.store.read_retained_testing_generation(fixture.operation.operation_id),
                 before,
             )
-            alembic_command.upgrade(config, PRE_RETIREMENT_ALEMBIC_REVISION)
+            with (
+                fixture.store._engine.begin() as connection,
+                Operations.context(MigrationContext.configure(connection)),
+            ):
+                migration.upgrade()
             fixture.store.verify_schema()
             self.assertEqual(
                 fixture.store.read_retained_testing_generation(fixture.operation.operation_id),
