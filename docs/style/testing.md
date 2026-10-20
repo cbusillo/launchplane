@@ -446,7 +446,14 @@ The digest-pinned Playwright image supplies browser system libraries. Browser
 execution runs inside the container, with private shared memory and the job's
 actual UID/GID so artifacts remain writable by subsequent runner jobs. The host
 installs frontend dependencies; the container uses the job's Node executable
-and the image's Chromium. The wrapper verifies that its namespace differs from
+and the image's Chromium. Every frontend CI job selects a pnpm store under its
+own checkout before cache restore and install. The helper publishes a relative
+cache target so runner slots share cache versions and archives; each restore
+still writes only its own checkout. The new cache-key namespace resets the old
+shared-home entries. Sibling restores cannot overwrite an install's objects. Checkout cleanup
+owns this generated directory; jobs never clear the shared home store. The same
+setup applies to validation, fork validation, both browser shards and evidence
+verification. The wrapper verifies that its namespace differs from
 the host and removes only its captured container ID, including after failures.
 The workflow owns the image pin. Match the
 image's Playwright version to the frontend dependency when updating it. Preserve
