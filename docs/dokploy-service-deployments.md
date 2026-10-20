@@ -83,9 +83,11 @@ can send this body to `POST /v1/live-target-runtime/apply`:
 
 Review those names and the desired runtime records, then use `mode: "apply"`
 with the same names and the API's existing authorization and idempotency headers.
-Only managed keys may be named. This encoding-only operation writes even when
-the value delta is empty; the response reports transport work separately from
-value changes. Persistence verification checks values and the literal transport written by that operation.
+Only managed keys may be named. Naming an unqualified managed key writes its
+literal transport even when the value delta is empty. Already-qualified keys
+and plain values are no-ops. The response reports transport work separately
+from value changes. Persistence verification checks values and the literal
+transport written by that operation.
 It does not prove that running containers restarted; deployment remains an
 explicit existing operation. Unchanged legacy inputs remain explicitly unqualified in the names-only report.
 Ordinary writes and deploy-only calls preserve their existing consumer semantics;
@@ -98,8 +100,9 @@ Compatible slots refuse a legacy/literal transport mismatch for shared settings.
 custody and recovery receipts remain intact when exact configuration fails.
 This API field changes no authorization: terminal agents remain unable to apply,
 and Director-agent disposable-lane restrictions still apply. The Live Target Runtime workflow exposes the same optional JSON array of names
-through its existing authorization. Its summary separates value changes, transport
-qualification and restart status. The installed runtime-sync helper does not expose
+through its existing authorization. Its summary separates value changes and transport
+qualification. `env_written_without_deploy` describes only this call. It does
+not track earlier unapplied writes or running-container values. The installed runtime-sync helper does not expose
 this optional input; use the workflow or the existing authorized service API.
 Historical recipient and activation recovery retains its original parsed-value
 contract, including previously stored runtime identity.

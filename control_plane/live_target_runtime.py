@@ -1172,7 +1172,7 @@ def apply_live_target_runtime_environment(
             "requested_literal_keys": sorted(literal_keys),
             "qualification_keys": sorted(qualification_keys),
             "unqualified_keys": remaining_unqualified_keys,
-            "restart_pending": bool(apply_changes and changed_key_count and not deploy),
+            "env_written_without_deploy": bool(apply_changes and changed_key_count and not deploy),
         },
         "provider_env_platform_credentials": provider_env_platform_credentials,
         "apply": {

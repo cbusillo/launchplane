@@ -161,7 +161,7 @@ class StableLaneSyncRefusalTests(unittest.TestCase):
         transport = report["compose_transport"]
         assert isinstance(transport, dict)
         self.assertEqual(transport["unqualified_keys"], [])
-        self.assertTrue(transport["restart_pending"])
+        self.assertTrue(transport["env_written_without_deploy"])
         self.assertEqual(len(updates), 1)
         unchanged, no_updates = lane.sync(
             provider_env=str(updates[0]["env_text"]), requalify_literal_keys=("APP_MODE",)
@@ -169,6 +169,9 @@ class StableLaneSyncRefusalTests(unittest.TestCase):
         self.assertEqual(no_updates, [])
         assert isinstance(unchanged["apply"], dict)
         self.assertFalse(unchanged["apply"]["env_updated"])
+        no_op_transport = unchanged["compose_transport"]
+        assert isinstance(no_op_transport, dict)
+        self.assertFalse(no_op_transport["env_written_without_deploy"])
         self.assertEqual(
             dokploy_api.parse_dokploy_env_text(str(updates[0]["env_text"])), {"APP_MODE": value}
         )

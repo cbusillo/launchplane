@@ -143,7 +143,7 @@ jobs:
                 "- Changed keys: \(($result.runtime_environment.changed_keys // []) | join(", "))",
                 "- Literal qualification keys: \(($result.compose_transport.qualification_keys // []) | join(", "))",
                 "- Unqualified legacy keys: \(($result.compose_transport.unqualified_keys // []) | join(", "))",
-                "- Restart pending: \($result.compose_transport.restart_pending // false)",
+                "- Environment written without deployment in this run: \($result.compose_transport.env_written_without_deploy // false)",
                 "- Env updated: \($result.apply.env_updated)",
                 "- Deploy triggered: \($result.deploy.triggered)"
             ' "$RESPONSE_FILE"
