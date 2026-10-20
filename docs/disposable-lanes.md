@@ -2593,6 +2593,72 @@ execution. Existing read authority covers planning and readback. It is a source
 capability until the completing PR is deployed; a missing route is unavailable,
 not a reason to invoke a local live-target command.
 
+For a held execute that never produced its sanitized recovery copies, use
+`action: retire-incomplete` with the **unchanged original execute intent and
+execute key**. Take it through the same client dry-run, saved review, apply and
+readback. It accepts only `prepared` with no copy receipts and an exact original
+`reconcile_required` execute checkpoint. Its native scope is before the
+target-runtime switch, with no recorded copies: the source database
+must still be selected and the web writer stopped. Later-phase incomplete
+runtimes remain held for their qualified disposition. Verified, running,
+unbound or production-aliased operations refuse. Ordinary `retire` still requires both
+verified final recovery tuples; incomplete retirement produces neither tuple.
+
+The dry-run acquires executor exclusion and inspects the exact private placement,
+containers, private network, labeled local volumes and backing identities. It
+checks that no container can see raw host custody and that the rehearsal web
+writer is stopped. Apply rechecks the reviewed binding, acquires the existing
+host lock, and records a private disposal manifest before stopping/removing only
+those containers, volumes and network. It deletes raw capture and partial host
+storage, including partial source snapshots, retaining only disposal/refusal
+receipts and the unlocked lock file. It removes
+the isolated provider compose through the existing compose retirement path,
+then its empty project. No source read, source mutation, credential creation,
+public-route operation or grant is involved.
+
+After native absence checks and placement absence, one DB transaction marks the
+rehearsal retired, removes its physical target registration and completes the
+original held execute with an explicit incomplete-retirement result. This frees
+its operation hold without advertising a successful execute. The retirement's
+own reservation uses a separate scope under the same principal and original
+key, so it cannot displace the held execute before disposal. A typed checkpoint
+binds the reviewed plan and native manifest before deletion; completed host
+disposal is persisted before provider placement removal. This checkpoint is
+excluded from the original execute binding and does not produce recovery
+copies. Legacy records without it retain their original binding. Use a
+compatible service to finish an admitted retirement before rolling back to a
+version that cannot read that checkpoint.
+
+Completed same-key apply replay returns its stored result; readback validates
+the shared typed receipt and provider placement absence. Interrupted calls keep
+both journals held. An explicit same-key apply can resume only after read-only
+qualification of the bound host manifest or persisted host disposal under the
+executor lock; it skips the removed host runtime once disposal is proved.
+Unavailable or running resources stay held. Changed inventory refuses before
+deletion and records an attempt-bound, review-specific native refusal under the
+host lock. If dispatch failed before that fence ran, dry-run reports
+`review_refusal_required`: retry the saved old review once to establish its
+no-effect refusal. Then obtain and review a fresh dry-run and apply with the
+same original execute key. The retirement's stable request fingerprint binds
+the original intent; its checkpoint and native admission enforce each review.
+A replacement review requires a durable refusal with no disposal manifest or
+persisted host disposal. Refused reviews stay refused, including delayed host
+scripts. Replacement plan hashes include the refusal lineage, so restored
+inventory cannot revive an old admission. Once disposal starts, only its bound
+manifest can resume. Planning reports native absence and remaining work without
+claiming preserved resources. Completed readback uses the persisted host receipt
+and current placement absence; it does not dispatch a new host inspection after
+the placement has been removed. The client rejects a
+retirement result when an old execute request is replayed, so cancellation
+cannot be reported as a successful execute. A failed readback never authorizes
+a new capture.
+
+The existing disabled manual server schedule and purpose-local managed-secret
+records remain as audit/configuration metadata with no runtime consumer. The
+retirement schedule carries no source configuration or local passwords and is
+not enabled for recurring execution. This action changes neither credential
+bindings nor access.
+
 After prepare, keep the returned `rehearsal_id` in the private intent and take
 each next `action` through its own dry-run/review/apply with a distinct stable
 key and new evidence file:
