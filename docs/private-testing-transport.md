@@ -186,7 +186,21 @@ identity with a settled update
 (completed or initial creation without update status) prove a qualification
 timeout at that deadline. Replacement tasks and reaped task history do not erase
 that settled service proof. An updater still running, an unreadable service or a
-foreign service specification remains unknown.
+foreign service specification remains unknown for a successful provider job.
+An exact terminal `error` or `failed` job can instead fail before it updates the
+service. Dokploy's pinned [application deploy](https://github.com/Dokploy/dokploy/blob/1c4414165d4aedbf6e28afab7a94c8fb7c053373/packages/server/src/services/application.ts)
+awaits the [Docker-source login and pull](https://github.com/Dokploy/dokploy/blob/1c4414165d4aedbf6e28afab7a94c8fb7c053373/packages/server/src/utils/providers/docker.ts)
+before the service update; a failed pull leaves the older service installed.
+That exact failed job plus a fresh stable service read (no update status,
+`completed` or `rollback_completed`) proves a currently settled failure even
+when the old image and deployment identity remain. It does not prove absence,
+permit provider retry or credit successful deployment/inventory. An interrupted
+lifecycle attempt that retains its reservation completes the captured hold through
+the reviewed recovery action. Normal execution settles the failed attempt directly
+when its hold completes. Updating or unreadable services and canceled/killed jobs
+remain unknown. Failed jobs use
+the remaining original deployment budget for transient runtime reads; a failure
+already proved by the qualification loop is preserved without a second read.
 
 The supported generic-web recovery dry-run/apply can establish that same timeout
 once the original lease is inactive. It compares the database observation time with
@@ -196,9 +210,11 @@ hold or record checkpoints can delay that proof; they never shorten the original
 budget. Automatic observation without that deadline proof retains the fence; use
 the reviewed native recovery operation.
 
-For a lifecycle lane, a proved failed job or qualification failure requires the
-explicit `settle_testing_failure` recovery action. The service retains the truthful
-`present` provider outcome and `retry_safe: false`. Adoption remains write-free.
+For an unfinished lifecycle attempt that retains its reservation after a proved
+failed job or qualification failure, use the explicit `settle_testing_failure`
+recovery action. A normal attempt whose hold completed already settles as failed
+without recovery. The service retains the truthful `present` provider outcome and
+`retry_safe: false`. Adoption remains write-free.
 The reviewed action acquires the original recovery lease and repeats only the
 idempotent schedule hold from the exact original artifact-bound receipt. It never
 captures a new baseline, saves or deploys an image, resets data, runs maintenance,
@@ -206,10 +222,14 @@ activates schedules or runs post-deploy work. Capture-time `prepared` receipts,
 partially applied holds and older `held` receipts can resume from their complete
 original baseline. An exact failed lifecycle record keeps the original attempt
 failed even if its runtime becomes healthy later; recovery still completes the
-hold. A crash while publishing the failed record can resume the same hold.
-A capture-only pending lifecycle receipt at `records_commit` with a successful
-provider job cannot prove whether data or post-deploy work completed, so that
-ambiguous case stays fenced. Missing or malformed baseline, changed target authority, an active updater,
+hold. A crash while publishing the failed record can resume the same hold. Failure
+publication checks the original lease without replacing its last recoverable phase,
+including application testing lanes without managed inputs. A capture-only pending
+lifecycle receipt at `records_commit` cannot prove whether
+data or post-deploy work completed, so that ambiguous case stays fenced for every
+provider status. Dokploy can publish `done` before a later notification failure
+changes that job to `error`; the final status cannot erase work already started.
+Missing or malformed baseline, changed target authority, an active updater,
 unknown service/provider effects or lost lease keep the original operation fenced.
 A failed cleanup also keeps the fence and a durable hold-only checkpoint, so a new
 review can resume cleanup instead of replaying the image operation.

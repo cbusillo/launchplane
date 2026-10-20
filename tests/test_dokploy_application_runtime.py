@@ -413,6 +413,71 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
         self.assertTrue(first)
         self.assertFalse(fingerprint(replace(observed, rollout_state="updating")))
 
+    def test_terminal_failed_job_settles_old_service_without_crediting_success(self) -> None:
+        from control_plane.workflows.generic_web_deploy_provider import (
+            DokployGenericWebDeployProvider,
+            GenericWebProviderDeploymentObservation,
+            qualify_testing_application_observation,
+        )
+
+        observed = replace(
+            self.read(),
+            service_image="ghcr.io/example/application:old",
+            service_deployment_record_id="old-deployment",
+            rollout_started_at="2026-01-01T00:00:00Z",
+        )
+        provider = DokployGenericWebDeployProvider()
+        target = _application_target()
+        for status, state, expected in (
+            ("error", "", "present"),
+            ("failed", "completed", "present"),
+            ("error", "rollback_completed", "present"),
+            ("done", "completed", "unknown"),
+            ("done", "rollback_completed", "unknown"),
+            ("error", "updating", "unknown"),
+            ("failed", "rollback_started", "unknown"),
+            ("canceled", "completed", "unknown"),
+            ("cancelled", "", "unknown"),
+            ("killed", "rollback_completed", "unknown"),
+        ):
+            with self.subTest(status=status, state=state):
+                job = GenericWebProviderDeploymentObservation(
+                    outcome="present",
+                    deployment_status=status,
+                    deployment_id="failed-job",
+                    started_at="2026-10-20T03:08:20Z",
+                    finished_at="2026-10-20T03:08:25Z",
+                )
+                with patch.object(
+                    provider,
+                    "observe_testing_application_runtime",
+                    return_value=replace(observed, rollout_state=state),
+                ):
+                    result = qualify_testing_application_observation(
+                        provider=provider,
+                        control_plane_root=Path("."),
+                        target=target,
+                        observation=job,
+                        deployment_record_id="deployment-1",
+                        original_deadline_expired=True,
+                    )
+                self.assertEqual(result.outcome, expected)
+                if expected == "present":
+                    self.assertEqual(result, job)
+        with patch.object(
+            provider,
+            "observe_testing_application_runtime",
+            side_effect=click.ClickException("unreadable service"),
+        ):
+            result = qualify_testing_application_observation(
+                provider=provider,
+                control_plane_root=Path("."),
+                target=target,
+                observation=job.model_copy(update={"deployment_status": "error"}),
+                deployment_record_id="deployment-1",
+            )
+        self.assertEqual(result.outcome, "unknown")
+
     def test_completion_waits_for_rollout_and_recovery_does_not_credit_pending(self) -> None:
         from control_plane.workflows.generic_web_deploy_provider import (
             DokployGenericWebDeployProvider,

@@ -646,6 +646,9 @@ def qualify_testing_application_observation(
         return observation
     if not isinstance(provider, GenericWebTestingApplicationRuntimeProvider):
         return GenericWebProviderDeploymentObservation(outcome="unknown")
+    if observation.deployment_status in {"canceled", "cancelled", "killed"}:
+        # Cancellation does not prove the provider worker stopped dispatching.
+        return GenericWebProviderDeploymentObservation(outcome="unknown")
     if wait and deadline is None:
         deadline = monotonic() + target.deploy_timeout_seconds
     while True:
@@ -657,6 +660,14 @@ def qualify_testing_application_observation(
             )
             if runtime.application_id != target.resolved_target.target_id:
                 raise ValueError("Runtime observation belongs to another target.")
+            if observation.deployment_status in {"error", "failed"} and runtime.rollout_state in {
+                "",
+                "completed",
+                "rollback_completed",
+            }:
+                # A pull/login failure can end before any service update. This
+                # proves a failed, currently settled effect, never its absence.
+                return GenericWebProviderDeploymentFailed(observation).observation
             if application_runtime_matches(
                 runtime,
                 artifact_reference=target.ship_request.artifact_id,

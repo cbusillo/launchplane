@@ -499,13 +499,13 @@ class GenericWebDeployProviderMutationAdapter:
                     provider_evidence="provider_status_unknown",
                 )
             if receipt is not None and record is not None:
-                if record.deploy.status == "fail":
+                if record.deploy.status == "fail" and generic_web_provider_deployment_succeeded(
+                    observation.deployment_status
+                ):
                     # Later runtime health cannot undo the original failed qualification.
                     observation = observation.model_copy(update={"deployment_status": "unhealthy"})
                 elif (
-                    provider_effect_phase == "records_commit"
-                    and record.deploy.status == "pending"
-                    and generic_web_provider_deployment_succeeded(observation.deployment_status)
+                    provider_effect_phase == "records_commit" and record.deploy.status == "pending"
                 ):
                     # The same capture receipt precedes success and data/post-deploy work.
                     # A lost final write does not prove which of those effects completed.
@@ -1079,11 +1079,12 @@ class GenericWebDeployProviderMutationAdapter:
                 resolved_deploy_target=resolved_target,
                 provider_effect_checkpoint=checkpoint,
                 before_records_commit=lambda: checkpoint("records_commit"),
-                # Publishing a refusal checks ownership without inventing a
+                # Publishing a testing failure checks ownership without inventing a
                 # provider effect or replacing the last recoverable phase.
                 before_failure_records_commit=(
                     (lambda: checkpoint("provider_dispatch_prepared"))
-                    if resolved_target.testing_runtime_digest
+                    if resolved_target.ship_request.instance == "testing"
+                    and resolved_target.resolved_target.target_type == "application"
                     else None
                 ),
                 recorded_artifact=self._recorded_artifact,

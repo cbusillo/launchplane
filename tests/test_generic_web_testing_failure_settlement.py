@@ -18,7 +18,11 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.contracts.promotion_record import PostDeployUpdateEvidence
 from control_plane.contracts.idempotency_record import parse_launchplane_mutation_timestamp
 from control_plane.dokploy import api
-from control_plane.generic_web_deploy_http import GenericWebDeployEnvelope
+from control_plane.generic_web_deploy_http import (
+    GenericWebDeployEnvelope,
+    execute_generic_web_deploy_result,
+)
+from control_plane.provider_operations import resume_acquired_provider_operation
 from control_plane.generic_web_deploy_provider_adapter import (
     GenericWebDeployProviderMutationAdapter,
 )
@@ -38,6 +42,7 @@ from control_plane.workflows.generic_web_deploy_provider import (
     GenericWebProviderDeploymentObservation,
 )
 from control_plane.workflows.ship import build_deployment_record
+from tests.test_generic_web_application_lifecycle import _LifecycleDeployProvider
 from tests.support.profiles import product_profile_payload
 from tests.support.stores import sqlite_database_url, _seed_generic_web_deploy_target_records
 from tests.test_generic_web_deploy_recovery import (
@@ -189,6 +194,12 @@ class GenericWebTestingFailureSettlementTests(TestCase):
                     ),
                     service_deployment_record_id=(runtime_changes or {}).get(
                         "service_deployment_record_id", observed.service_deployment_record_id
+                    ),
+                    service_image=(runtime_changes or {}).get(
+                        "service_image", observed.service_image
+                    ),
+                    rollout_started_at=(runtime_changes or {}).get(
+                        "rollout_started_at", observed.rollout_started_at
                     ),
                 )
 
@@ -392,7 +403,7 @@ class GenericWebTestingFailureSettlementTests(TestCase):
                 self.assertTrue(self.store.list_held_provider_target_reservations())
 
     def test_failed_job_with_unknown_or_active_service_keeps_fence(self) -> None:
-        for changes in ({"rollout_state": "updating"}, {"service_deployment_record_id": "foreign"}):
+        for changes in ({"rollout_state": "updating"}, {"rollout_state": "rollback_started"}):
             with (
                 self.subTest(changes=changes),
                 self.scenario(job_status="error", runtime_changes=changes),
@@ -530,22 +541,167 @@ class GenericWebTestingFailureSettlementTests(TestCase):
             self.assertFalse(any(item["enabled"] for item in self.schedules.values()))
 
     def test_capture_receipt_at_records_commit_cannot_prove_post_deploy_outcome(self) -> None:
-        for healthy in (False, True):
-            with self.subTest(healthy=healthy), self.scenario(phase="records_commit"):
+        for job_status in ("done", "error", "failed"):
+            for healthy in (False, True):
                 with (
-                    patch.object(
-                        self.provider,
-                        "observe_testing_application_runtime",
-                        side_effect=self.base_runtime_read,
-                    )
-                    if healthy
-                    else nullcontext()
+                    self.subTest(job_status=job_status, healthy=healthy),
+                    self.scenario(phase="records_commit", job_status=job_status),
                 ):
-                    status, dry = self.dry()
-                    self.assertEqual(status, 200, dry)
-                    self.assertEqual(dry["proposed_action"], "hold_unknown")
-                    status, _applied = self.apply(dry)
-                self.assertEqual(status, 409)
-                self.upsert.assert_not_called()
-                self.assertTrue(self.store.list_held_provider_target_reservations())
+                    with (
+                        patch.object(
+                            self.provider,
+                            "observe_testing_application_runtime",
+                            side_effect=self.base_runtime_read,
+                        )
+                        if healthy
+                        else nullcontext()
+                    ):
+                        status, dry = self.dry()
+                        self.assertEqual(status, 200, dry)
+                        self.assertEqual(dry["proposed_action"], "hold_unknown")
+                        status, _applied = self.apply(dry)
+                    self.assertEqual(status, 409)
+                    self.upsert.assert_not_called()
+                    self.assertTrue(self.store.list_held_provider_target_reservations())
+                    self.assertFalse(self.store.list_environment_inventory())
+
+    def test_terminal_failed_job_with_old_service_repeats_only_captured_hold(self) -> None:
+        for status, state, failed_record in (
+            ("error", "completed", False),
+            ("failed", "", True),
+            ("error", "rollback_completed", True),
+        ):
+            with (
+                self.subTest(status=status, state=state, failed_record=failed_record),
+                self.scenario(
+                    job_status=status,
+                    runtime_changes={
+                        "service_image": "ghcr.io/example/application:old",
+                        "service_deployment_record_id": "previous-deployment",
+                        "rollout_state": state,
+                        "rollout_started_at": "2026-01-01T00:00:00Z",
+                    },
+                ),
+            ):
+                if failed_record:
+                    record = self.store.read_deployment_record(self.record_id)
+                    self.store.write_deployment_record(
+                        record.model_copy(
+                            update={
+                                "deploy": record.deploy.model_copy(update={"status": "fail"}),
+                            }
+                        )
+                    )
+                status_code, dry = self.dry()
+                self.assertEqual(status_code, 200, dry)
+                self.assertEqual(dry["proposed_action"], "settle_testing_failure")
+                self.assertEqual(dry["provider_outcome"], "present")
+                self.assertFalse(dry["retry_safe"])
+                status_code, applied = self.apply(dry)
+                self.assertEqual(status_code, 202, applied)
+                self.assertEqual(
+                    self.store.read_deployment_record(self.record_id).deploy.status, "fail"
+                )
                 self.assertFalse(self.store.list_environment_inventory())
+                self.assertFalse(self.store.list_held_provider_target_reservations())
+                self.assertFalse(any(item["enabled"] for item in self.schedules.values()))
+
+    def test_no_input_lifecycle_failure_write_keeps_original_recovery_phase(self) -> None:
+        capture = DokployApplicationLifecycle.capture
+        prepare = DokployApplicationLifecycle.prepare
+        with self.scenario():
+            lane = self.profile.lanes[0].model_copy(
+                update={"generic_web_extensions": self.receipt.extensions}
+            )
+            self.profile = self.profile.model_copy(update={"lanes": (lane,)})
+            self.store.write_product_profile_record(self.profile)
+            provider = _LifecycleDeployProvider(
+                target_id=self.target.resolved_target.target_id,
+                target_name=self.target.resolved_target.target_name,
+                original_operation_key=self.provider.original_operation_key,
+                observation=self.provider.observation,
+            )
+            adapter = GenericWebDeployProviderMutationAdapter(
+                control_plane_root=Path("."),
+                record_store=self.store,
+                deploy_request=GenericWebDeployEnvelope.model_validate(self.original),
+                profile=self.profile,
+                lane=lane,
+                trace_id="original-failure-publication",
+                deploy_provider=provider,
+                recorded_artifact=True,
+            )
+            inspected = adapter.inspect_evidence(
+                provider_operation_key=self.provider.original_operation_key,
+                provider_effect_phase=self.reservation.provider_effect_phase,
+                reconciliation_key=self.reservation.reconciliation_key,
+                expected_provider_target_key=self.reservation.provider_target_key,
+            )
+            self.assertIsNotNone(inspected.resolved_deploy_target)
+            assert inspected.resolved_deploy_target is not None
+            self.assertFalse(inspected.resolved_deploy_target.testing_runtime_digest)
+            retry = self.store.retry_reconciled_mutation(
+                reservation=self.reservation,
+                lease_owner="original-failure-publication",
+                preserve_effect_checkpoint=True,
+            )
+            self.assertEqual(retry.status, "acquired")
+            assert retry.record is not None
+            execute = provider.execute_artifact_deploy
+            write = self.store.write_deployment_record
+
+            def pending_runtime(**kwargs: object) -> None:
+                execute(**kwargs)  # type: ignore[arg-type]
+                assert provider.application_runtime is not None
+                provider.application_runtime = replace(
+                    provider.application_runtime,
+                    running_container_images=(),
+                    running_container_deployment_record_ids=(),
+                    running_container_health=(),
+                    pending_task_count=1,
+                )
+
+            def fail_publication(record: Any) -> object:
+                if record.deploy.status == "fail":
+                    raise click.ClickException("failed final record write interrupted")
+                return write(record)
+
+            with (
+                patch(
+                    "control_plane.generic_web_deploy_provider_adapter.execute_generic_web_deploy_result",
+                    side_effect=execute_generic_web_deploy_result,
+                ),
+                patch.object(provider, "execute_artifact_deploy", side_effect=pending_runtime),
+                patch.object(self.store, "write_deployment_record", side_effect=fail_publication),
+                patch(
+                    "control_plane.dokploy.source.read_dokploy_config",
+                    return_value=("fixture", "fixture"),
+                ),
+                patch(
+                    "control_plane.workflows.generic_web_deploy_provider.monotonic",
+                    return_value=1e12,
+                ),
+                patch.object(DokployApplicationLifecycle, "capture", new=capture),
+                patch.object(DokployApplicationLifecycle, "prepare", new=prepare),
+            ):
+                result = resume_acquired_provider_operation(
+                    store=self.store,
+                    reservation=retry.record,
+                    response_trace_id="original-failure-publication",
+                    adapter=adapter,
+                )
+            self.assertEqual(result.status, "reconcile_required")
+            held = self.store.list_held_provider_target_reservations()
+            self.assertTrue(held)
+            stored = self.store.read_deployment_record(self.record_id)
+            self.assertEqual(stored.deploy.status, "pending")
+            baseline = recorded_application_lifecycle(stored)
+            assert baseline is not None
+            self.assertEqual(baseline.originals, self.receipt.originals)
+            status, dry = self.dry()
+            self.assertEqual(status, 200, dry)
+            self.assertEqual(dry["proposed_action"], "settle_testing_failure")
+            status, applied = self.apply(dry)
+            self.assertEqual(status, 202, applied)
+            self.assertFalse(self.store.list_held_provider_target_reservations())
+            self.assertFalse(self.store.list_environment_inventory())

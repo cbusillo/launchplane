@@ -757,6 +757,8 @@ def _execute_generic_web_deploy_unserialized(
     key_readback: IntegrationKeyReadbackEvidence | None = None
     application_lifecycle: GenericWebApplicationLifecycle | None = None
     failure_hold_completed = False
+    runtime_failure_proved = False
+    runtime_deadline: float | None = None
 
     def checkpoint_provider(phase: str) -> None:
         nonlocal post_deploy_update, last_provider_phase, dispatch_refused
@@ -1033,6 +1035,7 @@ def _execute_generic_web_deploy_unserialized(
             if not generic_web_provider_deployment_succeeded(
                 qualified_observation.deployment_status
             ):
+                runtime_failure_proved = True
                 raise GenericWebProviderDeploymentFailed(qualified_observation)
         deploy_completed = True
         key_readback = integration_key_readback(
@@ -1095,16 +1098,22 @@ def _execute_generic_web_deploy_unserialized(
         if isinstance(exc, GenericWebProviderDeploymentFailed):
             provider_deployment_observation = exc.observation
             if resolved_lane.instance == "testing" and resolved_target.target_type == "application":
-                failure_observation = qualify_testing_application_observation(
-                    provider=resolved_deploy_provider,
-                    control_plane_root=control_plane_root,
-                    target=prepared_deploy_target,
-                    observation=exc.observation,
-                    deployment_record_id=record_id,
-                )
-                provider_failure_observed = failure_observation.outcome == "present" and not (
-                    generic_web_provider_deployment_succeeded(failure_observation.deployment_status)
-                )
+                provider_failure_observed = runtime_failure_proved
+                if not runtime_failure_proved and runtime_deadline is not None:
+                    failure_observation = qualify_testing_application_observation(
+                        provider=resolved_deploy_provider,
+                        control_plane_root=control_plane_root,
+                        target=prepared_deploy_target,
+                        observation=exc.observation,
+                        deployment_record_id=record_id,
+                        wait=True,
+                        deadline=runtime_deadline,
+                    )
+                    provider_failure_observed = failure_observation.outcome == "present" and not (
+                        generic_web_provider_deployment_succeeded(
+                            failure_observation.deployment_status
+                        )
+                    )
         if application_lifecycle is not None:
             try:
                 require_cleanup_authority()

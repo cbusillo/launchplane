@@ -207,7 +207,9 @@ def settle_testing_failure(
                 operation_key, context=lane.context, instance=lane.instance
             )
         )
-        if original_record.deploy.status == "fail":
+        if original_record.deploy.status == "fail" and generic_web_provider_deployment_succeeded(
+            observed.deployment_status
+        ):
             observed = observed.model_copy(update={"deployment_status": "unhealthy"})
         qualified = qualify_testing_application_observation(
             provider=provider,

@@ -286,6 +286,85 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
                 self.assertEqual(next_receipt.originals, receipt.originals)
                 self.assertTrue(self.schedules["billing-recovery"]["enabled"])
 
+    def test_failure_qualification_reuses_original_proof_or_remaining_budget(self) -> None:
+        self._api_context()
+        profile = _profile()
+        lane = profile.lanes[0].model_copy(update={"generic_web_extensions": self.extensions})
+        profile = profile.model_copy(update={"lanes": (lane,)})
+        for failure_kind in (
+            "proved qualification timeout",
+            "unqualified provider failure",
+            "unqualified provider failure with exhausted budget",
+        ):
+            with self.subTest(failure_kind=failure_kind):
+                self.schedules = {"billing-recovery": dict(self.original)}
+                store = _GenericWebDeployStore(profile)
+                job = GenericWebProviderDeploymentObservation(
+                    outcome="present",
+                    deployment_status="done"
+                    if failure_kind == "proved qualification timeout"
+                    else "error",
+                    deployment_id="provider-job",
+                    started_at=utc_now_timestamp(),
+                    finished_at=utc_now_timestamp(),
+                )
+                provider = _LifecycleDeployProvider(target_id="app-123", observation=job)
+                execute = provider.execute_artifact_deploy
+                read = provider.observe_testing_application_runtime
+                calls = 0
+
+                def execute_failure(**kwargs: object) -> None:
+                    execute(**kwargs)  # type: ignore[arg-type]
+                    if failure_kind == "proved qualification timeout":
+                        assert provider.application_runtime is not None
+                        provider.application_runtime = replace(
+                            provider.application_runtime,
+                            running_container_images=(),
+                            running_container_deployment_record_ids=(),
+                            running_container_health=(),
+                            pending_task_count=1,
+                        )
+                        return
+                    raise GenericWebProviderDeploymentFailed(job)
+
+                def transient_read(**kwargs: object) -> object:
+                    nonlocal calls
+                    calls += 1
+                    if (failure_kind == "proved qualification timeout" and calls > 1) or (
+                        failure_kind.startswith("unqualified provider failure") and calls == 1
+                    ):
+                        raise click.ClickException("transient runtime read failure")
+                    return read(**kwargs)  # type: ignore[arg-type]
+
+                with (
+                    patch.object(provider, "execute_artifact_deploy", side_effect=execute_failure),
+                    patch.object(
+                        provider, "observe_testing_application_runtime", side_effect=transient_read
+                    ),
+                    patch("control_plane.workflows.generic_web_deploy_provider.sleep"),
+                    patch("control_plane.workflows.generic_web_deploy.monotonic", return_value=0),
+                    patch(
+                        "control_plane.workflows.generic_web_deploy_provider.monotonic",
+                        return_value=100
+                        if failure_kind == "unqualified provider failure"
+                        else 1e12,
+                    ),
+                ):
+                    result = execute_generic_web_deploy(
+                        control_plane_root=Path("."),
+                        record_store=store,
+                        request=_request(),
+                        profile=profile,
+                        lane=lane,
+                        deploy_provider=provider,
+                    )
+                self.assertEqual(result.deploy_status, "fail")
+                self.assertEqual(
+                    result.provider_failure_proved,
+                    failure_kind != "unqualified provider failure with exhausted budget",
+                )
+                self.assertFalse(self.schedules["billing-recovery"]["enabled"])
+
     def test_failed_provider_job_cannot_release_an_updating_application_effect(self) -> None:
         self._api_context()
         profile = _profile()
@@ -318,7 +397,13 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
                     )
                     raise GenericWebProviderDeploymentFailed(failed)
 
-                with patch.object(provider, "execute_artifact_deploy", side_effect=failed_runtime):
+                with (
+                    patch.object(provider, "execute_artifact_deploy", side_effect=failed_runtime),
+                    patch(
+                        "control_plane.workflows.generic_web_deploy_provider.monotonic",
+                        return_value=1e30,
+                    ),
+                ):
                     result = execute_generic_web_deploy(
                         control_plane_root=Path("."),
                         record_store=store,
@@ -330,6 +415,53 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
                 self.assertEqual(result.deploy_status, "fail")
                 self.assertEqual(result.provider_failure_proved, state == "completed")
                 self.assertFalse(self.schedules["billing-recovery"]["enabled"])
+
+    def test_failed_job_before_service_update_settles_image_only_lane_as_failure(self) -> None:
+        profile = _profile()
+        for state in ("", "completed", "rollback_completed"):
+            with self.subTest(state=state):
+                store = _GenericWebDeployStore(profile)
+                failed = GenericWebProviderDeploymentObservation(
+                    outcome="present",
+                    deployment_status="error",
+                    deployment_id="failed-job",
+                    started_at=utc_now_timestamp(),
+                    finished_at=utc_now_timestamp(),
+                )
+                provider = _LifecycleDeployProvider(observation=failed)
+                execute = provider.execute_artifact_deploy
+
+                def failed_before_update(**kwargs: object) -> None:
+                    execute(**kwargs)  # type: ignore[arg-type]
+                    assert provider.application_runtime is not None
+                    provider.application_runtime = replace(
+                        provider.application_runtime,
+                        rollout_state=state,
+                        service_image="ghcr.io/example/application:old",
+                        service_deployment_record_id="previous-deployment",
+                        rollout_started_at="2026-01-01T00:00:00Z",
+                    )
+                    raise GenericWebProviderDeploymentFailed(failed)
+
+                with (
+                    patch.object(
+                        provider, "execute_artifact_deploy", side_effect=failed_before_update
+                    ),
+                    patch(
+                        "control_plane.workflows.generic_web_deploy_provider.monotonic",
+                        return_value=1e30,
+                    ),
+                ):
+                    result = execute_generic_web_deploy(
+                        control_plane_root=Path("."),
+                        record_store=store,
+                        request=_request(),
+                        profile=profile,
+                        deploy_provider=provider,
+                    )
+                self.assertEqual(result.deploy_status, "fail")
+                self.assertTrue(result.provider_failure_proved)
+                self.assertFalse(store.inventories)
 
     def test_testing_reset_is_explicit_and_uses_the_disposable_lane_guard(self) -> None:
         reset_command = GenericWebMaintenanceCommand(
