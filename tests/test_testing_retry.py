@@ -350,6 +350,37 @@ class TestingRetryTests(reconcile_fixtures.ProductReconcileTestCase):
             TESTING_DEPLOY_MAX_ATTEMPT_CHAIN,
         )
 
+    def test_old_writer_rearms_after_new_checkpoint_survive_roll_forward(self) -> None:
+        self.assertEqual(self.post(self.reviewed(), "new-writer").status_code, 202)
+        # Old APIs/workers know only the product-key record. Preserve the older
+        # per-artifact checkpoint while several legacy re-arms move past it.
+        with (
+            patch.object(self.store, "read_testing_retry_history", return_value=None),
+            patch("control_plane.storage.postgres.testing_retry_history_key", return_value="site"),
+        ):
+            for cycle in range(
+                TESTING_DEPLOY_MAX_ATTEMPT_CHAIN // TESTING_DEPLOY_MAX_FAILED_ATTEMPTS + 1
+            ):
+                for _ in range(TESTING_DEPLOY_MAX_FAILED_ATTEMPTS):
+                    self.request()
+                    self.finish(str(self.reconcile()["queued_operation_id"]), "fail")
+                self.assertEqual(self.post(self.reviewed(), f"old-writer-{cycle}").status_code, 202)
+        # A valid reviewed budget must take effect even with stale traversal
+        # metadata from before the emergency rollback.
+        self.request()
+        queued = str(self.reconcile()["queued_operation_id"])
+        self.finish(queued, "fail")
+        inventory = self.store.read_environment_inventory(
+            context_name="cm", instance_name="testing"
+        )
+        self.store.write_environment_inventory(
+            inventory.model_copy(update={"deployment_record_id": "after-old-writer"})
+        )
+        # Invalidating the budget still permits review using the newer legacy
+        # traversal checkpoint. No history edit is needed after roll-forward.
+        reviewed = self.post(self.draft)
+        self.assertEqual(reviewed.status_code, 202, reviewed.text)
+
     def test_fresh_generation_uses_old_traversal_without_inheriting_old_budget(self) -> None:
         self.repeated_existing_rearms()
         generation = self.fresh_generation(after_history=True)

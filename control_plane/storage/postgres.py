@@ -24293,14 +24293,35 @@ class PostgresRecordStore(HumanSessionStore):
         return TestingRetryRearm.model_validate(record.response_payload) if record else None
 
     def read_testing_retry_history(
-        self, product: str, artifact_id: str
+        self, product: str, artifact_id: str, *, context: str, generation_binding_sha256: str = ""
     ) -> TestingRetryRearm | None:
-        record = self.read_idempotency_record(
-            scope=TESTING_RETRY_REARM_SCOPE,
-            route_path=TESTING_RETRY_REARM_ROUTE,
-            idempotency_key=testing_retry_history_key(product, artifact_id),
-        )
-        return TestingRetryRearm.model_validate(record.response_payload) if record else None
+        # Old APIs advance only the product key during emergency rollback.
+        # Compare persisted commit times, not second-resolution request times.
+        candidates = []
+        for key in dict.fromkeys(
+            (
+                product,
+                testing_retry_rearm_key(product, generation_binding_sha256),
+                testing_retry_history_key(product, artifact_id),
+            )
+        ):
+            record = self.read_idempotency_record(
+                scope=TESTING_RETRY_REARM_SCOPE,
+                route_path=TESTING_RETRY_REARM_ROUTE,
+                idempotency_key=key,
+            )
+            if record is not None:
+                rearm = TestingRetryRearm.model_validate(record.response_payload)
+                if (rearm.context, rearm.artifact_id) == (context, artifact_id):
+                    candidates.append(
+                        (
+                            parse_launchplane_mutation_timestamp(
+                                record.recorded_at, field_name="retry checkpoint commit"
+                            ),
+                            rearm,
+                        )
+                    )
+        return max(candidates, key=lambda candidate: candidate[0])[1] if candidates else None
 
     def commit_testing_retry_rearm(
         self,

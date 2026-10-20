@@ -1241,7 +1241,12 @@ def testing_retry_after_operation(
         return ""
     rearm = None
     if not require_current_binding:
-        rearm = record_store.read_testing_retry_history(profile.product, artifact_id)
+        rearm = record_store.read_testing_retry_history(
+            profile.product,
+            artifact_id,
+            context=lane.context,
+            generation_binding_sha256=generation_binding_sha256,
+        )
     if rearm is None:
         rearm = record_store.read_testing_retry_rearm(
             profile.product, generation_binding_sha256=generation_binding_sha256
@@ -1324,7 +1329,20 @@ def _next_testing_attempt(
     # lock. Start at its successor so repeated recoveries do not spend the chain
     # traversal bound on immutable history. Enqueue still checks the entire lane
     # for active/unknown operations, including any reopened historical attempt.
-    boundary = history_after_operation_id or rearmed_after_operation_id
+    if rearmed_after_operation_id and generation_started is not None:
+        reviewed = operation_store.read_odoo_stable_target_replacement_operation_record(
+            rearmed_after_operation_id
+        )
+        if (
+            parse_launchplane_mutation_timestamp(
+                reviewed.created_at, field_name="testing operation creation"
+            )
+            < generation_started
+        ):
+            rearmed_after_operation_id = ""
+    # A current-phase reviewed reset wins even when an older API did not advance
+    # the independent traversal key. Older-phase receipts cannot move us back.
+    boundary = rearmed_after_operation_id or history_after_operation_id
     key = f"{base_key}:after-{boundary}" if boundary else base_key
     failed_attempts = 0
     last_failed: OdooStableTargetReplacementOperationRecord | None = None
