@@ -176,6 +176,10 @@ class CopyRunner(OdooDataWorkflowRunner):
                 cause = error
                 while cause is not None:
                     if isinstance(cause, subprocess.CalledProcessError):
+                        if cause.stderr is not None:
+                            # Captured preflight output is unavailable here;
+                            # its artifact exception supplies the diagnosis.
+                            raise
                         # Keep the bounded tail for Odoo's own exception, not
                         # repeated argv and the artifact wrapper's chain.
                         raise RuntimeError(f"Odoo command exited {cause.returncode}") from None

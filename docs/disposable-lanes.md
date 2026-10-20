@@ -2858,6 +2858,9 @@ The rehearsal copy runner sends each Odoo CLI command's error logging to its own
 stderr, overriding config-directed files and log levels. This includes registry
 startup in post-upgrade Odoo shell steps. Only errors are requested, and failed
 command wrappers are terse so repeated arguments cannot displace the Odoo tail.
+Captured CLI-preflight failures retain their artifact's explanation, since their
+child output did not reach stderr. When both streams contain output, either can
+use the other's unused byte allowance within the same combined text limit.
 This makes the upgrade process's exception available to that same bounded receipt; container endpoint
 logs alone do not retain a separate exec process's output. Ordinary testing copy
 commands keep their artifact's logging behavior. This cannot reconstruct output
