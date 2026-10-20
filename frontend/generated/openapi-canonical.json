@@ -49984,17 +49984,6 @@
             "title": "Status",
             "type": "string"
           },
-          "sync": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/SyncCycleHealthEvidence"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "x-launchplane-optional-response": true
-          },
           "version": {
             "default": "",
             "title": "Version",

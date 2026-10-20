@@ -13,12 +13,12 @@ from control_plane.contracts.product_profile_record import (
     ProductLaneProfile,
 )
 from control_plane.contracts.public_ingress_monitoring import PublicIngressObservationRecord
-from control_plane.contracts.structured_health import structured_health_evidence_from_payload
 from control_plane.contracts.sync_cycle_health import sync_cycle_health_evidence_from_payload
 from control_plane.workflows.public_ingress_monitor import HttpObservation
 from control_plane.workflows.public_ingress_monitor import run_public_ingress_monitor_once
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.support.stores import _sqlite_database_url
+from tests.support.sync_cycle_health import sync_cycle_payload
 from tests.test_product_environment_read_model import (
     _PublicIngressReadModelStore,
     _site_profile_payload,
@@ -26,54 +26,37 @@ from tests.test_product_environment_read_model import (
 from tests.test_public_ingress_monitor import _Store, _add_private_endpoint, _profile
 
 
-def _cycle(**updates: object) -> dict[str, object]:
-    return {
-        "status": "success",
-        "mode": "incremental",
-        "cycle_id": "b12bc47c132144cd94b90e72385d10dc",
-        "cycle_started_at": "2026-05-29T12:00:00Z",
-        "cycle_finished_at": "2026-05-29T12:04:00Z",
-        # The producer records this with a separate clock read after finishing.
-        "last_heartbeat": "2026-05-29T12:04:00.000001Z",
-        "is_stale": False,
-        "next_cycle_overdue": False,
-        "freshness_status": "fresh",
-        "stale_threshold_seconds": 900,
-        **updates,
-    }
-
-
 class SyncCycleHealthTests(unittest.TestCase):
     def test_records_completed_incremental_without_business_rows_or_errors(self) -> None:
         private = "private-source-error-and-business-sentinel"
-        evidence = structured_health_evidence_from_payload(
-            {"status": "ok", "sync": _cycle(last_error=private, rows=[private])}
+        evidence = sync_cycle_health_evidence_from_payload(
+            {"status": "ok", "sync": sync_cycle_payload(last_error=private, rows=[private])}
         )
-        assert evidence.sync is not None and evidence.sync.cycle is not None
-        self.assertEqual(evidence.sync.status, "recorded")
-        self.assertEqual(evidence.sync.cycle.status, "success")
-        self.assertEqual(evidence.sync.cycle.mode, "incremental")
-        self.assertEqual(evidence.sync.cycle.cycle_id, _cycle()["cycle_id"])
-        self.assertEqual(evidence.sync.cycle.last_heartbeat, _cycle()["last_heartbeat"])
+        assert evidence is not None and evidence.cycle is not None
+        self.assertEqual(evidence.status, "recorded")
+        self.assertEqual(evidence.cycle.status, "success")
+        self.assertEqual(evidence.cycle.mode, "incremental")
+        self.assertEqual(evidence.cycle.cycle_id, sync_cycle_payload()["cycle_id"])
+        self.assertEqual(evidence.cycle.last_heartbeat, sync_cycle_payload()["last_heartbeat"])
         self.assertNotIn(private, evidence.model_dump_json())
 
     def test_absent_sync_preserves_generic_health_wire_shape(self) -> None:
         payloads: tuple[object, ...] = (None, [], {"status": "ok"})
         for payload in payloads:
             with self.subTest(payload=payload):
-                evidence = structured_health_evidence_from_payload(payload)
-                self.assertNotIn("sync", evidence.model_dump(mode="json"))
+                evidence = sync_cycle_health_evidence_from_payload(payload)
+                self.assertIsNone(evidence)
 
     def test_preserves_full_running_failed_stale_and_overdue_facts(self) -> None:
         cases = (
-            _cycle(mode="full"),
-            _cycle(status="running", cycle_finished_at=None),
-            _cycle(
+            sync_cycle_payload(mode="full"),
+            sync_cycle_payload(status="running", cycle_finished_at=None),
+            sync_cycle_payload(
                 status="running", cycle_finished_at=None, is_stale=True, freshness_status="stale"
             ),
-            _cycle(status="failed", freshness_status="failed"),
-            _cycle(next_cycle_overdue=True, freshness_status="overdue"),
-            _cycle(stale_threshold_seconds=0),
+            sync_cycle_payload(status="failed", freshness_status="failed"),
+            sync_cycle_payload(next_cycle_overdue=True, freshness_status="overdue"),
+            sync_cycle_payload(stale_threshold_seconds=0),
         )
         for cycle in cases:
             with self.subTest(cycle=cycle):
@@ -97,7 +80,7 @@ class SyncCycleHealthTests(unittest.TestCase):
             ("unavailable", "unavailable", True),
         ):
             with self.subTest(status=status):
-                cycle = _cycle(
+                cycle = sync_cycle_payload(
                     status=status,
                     mode=None,
                     cycle_id=None,
@@ -120,21 +103,21 @@ class SyncCycleHealthTests(unittest.TestCase):
             None,
             [],
             {},
-            _cycle(cycle_id=private),
-            _cycle(status=private),
-            _cycle(mode=private),
-            _cycle(cycle_started_at=private),
-            _cycle(cycle_started_at="2026-05-29T12:00:00"),
-            _cycle(cycle_finished_at="2026-05-29T11:59:59Z"),
-            _cycle(last_heartbeat="2026-05-29T11:59:59Z"),
-            _cycle(cycle_finished_at=None),
-            _cycle(mode=None),
-            _cycle(is_stale="false"),
-            _cycle(next_cycle_overdue=0),
-            _cycle(stale_threshold_seconds=True),
-            _cycle(stale_threshold_seconds=-1),
-            _cycle(freshness_status="stale"),
-            _cycle(status="running"),
+            sync_cycle_payload(cycle_id=private),
+            sync_cycle_payload(status=private),
+            sync_cycle_payload(mode=private),
+            sync_cycle_payload(cycle_started_at=private),
+            sync_cycle_payload(cycle_started_at="2026-05-29T12:00:00"),
+            sync_cycle_payload(cycle_finished_at="2026-05-29T11:59:59Z"),
+            sync_cycle_payload(last_heartbeat="2026-05-29T11:59:59Z"),
+            sync_cycle_payload(cycle_finished_at=None),
+            sync_cycle_payload(mode=None),
+            sync_cycle_payload(is_stale="false"),
+            sync_cycle_payload(next_cycle_overdue=0),
+            sync_cycle_payload(stale_threshold_seconds=True),
+            sync_cycle_payload(stale_threshold_seconds=-1),
+            sync_cycle_payload(freshness_status="stale"),
+            sync_cycle_payload(status="running"),
         )
         for cycle in invalid:
             with self.subTest(cycle=cycle):
@@ -147,7 +130,7 @@ class SyncCycleHealthTests(unittest.TestCase):
     def test_uuid_and_aware_timestamp_representations(self) -> None:
         evidence = sync_cycle_health_evidence_from_payload(
             {
-                "sync": _cycle(
+                "sync": sync_cycle_payload(
                     cycle_id="b12bc47c-1321-44cd-94b9-0e72385d10dc",
                     cycle_started_at="2026-05-29T08:00:00-04:00",
                 )
@@ -157,23 +140,24 @@ class SyncCycleHealthTests(unittest.TestCase):
         self.assertEqual(evidence.status, "recorded")
 
     def test_monitor_records_health_only_and_retains_failed_observation(self) -> None:
+        checked_at = "2026-05-29T12:05:00Z"
         for status_code in (200, 503):
             with self.subTest(status_code=status_code):
                 store = _Store((_profile(),))
                 run_public_ingress_monitor_once(
                     record_store=store,
-                    checked_at="2026-05-29T12:05:00Z",
+                    checked_at=checked_at,
                     http_get=lambda url, _timeout: HttpObservation(
                         status_code=status_code,
                         final_url=url,
                         redirect_count=0,
-                        payload={"sync": _cycle()},
+                        payload={"sync": sync_cycle_payload()},
                     ),
                 )
                 record = PublicIngressObservationRecord.model_validate_json(
                     store.records[0].model_dump_json()
                 )
-                self.assertEqual(record.observed_at, "2026-05-29T12:05:00Z")
+                self.assertEqual(record.observed_at, checked_at)
                 self.assertEqual(record.status, "pass" if status_code == 200 else "fail")
                 self.assertIsNone(record.targets[0].sync)
                 assert record.targets[-1].sync is not None
@@ -200,7 +184,10 @@ class SyncCycleHealthTests(unittest.TestCase):
             record_store=store,
             checked_at="2026-05-29T12:05:00Z",
             private_http_get=lambda url, _timeout: HttpObservation(
-                status_code=200, final_url=url, redirect_count=0, payload={"sync": _cycle()}
+                status_code=200,
+                final_url=url,
+                redirect_count=0,
+                payload={"sync": sync_cycle_payload()},
             ),
         )
         self.assertEqual(result.pass_count, 1)
@@ -227,7 +214,10 @@ class SyncCycleHealthTests(unittest.TestCase):
             record_store=store,
             checked_at="2026-05-29T12:05:00Z",
             http_get=lambda url, _timeout: HttpObservation(
-                status_code=200, final_url=url, redirect_count=0, payload={"sync": _cycle()}
+                status_code=200,
+                final_url=url,
+                redirect_count=0,
+                payload={"sync": sync_cycle_payload()},
             ),
         )
         record = store.records[0]
@@ -236,6 +226,7 @@ class SyncCycleHealthTests(unittest.TestCase):
         self.assertIsNotNone(record.targets[-1].sync)
 
     def test_monitor_cycle_survives_real_storage_restart(self) -> None:
+        checked_at = "2026-05-29T12:05:00Z"
         with TemporaryDirectory() as directory:
             url = _sqlite_database_url(Path(directory) / "records.sqlite3")
             store = PostgresRecordStore(database_url=url)
@@ -244,13 +235,13 @@ class SyncCycleHealthTests(unittest.TestCase):
                 store.write_product_profile_record(_profile())
                 run_public_ingress_monitor_once(
                     record_store=store,
-                    checked_at="2026-05-29T12:05:00Z",
+                    checked_at=checked_at,
                     http_get=lambda endpoint, _timeout: HttpObservation(
                         status_code=503,
                         final_url=endpoint,
                         redirect_count=0,
                         payload={
-                            "sync": _cycle(
+                            "sync": sync_cycle_payload(
                                 status="failed",
                                 freshness_status="failed",
                                 last_error="private-error-sentinel",
@@ -270,9 +261,39 @@ class SyncCycleHealthTests(unittest.TestCase):
                 )
                 self.assertEqual(record.targets[-1].sync.cycle.status, "failed")
                 self.assertNotIn("private-error-sentinel", record.model_dump_json())
-                self.assertEqual(record.observed_at, "2026-05-29T12:05:00Z")
+                self.assertEqual(record.observed_at, checked_at)
             finally:
                 store.close()
+
+    def test_monitor_observes_sync_when_base_url_is_the_health_endpoint(self) -> None:
+        profile = _profile()
+        profile = profile.model_copy(
+            update={
+                "health_path": "/",
+                "lanes": (
+                    profile.lanes[0].model_copy(update={"health_url": "https://example.test"}),
+                ),
+            }
+        )
+        store = _Store((profile,))
+        requested: list[str] = []
+
+        def fetch(url: str, _timeout: int) -> HttpObservation:
+            requested.append(url)
+            return HttpObservation(
+                status_code=200,
+                final_url=url,
+                redirect_count=0,
+                payload={"sync": sync_cycle_payload()},
+            )
+
+        run_public_ingress_monitor_once(
+            record_store=store, checked_at="2026-05-29T12:05:00Z", http_get=fetch
+        )
+        record = store.records[0]
+        self.assertEqual(requested, [record.base_url])
+        self.assertEqual(record.targets[0].target, "base_url")
+        self.assertIsNotNone(record.targets[0].sync)
 
     def test_readback_uses_same_latest_probe_and_does_not_reuse_old_sync(self) -> None:
         profile_payload = _site_profile_payload(preview_enabled=False)
@@ -287,7 +308,10 @@ class SyncCycleHealthTests(unittest.TestCase):
             record_store=store,
             checked_at="2026-05-29T12:05:00Z",
             http_get=lambda url, _timeout: HttpObservation(
-                status_code=200, final_url=url, redirect_count=0, payload={"sync": _cycle()}
+                status_code=200,
+                final_url=url,
+                redirect_count=0,
+                payload={"sync": sync_cycle_payload()},
             ),
         )
         observed = store.records[0].model_copy(update={"context": "example-site-prod"})

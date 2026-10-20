@@ -1,6 +1,6 @@
 from tests.support.auth import scoped_agent_test
 from control_plane.contracts.sync_cycle_health import sync_cycle_health_evidence_from_payload
-from tests.test_sync_cycle_health import _cycle
+from tests.support.sync_cycle_health import sync_cycle_payload
 import asyncio
 import json
 import os
@@ -2374,11 +2374,7 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
                                         http_status=200,
                                         summary="HTTP 200",
                                         sync=sync_cycle_health_evidence_from_payload(
-                                            {
-                                                "sync": _cycle(
-                                                    last_error="private-sync-error-sentinel"
-                                                )
-                                            }
+                                            {"sync": sync_cycle_payload()}
                                         ),
                                     ),
                                 ),
@@ -2395,8 +2391,9 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(monitoring["provenance"]["freshness_status"], "recorded")
                     check = monitoring["checks"][0]
                     if mode in ("stale", "fresh"):
-                        self.assertEqual(check["sync"]["cycle"]["cycle_id"], _cycle()["cycle_id"])
-                        self.assertNotIn("private-sync-error-sentinel", response.text)
+                        self.assertEqual(
+                            check["sync"]["cycle"]["cycle_id"], sync_cycle_payload()["cycle_id"]
+                        )
                     else:
                         self.assertNotIn("sync", check)
                     if mode in ("disabled", "inapplicable"):

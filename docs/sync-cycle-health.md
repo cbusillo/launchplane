@@ -1,10 +1,13 @@
 # Sync-cycle health observations
 
-Structured health and existing public/private health probes retain an optional
+Existing service-owned public/private health probes retain an optional
 `sync` projection. It contains `status: recorded` with typed `cycle` facts, or
 `status: malformed` with no cycle. Products without a `sync` member keep their
 existing response shape. This projection adds no endpoint, connection, monitoring
 policy or sync execution.
+
+Workflow-supplied stable-verification health payloads do not retain this
+projection. They cannot supply the service-observed sync evidence.
 
 The accepted cycle states are `idle`, `running`, `success`, `failed`, `unknown`
 and `unavailable`; modes are `full` and `incremental`. Active/completed cycles
