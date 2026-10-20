@@ -10,6 +10,8 @@ import sys
 import urllib.error
 from urllib.parse import quote
 
+from control_plane.testing_bootstrap_route_repair import TestingBootstrapRouteRepairPlan
+
 from control_plane.testing_replacement_bootstrap import (
     ROUTE,
     TestingReplacementBootstrapPlan,
@@ -20,7 +22,17 @@ from control_plane.testing_replacement_bootstrap import (
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("dry-run", "apply", "readback"))
+    parser.add_argument(
+        "mode",
+        choices=(
+            "dry-run",
+            "apply",
+            "readback",
+            "route-repair-dry-run",
+            "route-repair-apply",
+            "route-repair-readback",
+        ),
+    )
     parser.add_argument("--operator-helper", type=Path, required=True)
     for field in ("product", "context", "operation-id", "reason"):
         parser.add_argument(f"--{field}", required=True)
@@ -35,17 +47,22 @@ def main() -> int:
     parser.add_argument("--env-config")
     parser.add_argument("--url")
     args = parser.parse_args()
+    repair = args.mode.startswith("route-repair-")
+    operation_mode = args.mode.removeprefix("route-repair-")
+    plan_model = TestingBootstrapRouteRepairPlan if repair else TestingReplacementBootstrapPlan
     evidence_path = args.evidence_file.expanduser().resolve() if args.evidence_file else None
-    if args.mode != "readback" and evidence_path is None:
+    if operation_mode != "readback" and evidence_path is None:
         parser.error("Planning and apply require private review evidence.")
     if evidence_path is not None and (
         evidence_path.is_relative_to(Path(__file__).resolve().parents[1])
         or args.evidence_file.is_symlink()
     ):
         parser.error("Use a private evidence file outside the repository.")
-    if args.mode == "apply" and (not args.reviewed_dry_run or not args.idempotency_key.strip()):
+    if operation_mode == "apply" and (
+        not args.reviewed_dry_run or not args.idempotency_key.strip()
+    ):
         parser.error("Apply requires a reviewed dry run and the original stable key.")
-    if args.mode == "dry-run" and evidence_path is not None and evidence_path.exists():
+    if operation_mode == "dry-run" and evidence_path is not None and evidence_path.exists():
         parser.error("Choose new evidence; existing review evidence is preserved.")
     helper = args.operator_helper.expanduser().resolve(strict=True)
     if helper.name != "launchplane-write-action.py":
@@ -70,18 +87,20 @@ def main() -> int:
     trace = ""
     try:
         body = bootstrap_wire_payload(draft)
-        if args.mode == "apply":
+        if repair:
+            body["mode"] = args.mode
+        if operation_mode == "apply":
             assert evidence_path is not None
             saved = json.loads(evidence_path.read_text())
             if saved["request"] != review_request:
                 raise ValueError("Review belongs to another lane or operation.")
-            plan = TestingReplacementBootstrapPlan.model_validate(saved["plan"])
+            plan = plan_model.model_validate(saved["plan"])
             if plan.applied:
                 raise ValueError("The review is not a dry run.")
-            body.update(mode="apply", reviewed_plan_sha256=plan.plan_sha256)
-        elif args.mode == "readback":
-            body.update(mode="readback")
-        submitted = args.mode == "apply"
+            body.update(mode=args.mode, reviewed_plan_sha256=plan.plan_sha256)
+        elif operation_mode == "readback":
+            body.update(mode=args.mode)
+        submitted = operation_mode == "apply"
         response = transport["request_launchplane"](
             service_url=settings["service_url"],
             path=ROUTE.format(product=quote(args.product, safe="")),
@@ -102,8 +121,8 @@ def main() -> int:
             args.operation_id,
         ):
             raise ValueError("The receipt belongs to another lane or operation.")
-        if args.mode == "dry-run":
-            plan = TestingReplacementBootstrapPlan.model_validate(result)
+        if operation_mode == "dry-run":
+            plan = plan_model.model_validate(result)
             if plan.applied:
                 raise ValueError("The dry run unexpectedly applied a change.")
             assert evidence_path is not None
@@ -111,18 +130,23 @@ def main() -> int:
                 os.open(evidence_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w"
             ) as output:
                 json.dump({"request": review_request, "plan": plan.model_dump(mode="json")}, output)
-        elif args.mode == "apply":
-            applied = TestingReplacementBootstrapPlan.model_validate(result)
+        elif operation_mode == "apply":
+            applied = plan_model.model_validate(result)
             if (
                 applied.model_dump()
                 != plan.model_copy(
-                    update={"applied": True, "reconcile_requested": True}
+                    update={
+                        "applied": True,
+                        **({"route_verified": True} if repair else {"reconcile_requested": True}),
+                    }
                 ).model_dump()
             ):
                 raise ValueError("Apply differs from the reviewed plan.")
         else:
-            actual = TestingReplacementBootstrapPlan.model_validate(result)
-            if not actual.applied or not actual.reconcile_requested:
+            actual = plan_model.model_validate(result)
+            if not actual.applied or not getattr(
+                actual, "route_verified" if repair else "reconcile_requested"
+            ):
                 raise ValueError("Bootstrap generation is not prepared.")
         print(
             json.dumps(
@@ -131,7 +155,8 @@ def main() -> int:
                     "mode": args.mode,
                     "trace_id": trace,
                     "operation_id": args.operation_id,
-                    "bootstrap_prepared": args.mode != "dry-run",
+                    "bootstrap_prepared": not repair and operation_mode != "dry-run",
+                    "route_repaired": repair and operation_mode != "dry-run",
                     "runtime_verified": False,
                     "plan_sha256": result.get("plan_sha256"),
                     "resources_binding_sha256": result.get("resources_binding_sha256"),

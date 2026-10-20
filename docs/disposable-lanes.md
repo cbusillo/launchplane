@@ -1542,6 +1542,32 @@ supersession and queue receipt. It does not rerun bootstrap planning after that
 queue has started deploying. Omitted delivery keys come from the generation's
 immutable receipt; readback is never permission to replay bootstrap.
 
+A deployment continuing a fresh generation must carry that generation's
+certificate setting into every provider route write, including failed deploys.
+Changing it silently breaks original-bootstrap readback before the copy finishes.
+
+For an existing certificate mismatch, the same endpoint and repository client
+support `route-repair-dry-run`, `route-repair-apply`, and `route-repair-readback`.
+Supply the exact original bootstrap inputs, including certificate/source settings
+and reason. Keep its original key and evidence untouched. Save the repair plan in
+a **new** private evidence file, review it, then apply using that repair evidence,
+`--reviewed-dry-run`, and a **separate repair idempotency key**. Reusing a bootstrap
+key conflicts with its original request; it never repurposes that receipt.
+
+The repair binds the complete current generation and live provider domain row.
+It requires the original unfinished generation, valid allocation/queue receipts,
+current source/resource/credential qualification, unprotected testing use and
+executor/authority locks. Held uncertain provider effects refuse. Only one
+existing route with all other reviewed fields intact qualifies. The service
+updates that existing row's certificate setting only, then verifies the full
+original bootstrap again. It never creates a route, restarts or deploys, changes
+a generation, rewrites credentials, restores a copy, queues work, resets an
+attempt budget or releases historical uncertainty. Lost replies stay unknown
+unless original-key read-only reconciliation proves the exact route and generation;
+no blind repeat is permitted. `runtime_verified` remains false. After repair,
+use original-bootstrap readback and obtain a **new** supported exact-artifact retry
+review separately. Repair alone does not establish copy completion or testing readiness.
+
 New fresh-generation recovery journals bind override intent independently of
 apply status, time, detail, `updated_at` and `source_label`. Website-setting
 history that still affects rendering remains bound. Publishing post-deploy success or
@@ -2466,43 +2492,6 @@ and context, a new unbound hostname, and the same reviewed `--source-mode` (`ssh
 `readback`. Keep the complete original bootstrap intent and key for recovery.
 The existing testing-only upstream-restore policy and distinct managed testing
 credentials are prerequisites; this path creates no credential or grant.
-
-Bootstrap readback is an observation of the original intent, never a new plan,
-apply, retry or completed-copy witness. It matches the preparation, hostname
-and request digest, current target/lane authority, qualified generation snapshot,
-committed queue receipt, exact live provider domain and initial-queue or
-supersession receipt. It does not consume an idempotency key; retain the original
-apply key and receipt separately for recovery. Its provider-domain verification
-reads metadata, not container IPs, bridge identity, TLS reachability or database
-completion.
-
-A refused readback returns a fixed checkpoint code. The authoritative names
-and messages are in
-[`BootstrapReadbackCode`](../control_plane/testing_replacement_bootstrap.py)
-and [`GenerationQualificationCode`](../control_plane/odoo_testing_restore.py).
-The checkpoints distinguish missing/unreadable generation, changed original
-intent or target/lane authority, changed generation snapshot, missing queue,
-unreadable/missing/mismatched provider route and missing initial-queue or
-supersession receipt. Qualification names the observed predicate: generation
-record, queue, target, active product, credential separation, allocation,
-use/route hold, volume/project authority, target/provider alias or context owner.
-An unreadable dependency with no observed predicate remains qualification
-unverified; it never implies missing or safe state.
-
-Provider-route comparison retains host, compose id, service, port, HTTPS,
-certificate type, both paths, strip-path flag and domain id without returning
-private values. Local record-read failures stay distinct from changed authority.
-The first observed failure is reported; later checkpoints remain unproved.
-A missing queue receipt encountered during qualification is reported there.
-Apply and planning keep their existing generic original-key recovery guidance;
-readback-specific codes do not change unknown-effect operation handling.
-
-Authorization denials keep their existing 403. Unclassified failures retain the
-generic fail-closed response. Preserve the trace, original evidence and unknown
-effects; resolve the observed checkpoint through its supported route. Never
-refresh a plan, change a key, rebootstrap or release an operation to turn an
-unverified readback into a passing one. Earlier successful readbacks and green
-source checks do not establish current verification.
 
 Bootstrap uses the existing isolated renderer and sanitized production-copy
 worker: live keys and outbound integrations are removed before any copied Odoo

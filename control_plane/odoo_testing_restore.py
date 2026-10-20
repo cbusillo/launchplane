@@ -3,7 +3,6 @@
 import base64
 import inspect
 import json
-from enum import StrEnum
 from control_plane._odoo_testing_storage_program import STORAGE_MAINTENANCE_LIBRARY
 from control_plane._odoo_copy_runtime_guard import COPY_RUNTIME_INSPECTION_LIBRARY
 from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
@@ -1150,47 +1149,6 @@ FRESH_TESTING_RESTORE_HOST_PROGRAM = FRESH_TESTING_RESTORE_HOST_PROGRAM.replace(
 )
 
 
-class GenerationQualificationCode(StrEnum):
-    ADOPTED_HOLD = "adopted_hold"
-    RECORD = "record"
-    QUEUE = "queue"
-    TARGET = "target"
-    PRODUCT = "product"
-    CREDENTIALS = "credentials"
-    ALLOCATION = "allocation"
-    USE_OR_ROUTE_HOLD = "use_or_route_hold"
-    VOLUMES = "volumes"
-    PROJECT = "project"
-    TARGET_ALIAS = "target_alias"
-    PROVIDER_ALIAS = "provider_alias"
-    CONTEXT_OWNER = "context_owner"
-
-
-_GENERATION_QUALIFICATION_MESSAGES: dict[GenerationQualificationCode, str] = {
-    GenerationQualificationCode.ADOPTED_HOLD: "The adopted testing copy has a staff testing hold.",
-    GenerationQualificationCode.RECORD: "Fresh testing generation is unreadable.",
-    GenerationQualificationCode.QUEUE: "Fresh testing bootstrap has not committed its queue receipt.",
-    GenerationQualificationCode.TARGET: "Fresh testing generation no longer owns the target.",
-    GenerationQualificationCode.PRODUCT: "Fresh testing generation no longer owns an active Odoo product.",
-    GenerationQualificationCode.CREDENTIALS: "Fresh testing credential separation is unverified.",
-    GenerationQualificationCode.ALLOCATION: "Fresh testing generation lost its resource allocation.",
-    GenerationQualificationCode.USE_OR_ROUTE_HOLD: "Fresh testing generation has a use or route hold.",
-    GenerationQualificationCode.VOLUMES: "Fresh testing volume authority changed before deployment.",
-    GenerationQualificationCode.PROJECT: "Fresh testing project authority changed before deployment.",
-    GenerationQualificationCode.TARGET_ALIAS: "Fresh testing target aliases another lane.",
-    GenerationQualificationCode.PROVIDER_ALIAS: "Fresh testing provider target aliases another lane.",
-    GenerationQualificationCode.CONTEXT_OWNER: "Fresh testing context ownership changed.",
-}
-
-
-class TestingGenerationQualificationError(ValueError):
-    """A fixed failed generation predicate, separate from unreadable dependencies."""
-
-    def __init__(self, code: GenerationQualificationCode) -> None:
-        self.code = code
-        super().__init__(_GENERATION_QUALIFICATION_MESSAGES[code])
-
-
 def read_current_testing_generation(
     store: object,
     *,
@@ -1211,7 +1169,7 @@ def read_current_testing_generation(
         if publication is not None:
             target = store.read_dokploy_target_record(context_name=context, instance_name=instance)
             if target.policies.staff_testing_hold is not None and not task_account_cleanup:
-                raise TestingGenerationQualificationError(GenerationQualificationCode.ADOPTED_HOLD)
+                raise ValueError("The adopted testing copy has a staff testing hold.")
             # Native publication's queue/copy/route receipt replaces the old
             # bootstrap and resource-adoption receipts. Empty copies carry none.
             return store.read_fresh_odoo_testing_generation(product, context)
@@ -1222,25 +1180,22 @@ def read_current_testing_generation(
     if generation is None:
         return None
     if not isinstance(generation, FreshOdooTestingGeneration):
-        raise TestingGenerationQualificationError(GenerationQualificationCode.RECORD)
+        raise ValueError("Fresh testing generation is unreadable.")
     if not bootstrap_preparation and not generation.reconcile_requested_at:
-        raise TestingGenerationQualificationError(GenerationQualificationCode.QUEUE)
+        raise ValueError("Fresh testing bootstrap has not committed its queue receipt.")
     target_id = getattr(store, "read_dokploy_target_id_record")(
         context_name=context, instance_name="testing"
     )
     if target_id.target_id != generation.target_id:
-        raise TestingGenerationQualificationError(GenerationQualificationCode.TARGET)
+        raise ValueError("Fresh testing generation no longer owns the target.")
     profile = getattr(store, "read_product_profile_record")(product)
     if (
         not isinstance(profile, LaunchplaneProductProfileRecord)
         or profile.driver_id != "odoo"
         or not profile.is_active
     ):
-        raise TestingGenerationQualificationError(GenerationQualificationCode.PRODUCT)
-    try:
-        require_distinct_testing_credentials(store, profile, context)
-    except ValueError:
-        raise TestingGenerationQualificationError(GenerationQualificationCode.CREDENTIALS) from None
+        raise ValueError("Fresh testing generation no longer owns an active Odoo product.")
+    require_distinct_testing_credentials(store, profile, context)
     allocation = getattr(store, "read_disposable_resource_preparation")(generation.operation_id)
     if (
         allocation is None
@@ -1248,14 +1203,14 @@ def read_current_testing_generation(
         or allocation.resources_binding_sha256 != generation.resources_binding_sha256
         or allocation.resource_namespace != generation.namespace
     ):
-        raise TestingGenerationQualificationError(GenerationQualificationCode.ALLOCATION)
+        raise ValueError("Fresh testing generation lost its resource allocation.")
     target = getattr(store, "read_dokploy_target_record")(
         context_name=context, instance_name="testing"
     )
     if (
         target.policies.staff_testing_hold is not None and not task_account_cleanup
     ) or target.pending_public_host_effects:
-        raise TestingGenerationQualificationError(GenerationQualificationCode.USE_OR_ROUTE_HOLD)
+        raise ValueError("Fresh testing generation has a use or route hold.")
     values: dict[str, object] = {}
     for scope in ("context", "instance"):
         for runtime in getattr(store, "list_runtime_environment_records")(context_name=context):
@@ -1274,26 +1229,26 @@ def read_current_testing_generation(
         namespace=generation.namespace,
     )
     if any(values.get(key) != value for key, value in resources.volumes.items()):
-        raise TestingGenerationQualificationError(GenerationQualificationCode.VOLUMES)
+        raise ValueError("Fresh testing volume authority changed before deployment.")
     if (
         values.get("ODOO_PROJECT_NAME") != generation.namespace
         or values.get("ODOO_STACK_NAME") != generation.namespace
         or (generation.drill_database and values.get("ODOO_DB_NAME") != generation.drill_database)
     ):
-        raise TestingGenerationQualificationError(GenerationQualificationCode.PROJECT)
+        raise ValueError("Fresh testing project authority changed before deployment.")
     for other in getattr(store, "list_dokploy_target_id_records")():
         if other.target_id == generation.target_id and (other.context, other.instance) != (
             context,
             "testing",
         ):
-            raise TestingGenerationQualificationError(GenerationQualificationCode.TARGET_ALIAS)
+            raise ValueError("Fresh testing target aliases another lane.")
     for other in getattr(store, "list_physical_provider_target_records")():
         if (
             other.provider_id == "dokploy"
             and other.target_id == generation.target_id
             and (other.context, other.instance) != (context, "testing")
         ):
-            raise TestingGenerationQualificationError(GenerationQualificationCode.PROVIDER_ALIAS)
+            raise ValueError("Fresh testing provider target aliases another lane.")
     from control_plane.contracts.product_profile_record import (
         is_exclusive_product_context,
         product_context_owner_map,
@@ -1304,7 +1259,7 @@ def read_current_testing_generation(
         product=product,
         owners=product_context_owner_map(getattr(store, "list_product_profile_records")()),
     ):
-        raise TestingGenerationQualificationError(GenerationQualificationCode.CONTEXT_OWNER)
+        raise ValueError("Fresh testing context ownership changed.")
     return generation
 
 

@@ -25,8 +25,6 @@ from control_plane.testing_replacement_bootstrap import (
     TestingReplacementBootstrapAdapter,
     TestingReplacementBootstrapRequest,
     TestingBootstrapPrerequisiteError,
-    TestingBootstrapReadbackError,
-    TestingBootstrapReadbackUnavailable,
     bootstrap_plan,
     bootstrap_plan_payload,
     bootstrap_wire_payload,
@@ -66,7 +64,35 @@ def register_testing_replacement_bootstrap_routes(
             )
         adapter = TestingReplacementBootstrapAdapter(root, record_store, product, body, trace)
         try:
-            if body.mode == "dry-run":
+            if body.mode.startswith("route-repair-"):
+                from control_plane.testing_bootstrap_route_repair import TestingBootstrapRouteRepair
+
+                repair = TestingBootstrapRouteRepair(adapter)
+                if body.mode == "route-repair-dry-run":
+                    result = await run_in_worker_thread(repair.plan)
+                elif body.mode == "route-repair-readback":
+                    result = await run_in_worker_thread(repair.readback)
+                else:
+                    if not idempotency_key.strip() or not body.reviewed_plan_sha256:
+                        refuse(
+                            400,
+                            "review_required",
+                            "Certificate repair requires its reviewed plan and separate original repair key.",
+                        )
+                    return await run_provider_mutation(
+                        record_store=record_store,
+                        identity=identity,
+                        route_path=ROUTE.format(product=product),
+                        idempotency_key=idempotency_key.strip(),
+                        request_fingerprint=request_fingerprint(
+                            {"product": product, **bootstrap_wire_payload(body)}
+                        ),
+                        trace_id=trace,
+                        adapter=repair,
+                        in_progress_message="Original testing certificate repair is running under its repair key.",
+                        reconcile_message="Certificate repair has an unknown outcome; preserve its repair key and original bootstrap custody.",
+                    )
+            elif body.mode == "dry-run":
                 try:
                     result = await run_in_worker_thread(
                         lambda: bootstrap_plan_payload(bootstrap_plan(record_store, product, body))
@@ -100,14 +126,6 @@ def register_testing_replacement_bootstrap_routes(
                 403,
                 "authorization_denied",
                 "The provider refused the Odoo testing usage read. Preserve the trace and original bootstrap key.",
-            )
-        except (TestingBootstrapReadbackError, TestingBootstrapReadbackUnavailable) as error:
-            if body.mode == "readback":
-                refuse(409, error.code, str(error))
-            refuse(
-                409,
-                "testing_bootstrap_unverified",
-                "Fresh testing bootstrap is unverified. Inspect its original key and exact generation.",
             )
         except (ValueError, FileNotFoundError, RuntimeError, OSError, click.ClickException):
             refuse(

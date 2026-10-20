@@ -182,9 +182,16 @@ OPERATION_SPECS = (
     OperationSpec(
         "POST",
         TESTING_REPLACEMENT_BOOTSTRAP_ROUTE,
-        "Bind the exact fresh Odoo testing generation to its independent hostname and sanitized production-copy reconcile path; runtime proof remains separate.",
+        "Bind the exact fresh Odoo testing generation to its independent hostname and sanitized production-copy reconcile path; runtime proof remains separate. Reviewed certificate repair preserves the original generation, copy, and queue without retrying.",
         ("service_api",),
-        ("dry-run", "apply", "readback"),
+        (
+            "dry-run",
+            "apply",
+            "readback",
+            "route-repair-dry-run",
+            "route-repair-apply",
+            "route-repair-readback",
+        ),
         "apply",
         ("reviewed_plan_sha256",),
     ),

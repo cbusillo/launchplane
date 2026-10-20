@@ -2734,6 +2734,11 @@ def execute_odoo_stable_target_replacement_apply(
                 compose_id=target_id_record.target_id,
                 domain_host=domain_host,
                 runtime_port=profile.runtime_port,
+                **(
+                    {"certificate_type": generation.certificate_type}
+                    if generation is not None
+                    else {}
+                ),
             )
         raw_domains = dokploy_request(
             host=host,
