@@ -1406,11 +1406,19 @@ def run_dokploy_schedule(
         schedule_id=schedule_id,
     )
     before_key = deployment_key(latest_before)
-    dispatch: ScheduleTriggerGuardOptions = {"before_trigger": before_trigger}
+    trigger_admitted = False
+
+    def admit_trigger() -> None:
+        nonlocal trigger_admitted
+        if before_trigger is not None:
+            before_trigger()
+        trigger_admitted = True
+
+    dispatch: ScheduleTriggerGuardOptions = {"before_trigger": admit_trigger}
     if provider_mutation_guard is not None:
         dispatch = {
             "provider_mutation_guard": provider_mutation_guard,
-            "before_trigger": before_trigger,
+            "before_trigger": admit_trigger,
             "trigger_timeout_seconds": 10,
         }
     try:
@@ -1469,6 +1477,9 @@ def run_dokploy_schedule(
             cause="remote_command_exit",
         ) from error
     except click.ClickException as error:
+        if not trigger_admitted:
+            # Preserve a caller's safety/authorization refusal before dispatch.
+            raise
         deployment = _latest_new_schedule_deployment(
             host=host,
             token=token,
