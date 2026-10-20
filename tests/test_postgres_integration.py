@@ -5440,6 +5440,32 @@ def _owner_control_shadow_envelope(
 
 
 class RealPostgresStorageConcurrencyTests(unittest.TestCase):
+    def test_discussion_topic_retries_are_atomic_on_independent_connections(self) -> None:
+        from control_plane.contracts.discussion_topic import DiscussionTopicInput
+
+        topic = DiscussionTopicInput(
+            title="Decide: Contact links", issue_url="https://git.example.test/issues/7"
+        )
+        with _store_for_fresh_head_database() as store:
+            barrier = threading.Barrier(2)
+
+            def add(_: int) -> object:
+                barrier.wait(timeout=10)
+                return store.add_discussion_topic("site-a", "contact", topic)
+
+            def close(_: int) -> object:
+                barrier.wait(timeout=10)
+                return store.close_discussion_topic("site-a", "contact")
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                added = list(pool.map(add, range(2)))
+                closed = list(pool.map(close, range(2)))
+            self.assertEqual(added[0], added[1])
+            self.assertEqual(closed[0], closed[1])
+            self.assertNotEqual(added[0], closed[0])
+            self.assertEqual(store.list_discussion_topics("site-b"), ())
+            self.assertEqual(len(store.list_discussion_topics("site-a", include_closed=True)), 1)
+
     def test_delivery_projection_uses_canonical_times_and_candidate_identities(self) -> None:
         from tests.test_delivery_evidence_index import DeliveryEvidenceIndexTests
         from control_plane.storage.postgres import LaunchplaneDeploymentRow

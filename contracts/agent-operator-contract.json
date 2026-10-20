@@ -54,6 +54,84 @@
         "modes": [
           "read"
         ],
+        "operation_id": "list_discussion_topics",
+        "path": "/v1/products/{product}/discussion-topics",
+        "purpose": "Read a product's discussion topics within existing product-profile read access.",
+        "response_statuses": [
+          "200",
+          "401",
+          "403",
+          "404",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [],
+        "schema_fingerprint_sha256": "caa53d068bd6fa0bf6af9f0ae8c7d810c18f8bff008acd96a7e1ccaf2856309f",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
+        "idempotency": "none",
+        "identity_dependencies": [
+          "read_browser_mutation_identity"
+        ],
+        "method": "PUT",
+        "modes": [
+          "add"
+        ],
+        "operation_id": "add_discussion_topic",
+        "path": "/v1/products/{product}/discussion-topics/{topic_id}",
+        "purpose": "Add neutral discussion metadata as an admin or Director agent; retries preserve the topic.",
+        "response_statuses": [
+          "200",
+          "401",
+          "403",
+          "404",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [],
+        "schema_fingerprint_sha256": "ff5422cc4dade71342abd12c496dfa36c39a781c07ccb808cadf58a8d9bb14a7",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
+        "idempotency": "none",
+        "identity_dependencies": [
+          "read_browser_mutation_identity"
+        ],
+        "method": "POST",
+        "modes": [
+          "close"
+        ],
+        "operation_id": "close_discussion_topic",
+        "path": "/v1/products/{product}/discussion-topics/{topic_id}/close",
+        "purpose": "Close discussion metadata without accepting a release or changing product configuration.",
+        "response_statuses": [
+          "200",
+          "401",
+          "403",
+          "404",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [],
+        "schema_fingerprint_sha256": "aab7a05d0fdc2341e37a506b916322d3e5e8115f33a5fcc4a701e9a26ca24eb5",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
+        "idempotency": "none",
+        "identity_dependencies": [
+          "read_identity"
+        ],
+        "method": "GET",
+        "modes": [
+          "read"
+        ],
         "operation_id": "review_testing_retry",
         "path": "/v1/products/{product}/testing-retry",
         "purpose": "Review recovery of an exhausted Odoo testing artifact using read authority; queue no work.",
@@ -886,8 +964,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "b6977ea1570cbe76f323a7e431a9243485eb2dd0"
+    "source_commit_sha": "6d75a651cce5b0c5ab60d10b1037d4ca6a3c4d52"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "4089385dbcfae5074aac56a439ee8ecfe9b1b3062ca9903f7ec938bbae9da722"
+  "semantic_digest_sha256": "93c4ef01a532536f5ba5c385126a31ac758311cbd7333fdb1db2857393b8652d"
 }

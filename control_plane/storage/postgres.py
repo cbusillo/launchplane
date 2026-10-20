@@ -7,6 +7,7 @@ from control_plane.route_binding_reconcile import (
     RouteBindingSourceChanged,
 )
 from control_plane.contracts.merge_train_stall import MergeTrainStallRecord
+from control_plane.contracts.discussion_topic import DiscussionTopicInput, DiscussionTopicRecord
 from control_plane.contracts.odoo_upgrade_rehearsal import OdooUpgradeRehearsalRecord
 from control_plane.contracts.testing_route_refresh import TestingRouteRefreshSources
 from control_plane.contracts.testing_rebuild import TestingRebuildRecord
@@ -4533,6 +4534,27 @@ class LaunchplaneMergeTrainBatchCandidateRow(Base):
     batch_id: Mapped[str] = mapped_column(String, nullable=False)
     candidate_status: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneDiscussionTopicRow(Base):
+    __tablename__ = "launchplane_discussion_topics"
+    product: Mapped[str] = mapped_column(String, primary_key=True)
+    topic_id: Mapped[str] = mapped_column(String, primary_key=True)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    issue_url: Mapped[str] = mapped_column(Text, nullable=False)
+    added_at: Mapped[str] = mapped_column(String, nullable=False)
+    closed_at: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
+def _discussion_topic_record(row: LaunchplaneDiscussionTopicRow) -> DiscussionTopicRecord:
+    return DiscussionTopicRecord(
+        product=row.product,
+        topic_id=row.topic_id,
+        title=row.title,
+        issue_url=row.issue_url,
+        added_at=row.added_at,
+        closed_at=row.closed_at,
+    )
 
 
 class LaunchplaneMergeTrainStallRow(Base):
@@ -22519,6 +22541,67 @@ class PostgresRecordStore(HumanSessionStore):
             session.execute(text("SET LOCAL lock_timeout = '5s'"))
             self._lock_landing_authority(session, f"merge-train-stall:{repository}")
             yield
+
+    def add_discussion_topic(
+        self, product: str, topic_id: str, topic: DiscussionTopicInput
+    ) -> DiscussionTopicRecord:
+        record = DiscussionTopicRecord(
+            product=product,
+            topic_id=topic_id,
+            **topic.model_dump(),
+            added_at=datetime.now(timezone.utc).isoformat(),
+        )
+        # The primary key fences racing adds. A retry never overwrites or reopens.
+        try:
+            with self._session_factory() as session, session.begin():
+                session.add(LaunchplaneDiscussionTopicRow(**record.model_dump()))
+        except IntegrityError:
+            pass
+        with self._session_factory() as session:
+            row = session.get(LaunchplaneDiscussionTopicRow, (product, topic_id))
+            if row is None:
+                raise RuntimeError("Discussion topic could not be stored.")
+            saved = _discussion_topic_record(row)
+        if (saved.title, saved.issue_url) != (topic.title, topic.issue_url):
+            raise ValueError("Topic id already belongs to a different discussion.")
+        return saved
+
+    def close_discussion_topic(self, product: str, topic_id: str) -> DiscussionTopicRecord:
+        from sqlalchemy import update
+
+        with self._session_factory() as session, session.begin():
+            session.execute(
+                update(LaunchplaneDiscussionTopicRow)
+                .where(
+                    LaunchplaneDiscussionTopicRow.product == product,
+                    LaunchplaneDiscussionTopicRow.topic_id == topic_id,
+                    LaunchplaneDiscussionTopicRow.closed_at.is_(None),
+                )
+                .values(closed_at=datetime.now(timezone.utc).isoformat())
+            )
+            row = session.get(LaunchplaneDiscussionTopicRow, (product, topic_id))
+            if row is None:
+                raise FileNotFoundError("Discussion topic was not found.")
+            return _discussion_topic_record(row)
+
+    def list_discussion_topics(
+        self, product: str, *, include_closed: bool = False
+    ) -> tuple[DiscussionTopicRecord, ...]:
+        statement = select(LaunchplaneDiscussionTopicRow).where(
+            LaunchplaneDiscussionTopicRow.product == product
+        )
+        if not include_closed:
+            statement = statement.where(LaunchplaneDiscussionTopicRow.closed_at.is_(None))
+        with self._session_factory() as session:
+            return tuple(
+                _discussion_topic_record(row)
+                for row in session.scalars(
+                    statement.order_by(
+                        LaunchplaneDiscussionTopicRow.added_at,
+                        LaunchplaneDiscussionTopicRow.topic_id,
+                    )
+                )
+            )
 
     def read_merge_train_stall_record(self, repository: str) -> MergeTrainStallRecord:
         return self._read_model(

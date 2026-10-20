@@ -16,6 +16,8 @@ from control_plane.storage.postgres import _build_engine
 from control_plane.storage.migrations.versions import (
     e7c1d5e9a3b6_drop_retired_delivery_tables as retired_delivery,
     e8d2f6a0b4c7_drop_preview_enablement as retired_preview,
+    e9e3a7b1c5d8_join_retirement_paths as retirement_join,
+    b81ca763d924_add_discussion_topics as discussion_topics,
 )
 from control_plane.storage.schema_adoption import schema_stamp_revision_for_engine
 from control_plane.storage.schema_invariants import (
@@ -24,13 +26,15 @@ from control_plane.storage.schema_invariants import (
     PRE_RETIREMENT_ALEMBIC_REVISION,
 )
 
-# Q533 approves only preview enablement. #2437's sibling migration stays held.
-SCHEMA_MIGRATION_TARGET_REVISION = retired_preview.revision
+# Topics extend the approved preview path. #2437's sibling drop stays held.
+SCHEMA_MIGRATION_TARGET_REVISION = discussion_topics.revision
 SCHEMA_MIGRATION_SUPPORTED_REVISIONS = (
     AUTHZ_COMPATIBILITY_FLOOR_REVISION,
     PRE_RETIREMENT_ALEMBIC_REVISION,
     retired_preview.revision,
     retired_delivery.revision,
+    retirement_join.revision,
+    discussion_topics.revision,
     EXPECTED_ALEMBIC_HEAD_REVISION,
 )
 _SCHEMA_MIGRATION_LOCK_KEY = "launchplane:schema-migration"
@@ -62,6 +66,14 @@ def schema_migration_target(*, current_revision: str, target_revision: str) -> s
     # auto-join it. Explicitly requesting that branch remains the approved-host
     # application path; when preview has applied, join both on that request.
     if {current_revision, target_revision} == {retired_delivery.revision, retired_preview.revision}:
+        return retirement_join.revision
+    if (
+        current_revision in {retired_delivery.revision, retirement_join.revision}
+        and target_revision == discussion_topics.revision
+    ) or (
+        current_revision == discussion_topics.revision
+        and target_revision in {retired_delivery.revision, retirement_join.revision}
+    ):
         return EXPECTED_ALEMBIC_HEAD_REVISION
     return target_revision
 

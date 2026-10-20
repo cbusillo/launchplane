@@ -77,6 +77,7 @@ class ActionEffectTests(unittest.TestCase):
                 ("product_config.plan", True),
                 ("ingress_route.audit", True),
                 ("product_profile.health_monitoring.apply", True),
+                ("discussion_topic.write", True),
                 ("product_review.withdraw", True),
                 ("ingress_route.apply", False),
                 ("product_config.apply", False),
