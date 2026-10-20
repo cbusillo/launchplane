@@ -221,7 +221,7 @@ class TestingResourceScheduleTests(unittest.TestCase):
         from uuid import uuid4
         from control_plane.odoo_testing_resources import OdooTestingResources
         from control_plane.testing_replacement_resources import run_resource_schedule
-        from control_plane.dokploy import post_deploy
+        from control_plane.dokploy import api, post_deploy
 
         resources = OdooTestingResources(
             product="example",
@@ -339,6 +339,54 @@ class TestingResourceScheduleTests(unittest.TestCase):
                             candidate_server_id="new-server",
                         )
                     run.assert_not_called()
+            from control_plane.contracts.provider_schedule import ScheduleMaterializationTooLarge
+
+            guard = Mock()
+            dispatch = Mock()
+
+            def execute_schedule(**kwargs: Any) -> dict[str, str]:
+                before = kwargs["before_provider_mutation"]
+                before("schedule_upsert")
+                dispatch.assert_called_once()
+                upsert_checks = guard.call_count
+                before("schedule_trigger")
+                dispatch.assert_called_once()
+                self.assertGreater(guard.call_count, upsert_checks)
+                return evidence
+
+            run.side_effect = execute_schedule
+            run_resource_schedule(
+                root=Path("."),
+                store=store,
+                resources=resources,
+                mode="prepare",
+                checkpoint=guard,
+                before_provider_mutation=dispatch,
+                candidate_target=candidate,
+                candidate_server_id="new-server",
+            )
+            dispatch.assert_called_once()
+            run.reset_mock()
+            guard.reset_mock()
+            dispatch.reset_mock()
+            oversized = resources.model_copy(
+                update={"operation_id": "x" * api.DOKPLOY_SCHEDULE_MATERIALIZATION_LIMIT_BYTES}
+            )
+            with self.assertRaises(ScheduleMaterializationTooLarge):
+                run_resource_schedule(
+                    root=Path("."),
+                    store=store,
+                    resources=oversized,
+                    mode="prepare",
+                    checkpoint=guard,
+                    before_provider_mutation=dispatch,
+                    candidate_target=candidate,
+                    candidate_server_id="new-server",
+                )
+            guard.assert_not_called()
+            dispatch.assert_not_called()
+            run.assert_not_called()
+            run.side_effect = None
             run.reset_mock()
             with self.assertRaises(ValueError):
                 run_resource_schedule(
@@ -422,6 +470,9 @@ class TestingResourceCaptureRecoveryTests(unittest.TestCase):
                 assert observation is not None
                 self.assertEqual(observation.outcome, expected)
                 self.assertEqual(observation.retry_safe, expected == "absent")
+                self.assertEqual(
+                    observation.preserve_effect_checkpoint, expected == "absent" and bool(phase)
+                )
 
     def test_provider_inventory_accepts_its_relation_names_and_refuses_ambiguity(self) -> None:
         from unittest.mock import Mock
@@ -471,6 +522,125 @@ class TestingResourceCaptureRecoveryTests(unittest.TestCase):
                 project["environments"][1]["compose" if relation == "composes" else "composes"] = []
                 with self.assertRaises(ValueError):
                     adapter.created_placement(namespace)
+
+
+class TestingResourceCheckpointTests(unittest.TestCase):
+    def test_real_adapter_retains_original_checkpoint_when_next_render_refuses(self) -> None:
+        from contextlib import nullcontext
+        from datetime import datetime, UTC
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from control_plane import testing_replacement_resources as resources_module
+        from control_plane.contracts.disposable_lane import DisposableTestingResourcePreparation
+        from control_plane.contracts.provider_schedule import ScheduleMaterializationTooLarge
+        from control_plane.provider_operations import (
+            run_durable_provider_operation,
+            ProviderOperationLease,
+        )
+
+        preparation = DisposableTestingResourcePreparation(
+            operation_id="retained",
+            product="example",
+            context="example",
+            retained_target_id="old",
+            prepared_by="service",
+            recorded_at=datetime.now(UTC),
+            resource_namespace="lp-testing-" + "a" * 32,
+            replacement_target_id="new",
+            reviewed_plan_sha256="b" * 64,
+        )
+        domain_store = Mock()
+        domain_store.read_disposable_resource_preparation.return_value = preparation
+        domain_store.testing_replacement_execution_lock.side_effect = lambda *_: nullcontext(
+            lambda: None
+        )
+        domain_store.serialize_disposable_testing_resources.side_effect = nullcontext
+        adapter = resources_module.TestingReplacementResourceAdapter(
+            Path("."),
+            domain_store,
+            "example",
+            TestingReplacementResourcesRequest(
+                context="example",
+                operation_id="retained",
+                reason="Continue original resources",
+                reviewed_plan_sha256=preparation.reviewed_plan_sha256,
+            ),
+            "fixture-trace",
+        )
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url=f"sqlite+pysqlite:///{Path(directory) / 'state.db'}"
+            )
+            self.addCleanup(store.close)
+            store.ensure_schema()
+
+            def run(key: str = "original") -> Any:
+                return run_durable_provider_operation(
+                    store=store,
+                    scope="resource-test",
+                    route_path="/resource-test",
+                    idempotency_key=key,
+                    request_fingerprint="original-input",
+                    lease_owner="worker",
+                    response_trace_id="fixture-trace",
+                    adapter=adapter,
+                )
+
+            def stored() -> Any:
+                return store.read_idempotency_record(
+                    scope="resource-test", route_path="/resource-test", idempotency_key="original"
+                )
+
+            def interrupted(_key: str, lease: ProviderOperationLease) -> None:
+                lease.checkpoint_effect("captured-placement")
+                raise RuntimeError("Earlier provider interruption")
+
+            with (
+                patch.object(adapter, "apply", side_effect=interrupted),
+                self.assertRaises(RuntimeError),
+            ):
+                run()
+            original = stored()
+            assert original is not None
+            with (
+                patch.object(
+                    adapter, "readback", side_effect=resources_module.IncompleteTestingResources()
+                ),
+                patch.object(adapter, "configuration_sha256", return_value="configuration"),
+                patch.object(adapter, "authority_sha256", return_value="authority"),
+                patch.object(adapter, "checkpoint"),
+                patch.object(
+                    resources_module,
+                    "resource_context",
+                    return_value=(
+                        None,
+                        SimpleNamespace(operation_id="retained"),
+                        preparation,
+                        None,
+                        SimpleNamespace(target_id="old"),
+                        None,
+                    ),
+                ),
+                patch.object(
+                    resources_module,
+                    "resource_plan",
+                    return_value={"plan_sha256": preparation.reviewed_plan_sha256},
+                ),
+                patch.object(
+                    resources_module,
+                    "run_resource_schedule",
+                    side_effect=ScheduleMaterializationTooLarge(),
+                ),
+                self.assertRaises(ScheduleMaterializationTooLarge),
+            ):
+                run()
+            retained = stored()
+            self.assertEqual(retained.provider_effect_phase, original.provider_effect_phase)
+            self.assertEqual(
+                retained.provider_effect_started_at, original.provider_effect_started_at
+            )
+            self.assertEqual(retained.state, "reconcile_required")
+            self.assertEqual(run("competing").status, "target_busy")
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 """Host-side source capture and pre-registry sanitization for a fresh testing copy."""
 
 import base64
+import gzip
 import inspect
 import json
 from control_plane._odoo_testing_storage_program import STORAGE_MAINTENANCE_LIBRARY
@@ -469,12 +470,56 @@ def build_fresh_testing_restore_script(
         data_workflow_lock_path=data_workflow_lock_path,
         native_capture=native_capture,
     )
-    encoded = base64.b64encode(json.dumps(spec, sort_keys=True).encode()).decode()
+    return render_fresh_testing_restore_spec(spec)
+
+
+# Native capture is a separate bounded literal, so reserving this many script
+# bytes before capture/delivery bounds the exact final script independently of
+# how the rest of the input compresses.
+NATIVE_CAPTURE_SCRIPT_RESERVE_BYTES = 1024
+
+
+def render_fresh_testing_restore_spec(spec: dict[str, object]) -> str:
+    spec = dict(spec)
+    capture = spec.pop("native_capture", None)
+    if capture is not None:
+        # The host consumes identity and artifact receipts, never source topology
+        # or the full persisted capture observation.
+        if not isinstance(capture, dict):
+            raise ValueError("Native capture input must be an artifact receipt.")
+        capture = {
+            key: capture[key]
+            for key in (
+                "capture_id",
+                "generation_binding_sha256",
+                "source_binding_sha256",
+                "database",
+                "filestore",
+            )
+        }
+        if len(repr(capture).encode()) > NATIVE_CAPTURE_SCRIPT_RESERVE_BYTES:
+            from control_plane.contracts.provider_schedule import ScheduleMaterializationTooLarge
+
+            raise ScheduleMaterializationTooLarge()
+    encoded = base64.b64encode(
+        gzip.compress(json.dumps(spec, sort_keys=True).encode(), mtime=0)
+    ).decode()
+    program = base64.b64encode(
+        gzip.compress(FRESH_TESTING_RESTORE_HOST_PROGRAM.encode(), mtime=0)
+    ).decode()
     return (
-        "#!/usr/bin/env bash\nset -euo pipefail\npython3 - "
-        + encoded
-        + " <<'LP_FRESH_COPY'\n"
-        + FRESH_TESTING_RESTORE_HOST_PROGRAM
+        "#!/usr/bin/env bash\nset -euo pipefail\npython3 - <<'LP_FRESH_COPY'\n"
+        + "import base64,gzip,json,sys\n"
+        + "spec=json.loads(gzip.decompress(base64.b64decode("
+        + repr(encoded)
+        + ")))\n"
+        + "spec['native_capture']="
+        + repr(capture)
+        + "\n"
+        + "sys.argv=['fresh-copy',base64.b64encode(json.dumps(spec).encode()).decode()]\n"
+        + "exec(compile(gzip.decompress(base64.b64decode("
+        + repr(program)
+        + ")), '<fresh-testing-restore>', 'exec'), {})"
         + "\nLP_FRESH_COPY\n"
     )
 
