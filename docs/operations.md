@@ -2030,6 +2030,10 @@ The Launchplane container entrypoint now fails closed unless one of
 `LAUNCHPLANE_POLICY_FILE` is supplied. It also refuses to start from the
 checked-in `.example` policy path.
 
+Inline text and base64 inputs are rendered to `launchplane-authz.toml` in
+`TMPDIR` (default `/tmp`). The explicit `LAUNCHPLANE_POLICY_FILE` input is
+read in place and is not rewritten.
+
 ## Launchplane Service Deploy Posture
 
 The first real Launchplane service deployment should be GitHub-driven and
