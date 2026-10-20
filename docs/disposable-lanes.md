@@ -2529,6 +2529,8 @@ uses the daemon's effective `DefaultAddressPools`, complete network IPAM and
 all IPv4 route tables. Each overlapping allocation or non-default route consumes
 the pool slots it intersects; duplicate overlaps count once. The rehearsal needs
 one private bridge plus two spare slots. Exactly that headroom passes.
+Route exclusions are conservative: a summary route covering a whole pool makes
+that pool unavailable to admission even if Docker would otherwise allocate it.
 
 HTTP 409 `host_bridge_network_capacity_short` means the measured free capacity
 is below that requirement. `host_bridge_network_capacity_unavailable` means
@@ -2537,7 +2539,10 @@ incomplete reads, or network inventory changing during the read. Neither
 refusal creates credentials or provider placement, and a fresh pre-effect
 operation reservation is released. Provider authorization denials retain their
 403 classification and never select another transport or identity. An already
-partial placement keeps its original-key observation and custody rules.
+partial placement keeps its original-key observation and custody rules, without
+another capacity read; discovering existing placement takes precedence over
+fresh-create admission. Missing provider configuration rejects the fresh
+operation before effects instead of holding an uncertain reservation.
 
 The reader creates no probe network, schedule, container or host file, and emits
 only capacity counts. It does not assume Docker's stock pool capacity. Hosts

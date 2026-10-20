@@ -117,6 +117,7 @@ class BridgeCapacityTests(unittest.TestCase):
 class CapacityHostProgramTests(unittest.TestCase):
     def setUp(self) -> None:
         self.identifier = "a" * 64
+        self.identifiers = [self.identifier]
         self.pool: object = [{"Base": "172.22.0.0/22", "Size": 24}]
         self.networks: object = [
             {
@@ -139,15 +140,18 @@ class CapacityHostProgramTests(unittest.TestCase):
                 value = self.pool
             elif arguments[:3] == ["docker", "network", "inspect"]:
                 value = self.networks
-            elif arguments == ["ip", "-j", "-4", "route", "show", "table", "all"]:
+            elif arguments[0] == "ip" and "route" in arguments:
                 value = self.routes
-            else:
-                self.assertEqual(arguments, ["docker", "network", "ls", "--no-trunc", "--quiet"])
+            elif arguments[:3] == ["docker", "network", "ls"]:
                 self.list_calls += 1
-                identifier = "b" * 64 if self.changed and self.list_calls > 1 else self.identifier
-                return subprocess.CompletedProcess(
-                    arguments, 0, stdout=(identifier + "\n").encode(), stderr=b""
+                identifiers = (
+                    ["b" * 64] if self.changed and self.list_calls > 1 else self.identifiers
                 )
+                return subprocess.CompletedProcess(
+                    arguments, 0, stdout=("\n".join(identifiers) + "\n").encode(), stderr=b""
+                )
+            else:
+                raise AssertionError("The capacity probe dispatched a non-read operation")
             return subprocess.CompletedProcess(
                 arguments, 0, stdout=json.dumps(value).encode(), stderr=b""
             )
@@ -164,10 +168,21 @@ class CapacityHostProgramTests(unittest.TestCase):
         return result
 
     def test_fixed_program_counts_real_read_shapes_without_emitting_topology(self) -> None:
+        assert isinstance(self.networks, list)
+        overlay = "pqrx7y2zn0tvf8b3cd5j6lm9s"
+        self.identifiers.append(overlay)
+        self.networks.append(
+            {
+                "Id": overlay,
+                "Driver": "overlay",
+                "IPAM": {"Config": [{"Subnet": "10.0.0.0/24"}, {"Subnet": "fd00::/64"}]},
+            }
+        )
         self.assertEqual(
             self.run_program(), {"type": "complete", "result": {"total_slots": 4, "free_slots": 2}}
         )
         # Host/none networks reserve no IPAM subnet, including Docker's null form.
+        self.identifiers = [self.identifier]
         for driver in ("host", "null"):
             self.networks = [{"Id": self.identifier, "Driver": driver, "IPAM": {"Config": None}}]
             self.assertEqual(

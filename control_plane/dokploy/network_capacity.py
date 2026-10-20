@@ -99,7 +99,9 @@ def identifiers():
     values = checked(['docker', 'network', 'ls', '--no-trunc', '--quiet']).decode().splitlines()
     if not values or len(values) > 10000 or len(set(values)) != len(values):
         raise ValueError('Incomplete network inventory')
-    if any(len(value) != 64 or any(c not in '0123456789abcdef' for c in value) for value in values):
+    # Local networks use hexadecimal IDs; Swarm overlays use base-36 IDs.
+    # Inspect must return these exact identities, so no guessed ID length is needed.
+    if any(len(value) > 64 or any(c not in '0123456789abcdefghijklmnopqrstuvwxyz' for c in value) for value in values):
         raise ValueError('Invalid network identity')
     return sorted(values)
 

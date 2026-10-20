@@ -265,7 +265,10 @@ def rehearsal_inputs(
     identity = store.read_dokploy_target_id_record(
         context_name=request.source_context, instance_name="testing"
     )
-    host, token = source.read_dokploy_config(control_plane_root=root)
+    try:
+        host, token = source.read_dokploy_config(control_plane_root=root)
+    except (ValueError, OSError, click.ClickException):
+        raise RehearsalRefused(RehearsalPrerequisite.PLACEMENT_UNAVAILABLE) from None
     placement = api.fetch_dokploy_target_payload(
         host=host, token=token, target_type="compose", target_id=identity.target_id
     )
@@ -1345,16 +1348,16 @@ class OdooRehearsalAdapter:
                 require_unaliased_rehearsal(self.store, fresh)
 
             if self.request.action == "prepare" and not self._continue_prepare_host:
-                # Refuse before generating credentials, recording a create
-                # checkpoint, or allocating any provider resources. An original
-                # partial placement keeps its existing observation/custody rules.
-                host, token = source.read_dokploy_config(control_plane_root=self.root)
-                try:
-                    require_bridge_network_capacity(
-                        host=host, token=token, server_id=record.server_id, required_networks=1
-                    )
-                except (BridgeNetworkCapacityRefused, NativeSourceAuthorizationDenied) as error:
-                    raise ProviderMutationRejectedError(error) from None
+                existing_placement: tuple[str, str, str] = ("", "", "")
+                if not recovering_project:
+                    try:
+                        existing_placement = created_placement(self.root, record.rehearsal_id)
+                    except api.DokployRequestFailed as error:
+                        raise ProviderMutationRejectedError(error) from None
+                    except (ValueError, OSError, click.ClickException):
+                        raise ProviderMutationRejectedError(
+                            BridgeNetworkCapacityRefused("host_bridge_network_capacity_unavailable")
+                        ) from None
                 if recovering_project:
                     checkpoint()
                     if (
@@ -1365,13 +1368,27 @@ class OdooRehearsalAdapter:
                     updated = record.model_copy(update={"project_id": self._observed_project_id})
                     self.store.compare_and_write_odoo_upgrade_rehearsal(record, updated)
                     record = updated
-                elif any(created_placement(self.root, record.rehearsal_id)):
+                elif any(existing_placement):
                     raise ProviderMutationRejectedError(
                         RehearsalRefused(
                             RehearsalPrerequisite.PRECHECK_REFUSED,
                             prerequisite=RehearsalPrerequisite.RECOVERY_REQUIRED,
                         )
                     )
+                elif not any((record.project_id, record.environment_id, record.compose_id)):
+                    # Only a genuinely new placement can be refused cleanly.
+                    # Partial creation stays on its original recovery protocol.
+                    try:
+                        host, token = source.read_dokploy_config(control_plane_root=self.root)
+                        require_bridge_network_capacity(
+                            host=host, token=token, server_id=record.server_id, required_networks=1
+                        )
+                    except (BridgeNetworkCapacityRefused, NativeSourceAuthorizationDenied) as error:
+                        raise ProviderMutationRejectedError(error) from None
+                    except (ValueError, OSError, click.ClickException):
+                        raise ProviderMutationRejectedError(
+                            BridgeNetworkCapacityRefused("host_bridge_network_capacity_unavailable")
+                        ) from None
                 # The built-in local-password writer is scoped to the new record;
                 # it creates no key that can reach a live system or person grant.
                 prepare_rehearsal_local_credentials(

@@ -106,6 +106,10 @@ class RehearsalScenario(unittest.TestCase):
                 ) as read,
                 patch("control_plane.dokploy.api.dokploy_request") as create,
                 patch(
+                    "control_plane.dokploy.sandbox_placement.created_placement",
+                    return_value=("", "", ""),
+                ),
+                patch(
                     "control_plane.testing_local_credentials.prepare_rehearsal_local_credentials"
                 ) as credentials,
             ):
@@ -122,6 +126,52 @@ class RehearsalScenario(unittest.TestCase):
                 self.assertEqual(read.call_count, 2)
                 create.assert_not_called()
                 credentials.assert_not_called()
+
+    def test_missing_config_is_clean_but_existing_placement_requires_recovery(self) -> None:
+        from control_plane.dokploy.network_capacity import BridgeNetworkCapacityRefused
+        from control_plane.provider_operations import (
+            ProviderMutationRejectedError,
+            ProviderOperationLease,
+        )
+
+        with patch(
+            "control_plane.dokploy.source.read_dokploy_config",
+            side_effect=FileNotFoundError("private config path"),
+        ):
+            for _ in range(2):
+                with self.assertRaises(RehearsalRefused) as refused:
+                    self.run_operation(self.adapter("prepare"), "missing-capacity-config")
+                self.assertEqual(
+                    refused.exception.prerequisite, RehearsalPrerequisite.PLACEMENT_UNAVAILABLE
+                )
+                self.assertNotIn("private", str(refused.exception))
+        adapter = self.adapter("prepare")
+        with (
+            patch.object(adapter, "inputs", return_value=(self.record, self.source, self.shape)),
+            patch(
+                "control_plane.dokploy.source.read_dokploy_config",
+                side_effect=ValueError("private malformed config"),
+            ),
+        ):
+            for _ in range(2):
+                with self.assertRaises(BridgeNetworkCapacityRefused):
+                    self.run_operation(adapter, "capacity-config-changed")
+        with (
+            patch(
+                "control_plane.dokploy.sandbox_placement.created_placement",
+                return_value=("existing-project", "", ""),
+            ),
+            patch(
+                "control_plane.odoo_upgrade_rehearsal.require_bridge_network_capacity",
+                side_effect=AssertionError("Recovery takes precedence"),
+            ) as capacity,
+            self.assertRaises(ProviderMutationRejectedError) as rejected,
+        ):
+            self.adapter("prepare").apply("original-operation", Mock(spec=ProviderOperationLease))
+        cause = rejected.exception.cause
+        assert isinstance(cause, RehearsalRefused)
+        self.assertEqual(cause.prerequisite, RehearsalPrerequisite.RECOVERY_REQUIRED)
+        capacity.assert_not_called()
 
     def test_diagnostic_result_survives_real_marker_budget_and_adapter(self) -> None:
         import io
@@ -1427,6 +1477,9 @@ class RehearsalScenario(unittest.TestCase):
 
         adapter = self.adapter("prepare")
         with (
+            patch(
+                "control_plane.odoo_upgrade_rehearsal.require_bridge_network_capacity"
+            ) as capacity,
             patch.object(api, "fetch_dokploy_projects", side_effect=lambda **_: tuple(projects)),
             patch.object(api, "dokploy_request", side_effect=provider),
             patch.object(
@@ -1545,6 +1598,7 @@ class RehearsalScenario(unittest.TestCase):
             prepared = self.store.read_odoo_upgrade_rehearsal(self.identifier)
             assert prepared is not None
             self.assertEqual(prepared.state, "prepared")
+            capacity.assert_called_once()
 
     def test_terminal_refusal_releases_the_operation_target_for_a_new_key(self) -> None:
         retained = self.record.model_copy(
