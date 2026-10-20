@@ -1198,7 +1198,10 @@ The inspection also supplies the original administrator scope, which the browser
 persists before dispatch and submits with its original intent. A different signed-in
 actor cannot submit or settle that bound request. This scope is metadata; adding it
 does not change legacy intent fingerprints. Older saved requests lacking the original
-scope stay observation-only. They cannot safely be assigned to the current actor.
+scope stay observation-only when their dispatch outcome is uncertain. They cannot
+safely be assigned to the current actor. A confirmed first-submit denial still
+supports local discard, because its reply proves refusal before admission; a
+denial during recovery of an earlier uncertain dispatch never gains that disposition.
 
 **Settle this request** explicitly calls
 `POST /v1/products/{product}/testing-rebuild/settle` with the same key, inspected
@@ -1207,16 +1210,17 @@ service serializes settlement and queue admission on the original actor/key acro
 products and contexts. If the original operation exists, settlement returns its
 bounded view without changing or cancelling it. Otherwise it commits a durable
 exclusion receipt in the existing idempotency table. A delayed original submit
-cannot enqueue after that exclusion. Lookup remains read-only and its404 is never
+cannot enqueue after that exclusion. Lookup remains read-only and its 404 is never
 an exclusion. No new schema, grant, provider call, operation or lease is created by
 settlement.
 
-The browser clears its saved request only after a matching exclusion receipt or
+For an uncertain dispatch, the browser clears its saved request only after a
+matching exclusion receipt or
 an observed terminal operation. An observed pending, running or held operation
-retains its ID for watching. A lost settlement reply, denial, prior recovery409,
+retains its ID for watching. A lost settlement reply, denial, prior recovery 409,
 or mismatched receipt retains the original request; an explicit same-key settlement
 can recover a previously committed exclusion. Reload never retries settlement or
-starts a new rebuild. This also replaces local discard of a dispatched denial.
+starts a new rebuild. Confirmed first-submit refusals retain their existing local exit.
 
 `POST /v1/products/{product}/testing-rebuild/operations/{operation_id}/resume`
 explicitly resumes a held native rebuild. It requires the original request's

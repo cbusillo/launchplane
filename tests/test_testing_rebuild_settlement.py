@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from sqlalchemy import event, text
+from sqlalchemy.sql.dml import Insert
 
 from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementApplyRequest,
@@ -17,7 +18,7 @@ from control_plane.contracts.odoo_stable_target_replacement import (
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
 )
-from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.postgres import LaunchplaneIdempotencyRow, PostgresRecordStore
 from control_plane.testing_rebuild_request_settlement import (
     TestingRebuildRequestConflict,
     TestingRebuildRequestExclusion,
@@ -155,7 +156,12 @@ class TestingRebuildSettlementTests(unittest.TestCase):
             context: Any,
             executemany: bool,
         ) -> None:
-            if statement.startswith("INSERT INTO launchplane_idempotency_records"):
+            compiled = context.compiled
+            if (
+                compiled is not None
+                and isinstance(compiled.statement, Insert)
+                and compiled.statement.table.name == LaunchplaneIdempotencyRow.__tablename__
+            ):
                 raise RuntimeError("Fixture lost receipt commit")
 
         event.listen(self.store._engine, "before_cursor_execute", refuse_receipt)
@@ -166,6 +172,27 @@ class TestingRebuildSettlementTests(unittest.TestCase):
             event.remove(self.store._engine, "before_cursor_execute", refuse_receipt)
         self.assertEqual(self.admit(self.peer), (self.operation, True))
         self.assertEqual(self.exclude(), self.operation)
+
+    def test_unreadable_exclusion_refuses_both_paths_with_a_fixed_conflict(self) -> None:
+        self.exclude()
+        receipt = self.exclusion.receipt("fixture")
+        changes: tuple[dict[str, object], ...] = (
+            {"response_payload": {}},
+            {"scope": "foreign"},
+            {"state": "unknown"},
+        )
+        for change in changes:
+            with self.subTest(change=change):
+                with self.store._session_factory() as session:
+                    row = session.get(LaunchplaneIdempotencyRow, receipt.record_id)
+                    assert row is not None
+                    row.payload = {**receipt.model_dump(mode="json"), **change}
+                    session.commit()
+                with self.assertRaises(TestingRebuildRequestConflict):
+                    self.exclude(self.peer)
+                with self.assertRaises(TestingRebuildRequestConflict):
+                    self.admit(self.peer)
+        self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), ())
 
 
 class TestingRebuildSettlementPostgresTests(TestingRebuildSettlementTests):

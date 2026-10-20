@@ -184,9 +184,10 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-o
       expect(writes.length).toBe(1);
       expect(polled).toBe(false);
       await panel.screenshot({ path: testInfo.outputPath("testing-rebuild-denied.png") });
-      await panel.getByRole("button", { name: "Settle this request" }).click();
+      await panel.getByRole("button", { name: "Discard this denied request" }).click();
       await expect(panel.getByRole("button", { name: "Rebuild testing", exact: true })).toBeEnabled();
       expect(writes.length).toBe(1);
+      expect(settlements).toBe(0);
     } else {
       await waitForState(async () => (await readAttempt())?.operationId).toBe("native-original");
       await page.clock.runFor(2500);

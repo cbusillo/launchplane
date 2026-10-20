@@ -310,7 +310,7 @@ def register_testing_rebuild_routes(
                     status_code=409,
                     trace_id=trace_id,
                     code="idempotency_key_reused",
-                    message="This request key already identifies another operation.",
+                    message="This key cannot admit the supplied intent. Keep its original recovery state.",
                 )
             return response(existing, trace_id)
         try:
@@ -369,7 +369,7 @@ def register_testing_rebuild_routes(
                 status_code=409,
                 trace_id=trace_id,
                 code="idempotency_key_reused",
-                message="This request key already identifies another operation.",
+                message="This key cannot admit the supplied intent. Keep its original recovery state.",
             ) from error
         except (
             OdooTargetReplacementApplyCurrentArtifactChangedError,
@@ -440,7 +440,7 @@ def register_testing_rebuild_routes(
                 status_code=404,
                 trace_id=trace_id,
                 code="testing_rebuild_not_observed",
-                message="The original request has no observed operation yet. Keep its key and continue read-only lookup.",
+                message="No original operation is observed. Keep the key; settle explicitly before starting afresh.",
             )
         if (
             original.product != product
@@ -468,7 +468,7 @@ def register_testing_rebuild_routes(
         store = require_admin(identity, record_store, trace_id)
         require_original_scope(identity, payload, trace_id)
         key = idempotency_key.strip()
-        if not key or not payload.original_scope.strip():
+        if not key:
             raise common.http_error(
                 status_code=400,
                 trace_id=trace_id,
@@ -491,7 +491,7 @@ def register_testing_rebuild_routes(
                 status_code=409,
                 trace_id=trace_id,
                 code="idempotency_key_reused",
-                message="This key identifies another original intent. Keep its recovery state.",
+                message="This request cannot be settled with the retained evidence. Keep its recovery state.",
             ) from error
         operation = (
             response(settled, trace_id).operation
@@ -631,6 +631,7 @@ def register_testing_rebuild_routes(
         methods=["POST"],
         operation_id="settle_testing_rebuild",
         response_model=TestingRebuildSettlementResponse,
+        responses={status: {"model": common.error_response_model} for status in (400, 401, 403)},
     )
     app.add_api_route(
         TESTING_REBUILD_ROUTE + "/lookup",

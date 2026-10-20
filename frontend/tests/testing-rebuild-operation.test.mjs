@@ -102,6 +102,17 @@ test("legacy attempts without an original actor binding remain observation-only"
   }));
 });
 
+test("a confirmed first-submit legacy denial keeps its existing discard disposition", () => {
+  const { original_scope, ...payload } = original.payload;
+  const originalDenial = { ...original, payload, dispatchStarted: true, denied: true };
+  const storage = { getItem: () => JSON.stringify(originalDenial) };
+  assert.deepEqual(readTestingRebuildAttempt(original.product, storage), originalDenial);
+  const uncertain = { getItem: () => JSON.stringify({ ...original, payload, denied: true }) };
+  const recovered = readTestingRebuildAttempt(original.product, uncertain);
+  assert.equal(recovered.denied, false);
+  assert.equal(recovered.readOnlyRecovery, true);
+});
+
 test("explicit resume uses the held revision, original operation and original request key", async () => {
   const held = receipt("reconciliation_required").operation;
   const saved = { ...original, operationId: held.operation_id };

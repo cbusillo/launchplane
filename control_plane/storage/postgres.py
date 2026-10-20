@@ -10257,7 +10257,10 @@ class PostgresRecordStore(HumanSessionStore):
     def _testing_rebuild_request_exclusion(
         self, session: Session, *, scope: str, key: str
     ) -> TestingRebuildRequestExclusion | None:
-        from control_plane.testing_rebuild_request_settlement import SETTLEMENT_ROUTE
+        from control_plane.testing_rebuild_request_settlement import (
+            SETTLEMENT_ROUTE,
+            TestingRebuildRequestConflict,
+        )
 
         row = session.scalar(
             self._idempotency_statement(
@@ -10266,15 +10269,25 @@ class PostgresRecordStore(HumanSessionStore):
         )
         if row is None:
             return None
-        receipt = LaunchplaneIdempotencyRecord.model_validate(row.payload)
-        exclusion = TestingRebuildRequestExclusion.model_validate(receipt.response_payload)
+        try:
+            receipt = LaunchplaneIdempotencyRecord.model_validate(row.payload)
+            exclusion = TestingRebuildRequestExclusion.model_validate(receipt.response_payload)
+        except ValueError as error:
+            raise TestingRebuildRequestConflict(
+                "Original exclusion evidence is unreadable."
+            ) from error
         if (
             receipt.state != "completed"
+            or receipt.scope != scope
+            or receipt.route_path != SETTLEMENT_ROUTE
+            or receipt.idempotency_key != key
             or exclusion.original_scope != scope
             or exclusion.original_key != key
             or receipt.request_fingerprint != exclusion.request_fingerprint
         ):
-            raise ValueError("The original request exclusion evidence is invalid.")
+            raise TestingRebuildRequestConflict(
+                "The original request exclusion evidence is invalid."
+            )
         return exclusion
 
     def settle_testing_rebuild_request(

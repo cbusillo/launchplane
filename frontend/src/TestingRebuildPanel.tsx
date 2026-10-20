@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { inspectTestingRebuild, readTestingRebuild, submitTestingRebuild, lookupTestingRebuild, resumeTestingRebuild, settleTestingRebuild, LaunchplaneApiError } from "./api";
 import { waitFor } from "./odoo-release-operation";
-import { readTestingRebuildAttempt, runTestingRebuild, resumeTestingRebuildAttempt, settleTestingRebuildAttempt, saveTestingRebuildAttempt, type TestingRebuildAttempt } from "./testing-rebuild-operation";
+import { readTestingRebuildAttempt, runTestingRebuild, resumeTestingRebuildAttempt, settleTestingRebuildAttempt, saveTestingRebuildAttempt, testingRebuildIsTerminal, type TestingRebuildAttempt } from "./testing-rebuild-operation";
 import type { ProductEnvironmentDetail, TestingRebuildInspection, TestingRebuildResponse, TestingRebuildSubmit } from "./generated/openapi.ts";
 
 export function TestingRebuildPanel({ detail, fixtureMode, onRefresh }: {
@@ -64,7 +64,7 @@ export function TestingRebuildPanel({ detail, fixtureMode, onRefresh }: {
       setMessage(status === "pass" ? "Testing rebuilt and verified healthy at the same address."
         : status === "reconciliation_required" ? "This rebuild is held. Resume checks your permissions and continues the same rebuild."
         : "The rebuild stopped. Check the lane health and operation evidence before continuing.");
-      if (["pass", "fail", "cancelled", "superseded"].includes(status)) {
+      if (testingRebuildIsTerminal(status)) {
         saveTestingRebuildAttempt(detail.product, null); setAttempt(null); setPreflight(null); onRefresh();
       }
     } catch (error) {
@@ -141,12 +141,15 @@ export function TestingRebuildPanel({ detail, fixtureMode, onRefresh }: {
     {inspectionError && !attempt ? <button type="button" className="secondary-button" disabled={busy || fixtureMode} onClick={() => setRefresh(value => value + 1)}>Refresh inspection</button> : null}
     {attempt && !attempt.denied ? <button type="button" className="secondary-button" disabled={busy || fixtureMode} onClick={() => void rebuild(attempt)}>{attempt.operationId ? "Resume watching this rebuild" : attempt.readOnlyRecovery ? "Find the original rebuild" : "Recover this request"}</button> : null}
     {attempt?.operationId && !attempt.denied && result?.operation.status === "reconciliation_required" ? <button type="button" className="primary-button" disabled={busy || fixtureMode || attempt.resumeNeedsRead} onClick={() => void resumeOriginal()}>Resume this rebuild</button> : null}
-    {attempt?.denied ? <p>This request was denied and will not be submitted again. The denial needs to be resolved before rebuilding.</p> : null}
-    {attempt && !attempt.operationId && attempt.payload.original_scope ? <>
+    {attempt?.denied ? <p>The first submission was refused before admission. Discard it to inspect afresh; rebuilding still requires administrator access.</p> : null}
+    {attempt?.denied && !attempt.operationId ? <button type="button" className="secondary-button" disabled={busy || fixtureMode} onClick={() => {
+      saveTestingRebuildAttempt(detail.product, null); setAttempt(null); setPreflight(null); setMessage(""); setRefresh(value => value + 1);
+    }}>Discard this denied request</button> : null}
+    {attempt && !attempt.denied && !attempt.operationId && attempt.payload.original_scope ? <>
       <p>Settle checks for the original rebuild. If it has not been admitted, Launchplane prevents that request from arriving later so you can inspect afresh.</p>
       <button type="button" className="secondary-button" disabled={busy || fixtureMode} onClick={() => void settleOriginal()}>Settle this request</button>
     </> : null}
-    {attempt && !attempt.operationId && !attempt.payload.original_scope ? <p>This older saved request has no original administrator binding. Keep finding its original operation; it cannot be safely excluded from this browser state.</p> : null}
+    {attempt && !attempt.denied && !attempt.operationId && !attempt.payload.original_scope ? <p>This older saved request has no original administrator binding. Keep finding its original operation; it cannot be safely excluded from this browser state.</p> : null}
     <p role="status">{message}</p>
     {result ? <details><summary>Operation details</summary><p>{result.operation.status}: {result.operation.phase}</p><p>Operation: {result.operation.operation_id}</p><p>Trace: {result.trace_id}</p></details> : null}
   </section>;

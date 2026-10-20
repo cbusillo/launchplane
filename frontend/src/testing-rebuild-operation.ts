@@ -38,7 +38,8 @@ export function readTestingRebuildAttempt(product: string, storage: BrowserOpera
       && (attempt.resumeNeedsRead === undefined || typeof attempt.resumeNeedsRead === "boolean")) {
       // Older saved denials did not distinguish a write refusal from a failed
       // recovery/read. Preserve their key and allow only lookup, never a write.
-      if (!attempt.payload.original_scope?.trim()) {
+      const confirmedDenial = attempt.denied && attempt.dispatchStarted === true && !attempt.operationId;
+      if (!attempt.payload.original_scope?.trim() && !confirmedDenial) {
         return { ...attempt, dispatchStarted: true, denied: false, readOnlyRecovery: true };
       }
       return attempt.dispatchStarted === undefined
@@ -47,6 +48,10 @@ export function readTestingRebuildAttempt(product: string, storage: BrowserOpera
     }
   } catch { /* Unreadable browser state is not an operation handle. */ }
   return null;
+}
+
+export function testingRebuildIsTerminal(status: string): boolean {
+  return ["pass", "fail", "cancelled", "superseded"].includes(status);
 }
 
 export async function settleTestingRebuildAttempt(
@@ -77,7 +82,7 @@ export async function settleTestingRebuildAttempt(
     dependencies.persist(null);
   } else if (settled.outcome === "observed" && settled.operation?.product === attempt.product
     && settled.operation.instance === "testing" && settled.operation.operation_id) {
-    dependencies.persist(["pass", "fail", "cancelled", "superseded"].includes(settled.operation.status)
+    dependencies.persist(testingRebuildIsTerminal(settled.operation.status)
       ? null : { ...retained, operationId: settled.operation.operation_id });
   } else {
     throw new Error("The settlement outcome is unknown. Keep the original request.");
