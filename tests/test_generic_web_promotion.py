@@ -1307,21 +1307,21 @@ class GenericWebProdPromotionRollbackTests(unittest.TestCase):
                     failure in {"new_testing", "new_testing_command_failure"}
                     and runtime_identity.artifact_id != _PREVIOUS_ARTIFACT
                 ):
-                    testing = store.read_environment_inventory(
+                    next_testing = store.read_environment_inventory(
                         context_name=runtime_identity.context, instance_name="testing"
                     )
-                    assert testing.runtime_identity is not None
-                    next_id = testing.deployment_record_id + "-next"
+                    assert next_testing.runtime_identity is not None
+                    next_id = next_testing.deployment_record_id + "-next"
                     next_artifact = store.profile.image.repository + "@sha256:" + "c" * 64
                     store.write_qualified_testing_inventory(
-                        testing.model_copy(
+                        next_testing.model_copy(
                             update={
                                 "artifact_identity": ArtifactIdentityReference(
                                     artifact_id=next_artifact
                                 ),
                                 "source_git_ref": "3" * 40,
                                 "deployment_record_id": next_id,
-                                "runtime_identity": testing.runtime_identity.model_copy(
+                                "runtime_identity": next_testing.runtime_identity.model_copy(
                                     update={
                                         "artifact_id": next_artifact,
                                         "source_git_ref": "3" * 40,

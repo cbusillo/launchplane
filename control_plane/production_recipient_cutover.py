@@ -955,14 +955,14 @@ class RecipientCutoverAdapter:
             # Historical generic markers can belong to an earlier release or
             # repromotion. Only this attempt's pause dispatch or its original
             # trigger-bound deployment proves source admission already happened.
-            identity = record.execution.get("runtime_identity")
+            attempt_identity = record.execution.get("runtime_identity")
             attempt_started = bool(
                 record.execution.get(attempt_prefix + "old_pause_dispatched_at")
             ) or bool(
                 not repromote
                 and record.execution.get("trigger_requested_at")
-                and isinstance(identity, dict)
-                and identity.get("deployment_record_id")
+                and isinstance(attempt_identity, dict)
+                and attempt_identity.get("deployment_record_id")
                 == "recipient-release-" + canonical_sha256(provider_operation_key)[:24]
             )
             if self.validate_source is not None and not attempt_started:
