@@ -2845,12 +2845,19 @@ For an older initial-upgrade failure with an independently verified source
 snapshot, readback can also return `retained_upgrade_logs`: bounded redacted
 tails from the rehearsal's exclusive log volume and container logs, with source
 metadata. It reads regular log files only and executes no upgrade, registry or SQL.
+The combined result uses the native transport's shared byte budget, shedding
+oldest optional log tails before child failure or custody evidence. Partial logs
+are marked truncated. If diagnostic storage is full or its interrupted pending
+receipt remains, a bounded operation-bound fallback stays in the existing job
+log; `failure_events_after_checkpoint` returns it only for the exact original
+intent, attempt and record. It is diagnostic evidence, never custody proof.
 An unavailable log observation leaves child failure and custody readable and sets
 `retained_upgrade_logs_unavailable`. Credential redaction and byte limits apply
 before transport. These diagnostic fields carry `diagnostics_private: true`:
 they may contain Client record names or exception context. Keep full readbacks
 in private evidence; post only the necessary reviewed error, without Client row
-values. SQL statement and row-detail lines are withheld.
+values. Common PostgreSQL DETAIL/STATEMENT lines are filtered; other SQL or
+Client values may remain, so the private-evidence rule still applies.
 An older discarded child exit status cannot be reconstructed from a log tail;
 neither a log nor a child diagnostic proves successful migration or authorizes
 continuation, replay, retirement or a replacement key.

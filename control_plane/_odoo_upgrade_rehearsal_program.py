@@ -495,7 +495,7 @@ def observe(spec, root, receipt, lock_held=False):
         if not (root/(action+'.started')).exists():
             refused=read_refusal(spec,root)
             if refused is not None:
-                print('rehearsal_result='+json.dumps(refused).encode().hex())
+                emit_rehearsal_result(refused)
                 return
         copies=[]
         for database in database_names(spec).values():
@@ -555,7 +555,7 @@ def observe(spec, root, receipt, lock_held=False):
                 result['capture_attachment_validation']=capture_attachment_observation(spec,root,result)
             except RehearsalCommandFailure:
                 result['capture_attachment_validation']='runtime_unavailable'
-        print('rehearsal_result='+json.dumps(result).encode().hex())
+        emit_rehearsal_result(result)
         return
     result=json.loads(receipt.read_text())
     if result['intent_sha256']!=record['intent_sha256']:
@@ -571,7 +571,7 @@ def observe(spec, root, receipt, lock_held=False):
             raise RuntimeError('Rehearsal runtime retirement is not observed')
     elif observed_state in {'upgraded','switched'}:
         private_health(spec,containers)
-    print('rehearsal_result='+json.dumps(result).encode().hex())
+    emit_rehearsal_result(result)
     return
 
 
@@ -604,8 +604,8 @@ def main():
                 try:
                     fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
                 except BlockingIOError:
-                    print('rehearsal_result='+json.dumps({
-                        'intent_sha256':record['intent_sha256'],'host_busy':True}).encode().hex())
+                    emit_rehearsal_result({
+                        'intent_sha256':record['intent_sha256'],'host_busy':True})
                 else:
                     observe(spec,root,receipt,lock_held=True)
         return
@@ -619,7 +619,7 @@ def main():
             raise RuntimeError('Uncertain original effect retains its custody')
         refused=read_refusal(spec,root)
         if refused is not None:
-            print('rehearsal_result='+json.dumps(refused).encode().hex())
+            emit_rehearsal_result(refused)
             return
         started=time.monotonic()
         spec['phase_elapsed']={}
@@ -673,7 +673,7 @@ def main():
                 finally:
                     os.close(descriptor)
                 result=refusal_result(spec,code)
-                print('rehearsal_result='+json.dumps(result).encode().hex())
+                emit_rehearsal_result(result)
                 return
             (root/(action+'.started')).touch(mode=0o600)
             copies=list(record['copies'])
@@ -731,7 +731,7 @@ def main():
         result={'intent_sha256':record['intent_sha256'],'state':state,'copies':copies,'elapsed_seconds':elapsed,
             'resources_preserved':True,'public_route':False,'business_host_frozen':False}
         save(receipt,result)
-        print('rehearsal_result='+json.dumps(result).encode().hex())
+        emit_rehearsal_result(result)
 
 main()
 """

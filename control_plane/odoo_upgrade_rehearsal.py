@@ -656,11 +656,12 @@ class OdooRehearsalAdapter:
         }
 
     def failure_events(
-        self, record: OdooUpgradeRehearsalRecord, started_at: str
+        self, record: OdooUpgradeRehearsalRecord, started_at: str, *, operation_key: str = ""
     ) -> tuple[list[dict[str, object]], bool]:
-        """Read bounded event candidates without exporting provider prose or source data."""
+        """Read event candidates and exact-operation private diagnostic fallbacks."""
         import ast
         from control_plane.dokploy import post_deploy
+        from control_plane.contracts.odoo_upgrade_rehearsal import RehearsalChildFailure
 
         if not started_at:
             raise ValueError("Missing original checkpoint")
@@ -751,6 +752,27 @@ class OdooRehearsalAdapter:
             ]
             frames = sorted({str(location["function"]) for location in locations})
             status = api.deployment_status(deployment)
+            fallback: dict[str, object] = {}
+            if operation_key:
+                marker = post_deploy.extract_odoo_post_deploy_readback_markers({"logs": log}).get(
+                    "rehearsal_child_failure"
+                )
+                if marker:
+                    try:
+                        child = RehearsalChildFailure.model_validate_json(bytes.fromhex(marker))
+                    except ValueError:
+                        pass
+                    else:
+                        if (
+                            child.intent_sha256 == record.intent_sha256
+                            and child.record_binding_sha256 == record.binding_sha256
+                            and child.attempt_sha256
+                            == canonical_json_sha256({"operation_key": operation_key})
+                        ):
+                            fallback = {
+                                "child_failure": child.model_dump(mode="json"),
+                                "diagnostics_private": True,
+                            }
             events.append(
                 {
                     "deployment_id": identifier,
@@ -762,6 +784,7 @@ class OdooRehearsalAdapter:
                     "traceback_present": "Traceback (most recent call last):" in log,
                     "failure_frames": frames,
                     "failure_locations": locations,
+                    **fallback,
                 }
             )
         return events, complete
@@ -793,7 +816,9 @@ class OdooRehearsalAdapter:
             ):
                 try:
                     events, complete = self.failure_events(
-                        record, str(journal["provider_effect_started_at"])
+                        record,
+                        str(journal["provider_effect_started_at"]),
+                        operation_key=operation_key,
                     )
                     diagnostics["failure_events_after_checkpoint"] = events
                     if not complete:

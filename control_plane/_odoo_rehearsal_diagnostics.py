@@ -1,11 +1,39 @@
 """Bounded, redacted diagnostics from the isolated rehearsal's own custody."""
 
+from control_plane.contracts.native_operation_evidence import NATIVE_OPERATION_RESULT_MAX_BYTES
+
 REHEARSAL_DIAGNOSTIC_TEXT_LIMIT = 4096
 REHEARSAL_DIAGNOSTIC_FILE_LIMIT = 8
-REHEARSAL_DIAGNOSTICS_LIBRARY = r"""
+REHEARSAL_DIAGNOSTIC_PROCESS_LIMIT = 1024 * 1024
+REHEARSAL_DIAGNOSTICS_LIBRARY = (
+    r"""
 DIAGNOSTIC_TEXT_LIMIT = __TEXT_LIMIT__
 DIAGNOSTIC_FILE_LIMIT = __FILE_LIMIT__
+DIAGNOSTIC_PROCESS_LIMIT = __PROCESS_LIMIT__
+RESULT_MAX_BYTES = __RESULT_LIMIT__
 COMMAND_FAILURE_CONTEXT = None
+
+
+def encoded_rehearsal_evidence(result):
+    return json.dumps(result,ensure_ascii=False,separators=(',',':')).encode('utf-8')
+
+
+def emit_rehearsal_result(result):
+    logs=result.get('retained_upgrade_logs')
+    while len(encoded_rehearsal_evidence(result))>RESULT_MAX_BYTES and logs is not None:
+        logs['truncated']=True
+        if logs['files']:
+            logs['files'].pop()
+        elif logs['runtime']:
+            logs['runtime'].pop()
+        else:
+            result.pop('retained_upgrade_logs')
+            result['retained_upgrade_logs_unavailable']=True
+            logs=None
+    encoded=encoded_rehearsal_evidence(result)
+    if len(encoded)>RESULT_MAX_BYTES:
+        raise RuntimeError('Required rehearsal evidence exceeds its transport budget')
+    print('rehearsal_result='+encoded.hex(),flush=True)
 
 
 def diagnostic_text(value, secrets=()):
@@ -55,7 +83,14 @@ def command_failure_scope(spec,root):
                 diagnostic=cause.diagnostic
             cause=cause.__context__
         if (root/(spec['action']+'.started')).is_file():
-            retain_command_failure(spec,root,diagnostic)
+            try:
+                retain_command_failure(spec,root,diagnostic)
+            except OSError:
+                # Full storage and an interrupted .pending receipt must not
+                # replace or discard the failure that ended this operation.
+                encoded=encoded_rehearsal_evidence(bound_command_failure(spec,diagnostic))
+                if len(encoded)<=RESULT_MAX_BYTES:
+                    print('rehearsal_child_failure='+encoded.hex(),flush=True)
         raise
     finally:
         COMMAND_FAILURE_CONTEXT=None
@@ -89,12 +124,16 @@ def command_failure_path(spec,root):
     return root/(spec['action']+'-command-failure.json')
 
 
+def bound_command_failure(spec,diagnostic):
+    return {'intent_sha256':spec['record']['intent_sha256'],
+        'attempt_sha256':spec['attempt_sha256'],
+        'record_binding_sha256':spec['record_binding_sha256'],**diagnostic}
+
+
 def retain_command_failure(spec,root,diagnostic):
     path=command_failure_path(spec,root)
     if not path.exists():
-        save(path,{'intent_sha256':spec['record']['intent_sha256'],
-            'attempt_sha256':spec['attempt_sha256'],
-            'record_binding_sha256':spec['record_binding_sha256'],**diagnostic})
+        save(path,bound_command_failure(spec,diagnostic))
 
 
 def read_command_failure(spec,root):
@@ -134,7 +173,7 @@ def diagnostic_process_output(arguments):
                 if not chunk:
                     break
                 consumed+=len(chunk)
-                if consumed>1024*1024:
+                if consumed>DIAGNOSTIC_PROCESS_LIMIT:
                     return False,b''
                 tail=(tail+chunk)[-65536:]
         return process.wait(timeout=max(0.1,deadline-time.monotonic()))==0,tail
@@ -201,6 +240,8 @@ def retained_upgrade_logs(spec,containers,root):
             'modified_at':datetime.fromtimestamp(before.st_mtime,timezone.utc).isoformat(),
             'tail':diagnostic_text(tail,secrets)})
     return {'files':logs,'runtime':runtime,'since':since,'truncated':len(candidates)>DIAGNOSTIC_FILE_LIMIT}
-""".replace("__TEXT_LIMIT__", str(REHEARSAL_DIAGNOSTIC_TEXT_LIMIT)).replace(
-    "__FILE_LIMIT__", str(REHEARSAL_DIAGNOSTIC_FILE_LIMIT)
+""".replace("__TEXT_LIMIT__", str(REHEARSAL_DIAGNOSTIC_TEXT_LIMIT))
+    .replace("__FILE_LIMIT__", str(REHEARSAL_DIAGNOSTIC_FILE_LIMIT))
+    .replace("__PROCESS_LIMIT__", str(REHEARSAL_DIAGNOSTIC_PROCESS_LIMIT))
+    .replace("__RESULT_LIMIT__", str(NATIVE_OPERATION_RESULT_MAX_BYTES))
 )
