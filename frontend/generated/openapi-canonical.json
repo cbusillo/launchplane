@@ -29949,6 +29949,12 @@
             "title": "Preview Label",
             "type": "string"
           },
+          "reconciliation_receipt_id": {
+            "default": "",
+            "title": "Reconciliation Receipt Id",
+            "type": "string",
+            "x-launchplane-optional-response": true
+          },
           "schema_version": {
             "default": 1,
             "minimum": 1.0,
@@ -79597,7 +79603,7 @@
             "description": "Service Unavailable"
           }
         },
-        "summary": "Inspect or reconcile one provider-absent legacy generic-web preview"
+        "summary": "Inspect or reconcile one provider-absent legacy preview"
       }
     },
     "/v1/previews/lifecycle-cleanup": {

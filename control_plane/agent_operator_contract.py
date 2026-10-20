@@ -290,7 +290,7 @@ OPERATION_SPECS = (
     OperationSpec(
         "POST",
         LEGACY_PREVIEW_RECONCILIATION_ROUTE,
-        "Inspect, plan or reconcile one provider-absent legacy generic-web preview.",
+        "Inspect, plan or reconcile one provider-absent legacy generic-web or Odoo preview.",
         ("agent_helper", "service_api"),
         ("inspect", "plan", "apply"),
         "plan_and_apply",

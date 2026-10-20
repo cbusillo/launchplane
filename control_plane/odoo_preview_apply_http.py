@@ -46,6 +46,14 @@ from control_plane.contracts.preview_mutation_request import (
 )
 from control_plane.contracts.odoo_stable_target_replacement import apply_artifact_odoo_version
 from control_plane.contracts.preview_record import PreviewRecord
+from control_plane.contracts.preview_execution import (
+    ODOO_PREVIEW_DESTROY_REASON_PREFIX as _ODOO_PREVIEW_DESTROY_REASON_PREFIX,
+    odoo_preview_destroy_issued_at,
+)
+from control_plane.legacy_preview_completion import (
+    ReconciliationReceiptStore,
+    reconciliation_completion_time,
+)
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.runtime_identity import RuntimeIdentity, runtime_identity_env
 from control_plane.drivers.dispatch import (
@@ -86,7 +94,6 @@ from control_plane.workflows.launchplane import (
 ODOO_PREVIEW_APPLY_ROUTE = "/v1/drivers/odoo/preview-apply"
 ODOO_PREVIEW_APPLY_INPUTS_ROUTE = "/v1/drivers/odoo/preview-apply-inputs"
 ODOO_PREVIEW_PLAN_TTL_SECONDS = 30 * 60
-_ODOO_PREVIEW_DESTROY_REASON_PREFIX = "odoo_preview_destroy"
 
 
 class OdooPreviewApplyProductMismatchError(ValueError):
@@ -578,6 +585,7 @@ def apply_odoo_preview_lifecycle_evidence(
             record_store=typed_record_store,
             preview=existing_preview,
             issued_at=requested_at,
+            product=profile.product,
         ):
             return _odoo_preview_lifecycle_records(
                 preview=existing_preview,
@@ -604,7 +612,7 @@ def apply_odoo_preview_lifecycle_evidence(
             preview=preview_record,
             destroyed_at=completed_at,
             destroy_reason=destroy_reason,
-        )
+        ).model_copy(update={"reconciliation_receipt_id": ""})
         preview_path = typed_record_store.write_preview_record(transitioned_preview)
         return {
             **_odoo_preview_lifecycle_records(
@@ -655,6 +663,7 @@ def apply_odoo_preview_lifecycle_evidence(
         record_store=typed_record_store,
         preview=existing_preview,
         issued_at=requested_at,
+        product=profile.product,
     ):
         return _odoo_preview_lifecycle_records(
             preview=existing_preview,
@@ -898,10 +907,12 @@ def _odoo_preview_operation_is_stale(
     record_store: LaunchplaneMutationStore,
     preview: PreviewRecord,
     issued_at: str,
+    product: str = "",
 ) -> bool:
     existing_issued_at = _odoo_preview_existing_operation_issued_at(
         record_store=record_store,
         preview=preview,
+        product=product,
     )
     if not existing_issued_at:
         return True
@@ -920,14 +931,15 @@ def _odoo_preview_existing_operation_issued_at(
     *,
     record_store: LaunchplaneMutationStore,
     preview: PreviewRecord,
+    product: str = "",
 ) -> str:
     if preview.state == "destroyed":
-        prefix = f"{_ODOO_PREVIEW_DESTROY_REASON_PREFIX}:"
-        if preview.destroy_reason.startswith(prefix):
-            _token, separator, issued_at = preview.destroy_reason[len(prefix) :].partition(":")
-            if separator:
-                return issued_at
-        return ""
+        issued_at = odoo_preview_destroy_issued_at(preview.destroy_reason)
+        if issued_at:
+            return issued_at
+        return reconciliation_completion_time(
+            cast(ReconciliationReceiptStore, record_store), preview, product=product
+        )
     generation_id = preview.serving_generation_id or preview.latest_generation_id
     if not generation_id:
         return ""

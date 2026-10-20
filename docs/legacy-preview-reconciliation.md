@@ -5,12 +5,15 @@ title: Legacy Preview Reconciliation
 # Legacy preview reconciliation
 
 `POST /v1/previews/legacy-generic-web/reconciliation` inspects and reconciles
-one legacy generic-web preview whose provider application is already absent.
+one legacy generic-web or Odoo preview whose provider resources are already absent.
+The existing path and operation ID remain compatible; driver selection comes from
+the recorded product profile.
 It takes an exact `product`, `preview_id`, `reason`, and `mode` (`inspect`,
 `plan`, or `apply`). It never deletes provider resources or retires a product.
 Provider-present standalone reconciliations require the existing authorized teardown path first.
 For retiring a product, use the [single reviewed product-retirement operation](product-retirement.md),
-which includes its own previews without separate preview-cleanup approvals.
+which includes its own generic-web previews without separate preview-cleanup approvals.
+Standalone Odoo reconciliation does not extend integrated product retirement.
 
 ## Review and execution
 
@@ -63,10 +66,43 @@ product's repository, image or naming policy block reconciliation. Targets
 uniquely tracked to another live preview or stable lane are inspected and
 excluded unless this preview's exact identity or domain matches. Missing,
 malformed, truncated, duplicate, changing or uncertain inventory is not absence.
-Shared contexts, ambiguous anchors, current running generations/reconciliation, missing
+Shared contexts, ambiguous anchors, running product reconciliation, missing
 generation pointers, and existing preview target authority fail closed.
 
-An unreferenced historical generation can retain an interrupted nonterminal
+For Odoo, the service enumerates every project's environments and composes, reads
+joined compose details and all live domains, and enumerates again. It also checks
+applications for preview identity or domain residue. Physical IDs include their
+provider category: an application ID cannot exclude a compose with the same ID.
+A legacy target ID needs its matching typed target configuration before it can
+exclude an owned sibling or stable target. Unknown renamed raw composes require
+safe image-source classification. YAML and environment values are inspected only
+in memory; returned evidence contains identities and classifications, never raw
+compose source or environment values. Unresolved image expressions, malformed
+joins or uncertain source cannot prove absence. Historical compose names that
+disagree with the current profile's name remain uncertain and refuse.
+
+Odoo inspection holds the actual physical executor lock, then the stable logical
+preview lock, then the existing preview serialization lock through completion.
+The logical key uses the preview context, repository and PR, so a service-issued
+plan with a custom physical slug shares the same fence. Original PostgreSQL lock
+transactions must remain alive. Durable running or uncertain reservations also
+block reconciliation, including legacy raw target keys. Settle or tear down the
+original operation through its supported recovery path before inspecting again;
+never delete reservations or substitute provider absence for their settlement.
+
+A legacy Odoo generation with no runtime identity may retain interrupted
+nonterminal state, including current pointers, when those executor fences exclude
+current work and complete absence is established. Its history is retained unchanged.
+The atomic Odoo completion stores an exact receipt pointer on the destroyed preview.
+Old issued Odoo plans are rejected before provider effects under the same fences.
+Bare preview evidence cannot erase that terminal proof. Generation evidence can
+resume the preview only with a fresh generation requested strictly after completion;
+changing an old generation's timestamps does not qualify. Stale evidence returns
+`409 preview_retirement_conflict` without partially writing generation or preview.
+A genuine later service-issued Odoo destroy also retains its normal lifecycle flow.
+Unproven older destroyed records keep their existing fail-closed ordering behavior.
+
+For generic-web, an unreferenced historical generation can retain an interrupted nonterminal
 state. It no longer blocks inspection when all current generation pointers refer
 to terminal evidence and the service holds the preview's actual exclusive
 PostgreSQL executor lock (or retirement's exclusive product lock). The original
