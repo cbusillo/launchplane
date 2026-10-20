@@ -1,5 +1,7 @@
 """The native testing rebuild inside the existing durable replacement action."""
 
+from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
+
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -404,6 +406,16 @@ class NativeTestingRebuildAdapter:
             operation.product, operation.context, operation.operation_id
         )
         self.checkpoints = RecordTestingRebuildStore(store)
+
+    def provider_target_origin(self) -> ProviderTargetOrigin:
+        return ProviderTargetOrigin(
+            product=self.intent.profile.product,
+            context=self.operation.context,
+            instance="testing",
+            provider_id="dokploy",
+            target_type="compose",
+            target_id=self.intent.old.target_id,
+        )
 
     def target_key(self) -> str:
         return generic_web_provider_target_key(

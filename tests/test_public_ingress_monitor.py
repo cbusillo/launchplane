@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
+
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
@@ -507,6 +509,14 @@ def _hold_deploy_fence(
         lease_owner="trace-original",
         reconciliation_key=reconciliation_key,
         provider_target_key=build_generic_web_provider_target_key(target),
+        provider_target_origin=ProviderTargetOrigin(
+            product="example-site",
+            context=target.ship_request.context,
+            instance=target.ship_request.instance,
+            provider_id=target.ship_request.provider_id,
+            target_type=target.resolved_target.target_type,
+            target_id=target.resolved_target.target_id,
+        ),
     ).record
     checkpointed = store.checkpoint_mutation_provider_effect(
         reservation=reserved, effect_phase="deploy_trigger"

@@ -1,5 +1,7 @@
 """Stage testing configuration without changing running resources or claiming disposability."""
 
+from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
+
 from collections.abc import Iterator
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
@@ -34,6 +36,13 @@ class TestingSeparationRefused(ValueError):
 def separation_binding(
     store: PostgresRecordStore, request: runtime.LiveTargetRuntimeApplyEnvelope, actor: str
 ) -> tuple[str, str]:
+    binding, key, _ = separation_admission(store, request, actor)
+    return binding, key
+
+
+def separation_admission(
+    store: PostgresRecordStore, request: runtime.LiveTargetRuntimeApplyEnvelope, actor: str
+) -> tuple[str, str, ProviderTargetOrigin]:
     """Bind the recipient and inputs; usage/custody observations are irrelevant to staging."""
     if not request.separation_only or request.instance != "testing" or request.deploy:
         raise ValueError("Separation only stages testing configuration with deployment disabled.")
@@ -96,23 +105,34 @@ def separation_binding(
         target_type="compose",
         target_id=target_id.target_id,
     )
-    return canonical_sha256(
-        [
-            disposable_lane_binding_sha256(
-                profile,
-                target,
-                target_id,
-                configuration=disposable_lane_configuration(
-                    cast(DisposableLaneStore, store), request.context, request.instance
-                ),
-            ),
-            provider.model_dump(mode="json"),
+    return (
+        canonical_sha256(
             [
-                p.model_dump(mode="json")
-                for p in store.list_runtime_key_safety_policy_records(status="active", limit=1)
-            ],
-        ]
-    ), key
+                disposable_lane_binding_sha256(
+                    profile,
+                    target,
+                    target_id,
+                    configuration=disposable_lane_configuration(
+                        cast(DisposableLaneStore, store), request.context, request.instance
+                    ),
+                ),
+                provider.model_dump(mode="json"),
+                [
+                    p.model_dump(mode="json")
+                    for p in store.list_runtime_key_safety_policy_records(status="active", limit=1)
+                ],
+            ]
+        ),
+        key,
+        ProviderTargetOrigin(
+            product=profile.product,
+            context=request.context,
+            instance=request.instance,
+            provider_id=provider.provider_id,
+            target_type="compose",
+            target_id=target_id.target_id,
+        ),
+    )
 
 
 class TestingRuntimeSeparation:
@@ -126,9 +146,14 @@ class TestingRuntimeSeparation:
         binding: str,
         target_key: str,
         trace_id: str,
+        origin: ProviderTargetOrigin | None = None,
     ) -> None:
         self.store, self.root, self.request, self.actor = store, root, request, actor
         self.binding, self.key, self.trace_id = binding, target_key, trace_id
+        self.origin = origin
+
+    def provider_target_origin(self) -> ProviderTargetOrigin | None:
+        return self.origin
 
     def target_key(self) -> str:
         # Share the deploy fence. An unknown deploy is never cleared or bypassed.

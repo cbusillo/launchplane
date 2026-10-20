@@ -665,6 +665,32 @@ class NativeTestingWorkerTests(unittest.TestCase):
         secrets = self.store.list_secret_records()
         result = self.execute()
         self.assertEqual(result.deploy_status, "pass")
+        reservation = self.store.read_idempotency_record(
+            scope=REBUILD_SCOPE,
+            route_path=REBUILD_ROUTE,
+            idempotency_key=self.operation.operation_id,
+        )
+        assert reservation is not None
+        capsule = self.store.read_provider_target_origin(reservation)
+        assert capsule is not None
+        self.assertEqual(
+            (
+                capsule.origin.product,
+                capsule.origin.context,
+                capsule.origin.instance,
+                capsule.origin.target_id,
+            ),
+            (
+                self.intent.profile.product,
+                self.operation.context,
+                "testing",
+                self.intent.old.target_id,
+            ),
+        )
+        self.assertEqual(
+            self.store.read_original_mutation_intent(reservation),
+            self.intent.model_dump(mode="json"),
+        )
         self.assertEqual(self.effects, ["switch-new", "stop-old"])
         self.assertEqual(
             tuple(item.domain_name for item in self.current().binding.domains),

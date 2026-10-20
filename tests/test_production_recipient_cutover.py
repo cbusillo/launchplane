@@ -9,6 +9,7 @@ from typing import Any
 import unittest
 from unittest.mock import patch
 
+from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
 from control_plane.contracts.durable_operation_authorization import DurableOperationAuthorization
 from control_plane.contracts.production_backup_authority import ProductionBackupPolicyRecord
 from control_plane.contracts.production_backup_gate import ProductionBackupGateRequest
@@ -365,6 +366,22 @@ class RecipientCutoverTests(unittest.TestCase):
     def test_accepted_release_bootstraps_then_publishes_one_atomic_set(self) -> None:
         result = self.run_release()
         self.assertEqual(result.response_status_code, 202, result.response_payload)
+        capsule = self.store.read_provider_target_origin(result.record)
+        assert capsule is not None
+        self.assertEqual(
+            (
+                capsule.origin.product,
+                capsule.origin.context,
+                capsule.origin.instance,
+                capsule.origin.target_id,
+            ),
+            (
+                self.record.product,
+                self.record.context,
+                "prod",
+                self.record.retained_target_id.target_id,
+            ),
+        )
         payload = result.response_payload["result"]
         assert isinstance(payload, dict)
         self.assertEqual(payload["promotion_status"], "pass")
@@ -579,6 +596,14 @@ class RecipientCutoverTests(unittest.TestCase):
             lease_owner="peer",
             provider_target_key=key,
             reconciliation_key="peer-restart",
+            provider_target_origin=ProviderTargetOrigin(
+                product=self.record.product,
+                context=self.record.context,
+                instance="prod",
+                provider_id="dokploy",
+                target_type="compose",
+                target_id=self.record.retained_provider.target_id,
+            ),
         )
         result = self.run_release()
         self.assertEqual(result.response_status_code, 409)
@@ -610,6 +635,14 @@ class RecipientCutoverTests(unittest.TestCase):
             lease_owner="peer",
             provider_target_key=key,
             reconciliation_key="peer-restart",
+            provider_target_origin=ProviderTargetOrigin(
+                product=self.record.product,
+                context=self.record.context,
+                instance="prod",
+                provider_id="dokploy",
+                target_type="compose",
+                target_id=self.record.retained_provider.target_id,
+            ),
         ).record
         assert peer is not None
         with self.assertRaises(ValueError):
@@ -758,6 +791,21 @@ class RecipientCutoverTests(unittest.TestCase):
                 trace=self.adapter.trace_id,
                 validate_release=self.validate_release,
             )
+        inverse = self.store.read_idempotency_record(
+            scope="client-release", route_path="/fixture/inverse", idempotency_key="inverse"
+        )
+        assert inverse is not None
+        capsule = self.store.read_provider_target_origin(inverse)
+        assert capsule is not None
+        self.assertEqual(
+            (
+                capsule.origin.product,
+                capsule.origin.context,
+                capsule.origin.instance,
+                capsule.origin.target_id,
+            ),
+            (current.product, current.context, "prod", current.target_id),
+        )
         restored = custody(self.store, self.record.product, self.record.context)
         assert restored is not None
         self.assertEqual(restored.phase, "rolled_back")

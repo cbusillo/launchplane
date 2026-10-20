@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from control_plane.contracts.provider_target_origin import (
+    ProviderTargetOrigin,
+    RetainedProviderTargetOrigin,
+    requires_provider_target_origin,
+)
 from urllib.parse import urlsplit
 
 from control_plane.route_binding_reconcile import (
@@ -8127,6 +8132,13 @@ class PostgresRecordStore(HumanSessionStore):
     def _original_mutation_intent(
         self, session: Any, reservation: LaunchplaneIdempotencyRecord, *, for_update: bool = False
     ) -> dict[str, Any]:
+        receipt = self._original_mutation_receipt(session, reservation, for_update=for_update)
+        intent = receipt.response_payload.get("original_intent") if receipt else None
+        return intent if isinstance(intent, dict) else {}
+
+    def _original_mutation_receipt(
+        self, session: Any, reservation: LaunchplaneIdempotencyRecord, *, for_update: bool = False
+    ) -> LaunchplaneIdempotencyRecord | None:
         statement = self._idempotency_statement(
             scope=reservation.scope,
             route_path=ORIGINAL_MUTATION_INTENT_ROUTE,
@@ -8136,26 +8148,57 @@ class PostgresRecordStore(HumanSessionStore):
             statement = statement.with_for_update()
         row = session.scalar(statement)
         if row is None:
-            return {}
+            return None
         receipt = self._read_payload(model_type=LaunchplaneIdempotencyRecord, payload=row.payload)
         if (
             receipt.state != "completed"
             or receipt.request_fingerprint != reservation.request_fingerprint
             or receipt.response_payload.get("reservation_id") != reservation.record_id
         ):
-            return {}
-        intent = receipt.response_payload.get("original_intent")
-        if not isinstance(intent, dict):
-            return {}
-        return intent
+            return None
+        return receipt
+
+    def read_provider_target_origin(
+        self, reservation: LaunchplaneIdempotencyRecord
+    ) -> RetainedProviderTargetOrigin | None:
+        """Internal bound custody read; missing or invalid evidence stays unavailable."""
+        with self._session_factory() as session:
+            try:
+                receipt = self._original_mutation_receipt(session, reservation)
+                if receipt is None:
+                    return None
+                capsule = RetainedProviderTargetOrigin.model_validate(
+                    receipt.response_payload.get("provider_target_origin")
+                )
+            except ValueError:
+                return None
+            return (
+                capsule if capsule.origin.target_key() == reservation.provider_target_key else None
+            )
 
     def _retain_original_mutation_intent(
         self,
         session: Any,
         reservation: LaunchplaneIdempotencyRecord,
         original_intent: dict[str, Any] | None,
+        provider_target_origin: ProviderTargetOrigin | None = None,
     ) -> None:
-        if not original_intent:
+        capsule = None
+        if requires_provider_target_origin(reservation.provider_target_key):
+            if (
+                provider_target_origin is None
+                or provider_target_origin.target_key() != reservation.provider_target_key
+            ):
+                raise ValueError(
+                    "Fresh shared provider reservations require their original recipient."
+                )
+            capsule = RetainedProviderTargetOrigin(
+                origin=ProviderTargetOrigin.model_validate(provider_target_origin.model_dump()),
+                operation_nonce=uuid4(),
+            )
+        elif provider_target_origin is not None:
+            raise ValueError("Original recipient requires the shared provider target key.")
+        if not original_intent and capsule is None:
             return
         route = ORIGINAL_MUTATION_INTENT_ROUTE
         receipt = LaunchplaneIdempotencyRecord(
@@ -8173,7 +8216,8 @@ class PostgresRecordStore(HumanSessionStore):
             recorded_at=reservation.created_at,
             response_payload={
                 "reservation_id": reservation.record_id,
-                "original_intent": original_intent,
+                "original_intent": original_intent or {},
+                **({"provider_target_origin": capsule.model_dump(mode="json")} if capsule else {}),
             },
         )
         # Called only in the transaction that acquires a fresh reservation. A
@@ -8450,6 +8494,7 @@ class PostgresRecordStore(HumanSessionStore):
         lease_seconds: int = 300,
         reconciliation_key: str = "",
         provider_target_key: str = "",
+        provider_target_origin: ProviderTargetOrigin | None = None,
         original_intent: dict[str, Any] | None = None,
     ) -> MutationReservationResult:
         return self._reserve_mutation(
@@ -8462,6 +8507,7 @@ class PostgresRecordStore(HumanSessionStore):
             reconciliation_key=reconciliation_key,
             provider_target_key=provider_target_key,
             original_intent=original_intent,
+            provider_target_origin=provider_target_origin,
             retry_missing_collision=True,
         )
 
@@ -8527,6 +8573,7 @@ class PostgresRecordStore(HumanSessionStore):
         reconciliation_key: str,
         provider_target_key: str,
         retry_missing_collision: bool,
+        provider_target_origin: ProviderTargetOrigin | None = None,
         original_intent: dict[str, Any] | None = None,
     ) -> MutationReservationResult:
         normalized_scope = scope.strip()
@@ -8568,7 +8615,10 @@ class PostgresRecordStore(HumanSessionStore):
                     provider_target_key=normalized_provider_target_key,
                 )
                 session.add(self._idempotency_row(reservation))
-                self._retain_original_mutation_intent(session, reservation, original_intent)
+                session.flush()
+                self._retain_original_mutation_intent(
+                    session, reservation, original_intent, provider_target_origin
+                )
                 session.commit()
             return MutationReservationResult(status="acquired", record=reservation)
         except IntegrityError as error:
@@ -8615,6 +8665,7 @@ class PostgresRecordStore(HumanSessionStore):
                         reconciliation_key=reconciliation_key,
                         provider_target_key=provider_target_key,
                         original_intent=original_intent,
+                        provider_target_origin=provider_target_origin,
                         retry_missing_collision=False,
                     )
                 raise insert_error
@@ -8700,6 +8751,20 @@ class PostgresRecordStore(HumanSessionStore):
                 response_payload={},
             )
             self._sync_idempotency_row(row, reclaimed_record)
+            session.flush()
+            if (
+                requires_provider_target_origin(normalized_provider_target_key)
+                or provider_target_origin is not None
+            ):
+                # This was an unbound row, so assigning a shared physical key is
+                # a fresh admission. Preserve its existing family equality; a
+                # caller's different supplied intent must still conflict.
+                self._retain_original_mutation_intent(
+                    session,
+                    reclaimed_record,
+                    self._original_mutation_intent(session, current_record),
+                    provider_target_origin,
+                )
             session.commit()
             return MutationReservationResult(status="acquired", record=reclaimed_record)
 
@@ -9327,6 +9392,7 @@ class PostgresRecordStore(HumanSessionStore):
         minimum_expired_seconds: int,
         reconciliation_key: str,
         provider_target_key: str,
+        provider_target_origin: ProviderTargetOrigin | None = None,
         original_intent: dict[str, Any] | None = None,
         expected_original_intent: dict[str, Any] | None = None,
     ) -> MutationReconciliationSupersessionResult:
@@ -9441,7 +9507,10 @@ class PostgresRecordStore(HumanSessionStore):
                 )
                 self._sync_idempotency_row(row, superseded_record)
                 session.add(self._idempotency_row(replacement))
-                self._retain_original_mutation_intent(session, replacement, original_intent)
+                session.flush()
+                self._retain_original_mutation_intent(
+                    session, replacement, original_intent, provider_target_origin
+                )
                 session.commit()
                 return MutationReconciliationSupersessionResult(
                     status="acquired",

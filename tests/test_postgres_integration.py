@@ -13434,6 +13434,7 @@ class RealPostgresRecipientCutoverTests(unittest.TestCase):
         self.fixture.test_reviewed_native_inverse_works_without_minting_a_client_release_step()
 
     def test_effect_checkpoint_and_budget_admission_serialize_on_two_connections(self) -> None:
+        from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
         from control_plane.production_recipient_budget import require_budget_checkpoint
         from control_plane.workflows.generic_web_deploy_provider import (
             generic_web_provider_target_key,
@@ -13456,6 +13457,14 @@ class RealPostgresRecipientCutoverTests(unittest.TestCase):
             lease_owner="peer",
             provider_target_key=key,
             reconciliation_key="restart",
+            provider_target_origin=ProviderTargetOrigin(
+                product=record.product,
+                context=record.context,
+                instance="prod",
+                provider_id="dokploy",
+                target_type="compose",
+                target_id=record.retained_target_id.target_id,
+            ),
         ).record
         assert peer is not None
         url = make_url(f.database_url)

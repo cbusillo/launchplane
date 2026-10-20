@@ -203,7 +203,19 @@ class GenericWebDeployRecoveryCloseOutTests(unittest.TestCase):
             )
             stored = harness.stored(reservation)
             deployments = harness.store.list_deployment_records()
+            from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
+            from tests.test_generic_web_deploy_recovery import _generic_web_recovery_target
+
+            target = _generic_web_recovery_target()
             next_deploy = harness.store.reserve_mutation(
+                provider_target_origin=ProviderTargetOrigin(
+                    product=str(original_deploy["product"]),
+                    context=target.ship_request.context,
+                    instance=target.ship_request.instance,
+                    provider_id=target.ship_request.provider_id,
+                    target_type=target.resolved_target.target_type,
+                    target_id=target.resolved_target.target_id,
+                ),
                 scope=reservation.scope,
                 route_path=reservation.route_path,
                 idempotency_key="next-deploy-after-close-out",

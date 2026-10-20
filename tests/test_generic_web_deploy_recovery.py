@@ -287,7 +287,10 @@ def _write_generic_web_recovery_reservation(
     store: PostgresRecordStore,
     reservation: LaunchplaneIdempotencyRecord,
 ) -> LaunchplaneIdempotencyRecord:
-    reserved = store.reserve_mutation(
+    from tests.support.provider_target_history import reserve_historical_mutation
+
+    reserved = reserve_historical_mutation(
+        store,
         scope=reservation.scope,
         route_path=reservation.route_path,
         idempotency_key=reservation.idempotency_key,

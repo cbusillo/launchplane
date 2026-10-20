@@ -1,6 +1,8 @@
 """The shared durable generic-web promotion adapter for HTTP and Client releases."""
 
 import hashlib
+from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
+
 from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path as FilePath
@@ -170,6 +172,17 @@ class GenericWebProdPromotionProviderMutationAdapter:
         return build_generic_web_provider_reconciliation_key(
             self.resolve_deploy_target(),
             product=self._profile.product,
+        )
+
+    def provider_target_origin(self) -> ProviderTargetOrigin:
+        resolved = self.resolve_deploy_target()
+        return ProviderTargetOrigin(
+            product=self._profile.product,
+            context=resolved.ship_request.context,
+            instance=resolved.ship_request.instance,
+            provider_id=resolved.ship_request.provider_id,
+            target_type=resolved.resolved_target.target_type,
+            target_id=resolved.resolved_target.target_id,
         )
 
     def target_key(self) -> str:

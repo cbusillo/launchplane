@@ -354,6 +354,28 @@ class TaskRouteTests(unittest.TestCase):
         provision = task_request(mode="apply", reviewed_plan_sha256=self.plan.digest)
         status, receipt = self.invoke(provision, "provision")
         self.assertEqual((status, receipt["result"]["status"]), (200, "pass"))
+        reservation = self.store.read_idempotency_record(
+            scope=walkthrough_activity_scope(provision.product),
+            route_path=WALKTHROUGH_ROUTE,
+            idempotency_key="provision",
+        )
+        assert reservation is not None
+        capsule = self.store.read_provider_target_origin(reservation)
+        assert capsule is not None
+        self.assertEqual(
+            (
+                capsule.origin.product,
+                capsule.origin.context,
+                capsule.origin.instance,
+                capsule.origin.target_id,
+            ),
+            (
+                provision.product,
+                provision.context,
+                "testing",
+                self.plan.connection.evidence.target_id,
+            ),
+        )
         password = self.account.call_args.kwargs["payload"]["password"]
         self.assertTrue(password)
         self.assertNotIn(password, json.dumps(receipt))

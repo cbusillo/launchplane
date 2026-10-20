@@ -481,6 +481,27 @@ completion has the same evidence requirement as restart adoption; completed
 means the provider outcome is durable and replayable, not that the external
 deployment passed.
 
+Fresh reservations for shared physical-parent keys in the
+`generic-web-provider-target:*` namespace also require an original provider
+recipient captured from the same recipient used to compute the existing key.
+Suffixed child-effect keys keep their separate operation-fence semantics. The typed identity contains product, context, instance,
+provider, target type and target ID. Product is captured explicitly because the
+physical key does not include it. Storage verifies the existing key and retains
+that identity with a random operation nonce as the `provider_target_origin`
+sibling in the existing original-mutation-intent receipt, in the acquisition or
+supersession transaction. The family's `original_intent` dictionary and equality
+stay unchanged, including an empty dictionary for origin-only receipts.
+
+Retries, adoption and recovery never replace that capsule or infer it from
+current lane records. A safe release followed by fresh acquisition receives a
+new nonce even when the deterministic reservation ID and database timestamp are
+unchanged. Existing rows without custody remain readable and recoverable through
+their existing guards; they are never backfilled. Internal origin reads require
+the completed receipt, matching request fingerprint and reservation ID, a valid
+capsule and the same physical key. Missing or mismatched evidence is unavailable.
+The capsule is attention identity only: it grants no authorization, exclusion,
+effect-completion, retry, supersession or lane-separation proof.
+
 ## ORM Query Boundary
 
 Launchplane's Postgres storage layer should expose GUI and driver reads through

@@ -21844,7 +21844,7 @@ def create_launchplane_fastapi_app(
             from control_plane.testing_runtime_separation import (
                 TestingRuntimeSeparation,
                 TestingSeparationRefused,
-                separation_binding,
+                separation_admission,
             )
 
             if not director_agent_identity(identity):
@@ -21858,6 +21858,7 @@ def create_launchplane_fastapi_app(
                 record_store=record_store,
                 trace_id=trace_id,
             )
+            separation_origin = None
             prior = None
             if normalized_idempotency_key:
                 prior = separation_store.read_idempotency_record(
@@ -21890,7 +21891,7 @@ def create_launchplane_fastapi_app(
                 target_key = prior.provider_target_key
             else:
                 try:
-                    binding, target_key = separation_binding(
+                    binding, target_key, separation_origin = separation_admission(
                         separation_store,
                         live_target_runtime_request,
                         launchplane_identity_actor(identity),
@@ -21937,6 +21938,7 @@ def create_launchplane_fastapi_app(
                             actor=launchplane_identity_actor(identity),
                             binding=binding,
                             target_key=target_key,
+                            origin=separation_origin,
                             trace_id=trace_id,
                         ),
                         in_progress_message="Testing separation is in progress.",

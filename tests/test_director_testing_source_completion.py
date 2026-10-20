@@ -1,5 +1,7 @@
 """Director transport uses the existing empty-source operation, without a grant."""
 
+from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
+
 from copy import deepcopy
 from typing import Any
 import unittest
@@ -227,6 +229,14 @@ class DirectorTestingSourceCompletionTests(unittest.IsolatedAsyncioTestCase):
             lease_owner="worker",
             reconciliation_key="fixture",
             provider_target_key=target_key,
+            provider_target_origin=ProviderTargetOrigin(
+                product="sample",
+                context="sample",
+                instance="testing",
+                provider_id="dokploy",
+                target_type="compose",
+                target_id=self.fixture.target_id.target_id,
+            ),
         )
         self.assertEqual(reserved.status, "acquired")
         response = await self.post()
@@ -279,6 +289,14 @@ class DirectorTestingSourceCompletionTests(unittest.IsolatedAsyncioTestCase):
             lease_owner="worker",
             reconciliation_key="fixture",
             provider_target_key=target_key,
+            provider_target_origin=ProviderTargetOrigin(
+                product="sample",
+                context="sample",
+                instance="testing",
+                provider_id="dokploy",
+                target_type="compose",
+                target_id=self.fixture.target_id.target_id,
+            ),
         )
         held = self.store.list_held_provider_target_reservations()
         visible = False

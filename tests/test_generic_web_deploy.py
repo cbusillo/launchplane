@@ -1762,6 +1762,12 @@ class GenericWebDeployTests(unittest.TestCase):
             store=store,
             provider=original_provider,
         )
+        original_origin = original_adapter.provider_target_origin()
+        self.assertEqual(
+            (original_origin.product, original_origin.target_id),
+            (profile.product, "target-original"),
+        )
+        self.assertEqual(original_origin.target_key(), original_adapter.target_key())
         original_key = original_adapter.reconciliation_key()
         replacement_provider = _FakeGenericWebDeployProvider(
             target_id="target-replacement",
