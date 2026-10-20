@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
 import { LaunchplaneApiError, readDiscussionTopics } from "./api";
 import type { DiscussionTopicsResponse } from "./generated/openapi.ts";
+import { loadDevFixtures, type DevFixtureMode } from "./dev-fixture-loader";
 import { formatTime } from "./format";
 import { AppLink, productPath } from "./router";
 import { safeExternalUrl } from "./url";
 
-export function ProductTopicsRoute({ product, admin }: { product: string; admin: boolean }) {
+export function ProductTopicsRoute({ product, workspaceAccess, fixtureMode }: { product: string; workspaceAccess: boolean; fixtureMode: DevFixtureMode }) {
   const [response, setResponse] = useState<DiscussionTopicsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -16,7 +17,10 @@ export function ProductTopicsRoute({ product, admin }: { product: string; admin:
     setResponse(null);
     setLoading(true);
     setError("");
-    void readDiscussionTopics(product, controller.signal).then(payload => {
+    const read = fixtureMode
+      ? loadDevFixtures().then(fixtures => fixtures.discussionTopicsForFixture(fixtureMode, product))
+      : readDiscussionTopics(product, controller.signal);
+    void read.then(payload => {
       if (!controller.signal.aborted) setResponse(payload);
     }).catch((failure: unknown) => {
       if (controller.signal.aborted) return;
@@ -27,7 +31,7 @@ export function ProductTopicsRoute({ product, admin }: { product: string; admin:
       if (!controller.signal.aborted) setLoading(false);
     });
     return () => controller.abort();
-  }, [product, refresh]);
+  }, [product, refresh, fixtureMode]);
 
   return (
     <section className="owner-review-page topics-page">
@@ -39,7 +43,7 @@ export function ProductTopicsRoute({ product, admin }: { product: string; admin:
       <div className="topics-toolbar">
         {response ? <p role="status">{response.topics.length} open {response.topics.length === 1 ? "topic" : "topics"}</p> : null}
         <button className="button" type="button" disabled={loading} onClick={() => setRefresh(value => value + 1)}>Refresh topics</button>
-        {admin ? <AppLink to={productPath(product)}>Product overview</AppLink> : null}
+        {workspaceAccess ? <AppLink to={productPath(product)}>Product overview</AppLink> : null}
       </div>
       {loading ? <p className="owner-review-state" role="status">Loading topics…</p> : error ? (
         <p className="owner-review-alert" role="alert">{error}</p>

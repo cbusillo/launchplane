@@ -309,7 +309,7 @@ export function App() {
         signingOut={signingOut}
         theme={theme}
       >
-        {route.kind === "product-topics" ? <ProductTopicsRoute key={route.product} product={route.product} admin={authState.identity.role === "admin"} /> : route.kind === "owner-secrets" ? <OwnerSecretInputsRoute fixtureMode={fixtureMode} /> : <OwnerProductReviewRoute fixtureMode={fixtureMode} />}
+        {route.kind === "product-topics" ? <ProductTopicsRoute key={route.product} product={route.product} workspaceAccess={authState.identity.role !== "owner"} fixtureMode={fixtureMode} /> : route.kind === "owner-secrets" ? <OwnerSecretInputsRoute fixtureMode={fixtureMode} /> : <OwnerProductReviewRoute fixtureMode={fixtureMode} />}
       </OwnerReviewShell>
     );
   }
