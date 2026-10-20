@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 from pathlib import Path
 import runpy
@@ -48,6 +49,7 @@ class DeployFailureAlertTests(unittest.TestCase):
     ) -> None:
         with TemporaryDirectory() as directory:
             response = Path(directory) / "response.json"
+            operation_reference = hashlib.sha256(b"private-key").hexdigest()
             response.write_text(
                 json.dumps(
                     {
@@ -55,7 +57,17 @@ class DeployFailureAlertTests(unittest.TestCase):
                             "code": "self_deploy_drain_timeout",
                             "message": "private-coordinates",
                             "blocking": ["private-key"],
-                        }
+                        },
+                        "records": {
+                            "blocking_operation_refs": json.dumps(
+                                [
+                                    operation_reference,
+                                    "private-key",
+                                    "@everyone",
+                                    operation_reference,
+                                ]
+                            )
+                        },
                     }
                 )
             )
@@ -75,8 +87,16 @@ class DeployFailureAlertTests(unittest.TestCase):
                 patch("control_plane.deploy_failure_alert.post_discord_webhook") as sender,
             ):
                 self.assertTrue(send_failure_alert())
+            sender.assert_called_once()
             payload = sender.call_args.args[1]
             self.assertNotIn("private-", json.dumps(payload))
+            self.assertNotIn("@everyone", json.dumps(payload))
+            operations = next(
+                field["value"]
+                for field in payload["embeds"][0]["fields"]
+                if field["name"] == "Blocking operation references"
+            )
+            self.assertEqual(operations, operation_reference)
             recovery_link = next(
                 field["value"]
                 for field in payload["embeds"][0]["fields"]

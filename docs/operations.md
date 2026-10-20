@@ -4726,10 +4726,29 @@ not an environment. Original intent absent in legacy records stays unavailable:
 current plans and provider idleness cannot reconstruct the original proof.
 Separately,
 a typed `self_deploy_drain_timeout` uses the existing deploy-failure Discord
-reporter and manual break-glass link. It explicitly reports zero replacement
+reporter once in the failed deploy run. It explicitly reports zero replacement
 dispatch; the rollback dispatch classifier still treats that refusal as
-pre-effect. Installation and later live settlement remain separate proof from
-source tests or a merge.
+pre-effect. The absolute ten-minute drain budget survives polls and service
+restarts. At timeout, new provider-effect admission remains paused, so constant
+new traffic cannot get ahead of the waiting deploy. Existing executors can still
+renew their leases, finish and commit; a timeout never kills or settles them.
+
+The alert includes bounded opaque blocker references. Match each reference to
+`runtime.release_drain.operation_details[].operation_ref` for its operation ID
+and ownership evidence. Raw operation IDs, keys and private coordinates are not
+sent to Discord. If the alert lists more blockers than fit, inspect the runtime
+status; its detail count and truncation flag report coverage.
+
+Let blockers finish or use their own supported recovery. Then dispatch a fresh
+normal Deploy Launchplane run on the default branch, with a new self-deploy key
+and marker (the workflow normally supplies both). No superseded-marker repair
+or break-glass is required for this pre-effect timeout. The fresh request checks
+the remaining blockers before any provider write; the old timed-out request
+stays non-dispatchable even after blockers clear. New admission remains fenced
+until matching replacement startup. This continuation does not authorize an
+operation replay, clear a product recovery fence or supply a missing checkpoint.
+Installation and later live settlement remain separate proof from source tests
+or a merge.
 
 ### Fishbowl import proof on an exact PR artifact
 

@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from collections.abc import Iterator
 from contextlib import contextmanager
 import os
+import hashlib
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -74,7 +75,10 @@ class ServiceDeployDrainTimeout(ServiceDeployPreEffectRefused):
 
     def __init__(self, blockers: tuple[str, ...]) -> None:
         super().__init__(
-            "Self-deploy drain timed out before provider effects; inspect runtime.release_drain."
+            "Self-deploy drain timed out before provider effects; admission remains paused. "
+            "Inspect runtime.release_drain. Let the held operations finish or use their "
+            "supported recovery, then submit a fresh normal deploy with a new key and marker. "
+            "This timed-out request cannot dispatch."
         )
         self.blockers = blockers
 
@@ -162,6 +166,12 @@ def admission_allowed(session: Any, now: str) -> bool:
     if record is None:
         return True
     if record.state == "draining":
+        budget = _read_budget(session, record.request_fingerprint)
+        if budget is not None and budget.drain_timed_out:
+            # Keep new traffic from starving the waiting deploy. Existing
+            # executors can still heartbeat and settle. A fresh deploy request
+            # is the supported continuation; the timed-out intent never replays.
+            return False
         # An abandoned pre-effect request cannot permanently park releases.
         return record.expires_at <= now
     return record.state == "confirmed" and (
@@ -287,6 +297,11 @@ def _running_operations(store: Any, session: Any, now: str) -> tuple[str, ...]:
     )
 
 
+def operation_reference(operation_id: str) -> str:
+    """Correlate a blocker in the Director alert without exporting private IDs."""
+    return hashlib.sha256(operation_id.encode("utf-8")).hexdigest()
+
+
 def prepare(
     store: Any,
     *,
@@ -369,6 +384,10 @@ def prepare(
             and current.request_fingerprint != request_fingerprint
             and current.state == "draining"
             and current.expires_at > now
+            and not (
+                (current_budget := _read_budget(session, current.request_fingerprint))
+                and current_budget.drain_timed_out
+            )
         ):
             raise ValueError("Another self-deploy is draining release operations.")
         blockers = _running_operations(store, session, now)
@@ -388,8 +407,9 @@ def prepare(
         ) >= parse_launchplane_mutation_timestamp(
             budget.drain_deadline_at, field_name="drain_deadline_at"
         ):
-            # A timed-out request must never later dispatch on a poll. Expire only
-            # this pre-effect admission pause; all product recovery fences survive.
+            # A timed-out request must never later dispatch on a poll. Retain
+            # admission until a fresh deploy intent continues after the alert;
+            # all running executors and product recovery fences survive.
             _write(
                 session,
                 prior.model_copy(
@@ -525,7 +545,10 @@ def read_status(store: Any) -> dict[str, object]:
         result["running_operation_ids"] = tuple(
             item["operation_id"] for item in observations if item["blocks_drain"]
         )
-        result["operation_details"] = observations[:100]
+        result["operation_details"] = tuple(
+            {**item, "operation_ref": operation_reference(cast(str, item["operation_id"]))}
+            for item in observations[:100]
+        )
         result["operation_detail_count"] = len(observations)
         result["operation_details_truncated"] = len(observations) > 100
         result["drain_timeout_seconds"] = SERVICE_DEPLOY_DRAIN_TIMEOUT_SECONDS

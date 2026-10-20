@@ -150,9 +150,13 @@ class EventDeployRedeployTests(unittest.TestCase):
             self.assertEqual(timeout.exception.blockers, (reservation.record_id,))
             status = read_status(self.store)
             self.assertTrue(status["drain_timed_out"])
-            self.assertFalse(status["admission_paused"])
+            self.assertTrue(status["admission_paused"])
             with self.assertRaises(ServiceDeployDrainTimeout):
                 _prepare(self.store)
+            # Reopening the store or letting the old poll lease expire must not
+            # admit a constant stream of new effects ahead of the waiting deploy.
+            with self.assertRaises(ServiceDeployDraining):
+                self.reserve("new-during-timeout")
         # The timeout does not change, retire or fabricate the product outcome.
         observed = self.store.lookup_existing_mutation_reservation(
             route_path=reservation.route_path,
@@ -160,6 +164,40 @@ class EventDeployRedeployTests(unittest.TestCase):
             request_fingerprint=reservation.request_fingerprint,
         ).record
         self.assertEqual(observed, reservation)
+        restarted.close()
+        restarted = PostgresRecordStore(database_url=self.store.database_url)
+        self.addCleanup(restarted.close)
+        self.assertTrue(read_status(restarted)["admission_paused"])
+        renewed = restarted.renew_mutation_reservation(reservation=reservation).record
+        assert renewed is not None
+        self.assertEqual(
+            restarted.complete_mutation_reservation(
+                completion=complete_launchplane_mutation_reservation(
+                    renewed,
+                    response_status_code=200,
+                    response_trace_id="finished-without-kill",
+                    response_payload={"result": {"deploy_status": "pass"}},
+                    completed_at=renewed.updated_at,
+                )
+            ).status,
+            "completed",
+        )
+        # A timed-out intent never dispatches on replay. A fresh normal deploy
+        # (fresh key AND marker) is the supported continuation after the alert.
+        with self.assertRaises(ServiceDeployDrainTimeout):
+            _prepare(restarted)
+        from control_plane.service_deploy_drain import prepare
+
+        _, blockers, dispatch = prepare(
+            restarted,
+            request_fingerprint="fresh-after-timeout",
+            target_type=record.target_type,
+            target_id=record.target_id,
+            image_reference=record.image_reference,
+            deployment_marker=record.deployment_marker + "-retry",
+        )
+        self.assertFalse(blockers)
+        self.assertTrue(dispatch)
 
     def test_active_reconciliation_tail_blocks_but_expired_hold_is_diagnostic_only(self) -> None:
         reservation = self.reserve().record

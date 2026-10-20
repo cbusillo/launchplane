@@ -11933,6 +11933,7 @@ def create_launchplane_fastapi_app(
                 ServiceDeployFenceConflict,
                 ServiceDeployOutcomeUnknown,
                 ServiceDeployPreEffectRefused,
+                operation_reference,
             )
 
             if isinstance(error, ServiceDeployDrainTimeout):
@@ -11941,7 +11942,12 @@ def create_launchplane_fastapi_app(
                     trace_id=trace_id,
                     code="self_deploy_drain_timeout",
                     message=str(error),
-                    records={"running_operation_ids": json.dumps(error.blockers)},
+                    records={
+                        "running_operation_ids": json.dumps(error.blockers),
+                        "blocking_operation_refs": json.dumps(
+                            [operation_reference(item) for item in error.blockers]
+                        ),
+                    },
                 ) from error
             elif isinstance(error, ServiceDeployDispatchBusy):
                 driver_result = LaunchplaneSelfDeployResult(

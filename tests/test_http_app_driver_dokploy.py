@@ -1,5 +1,6 @@
 from tests.support.auth import scoped_agent_test
 import json
+import hashlib
 import os
 import unittest
 from datetime import (
@@ -1234,6 +1235,15 @@ class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
                             response.json()["error"]["code"], "self_deploy_drain_timeout"
                         )
                         self.assertIn(reservation.record_id, response.text)
+                        operation_ref = hashlib.sha256(reservation.record_id.encode()).hexdigest()
+                        self.assertEqual(
+                            json.loads(response.json()["records"]["blocking_operation_refs"]),
+                            [operation_ref],
+                        )
+                        details = cast(
+                            tuple[dict[str, object], ...], read_status(store)["operation_details"]
+                        )
+                        self.assertEqual(details[0]["operation_ref"], operation_ref)
                 update.assert_not_called()
                 deploy.assert_not_called()
 
