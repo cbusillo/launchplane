@@ -51,6 +51,88 @@ Production callers import the canonical owning module. The
 and new code patch dependencies at the canonical module so the compatibility
 surface does not become a second implementation authority.
 
+### Environment wire formats
+
+Dokploy application targets consume one dotenv layer. Docker Compose targets
+consume two: Dokploy parses the stored environment and writes those values to
+the generated `.env`, which Compose then reads for interpolation and `env_file`.
+The adapter quotes new or changed literal inputs for both stages, with a
+format comment naming the encoded keys. Readback, merges, credential checks and
+retirement recover their literal values. Untouched legacy values retain their
+original wire meaning, including existing provider references: an unrelated
+image or startup update must not change a password that initialized a retained
+database. This repair does not retroactively qualify or rewrite a legacy value
+that Compose previously transformed. Existing lane replacement/rebuild paths
+create their environment from canonical records; retained databases keep their
+existing credential and recovery checks.
+
+Equal stored strings do not prove literal delivery for non-plain legacy values.
+Runtime apply dry-run reports `compose_transport.unqualified_keys` using names
+only. To qualify unchanged managed inputs, an already-authorized admin caller
+can send this body to `POST /v1/live-target-runtime/apply`:
+
+```json
+{
+  "mode": "dry-run",
+  "product": "example-product",
+  "context": "example-context",
+  "instance": "testing",
+  "requalify_literal_keys": ["APP_SETTINGS", "SMTP_PASSWORD"]
+}
+```
+
+Review those names and the desired runtime records, then use `mode: "apply"`
+with the same names and the API's existing authorization and idempotency headers.
+Only managed keys may be named. Naming an unqualified managed key writes its
+literal transport even when the value delta is empty. Already-qualified keys
+and plain values are no-ops. The response reports transport work separately
+from value changes. Persistence verification checks values and the literal
+transport written by that operation.
+It does not prove that running containers restarted; deployment remains an
+explicit existing operation. Unchanged legacy inputs remain explicitly unqualified in the names-only report.
+Ordinary writes and deploy-only calls preserve their existing consumer semantics;
+that report does not claim retroactive literal delivery.
+
+Requalifying an uncertain `ODOO_DB_PASSWORD` on any retained database is refused before effects, including production.
+For testing, use the existing fresh testing generation, which creates
+its own database, rather than toggling or rotating a retained credential.
+Compatible slots refuse a legacy/literal transport mismatch for shared settings. Historical candidate
+custody and recovery receipts remain intact when exact configuration fails.
+This API field changes no authorization: terminal agents remain unable to apply,
+and Director-agent disposable-lane restrictions still apply. The Live Target Runtime workflow exposes the same optional JSON array of names
+through its existing authorization. Its summary separates value changes and transport
+qualification. `env_written_without_deploy` describes only this call. It does
+not track earlier unapplied writes or running-container values. The installed runtime-sync helper does not expose
+this optional input; use the workflow or the existing authorized service API.
+Historical recipient and activation recovery retains its original parsed-value
+contract, including previously stored runtime identity.
+
+The wire quotes and Compose-supported escapes are transport data, not a product
+storage convention. Metadata survives comment movement and CRLF normalization;
+new provider-only fields and edits that cease to match the encoding remain
+legacy fields rather than making the record unreadable. Canonical reconciliation
+can then replace or retire them through the existing runtime-input path. Swarm
+stack targets retain their separate shell-export format.
+
+Render the target-specific environment before recording its write checkpoint
+or changing its Compose source. New literal inputs support multiline text,
+surrounding/mixed quotes, whitespace, backslashes, controls and dollar expressions,
+including text that resembles provider substitutions. The adapter hides that
+syntax until Compose's own escape/interpolation pass, where dollars become
+literal. NUL remains invalid for container environments and is refused before
+the corresponding effect, without including values in the error; remove NUL
+from the input. New testing-candidate configuration custody also binds the
+wire representation, while historical unmarked hashes retain their recovery
+contract.
+
+`scripts/qualify-dokploy-compose-environment.sh` exercises the tracked pinned
+Dokploy generated-file functions and actual Compose `config`, covering both
+interpolation and service `env_file` consumption with synthetic values only.
+Provision Node through the repository's CI Node setup and Compose through
+`scripts/setup-ci-compose.sh` using the CI-declared version before running it.
+The frontend validation CI job runs this qualification; ordinary unit discovery
+does not depend on a developer's installed Node or Compose. No containers start.
+
 Odoo post-deploy sender verification follows the deployed image's bootstrap
 contract. On a rollback or exact artifact re-deploy, when a company email is
 requested, the maintenance schedule reads and

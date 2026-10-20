@@ -353,7 +353,12 @@ def _sync_launchplane_bootstrap_policy(
             target_type=target_type,
             target_id=target_id,
             target_payload=target_payload,
-            env_text=dokploy_api.serialize_dokploy_env_text(env_map),
+            env_text=dokploy_api.serialize_dokploy_env_text(
+                env_map,
+                target_type=target_type,
+                compose_type=str(target_payload.get("composeType") or "docker-compose"),
+                current_env_text=raw_env_text,
+            ),
             launchplane_service_target=True,
         )
     current_policy_sha256 = ""
@@ -2497,6 +2502,18 @@ def _sync_artifact_image_reference_for_target(
     finally:
         postgres_store.close()
 
+    # Validate the complete wire environment before changing the Compose source.
+    prepared_env_text = dokploy_api.serialize_dokploy_env_text(
+        desired_env_map,
+        target_type=resolved_target.target_type,
+        compose_type=str(target_payload.get("composeType") or "docker-compose"),
+        current_env_text=str(target_payload.get("env") or ""),
+    )
+    dokploy_api.refuse_app_runtime_env_write(
+        env_text=prepared_env_text,
+        current_env_text=str(target_payload.get("env") or ""),
+        target="Ship runtime environment sync",
+    )
     runtime_source_evidence: dict[str, str] = {}
     if desired_image_reference and resolved_target.target_type == "compose":
         target_domains: tuple[str, ...] = ()
@@ -2545,7 +2562,7 @@ def _sync_artifact_image_reference_for_target(
             target_type=resolved_target.target_type,
             target_id=resolved_target.target_id,
             target_payload=target_payload,
-            env_text=dokploy_api.serialize_dokploy_env_text(desired_env_map),
+            env_text=prepared_env_text,
         )
         target_payload = dokploy_api.fetch_dokploy_target_payload(
             host=host,
@@ -2559,6 +2576,16 @@ def _sync_artifact_image_reference_for_target(
         for env_key, env_value in desired_env_map.items()
         if refreshed_env_map.get(env_key, "") != env_value
     )
+    if resolved_target.target_type == "compose" and target_payload.get("composeType") != "stack":
+        missing_or_mismatched_keys = sorted(
+            set(missing_or_mismatched_keys)
+            | set(
+                dokploy_api.compose_unqualified_keys(
+                    str(target_payload.get("env") or ""),
+                    dokploy_api.compose_literal_keys(prepared_env_text),
+                )
+            )
+        )
     if missing_or_mismatched_keys:
         raise click.ClickException(
             "Dokploy target env did not persist Launchplane DB-backed runtime key(s): "

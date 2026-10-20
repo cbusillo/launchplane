@@ -2541,7 +2541,9 @@ def execute_odoo_stable_target_replacement_apply(
         if (
             plan.data_source_mode == "existing"
             and control_plane_live_target_runtime.retained_database_password_changed(
-                instance_name=plan.instance, desired_env=application_env, live_env=current_env_map
+                instance_name=plan.instance,
+                desired_env=application_env,
+                live_env=current_env_map,
             )
         ):
             code = deploy_blocked_code("retained_database_credential_changed")
@@ -2581,15 +2583,12 @@ def execute_odoo_stable_target_replacement_apply(
                 "replacement.",
                 tuple(provider_only_keys),
             )
-        # Preserve the Compose preflight's existing single-line/trim boundary:
-        # its later environment-file consumer is not the application consumer.
+        # Qualify both provider parsing and Compose's generated .env stage
+        # before allocation, schedule or provider effects.
         unportable_keys: list[str] = []
         for key, value in runtime_environment_values.items():
-            if value.rstrip() != value or (value and value.splitlines() != [value]):
-                unportable_keys.append(key)
-                continue
             try:
-                dokploy_api.serialize_dokploy_env_text({key: value})
+                dokploy_api.serialize_dokploy_env_text({key: value}, target_type="compose")
             except dokploy_api.DokployEnvironmentEncodingError:
                 unportable_keys.append(key)
         if unportable_keys:
@@ -2817,13 +2816,19 @@ def execute_odoo_stable_target_replacement_apply(
         desired_env_map["PLATFORM_INSTANCE"] = plan.instance
         desired_env_map.update(dict.fromkeys(COMPOSE_IMAGE_REFERENCE_ENV_KEYS, image_reference))
         desired_env_map.update(runtime_identity_env(runtime_identity))
+        prepared_env_text = dokploy_api.serialize_dokploy_env_text(
+            desired_env_map,
+            target_type="compose",
+            compose_type=str(target_payload.get("composeType") or "docker-compose"),
+            current_env_text=str(target_payload.get("env") or ""),
+        )
         dokploy_api.update_dokploy_target_env(
             host=host,
             token=token,
             target_type="compose",
             target_id=target_id_record.target_id,
             target_payload=target_payload,
-            env_text=dokploy_api.serialize_dokploy_env_text(desired_env_map),
+            env_text=prepared_env_text,
         )
         refreshed_payload = dokploy_api.fetch_dokploy_target_payload(
             host=host,
@@ -2858,6 +2863,15 @@ def execute_odoo_stable_target_replacement_apply(
             )
         missing_keys = sorted(
             key for key, value in desired_env_map.items() if refreshed_env_map.get(key, "") != value
+        )
+        missing_keys = sorted(
+            set(missing_keys)
+            | set(
+                dokploy_api.compose_unqualified_keys(
+                    str(refreshed_payload.get("env") or ""),
+                    dokploy_api.compose_literal_keys(prepared_env_text),
+                )
+            )
         )
         if missing_keys:
             raise click.ClickException(

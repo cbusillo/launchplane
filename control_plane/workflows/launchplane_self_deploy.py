@@ -294,6 +294,8 @@ def _execute_launchplane_self_deploy(
         raw_env_text,
         updates=updates,
         removals=removals,
+        target_type=request.target_type,
+        compose_type=str(target_payload.get("composeType") or "docker-compose"),
     )
     updated_env_map = dokploy_api.parse_dokploy_env_text(updated_env_text)
     _validate_bootstrap_target_env(updated_env_map)

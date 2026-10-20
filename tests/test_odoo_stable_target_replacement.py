@@ -5587,8 +5587,8 @@ class OdooStableTargetReplacementSiteEnvironmentTests(unittest.TestCase):
                     )
         return result, persisted_env, sync_source
 
-    def test_compose_keeps_its_portability_refusal_before_provider_writes(self) -> None:
-        for value in ("fixture\x00value", "fixture\nsecond line", "fixture "):
+    def test_compose_refuses_unsupported_inputs_before_provider_writes(self) -> None:
+        for value in ("fixture\x00value",):
             with self.subTest(value=value):
 
                 def write_records(record_store: PostgresRecordStore) -> None:
@@ -5618,6 +5618,37 @@ class OdooStableTargetReplacementSiteEnvironmentTests(unittest.TestCase):
                 self.assertNotIn(value, result.error_message)
                 self.assertNotIn("APP_SETTING", persisted_env)
                 sync_source.assert_not_called()
+
+    def test_compose_delivers_multiline_and_padded_runtime_values(self) -> None:
+        for value in ("fixture\nsecond line", "fixture ", '"literal" $NAME'):
+            with self.subTest(value=value):
+
+                def write_records(record_store: PostgresRecordStore) -> None:
+                    record_store.write_runtime_environment_record(
+                        RuntimeEnvironmentRecord(
+                            scope="context",
+                            context="cm",
+                            env={"APP_SETTING": value},
+                            updated_at="2026-07-25T00:00:00Z",
+                        )
+                    )
+
+                result, persisted_env, _ = self._apply(
+                    write_records=write_records,
+                    policy_rules=(
+                        RuntimeSecretSafetyRule(
+                            binding_key="ODOO_DB_PASSWORD",
+                            secret_class="testing",
+                            allowed_contexts=("cm",),
+                            allowed_instances=("testing",),
+                        ),
+                    ),
+                )
+                self.assertEqual(result.deploy_status, "pass")
+                self.assertEqual(
+                    control_plane_dokploy.parse_dokploy_env_text(persisted_env)["APP_SETTING"],
+                    value,
+                )
 
     def test_plan_lists_the_keys_it_would_deliver_without_requiring_declarations(self) -> None:
         store = _Store(

@@ -1717,7 +1717,12 @@ def _execute_refresh(
             # source-free refreshes repeat this fixed, idempotent deletion.
             environment_values[PREVIEW_FISHBOWL_SOURCE_ENV_KEY] = "source-free"
 
-        env_text = dokploy_api.serialize_dokploy_env_text(environment_values)
+        env_text = dokploy_api.serialize_dokploy_env_text(
+            environment_values,
+            target_type="compose",
+            compose_type=str(target_payload.get("composeType") or "docker-compose"),
+            current_env_text=str(target_payload.get("env") or ""),
+        )
         with guard():
             checkpoint_provider_effect("compose_update")
             dokploy_api.update_dokploy_target_env(

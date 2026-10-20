@@ -77479,6 +77479,14 @@
                     "title": "Product",
                     "type": "string"
                   },
+                  "requalify_literal_keys": {
+                    "default": [],
+                    "items": {
+                      "type": "string"
+                    },
+                    "title": "Requalify Literal Keys",
+                    "type": "array"
+                  },
                   "reviewed_binding_sha256": {
                     "default": "",
                     "title": "Reviewed Binding Sha256",

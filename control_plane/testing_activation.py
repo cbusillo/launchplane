@@ -1434,7 +1434,7 @@ class TestingActivationAdapter:
                     template = json.loads(record.compose_source)
                     for volume in template["volumes"].values():
                         volume["external"] = True
-                    env_text = api.serialize_dokploy_env_text(values)
+                    env_text = api.serialize_dokploy_env_text(values, target_type="compose")
                     record = self.save(record, phase="configure_new_recipient")
                     checkpoint(record.phase)
                     api.dokploy_request(

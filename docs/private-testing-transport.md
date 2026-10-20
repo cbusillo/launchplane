@@ -119,11 +119,13 @@ a write or a value in the error. For example, dotenv does not unescape quote
 delimiters, so a multiline value containing all three quote delimiters may not
 be representable. This is the shared provider storage codec. It qualifies
 application delivery, where Dokploy passes the parsed values to the container.
-It does not qualify Compose's later environment-file processing: provider
-versions that write parsed values as raw assignments can change them again.
-Odoo Compose target replacement retains its single-line, no-trailing-whitespace
-preflight; the application codec fix does not widen that boundary. Compose
-consumer compatibility is tracked separately in [#4174](https://github.com/cbusillo/launchplane/issues/4174).
+Compose uses a separate two-stage wire codec, including for Odoo target
+replacement and fresh testing candidates. It preserves new or changed literal
+inputs through Dokploy's generated `.env` and final Compose consumption; it no
+longer imposes the former single-line/no-trailing-whitespace restriction.
+Untouched legacy values keep their existing effective meaning. See the
+[environment wire contract](dokploy-service-deployments.md#environment-wire-formats)
+for preservation, provider edits and actual-consumer qualification.
 The application consumer follows Dokploy's
 [dotenv parsing and service substitution](https://github.com/Dokploy/dokploy/blob/1c4414165d4aedbf6e28afab7a94c8fb7c053373/packages/server/src/utils/docker/utils.ts)
 and the [dotenv value grammar](https://github.com/motdotla/dotenv/blob/v16.4.5/lib/main.js).
