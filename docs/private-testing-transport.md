@@ -104,14 +104,39 @@ explicit provider-key retirements are checked before writing. The existing
 provider operation writes the environment, verifies its readback, then installs
 and deploys the verified image. Platform credentials left in provider-only keys
 must be explicitly retired through product configuration before delivery.
-Input preparation also checks that values survive the provider's environment
-text format before schedules are quiesced. Values containing line breaks or
+Input preparation reads the provider environment and checks the complete merged
+environment for platform credentials and provider-format fidelity before
+schedules are quiesced. The same checks run again immediately before writing.
+Values containing line breaks or
 trailing whitespace that the provider cannot preserve are refused without a
 write. A later refusal restores or holds schedules using the original lifecycle
 receipt and records the failed attempt. Failure publication retains the last
 provider-effect phase. An interruption after input readback remains retryable
-under the original operation once provider observation proves no deployment;
-a further input refusal retains that operation's fence and original receipts.
+under the original operation once provider observation proves no deployment.
+If its captured inputs have changed, or a newer verified image supersedes it,
+the original lease settles the obsolete attempt as failed only with exact
+pre-image proof on the original target. It restores any captured schedule
+baseline through verified provider writes, retaining the old input receipt as
+failed-attempt evidence. A durable settlement phase resumes cleanup after a
+lost reply, even if inputs subsequently revert. The current image and inputs
+then use a fresh operation. Returning to a settled operation's input identity
+uses a deterministic successor bound to that terminal predecessor.
+An ambiguous image-save phase, unknown provider observation, changed target,
+missing baseline or lost lease keeps the original operation fenced. Environment
+and registry preparation are journaled separately from image save and deploy;
+an environment-only failure can restore schedules without treating it as an
+unqualified image.
+The existing generic-web deploy-recovery service supports application targets.
+Its `retry_original_operation` action resumes the original controller, which
+may restore and settle an obsolete pre-image attempt as failed instead of
+deploying it. The reviewed recovery digest binds current input authority and
+that disposition; changes between dry-run and apply require a fresh review.
+The ordinary testing reconciler uses the same settlement automatically.
+An exact original reservation with no effect checkpoint may settle before any
+lifecycle receipt was captured. Its renewed lease verifies that no-effect
+evidence again; it restores nothing and keeps the effect journal empty, even
+if writing the failed record must retry. A missing baseline after an effect
+remains fenced.
 
 A successful deployment retains a keyed, value-free receipt for those captured
 inputs. Missing legacy evidence or changed site inputs makes the same verified

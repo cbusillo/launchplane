@@ -749,14 +749,16 @@ def _execute_generic_web_deploy_unserialized(
     deploy_completed = False
     provider_effect_attempted = False
     image_effect_attempted = False
+    last_provider_phase = ""
     provider_deployment_observation: GenericWebProviderDeploymentObservation | None = None
     key_readback: IntegrationKeyReadbackEvidence | None = None
     application_lifecycle: GenericWebApplicationLifecycle | None = None
 
     def checkpoint_provider(phase: str) -> None:
-        nonlocal post_deploy_update
+        nonlocal post_deploy_update, last_provider_phase
         if provider_effect_checkpoint is not None:
             provider_effect_checkpoint(phase)
+        last_provider_phase = phase
         if phase in {"provider_dispatch_prepared", "runtime_inputs_verified"}:
             from control_plane.generic_web_testing_inputs import DELIVERY_RECEIPT_KEY
 
@@ -801,11 +803,13 @@ def _execute_generic_web_deploy_unserialized(
 
     def mark_image_effect_started() -> None:
         nonlocal image_effect_attempted
-        image_effect_attempted = True
+        if last_provider_phase not in {"runtime_environment_update", "runtime_registry_prepare"}:
+            image_effect_attempted = True
         mark_provider_effect_started()
 
     try:
         from control_plane.workflows.generic_web_deploy_provider import (
+            GenericWebTestingRuntimePreflightProvider,
             prepare_generic_web_testing_runtime,
         )
 
@@ -816,6 +820,10 @@ def _execute_generic_web_deploy_unserialized(
         )
         if prepared_deploy_target._testing_runtime_prepare is not None:
             prepared_deploy_target._testing_runtime_prepare()
+        if isinstance(resolved_deploy_provider, GenericWebTestingRuntimePreflightProvider):
+            resolved_deploy_provider.preflight_testing_runtime(
+                control_plane_root=control_plane_root, target=prepared_deploy_target
+            )
         if request.reset:
             from control_plane.disposable_lanes import DisposableLaneStore, require_disposable_lane
 

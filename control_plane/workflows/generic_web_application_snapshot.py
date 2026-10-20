@@ -284,7 +284,7 @@ def application_snapshot_for_deploy(
         proved_pre_image_retry
         and same_attempt is not None
         and prior is same_attempt
-        and prior.state == "prepared"
+        and prior.state in {"prepared", "held"}
     ):
         held = False
     carry_baseline = prior is not None and prior.state in {"prepared", "held", "restore_failed"}

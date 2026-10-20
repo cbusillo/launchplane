@@ -31,6 +31,28 @@ def require_dokploy_testing_environment_representable(values: dict[str, str]) ->
     return env_text
 
 
+def prepare_dokploy_testing_environment(
+    *,
+    target_payload: dokploy_api.JsonObject,
+    desired: dict[str, str],
+    retired_keys: frozenset[str],
+) -> str:
+    """Validate the complete prospective environment without changing the provider."""
+    merged = merge_provider_environment(
+        current_env_map=dokploy_api.parse_dokploy_env_text(str(target_payload.get("env") or "")),
+        desired_env_map=desired,
+        retired_keys=retired_keys,
+    )
+    findings = runtime_platform_credentials.find_platform_credentials(merged)
+    if findings:
+        raise TestingInputSafetyRefused(
+            "Application testing provider environment contains platform credentials: "
+            + ", ".join(sorted({finding.key for finding in findings}))
+            + ". Retire these provider keys through product configuration first."
+        )
+    return require_dokploy_testing_environment_representable(merged)
+
+
 def dokploy_deploy_artifact_reference(
     *,
     ship_request: ShipRequest,
@@ -86,22 +108,18 @@ def update_dokploy_target_artifact(
                 desired_env_map=desired,
                 retired_keys=retired_runtime_keys,
             )
-            if runtime_environment is not None:
-                findings = runtime_platform_credentials.find_platform_credentials(merged)
-                if findings:
-                    raise TestingInputSafetyRefused(
-                        "Application testing provider environment contains platform credentials: "
-                        + ", ".join(sorted({finding.key for finding in findings}))
-                        + ". Retire these provider keys through product configuration first."
-                    )
             env_text = (
-                require_dokploy_testing_environment_representable(merged)
+                prepare_dokploy_testing_environment(
+                    target_payload=target_payload,
+                    desired=desired,
+                    retired_keys=retired_runtime_keys,
+                )
                 if runtime_environment is not None
                 else dokploy_api.serialize_dokploy_env_text(merged)
             )
         if runtime_environment is not None and target_payload.get("registryId"):
             if before_provider_mutation is not None:
-                before_provider_mutation("target_update")
+                before_provider_mutation("runtime_registry_prepare")
             if effect_started is not None:
                 effect_started()
         _prepare_saved_registry_login(
@@ -112,7 +130,11 @@ def update_dokploy_target_artifact(
         )
         if env_text is not None:
             if before_provider_mutation is not None:
-                before_provider_mutation("target_update")
+                before_provider_mutation(
+                    "runtime_environment_update"
+                    if runtime_environment is not None
+                    else "target_update"
+                )
             if effect_started is not None:
                 effect_started()
             dokploy_api.update_dokploy_target_env(

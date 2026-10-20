@@ -163,6 +163,13 @@ reservation. The webhook request never waits on a deploy.
     Before using a new authority key, the reconciler also checks held attempts
     for its testing lane. Matching provider target and
     deploy request reuse the held attempt's key for normal observation/recovery.
+    Application testing attempts with managed inputs can settle obsolete
+    captured inputs or a superseded candidate under the original lease when
+    provider absence and the durable journal prove no image mutation. Any
+    original schedule baseline is restored and verified first. The failed
+    original retains its input evidence; a fresh candidate earns its own
+    readback receipt. Unknown image effects remain fenced. A return to a
+    settled predecessor's exact inputs receives a deterministic successor key.
     Otherwise a running attempt defers it, and an unknown or expired attempt
     requires generic-web deploy recovery first, even after a provider-binding
     repair moves the lane to another application.

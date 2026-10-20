@@ -40,6 +40,7 @@ from control_plane.contracts.ship_request import ShipRequest
 from control_plane.workflows.dokploy_deploy import (
     dokploy_deploy_artifact_reference,
     execute_dokploy_artifact_deploy,
+    prepare_dokploy_testing_environment,
     require_dokploy_testing_environment_representable,
 )
 from control_plane.dokploy import api as dokploy_api
@@ -606,6 +607,13 @@ class TestingEventDeployRecoveryRefused(ValueError):
         self.code = code
 
 
+@runtime_checkable
+class GenericWebTestingRuntimePreflightProvider(Protocol):
+    def preflight_testing_runtime(
+        self, *, control_plane_root: Path, target: GenericWebResolvedDeployTarget
+    ) -> None: ...
+
+
 class DokployGenericWebDeployProvider:
     def __init__(
         self,
@@ -748,6 +756,24 @@ class DokployGenericWebDeployProvider:
         )
         prepare_generic_web_testing_runtime(resolved, record_store, profile, lane)
         return resolved
+
+    def preflight_testing_runtime(
+        self, *, control_plane_root: Path, target: GenericWebResolvedDeployTarget
+    ) -> None:
+        if not target.testing_runtime_digest:
+            return
+        host, token = self._read_provider_config(control_plane_root=control_plane_root)
+        payload = dokploy_api.fetch_dokploy_target_payload(
+            host=host,
+            token=token,
+            target_type=target.resolved_target.target_type,
+            target_id=target.resolved_target.target_id,
+        )
+        prepare_dokploy_testing_environment(
+            target_payload=payload,
+            desired=target.testing_runtime_values,
+            retired_keys=target.testing_runtime_retired_keys,
+        )
 
     def execute_artifact_deploy(
         self,

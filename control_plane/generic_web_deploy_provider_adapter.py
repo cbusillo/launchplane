@@ -7,6 +7,11 @@ import click
 from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.generic_web_testing_inputs import testing_input_authority
+from control_plane.generic_web_testing_settlement import (
+    settle_testing_pre_image_attempt,
+    testing_pre_image_settlement_required,
+)
 from control_plane.workflows.generic_web_application_snapshot import (
     has_recorded_application_lifecycle,
     generic_web_provider_deployment_record_id,
@@ -102,6 +107,7 @@ class GenericWebDeployProviderMutationAdapter:
         recorded_artifact: bool = False,
         retain_event_request: bool = False,
         post_deploy_authority_digest: str = "",
+        superseded_testing_candidate: bool = False,
     ) -> None:
         # Recovery replays a deploy Launchplane reserved; its artifact is a record.
         self._recorded_artifact = recorded_artifact
@@ -122,6 +128,10 @@ class GenericWebDeployProviderMutationAdapter:
         self._qualification_authority_digest = post_deploy_authority_digest
         self._reconciliation_qualification_digest: str | None = None
         self._proved_pre_image_operation = ""
+        self._superseded_testing_candidate = superseded_testing_candidate
+        self._settlement_operation = ""
+        self._settlement_phase = ""
+        self._settlement_no_effect_checkpoint = False
         self.execution_check: Callable[[], None] = lambda: None
 
     @property
@@ -131,6 +141,10 @@ class GenericWebDeployProviderMutationAdapter:
     @property
     def lane(self) -> ProductLaneProfile:
         return self._lane
+
+    @property
+    def testing_settlement_pending(self) -> bool:
+        return bool(self._settlement_operation)
 
     def _resolve_deploy_target(self) -> GenericWebResolvedDeployTarget:
         if self._resolved_deploy_target is None:
@@ -197,11 +211,13 @@ class GenericWebDeployProviderMutationAdapter:
         provider_effect_phase: str,
         reconciliation_key: str,
     ) -> ProviderObservation:
-        return self.observe_with_effect_started_at(
-            provider_operation_key,
-            provider_effect_phase,
-            reconciliation_key,
-            "",
+        inspection = self.inspect(
+            provider_operation_key=provider_operation_key,
+            provider_effect_phase=provider_effect_phase,
+            reconciliation_key=reconciliation_key,
+        )
+        return self.provider_observation_from_inspection(
+            provider_operation_key=provider_operation_key, inspection=inspection
         )
 
     def observe_with_effect_started_at(
@@ -216,6 +232,7 @@ class GenericWebDeployProviderMutationAdapter:
             provider_effect_phase=provider_effect_phase,
             reconciliation_key=reconciliation_key,
             legacy_provider_effect_started_at=provider_effect_started_at,
+            no_effect_checkpoint=not provider_effect_phase and not provider_effect_started_at,
         )
         return self.provider_observation_from_inspection(
             provider_operation_key=provider_operation_key,
@@ -296,8 +313,10 @@ class GenericWebDeployProviderMutationAdapter:
         reconciliation_key: str,
         expected_provider_target_key: str = "",
         legacy_provider_effect_started_at: str = "",
+        no_effect_checkpoint: bool = False,
     ) -> _GenericWebDeployProviderInspection:
         self._proved_pre_image_operation = ""
+        self._settlement_operation = ""
         if self._lane.generic_web_cutover is not None:
             return self._inspect_cutover(
                 provider_operation_key,
@@ -316,6 +335,45 @@ class GenericWebDeployProviderMutationAdapter:
         observation = evidence.observation
         resolved_target = evidence.resolved_deploy_target
         if observation.outcome != "present":
+            if (
+                observation.outcome == "absent"
+                and resolved_target is not None
+                and resolved_target.testing_runtime_digest
+            ):
+                try:
+                    settle = testing_pre_image_settlement_required(
+                        record_store=self._record_store,
+                        profile=self._profile,
+                        lane=self._lane,
+                        target=resolved_target,
+                        operation_key=provider_operation_key,
+                        phase=provider_effect_phase,
+                        superseded=self._superseded_testing_candidate,
+                        no_effect_checkpoint=no_effect_checkpoint,
+                    )
+                    obsolete = self._superseded_testing_candidate or (
+                        testing_input_authority(self._record_store, self._profile, self._lane)
+                        != resolved_target.testing_runtime_digest
+                    )
+                except (FileNotFoundError, ValueError, click.ClickException):
+                    return _GenericWebDeployProviderInspection(
+                        observation=GenericWebProviderDeploymentObservation(outcome="unknown"),
+                        resolved_deploy_target=resolved_target,
+                    )
+                if settle:
+                    self._settlement_operation = provider_operation_key
+                    self._settlement_phase = provider_effect_phase
+                    self._settlement_no_effect_checkpoint = no_effect_checkpoint
+                    return _GenericWebDeployProviderInspection(
+                        observation=observation,
+                        resolved_deploy_target=resolved_target,
+                        retry_safe=True,
+                        provider_evidence="deployment_absent_before_effect",
+                    )
+                if obsolete:
+                    # An obsolete candidate must never execute its old image
+                    # merely because ordinary same-artifact retries are safe.
+                    return evidence
             if (
                 observation.outcome == "absent"
                 and resolved_target is not None
@@ -380,7 +438,13 @@ class GenericWebDeployProviderMutationAdapter:
                     retry_safe=(
                         observation.outcome == "absent"
                         and provider_effect_phase
-                        in {"", "target_update", "runtime_inputs_verified"}
+                        in {
+                            "",
+                            "target_update",
+                            "runtime_inputs_verified",
+                            "runtime_registry_prepare",
+                            "runtime_environment_update",
+                        }
                     ),
                     provider_evidence=evidence.provider_evidence,
                     provider_read_error_class=evidence.provider_read_error_class,
@@ -742,7 +806,11 @@ class GenericWebDeployProviderMutationAdapter:
             and (
                 (receipt.state == "restored" and record.deploy.status == "fail")
                 or (
-                    receipt.state == "prepared"
+                    receipt.state in {"prepared", "held"}
+                    and (
+                        receipt.state == "prepared"
+                        or (bool(target.testing_runtime_digest) and bool(phase))
+                    )
                     and (
                         record.deploy.status == "pending"
                         or (bool(target.testing_runtime_digest) and record.deploy.status == "fail")
@@ -753,6 +821,8 @@ class GenericWebDeployProviderMutationAdapter:
                         "application_lifecycle_prepared",
                         "application_schedule_quiesce",
                         "runtime_inputs_verified",
+                        "runtime_registry_prepare",
+                        "runtime_environment_update",
                     }
                 )
             )
@@ -789,6 +859,25 @@ class GenericWebDeployProviderMutationAdapter:
     def apply(
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
+        if self._settlement_operation == provider_operation_key:
+            try:
+                return settle_testing_pre_image_attempt(
+                    record_store=self._record_store,
+                    profile=self._profile,
+                    lane=self._lane,
+                    target=self._resolve_deploy_target(),
+                    operation_key=provider_operation_key,
+                    phase=self._settlement_phase,
+                    no_effect_checkpoint=self._settlement_no_effect_checkpoint,
+                    superseded=self._superseded_testing_candidate,
+                    provider=self._deploy_provider,
+                    control_plane_root=self._control_plane_root,
+                    lease=lease,
+                    check_execution=self.execution_check,
+                    trace_id=self._trace_id,
+                )
+            except (FileNotFoundError, ValueError, click.ClickException) as error:
+                raise ProviderMutationUnknownError(str(error)) from error
         effect_started = False
         if self._lane.generic_web_cutover is not None:
             try:

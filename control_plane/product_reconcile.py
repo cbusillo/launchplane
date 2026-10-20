@@ -827,6 +827,20 @@ def _deploy_generic_web_testing(
             route_path=GENERIC_WEB_DEPLOY_ROUTE,
             idempotency_key=idempotency_key,
         )
+        from control_plane.generic_web_testing_settlement import testing_attempt_was_settled
+
+        base_idempotency_key = idempotency_key
+        while existing is not None and testing_attempt_was_settled(existing):
+            # A settled operation is immutable. Returning to the same inputs
+            # starts one deterministic successor instead of replaying its failure.
+            predecessor = hashlib.sha256(existing.record_id.encode()).hexdigest()
+            idempotency_key = f"{base_idempotency_key}:after-{predecessor}"
+            existing = record_store.read_idempotency_record(
+                scope=reconcile_reservation_scope(profile.product),
+                route_path=GENERIC_WEB_DEPLOY_ROUTE,
+                idempotency_key=idempotency_key,
+            )
+        plan["deploy_idempotency_key"] = idempotency_key
         if existing is None and not _scan_deploy_artifact(profile, plan, desired):
             return ReconcileOutcome(plan)
         provider = (
@@ -893,6 +907,32 @@ def _deploy_generic_web_testing(
                         # This exact old recipient remains fenced. The qualified
                         # new recipient has its own executor and reservation key.
                         continue
+                    from control_plane.testing_event_deploy_recovery import (
+                        settle_obsolete_testing_event_deploy,
+                    )
+
+                    settlement = settle_obsolete_testing_event_deploy(
+                        store=record_store,
+                        reservation=reservation,
+                        profile=profile,
+                        context=lane.context,
+                        current_target_key=adapter.target_key(),
+                        desired_fingerprint=request_fingerprint,
+                        provider=provider,
+                        root=control_plane_root,
+                        trace_id=trace_id,
+                        check_execution_lock=check_execution_lock,
+                    )
+                    if settlement is not None:
+                        if settlement.record is not None and testing_attempt_was_settled(
+                            settlement.record
+                        ):
+                            plan["testing_deploy_recovery"] = {
+                                "action": "settle_obsolete_testing_pre_image_attempt",
+                                "reservation_id": reservation.record_id,
+                            }
+                            continue
+                        return _generic_web_testing_outcome(plan=plan, result=settlement)
                     if (
                         reservation.provider_target_key == adapter.target_key()
                         and reservation.request_fingerprint == request_fingerprint
