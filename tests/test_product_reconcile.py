@@ -6855,6 +6855,35 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
         self.assertEqual(cast(dict[str, object], result["pr_feedback"])["status"], "failed")
         self.assertEqual(self.owner_review_status_calls, [("site", 5)])
 
+    def test_notes_status_refreshes_while_preview_outcome_is_unknown(self) -> None:
+        from github_plan_status.client_test_notes import ENGINEERING_RELEASE_TESTS
+
+        payload = _profile()
+        payload["owner"] = {"github_login": "site-owner", "github_id": "4242"}
+        self.store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(payload)
+        )
+        self.github.pull_request["body"] = "## Client test notes\nTry the changed price list."
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.provider.execute_apply = lambda **_kwargs: {  # type: ignore[method-assign]
+            "status": "fail",
+            "provider_effect_attempted": True,
+        }
+        self.request("preview", 5)
+        self.assertEqual(self.run_once().state, "failed")
+        self.owner_review_status_calls.clear()
+        writes = list(self.comments.writes)
+        self.github.pull_request["body"] = (
+            f"## Client test notes\n{ENGINEERING_RELEASE_TESTS}\nCheck prices at release."
+        )
+
+        self.request("preview", 5)
+        held = self.run_once()
+
+        self.assertEqual(held.state, "failed")
+        self.assertEqual(self.owner_review_status_calls, [("site", 5)])
+        self.assertEqual(self.comments.writes, writes)
+
     def test_ready_preview_on_an_accepted_head_says_so_instead_of_asking_again(self) -> None:
         payload = _profile()
         payload["owner"] = {"github_login": "site-owner", "github_id": "4242"}

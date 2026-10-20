@@ -61,8 +61,11 @@ Client's acceptance.
 
 Editing the PR body re-plans its preview and review intent without needing a
 push or label change.
-The preview reconciler refreshes the Client-review check even while waiting for
-a verified build or after a failed preview apply. Valid engineering-only notes
+The preview reconciler refreshes the Client-review check independently of
+preview planning and delivery, including a deferred operation, an unknown
+provider outcome, or a failure to recover the original preview proof. The
+publisher rereads the PR and saved decisions, even when there is no new preview
+comment to post. Valid engineering-only notes
 publish a neutral check, replacing any earlier missing-notes failure, saying no
 Client preview review is required, without
 recording a Client decision or sending a review invitation. A later review label,
@@ -273,6 +276,16 @@ and changes no release acceptance. It does not rewrite test notes or publish a
 successful Client-review check. Set truthful engineering notes separately; real
 test notes or a later review label request review normally, including on the
 same head. The normal preview reconciler refreshes the check after those edits.
+
+An unlabeled request needs no label withdrawal: edit its notes truthfully and
+the next event reconcile or open-PR sweep refreshes the check. A held preview
+operation remains held; check reclassification neither retries it nor records
+Client acceptance. Withdrawal still refuses an unlabeled request with
+`product_review_withdrawal_no_pending_labeled_request`. Other preflight refusals
+name `profile_changed`, `repository_mismatch`, `pull_request_closed`,
+`head_changed`, or `client_already_decided` after the same
+`product_review_withdrawal_` prefix. These bounded codes remain visible when a
+caller redacts the free-text message.
 
 Recovery and readback can observe a closed PR; a new withdrawal still requires
 an open PR. A published history receipt remains historical proof after closure.

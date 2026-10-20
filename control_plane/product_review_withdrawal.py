@@ -24,7 +24,22 @@ WITHDRAWAL_ACTION = "product_review.withdraw"
 
 
 class ReviewWithdrawalRefused(ValueError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason: Literal[
+            "refused",
+            "profile_changed",
+            "repository_mismatch",
+            "pull_request_closed",
+            "head_changed",
+            "client_already_decided",
+            "no_pending_labeled_request",
+        ] = "refused",
+    ) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 class ReviewWithdrawalUnsettled(ReviewWithdrawalRefused):
@@ -129,26 +144,39 @@ class ReviewWithdrawalService:
     def _pending(self, request: ReviewWithdrawalRequest, *, require_label: bool = True) -> None:
         current = self.store.read_product_profile_record(request.product)
         if current != self.profile or not current.is_active or not current.owner.is_set:
-            raise ReviewWithdrawalRefused("The product or its Client changed. Review again.")
+            raise ReviewWithdrawalRefused(
+                "The product or its Client changed. Review again.", reason="profile_changed"
+            )
         if current.repository.casefold() != request.repository.casefold():
-            raise ReviewWithdrawalRefused("The product does not own this repository.")
+            raise ReviewWithdrawalRefused(
+                "The product does not own this repository.", reason="repository_mismatch"
+            )
         change = self.source.change()
         head, labels = change.head_sha, change.labels
         if not change.is_open:
-            raise ReviewWithdrawalRefused("A new withdrawal requires an open pull request.")
+            raise ReviewWithdrawalRefused(
+                "A new withdrawal requires an open pull request.", reason="pull_request_closed"
+            )
         if head != request.expected_head_sha:
-            raise ReviewWithdrawalRefused("The PR head changed. Review again.")
+            raise ReviewWithdrawalRefused(
+                "The PR head changed. Review again.", reason="head_changed"
+            )
         if any(
             decision.product == current.product and decision.head_sha == head
             for decision in self.store.list_product_review_decision_records(
                 repository=current.repository, pull_request_number=request.pull_request
             )
         ):
-            raise ReviewWithdrawalRefused("The Client has already decided on this head.")
+            raise ReviewWithdrawalRefused(
+                "The Client has already decided on this head.", reason="client_already_decided"
+            )
         if require_label and current.owner.review_label.casefold() not in {
             label.casefold() for label in labels
         }:
-            raise ReviewWithdrawalRefused("This PR has no pending labeled Client review request.")
+            raise ReviewWithdrawalRefused(
+                "This PR has no pending labeled Client review request.",
+                reason="no_pending_labeled_request",
+            )
 
     def run(self, request: ReviewWithdrawalRequest, *, key: str, trace: str) -> dict[str, object]:
         plan = self._plan(request)
