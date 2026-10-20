@@ -113,8 +113,12 @@ class IncompleteRehearsalRetirement:
     def host(self, mode: str, check: Callable[[], None]) -> dict[str, object]:
         record = self.record()
         script = self.adapter.host_script(record, mode, operation_key=self.original_key)
-        if mode == "apply":
+        try:
             self.adapter.validate_apply_script(record, script)
+        except ProviderMutationRejectedError as refusal:
+            if mode == "apply":
+                raise
+            raise refusal.cause from None
         evidence = self.adapter.run_script(record, script, check)
         try:
             result = IncompleteRehearsalHostResult.model_validate(

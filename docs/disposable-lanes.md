@@ -2609,10 +2609,9 @@ containers, private network, labeled local volumes and backing identities. It
 checks that no container can see raw host custody and that the rehearsal web
 writer is stopped. A provider schedule reporting success without a valid,
 operation-bound host result is a refusal, not a qualified plan. It preserves
-the original hold and custody; retry the supported dry-run after inspecting
-the failed schedule's private log. Apply rechecks the reviewed binding, acquires the existing
-host lock, and records a private disposal manifest before stopping/removing only
-those containers, volumes and network. It deletes raw capture and partial host
+the original hold and custody. Apply rechecks the reviewed binding, acquires
+the existing host lock, and records a private disposal manifest before
+stopping/removing only those containers, volumes and network. It deletes raw capture and partial host
 storage, including partial source snapshots, retaining only disposal/refusal
 receipts and the unlocked lock file. It removes
 the isolated provider compose through the existing compose retirement path,

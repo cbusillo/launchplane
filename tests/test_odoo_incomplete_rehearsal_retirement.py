@@ -75,6 +75,48 @@ class IncompleteRehearsalRetirementTests(unittest.TestCase):
         )
 
     def test_held_incomplete_operation_retires_and_replays_with_readback(self) -> None:
+        import click
+
+        # Apply also qualifies through dry-run before any disposal checkpoint.
+        # A refused qualification must not strand a second hold on its key.
+        for unavailable in ({"log_available": "true"}, "script-unmaterializable"):
+            refused_operation = self.retirement()
+            held = self.store.list_held_provider_target_reservations()
+            original = refused_operation.original(self.prepared)
+            with (
+                self.subTest(unavailable=unavailable),
+                patch.object(type(refused_operation), "placement", return_value=False),
+                patch.object(
+                    OdooRehearsalAdapter,
+                    "run_script",
+                    return_value=unavailable if isinstance(unavailable, dict) else {},
+                    side_effect=refused_operation.adapter.run_script
+                    if isinstance(unavailable, str)
+                    else None,
+                ) as dispatch,
+                patch(
+                    "control_plane.dokploy.api.validate_dokploy_schedule_script",
+                    side_effect=click.ClickException("Script cannot be materialized")
+                    if isinstance(unavailable, str)
+                    else None,
+                ),
+            ):
+                with self.assertRaises(RehearsalRefused):
+                    self.run_retirement(refused_operation)
+                if isinstance(unavailable, str):
+                    dispatch.assert_not_called()
+            self.assertEqual(refused_operation.original(self.prepared), original)
+            self.assertEqual(self.store.list_held_provider_target_reservations(), held)
+            self.assertEqual(
+                self.store.read_odoo_upgrade_rehearsal(self.fixture.identifier), self.prepared
+            )
+            self.assertIsNone(
+                self.store.read_idempotency_record(
+                    scope=refused_operation.reservation_scope(),
+                    route_path=ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=self.fixture.product),
+                    idempotency_key=self.key,
+                )
+            )
         from control_plane.storage.postgres import LaunchplaneOdooUpgradeRehearsalRow
 
         with self.store._session_factory() as session:
@@ -842,7 +884,11 @@ class IncompleteRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(refused.status_code, 409, refused.text)
                 self.assertTrue(refused.json()["trace_id"])
-                self.assertEqual(refused.json()["error"]["code"], "rehearsal_state_unverified")
+                from control_plane.contracts.odoo_upgrade_rehearsal import RehearsalPrerequisite
+
+                self.assertEqual(
+                    refused.json()["error"]["code"], RehearsalPrerequisite.STATE_UNVERIFIED.value
+                )
                 self.assertEqual(
                     fixture.store.read_odoo_upgrade_rehearsal(fixture.identifier), prepared
                 )
@@ -857,6 +903,7 @@ class IncompleteRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
             refused = await request(fixture.app, "POST", route, payload=payload, headers=headers)
             self.assertEqual(refused.status_code, 409, refused.text)
         self.assertEqual(fixture.store.list_held_provider_target_reservations(), held)
+        self.assertEqual(fixture.store.read_odoo_upgrade_rehearsal(fixture.identifier), prepared)
         with (
             patch.object(
                 IncompleteRehearsalRetirement,
