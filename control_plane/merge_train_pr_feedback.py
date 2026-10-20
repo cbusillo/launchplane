@@ -95,6 +95,10 @@ class MergeTrainPrFeedbackEnvelope(BaseModel):
 
 
 class MergeTrainPrFeedbackRecordStore(Protocol):
+    def read_merge_train_pr_feedback_record(
+        self, feedback_id: str
+    ) -> MergeTrainPrFeedbackRecord | None: ...
+
     def merge_train_feedback_delivery_lock(
         self, *, repository: str, pull_request_number: int
     ) -> ContextManager[None]: ...

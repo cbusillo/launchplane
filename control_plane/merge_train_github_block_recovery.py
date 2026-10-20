@@ -9,7 +9,10 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 from urllib.parse import quote
 
-from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidateRecord
+from control_plane.contracts.merge_train_batch import (
+    MergeTrainBatchCandidateRecord,
+    MergeTrainSetupFailureRecovery,
+)
 from control_plane.contracts.merge_train_policy import MergeTrainRepositoryPolicy
 from control_plane.contracts.merge_train_pr_feedback_record import MergeTrainPrFeedbackRecord
 from control_plane.merge_train_handoff import handoff_actor_allowed, handoff_timestamp
@@ -178,6 +181,73 @@ def _review_weighed(
     return latest is not None and latest[2]
 
 
+def candidate_block_label_event(
+    *,
+    client: GitHubMergeTrainClient,
+    candidate: MergeTrainBatchCandidateRecord,
+    feedback: MergeTrainPrFeedbackRecord | None,
+    policy: MergeTrainRepositoryPolicy,
+    legacy_writer_app_id: int | None,
+) -> dict[str, object] | None:
+    from control_plane.merge_train_batch_pull_request import bound_closed_batch_pull_request
+
+    repository, label = policy.repository, policy.blocked_label
+    number = candidate.candidate.entries[0].pull_request_number
+    events = block_label_events(client, repository=repository, number=number, label=label)
+    if any(type(event.get("id")) is not int for event in events):
+        return None
+    events.sort(key=lambda event: int(str(event["id"])))
+    if candidate.block_intent is not None:
+        intent = candidate.block_intent
+        if intent.label.casefold() != label.casefold() or (
+            intent.applied_label_event_id is None and not intent.label_write_succeeded
+        ):
+            return None
+        changes = [event for event in events if int(str(event["id"])) > intent.prior_label_event_id]
+    else:
+        # Legacy block feedback is a durable controller outcome even when
+        # comment delivery failed or came through the workflow runner. Bind
+        # its label sequence to the provider's exact closed candidate PR,
+        # without comparing the service clock to GitHub's clock.
+        if feedback is None:
+            return None
+        closed = bound_closed_batch_pull_request(client=client, candidate=candidate.candidate)
+        if closed is None:
+            return None
+        closed_at = handoff_timestamp(str(closed.get("closed_at") or ""))
+        changes = [
+            event
+            for event in events
+            if handoff_timestamp(str(event.get("created_at") or "")) >= closed_at
+        ]
+    if len(changes) != 1 or changes[0].get("event") != "labeled":
+        return None
+    event = changes[0]
+    if (
+        candidate.block_intent is not None
+        and candidate.block_intent.applied_label_event_id is not None
+        and event["id"] != candidate.block_intent.applied_label_event_id
+    ):
+        return None
+    return (
+        event
+        if _block_writer_matches(
+            client,
+            event,
+            app_id=(
+                candidate.block_intent.writer_app_id
+                if candidate.block_intent
+                else legacy_writer_app_id
+            ),
+            policy=policy,
+            confirmed_actor_id=(
+                candidate.block_intent.applied_label_actor_id if candidate.block_intent else None
+            ),
+        )
+        else None
+    )
+
+
 def recover_candidate_block(
     *,
     client: GitHubMergeTrainClient,
@@ -188,12 +258,12 @@ def recover_candidate_block(
     legacy_writer_app_id: int | None,
     mutate: bool,
     before_remove: Callable[[], None],
+    setup_failure_evidence: Callable[[], MergeTrainSetupFailureRecovery | None] | None = None,
 ) -> bool:
     from control_plane.merge_train_github import (
         GitHubMergeTrainSnapshotReader,
         MergeTrainGitHubError,
     )
-    from control_plane.merge_train_batch_pull_request import bound_closed_batch_pull_request
 
     repository = policy.repository
     number = candidate.candidate.entries[0].pull_request_number
@@ -221,70 +291,22 @@ def recover_candidate_block(
         return handoff_actor_allowed(policy, actor_id=actor_id, actor_role=role)
 
     def label_event() -> dict[str, object] | None:
-        events = block_label_events(client, repository=repository, number=number, label=label)
-        if any(type(event.get("id")) is not int for event in events):
-            return None
-        events.sort(key=lambda event: int(str(event["id"])))
-        if candidate.block_intent is not None:
-            intent = candidate.block_intent
-            if intent.label.casefold() != label.casefold() or (
-                intent.applied_label_event_id is None and not intent.label_write_succeeded
-            ):
-                return None
-            changes = [
-                event for event in events if int(str(event["id"])) > intent.prior_label_event_id
-            ]
-        else:
-            # Legacy block feedback is a durable controller outcome even when
-            # comment delivery failed or came through the workflow runner. Bind
-            # its label sequence to the provider's exact closed candidate PR,
-            # without comparing the service clock to GitHub's clock.
-            if feedback is None:
-                return None
-            closed = bound_closed_batch_pull_request(client=client, candidate=candidate.candidate)
-            if closed is None:
-                return None
-            closed_at = handoff_timestamp(str(closed.get("closed_at") or ""))
-            changes = [
-                event
-                for event in events
-                if handoff_timestamp(str(event.get("created_at") or "")) >= closed_at
-            ]
-        if len(changes) != 1 or changes[0].get("event") != "labeled":
-            return None
-        event = changes[0]
-        if (
-            candidate.block_intent is not None
-            and candidate.block_intent.applied_label_event_id is not None
-            and event["id"] != candidate.block_intent.applied_label_event_id
-        ):
-            return None
-        return (
-            event
-            if _block_writer_matches(
-                client,
-                event,
-                app_id=(
-                    candidate.block_intent.writer_app_id
-                    if candidate.block_intent
-                    else legacy_writer_app_id
-                ),
-                policy=policy,
-                confirmed_actor_id=(
-                    candidate.block_intent.applied_label_actor_id
-                    if candidate.block_intent
-                    else None
-                ),
-            )
-            else None
+        return candidate_block_label_event(
+            client=client,
+            candidate=candidate,
+            feedback=feedback,
+            policy=policy,
+            legacy_writer_app_id=legacy_writer_app_id,
         )
 
-    def qualified() -> bool:
+    accepted_evidence: MergeTrainSetupFailureRecovery | None = None
+
+    def qualified(*, recheck_setup: bool = False) -> bool:
         pr = client.read_pull_request_snapshot(repository=repository, pull_request_number=number)
         reader = GitHubMergeTrainSnapshotReader(transport=client.transport)
-        return (
+        same_head = pr.head_sha == candidate.candidate.entries[0].head_sha
+        eligible = (
             pr.head_sha == expected_head_sha
-            and pr.head_sha != candidate.candidate.entries[0].head_sha
             and pr.state == "open"
             and not pr.is_draft
             and pr.base_repository == repository
@@ -307,13 +329,42 @@ def recover_candidate_block(
             )
         )
 
-    try:
-        if (event := label_event()) is None or not qualified():
+        if not eligible:
             return False
+        if same_head:
+            if recheck_setup and accepted_evidence is None:
+                return False
+            if not recheck_setup:
+                return True
+            from control_plane.merge_train_github_setup_failure_recovery import (
+                read_setup_failure_recovery,
+            )
+
+            assert accepted_evidence is not None
+            fresh = read_setup_failure_recovery(client, candidate=candidate.candidate)
+            if (
+                fresh is None
+                or fresh.model_copy(
+                    update={"ready_comment_floor": accepted_evidence.ready_comment_floor}
+                )
+                != accepted_evidence
+            ):
+                return False
+        return True
+
+    try:
+        if not qualified() or (event := label_event()) is None:
+            return False
+        if expected_head_sha == candidate.candidate.entries[0].head_sha:
+            if setup_failure_evidence is None:
+                return False
+            accepted_evidence = setup_failure_evidence()
+            if accepted_evidence is None:
+                return False
         if not mutate:
             return True
         before_remove()
-        if label_event() != event or not qualified():
+        if label_event() != event or not qualified(recheck_setup=True):
             return False
     except MergeTrainGitHubError as error:
         if error.rate_limited or error.status_code in {401, 403}:

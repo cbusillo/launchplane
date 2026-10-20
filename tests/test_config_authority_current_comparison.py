@@ -52,6 +52,10 @@ class ComparisonStore:
     ) -> tuple[MergeTrainBranchRefreshRecord, ...]:
         return ()
 
+    @staticmethod
+    def read_merge_train_pr_feedback_record(_feedback_id: str) -> None:
+        return None
+
     def list_merge_train_batch_candidate_records(
         self, *, repository: str = ""
     ) -> tuple[MergeTrainBatchCandidateRecord, ...]:
