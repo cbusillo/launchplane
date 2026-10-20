@@ -1351,6 +1351,16 @@ class ActivationTests(unittest.TestCase):
         target.env[self.request.port_keys[0]] = "3307"
         self.store.write_dokploy_target_record(target)
         self.assertFalse(retained_fence_is_separated(self.store, self.preparation.original))
+        from control_plane.workflows.generic_web_deploy_provider import (
+            held_generic_web_provider_target_reservations,
+        )
+
+        self.assertEqual(
+            (held_generic_web_provider_target_reservations(self.store) or {}).get(
+                (self.context, "testing")
+            ),
+            self.preparation.original,
+        )
 
     def test_supported_http_lift_replays_and_requests_only_testing_reconcile(self) -> None:
         import asyncio

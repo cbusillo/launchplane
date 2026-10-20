@@ -21859,7 +21859,7 @@ def create_launchplane_fastapi_app(
             if prior is not None and prior.state in {"running", "reconcile_required"}:
                 original = store.read_original_mutation_intent(prior)
                 intent = browser_runtime_sync.RuntimeSyncIntent.model_validate(
-                    original["runtime_sync"]
+                    original.get("runtime_sync")
                 )
             else:
                 captured = browser_runtime_sync.prepare_runtime_sync(

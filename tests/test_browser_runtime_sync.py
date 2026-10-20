@@ -31,7 +31,11 @@ from control_plane.http_app import create_launchplane_fastapi_app, idempotency_s
 from control_plane.provider_operations import ProviderMutationUnknownError
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
-from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.postgres import (
+    LaunchplaneIdempotencyRow,
+    ORIGINAL_MUTATION_INTENT_ROUTE,
+    PostgresRecordStore,
+)
 from control_plane.workflows.public_ingress_monitor import run_public_ingress_monitor_once
 from tests.http_app_test_support import (
     _browser_mutation_headers,
@@ -209,6 +213,50 @@ class BrowserRuntimeSyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(transition.status, "updated")
         return response
 
+    async def assert_original_intent_loss_is_uncertain(
+        self, payload: dict[str, Any], key: str
+    ) -> None:
+        held = self.store.read_idempotency_record(
+            scope=idempotency_scope(self.session.identity),
+            route_path="/v1/live-target-runtime/apply",
+            idempotency_key=key,
+        )
+        assert held is not None
+        receipt = self.store.read_idempotency_record(
+            scope=held.scope,
+            route_path=ORIGINAL_MUTATION_INTENT_ROUTE,
+            idempotency_key=held.record_id,
+        )
+        assert receipt is not None
+        for original in (None, {}, {"unrelated": {}}, {"runtime_sync": {}}):
+            with self.subTest(original=original):
+                try:
+                    if original is None:
+                        with self.store._session_factory.begin() as session:
+                            row = session.get(LaunchplaneIdempotencyRow, receipt.record_id)
+                            assert row is not None
+                            session.delete(row)
+                    else:
+                        self.store.write_idempotency_record(
+                            receipt.model_copy(
+                                update={
+                                    "response_payload": {
+                                        "reservation_id": held.record_id,
+                                        "original_intent": original,
+                                    }
+                                }
+                            )
+                        )
+                    fetch_count, update_count = self.fetch_count, len(self.updates)
+                    resumed = await self.post(payload, key)
+                    self.assertEqual(resumed.status_code, 503, resumed.text)
+                    self.assertEqual(resumed.json()["error"]["code"], "runtime_sync_unavailable")
+                    self.assertEqual(self.fetch_count, fetch_count)
+                    self.assertEqual(len(self.updates), update_count)
+                    self.assertEqual(self.store.list_held_provider_target_reservations(), (held,))
+                finally:
+                    self.store.write_idempotency_record(receipt)
+
     async def post(
         self,
         payload: dict[str, Any],
@@ -376,6 +424,7 @@ class BrowserRuntimeSyncTests(unittest.IsolatedAsyncioTestCase):
         payload = self.apply_payload(review)
         first = await self.interrupt_acknowledged(payload, "unknown")
         self.assert_redacted(first)
+        await self.assert_original_intent_loss_is_uncertain(payload, "unknown")
         other = await self.post(payload, "new-key")
         self.assertEqual(other.status_code, 409, other.text)
         self.assertEqual(other.json()["error"]["code"], "runtime_sync_target_busy")
@@ -429,6 +478,19 @@ class BrowserRuntimeSyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(monitored.open_incident_count, 1)
         self.assertIn(record.record_id, monitored.records[0].summary)
         self.assertNotIn(record.idempotency_key, monitored.records[0].summary)
+        self.store.write_provider_target_record(
+            self.provider.model_copy(update={"target_id": "replacement-provider-target"})
+        )
+        repointed = run_public_ingress_monitor_once(
+            record_store=self.store,
+            checked_at=(datetime.fromisoformat(checked_at) + timedelta(minutes=5)).isoformat(),
+        )
+        self.assertEqual(repointed.resolved_incident_count, 0)
+        self.assertEqual(repointed.fail_count, 1)
+        self.assertIn(self.provider.target_id, repointed.records[0].summary)
+        self.assertNotIn("replacement-provider-target", repointed.records[0].summary)
+        self.store.write_provider_target_record(self.provider)
+        await self.assert_original_intent_loss_is_uncertain(payload, "unacknowledged")
 
     async def test_delayed_old_post_stays_fenced_after_machine_writes_matching_values(self) -> None:
         payload = self.apply_payload(await self.plan())

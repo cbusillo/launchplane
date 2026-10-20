@@ -743,9 +743,9 @@ class PublicIngressMonitorTests(unittest.TestCase):
                 {"provider_id": "another-provider"},
             ):
                 store.write_provider_target_record(provider.model_copy(update=change))
-                self.assertFalse(
+                self.assertTrue(
                     any(
-                        target.deploy_fence is not None
+                        target.deploy_fence == legacy
                         for target in discover_public_ingress_monitor_targets(store)
                     )
                 )
