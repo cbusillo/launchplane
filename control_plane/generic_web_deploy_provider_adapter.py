@@ -17,6 +17,10 @@ from control_plane.generic_web_testing_settlement import (
     settle_testing_pre_image_attempt,
     testing_pre_image_settlement_required,
 )
+from control_plane.generic_web_testing_failure_settlement import (
+    settle_testing_failure,
+    testing_failure_lifecycle_receipt,
+)
 from control_plane.workflows.generic_web_application_snapshot import (
     has_recorded_application_lifecycle,
     generic_web_provider_deployment_record_id,
@@ -97,6 +101,7 @@ class _GenericWebDeployProviderInspection:
     provider_evidence: GenericWebDeployProviderEvidenceClassification = "not_inspected"
     provider_read_error_class: GenericWebDeployProviderReadErrorClass = ""
     legacy_correlation_digest_evidence: dict[str, object] | None = None
+    testing_failure_receipt: str = ""
 
 
 class GenericWebDeployProviderMutationAdapter:
@@ -286,6 +291,9 @@ class GenericWebDeployProviderMutationAdapter:
                     result=result,
                 ),
             )
+        if inspection.testing_failure_receipt:
+            # Adoption is write-free. Only explicit reviewed recovery may repeat a hold.
+            return ProviderObservation(outcome="unknown")
         if observation.outcome != "present" or inspection.resolved_deploy_target is None:
             return ProviderObservation(
                 outcome=observation.outcome,
@@ -472,6 +480,40 @@ class GenericWebDeployProviderMutationAdapter:
                 provider_evidence="provider_read_failed",
                 provider_read_error_class="target_resolution_failed",
             )
+        if (
+            resolved_target.ship_request.instance == "testing"
+            and resolved_target.resolved_target.target_type == "application"
+        ):
+            try:
+                record = cast(_DeploymentRecordReader, self._record_store).read_deployment_record(
+                    self._deployment_record_id(provider_operation_key)
+                )
+            except FileNotFoundError:
+                record = None
+            try:
+                receipt = recorded_application_lifecycle(record) if record is not None else None
+            except click.ClickException:
+                return _GenericWebDeployProviderInspection(
+                    observation=GenericWebProviderDeploymentObservation(outcome="unknown"),
+                    resolved_deploy_target=resolved_target,
+                    provider_evidence="provider_status_unknown",
+                )
+            if receipt is not None and record is not None:
+                if record.deploy.status == "fail":
+                    # Later runtime health cannot undo the original failed qualification.
+                    observation = observation.model_copy(update={"deployment_status": "unhealthy"})
+                elif (
+                    provider_effect_phase == "records_commit"
+                    and record.deploy.status == "pending"
+                    and generic_web_provider_deployment_succeeded(observation.deployment_status)
+                ):
+                    # The same capture receipt precedes success and data/post-deploy work.
+                    # A lost final write does not prove which of those effects completed.
+                    return _GenericWebDeployProviderInspection(
+                        observation=GenericWebProviderDeploymentObservation(outcome="unknown"),
+                        resolved_deploy_target=resolved_target,
+                        provider_evidence="provider_status_unknown",
+                    )
         observation = qualify_testing_application_observation(
             provider=self._deploy_provider,
             control_plane_root=self._control_plane_root,
@@ -491,6 +533,29 @@ class GenericWebDeployProviderMutationAdapter:
                 resolved_deploy_target=resolved_target,
                 provider_evidence="provider_status_unknown",
             )
+        testing_failure_receipt = ""
+        if (
+            resolved_target.ship_request.instance == "testing"
+            and resolved_target.resolved_target.target_type == "application"
+            and not generic_web_provider_deployment_succeeded(observation.deployment_status)
+        ):
+            try:
+                _record, receipt = testing_failure_lifecycle_receipt(
+                    record_store=self._record_store,
+                    profile=self._profile,
+                    lane=self._lane,
+                    target=resolved_target,
+                    operation_key=provider_operation_key,
+                    phase=provider_effect_phase,
+                )
+            except (FileNotFoundError, ValueError, click.ClickException):
+                return _GenericWebDeployProviderInspection(
+                    observation=GenericWebProviderDeploymentObservation(outcome="unknown"),
+                    resolved_deploy_target=resolved_target,
+                    provider_evidence="provider_status_unknown",
+                )
+            if receipt is not None:
+                testing_failure_receipt = receipt.model_dump_json()
         post_deploy_unobserved = generic_web_provider_deployment_succeeded(
             observation.deployment_status
         ) and (
@@ -537,74 +602,59 @@ class GenericWebDeployProviderMutationAdapter:
             provider_evidence=evidence.provider_evidence,
             provider_read_error_class=evidence.provider_read_error_class,
             legacy_correlation_digest_evidence=evidence.legacy_correlation_digest_evidence,
+            testing_failure_receipt=testing_failure_receipt,
         )
 
     def _settled_spec_timeout_allowed(
         self, operation: str, target: GenericWebResolvedDeployTarget, phase: str
     ) -> bool:
-        if (
-            target.ship_request.instance != "testing"
-            or target.resolved_target.target_type != "application"
-        ):
-            return False
         try:
-            record = cast(_DeploymentRecordReader, self._record_store).read_deployment_record(
-                self._deployment_record_id(operation)
+            record, receipt = testing_failure_lifecycle_receipt(
+                record_store=self._record_store,
+                profile=self._profile,
+                lane=self._lane,
+                target=target,
+                operation_key=operation,
+                phase=phase,
             )
-        except FileNotFoundError:
-            record = None
-        receipt = recorded_application_lifecycle(record) if record is not None else None
-        if phase == "records_commit" and (
-            record is None
-            or record.deploy.status != "fail"
-            or record.artifact_identity is None
-            or record.resolved_target is None
-            or (
-                record.context,
-                record.instance,
-                record.artifact_identity.artifact_id,
-                record.source_git_ref,
-                record.resolved_target.target_id,
-            )
-            != (
-                self._lane.context,
-                self._lane.instance,
-                target.ship_request.artifact_id,
-                target.ship_request.source_git_ref,
-                target.resolved_target.target_id,
-            )
-        ):
+        except (FileNotFoundError, ValueError, click.ClickException):
             return False
-        if receipt is not None:
-            return (
-                receipt.state == "held"
-                and receipt.qualification_failure_hold_completed
-                and (
-                    receipt.product,
-                    receipt.context,
-                    receipt.instance,
-                    receipt.provider_id,
-                    receipt.target_id,
-                    receipt.artifact_id,
-                    receipt.source_git_ref,
-                )
-                == (
-                    self._profile.product,
-                    self._lane.context,
-                    self._lane.instance,
-                    self._deploy_provider.provider_id,
-                    target.resolved_target.target_id,
-                    target.ship_request.artifact_id,
-                    target.ship_request.source_git_ref,
-                )
-            )
-        return (
-            phase in {"deploy_trigger", "records_commit"}
-            and not self._lane.generic_web_extensions.configured
-            and not has_recorded_application_lifecycle(
-                self._record_store, context=self._lane.context, instance=self._lane.instance
-            )
+        return not (
+            phase == "records_commit"
+            and receipt is not None
+            and record is not None
+            and record.deploy.status == "pending"
         )
+
+    def settle_testing_failure(
+        self,
+        operation: str,
+        lease: ProviderOperationLease,
+        *,
+        inspection: _GenericWebDeployProviderInspection,
+        phase: str,
+    ) -> ProviderMutationOutcome:
+        if not inspection.testing_failure_receipt or inspection.resolved_deploy_target is None:
+            raise ProviderMutationUnknownError(
+                "Original lifecycle failure has no reviewed receipt."
+            )
+        try:
+            return settle_testing_failure(
+                record_store=self._record_store,
+                profile=self._profile,
+                lane=self._lane,
+                target=inspection.resolved_deploy_target,
+                operation_key=operation,
+                phase=phase,
+                expected_receipt=inspection.testing_failure_receipt,
+                provider=self._deploy_provider,
+                control_plane_root=self._control_plane_root,
+                lease=lease,
+                check_execution=self.execution_check,
+                trace_id=self._trace_id,
+            )
+        except (FileNotFoundError, ValueError, click.ClickException) as error:
+            raise ProviderMutationUnknownError(str(error)) from error
 
     def _inspect_legacy_artifact_deploy(
         self,

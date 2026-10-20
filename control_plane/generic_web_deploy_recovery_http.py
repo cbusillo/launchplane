@@ -36,6 +36,7 @@ from control_plane.generic_web_deploy_http import (
     GenericWebDeployRouteDependencyError,
     resolve_generic_web_deploy_lane,
 )
+from control_plane.generic_web_testing_failure_settlement import TESTING_FAILURE_SETTLEMENT_PHASES
 from control_plane.generic_web_deploy_provider_adapter import (
     GenericWebDeployProviderMutationAdapter,
 )
@@ -207,9 +208,13 @@ class _GenericWebRecoveryApplyAdapter:
         *,
         delegate: GenericWebDeployProviderMutationAdapter,
         recovery_metadata: dict[str, object],
+        failure_inspection: Any | None = None,
+        failure_phase: str = "",
     ) -> None:
         self._delegate = delegate
         self._recovery_metadata = recovery_metadata
+        self._failure_inspection = failure_inspection
+        self._failure_phase = failure_phase
 
     def target_key(self) -> str:
         return self._delegate.target_key()
@@ -246,7 +251,16 @@ class _GenericWebRecoveryApplyAdapter:
     def apply(
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
-        outcome = self._delegate.apply(provider_operation_key, lease)
+        outcome = (
+            self._delegate.settle_testing_failure(
+                provider_operation_key,
+                lease,
+                inspection=self._failure_inspection,
+                phase=self._failure_phase,
+            )
+            if self._failure_inspection is not None
+            else self._delegate.apply(provider_operation_key, lease)
+        )
         response_payload = dict(outcome.response_payload)
         response_payload["recovery"] = self._recovery_metadata
         return ProviderMutationOutcome(
@@ -280,6 +294,7 @@ def _stored_recovery_metadata(
             | "adopt_observed"
             | "retry_original_operation"
             | "close_out_observed"
+            | "settle_testing_failure"
             | "hold_unknown"
         ):
             return digest, action
@@ -819,11 +834,7 @@ async def _inspect_generic_web_deploy_recovery(
                 retain_event_request=retain_event_request,
             )
             original_deadline_expired = False
-            if reservation.provider_effect_phase in {
-                "deploy_trigger",
-                "application_schedule_hold",
-                "records_commit",
-            }:
+            if reservation.provider_effect_phase in TESTING_FAILURE_SETTLEMENT_PHASES:
                 try:
                     original_deadline_expired = parse_launchplane_mutation_timestamp(
                         lookup.observed_at, field_name="observed_at"
@@ -892,7 +903,12 @@ async def _inspect_generic_web_deploy_recovery(
                     testing_pre_image_settlement=adapter.testing_settlement_pending,
                     testing_settlement_disposition=adapter.testing_settlement_disposition,
                 )
-            if provider_outcome == "present":
+            if provider_inspection.testing_failure_receipt:
+                provider_observation_payload["testing_failure_receipt"] = (
+                    provider_inspection.testing_failure_receipt
+                )
+                proposed_action = "settle_testing_failure"
+            elif provider_outcome == "present":
                 proposed_action = "adopt_observed"
             elif provider_outcome == "absent" and retry_safe:
                 proposed_action = "retry_original_operation"
@@ -1082,6 +1098,7 @@ def build_generic_web_deploy_recovery_apply_handler(
             "adopt_observed",
             "retry_original_operation",
             "close_out_observed",
+            "settle_testing_failure",
         }:
             raise dependencies.http_error(
                 status_code=409,
@@ -1093,7 +1110,7 @@ def build_generic_web_deploy_recovery_apply_handler(
             raise RuntimeError("Generic web deploy recovery apply requires an adapter.")
         recovery_metadata = _recovery_metadata(inspection)
         if (
-            inspection.proposed_action == "retry_original_operation"
+            inspection.proposed_action in {"retry_original_operation", "settle_testing_failure"}
             and inspection.adapter.reconciliation_key().strip()
             != inspection.reservation.reconciliation_key
         ):
@@ -1164,7 +1181,8 @@ def build_generic_web_deploy_recovery_apply_handler(
         retry = record_store.retry_reconciled_mutation(
             reservation=action_inspection.reservation,
             lease_owner=trace_id,
-            preserve_effect_checkpoint=(
+            preserve_effect_checkpoint=inspection.proposed_action == "settle_testing_failure"
+            or (
                 inspection.adapter.provider_observation_from_inspection(
                     provider_operation_key=inspection.provider_operation_key,
                     inspection=action_inspection.provider_inspection,
@@ -1193,6 +1211,12 @@ def build_generic_web_deploy_recovery_apply_handler(
             adapter=_GenericWebRecoveryApplyAdapter(
                 delegate=inspection.adapter,
                 recovery_metadata=recovery_metadata,
+                failure_inspection=(
+                    action_inspection.provider_inspection
+                    if inspection.proposed_action == "settle_testing_failure"
+                    else None
+                ),
+                failure_phase=action_inspection.reservation.provider_effect_phase,
             ),
         )
         if result.status in {"completed", "adopted", "replayed"} and result.record is not None:

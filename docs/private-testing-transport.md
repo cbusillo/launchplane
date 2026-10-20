@@ -190,18 +190,55 @@ foreign service specification remains unknown.
 
 The supported generic-web recovery dry-run/apply can establish that same timeout
 once the original lease is inactive. It compares the database observation time with
-the database `deploy_trigger` checkpoint plus the original timeout saved in the
-reservation, rather than current target settings or provider clocks. A later
-`application_schedule_hold` checkpoint requires the exact original held receipt
-with proved cleanup completion. A later `records_commit` checkpoint also requires
-the exact original failed deployment record. Automatic
-observation without that deadline proof retains the fence; use the reviewed native
-recovery operation. An application lifecycle qualification failure becomes durable
-only after its hold actions complete. The original artifact-bound receipt records
-that completion; absent legacy proof or failed cleanup retains the operation fence.
-Recovery preserves the held receipt and original schedule baseline. The next
-deliberate deployment uses the existing resume-from-hold path and qualifies before
-activating schedules. Settling the failed operation never releases the lifecycle hold.
+the latest database provider-effect checkpoint plus the original timeout saved in
+the reservation, rather than current target settings or provider clocks. Later
+hold or record checkpoints can delay that proof; they never shorten the original
+budget. Automatic observation without that deadline proof retains the fence; use
+the reviewed native recovery operation.
+
+For a lifecycle lane, a proved failed job or qualification failure requires the
+explicit `settle_testing_failure` recovery action. The service retains the truthful
+`present` provider outcome and `retry_safe: false`. Adoption remains write-free.
+The reviewed action acquires the original recovery lease and repeats only the
+idempotent schedule hold from the exact original artifact-bound receipt. It never
+captures a new baseline, saves or deploys an image, resets data, runs maintenance,
+activates schedules or runs post-deploy work. Capture-time `prepared` receipts,
+partially applied holds and older `held` receipts can resume from their complete
+original baseline. An exact failed lifecycle record keeps the original attempt
+failed even if its runtime becomes healthy later; recovery still completes the
+hold. A crash while publishing the failed record can resume the same hold.
+A capture-only pending lifecycle receipt at `records_commit` with a successful
+provider job cannot prove whether data or post-deploy work completed, so that
+ambiguous case stays fenced. Missing or malformed baseline, changed target authority, an active updater,
+unknown service/provider effects or lost lease keep the original operation fenced.
+A failed cleanup also keeps the fence and a durable hold-only checkpoint, so a new
+review can resume cleanup instead of replaying the image operation.
+
+To use that action through the deployed service API:
+
+1. For an event-driven testing deploy, read
+   `GET /v1/admin/generic-web/deploy-recovery/{product}/testing` and retain its
+   exact `recovery_reference` privately.
+2. Send `POST /v1/admin/generic-web/deploy-recovery/dry-run` with the product,
+   `instance: "testing"`, that `recovery_reference`, and the reason. Do not send
+   an `Idempotency-Key` for this reference request. For a legacy original-deploy
+   request, retain its existing exact envelope and original key instead.
+3. Review `proposed_action: "settle_testing_failure"`, `provider_outcome: "present"`,
+   `retry_safe: false` and the returned `recovery_digest`. Send the identical
+   request to `POST /v1/admin/generic-web/deploy-recovery/apply`, adding
+   `expected_recovery_digest` with that digest. Use the same scoped service
+   identity; this action adds no grant. A helper version that does not accept
+   this new action cannot apply it; the native service API is supported.
+   Helper support is tracked in [codex-skills#2395](https://github.com/cbusillo/codex-skills/issues/2395).
+4. Confirm the reservation completed with the failed deployment record, schedules
+   held and no new inventory credit. A lost-response retry of the identical apply
+   replays the saved result without provider work. Changed receipts or runtime
+   evidence require a fresh review.
+
+The original schedule baseline remains in the held receipt. The next deliberate
+deployment uses the existing resume-from-hold path and qualifies before activating
+schedules. Settling the failed operation releases its reservation fence but never
+releases the lifecycle hold.
 
 An ordinary sweep also checks every application testing runtime before skipping
 saved deployment evidence, including legacy false inventory and lanes without inputs.

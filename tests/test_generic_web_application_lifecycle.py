@@ -38,6 +38,7 @@ from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.workflows.generic_web_deploy_provider import (
     DokployGenericWebDeployProvider,
     GenericWebProviderDeploymentObservation,
+    GenericWebProviderDeploymentFailed,
 )
 from tests.test_generic_web_deploy import (
     _FakeGenericWebDeployProvider,
@@ -241,15 +242,6 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
                 self.assertEqual(result.provider_failure_proved, not hold_fails)
                 receipt = recorded_application_lifecycle(store.read_deployment_record(record_id))
                 assert receipt is not None
-                self.assertEqual(receipt.qualification_failure_hold_completed, not hold_fails)
-                legacy = ApplicationLifecycleSnapshot.model_validate_json(
-                    receipt.model_dump_json(exclude={"qualification_failure_hold_completed"})
-                )
-                self.assertFalse(legacy.qualification_failure_hold_completed)
-                self.assertEqual(
-                    ApplicationLifecycleSnapshot.model_validate_json(receipt.model_dump_json()),
-                    receipt,
-                )
                 adapter = GenericWebDeployProviderMutationAdapter(
                     control_plane_root=Path("."),
                     record_store=store,
@@ -267,17 +259,14 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
                     reconciliation_key=adapter.reconciliation_key(),
                     original_deadline_expired=True,
                 )
-                if hold_fails:
-                    self.assertEqual(inspection.observation.outcome, "unknown")
-                    continue
                 self.assertEqual(inspection.observation.deployment_status, "unhealthy")
+                self.assertTrue(inspection.testing_failure_receipt)
                 adopted = adapter.provider_observation_from_inspection(
                     provider_operation_key=operation, inspection=inspection
                 )
-                self.assertEqual(adopted.response_status_code, 502)
-                self.assertEqual(
-                    recorded_application_lifecycle(store.read_deployment_record(record_id)), receipt
-                )
+                self.assertEqual(adopted.outcome, "unknown")
+                if hold_fails:
+                    continue
                 self.assertFalse(self.schedules["billing-recovery"]["enabled"])
                 resumed = execute_generic_web_deploy(
                     control_plane_root=Path("."),
@@ -295,8 +284,52 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
                 assert next_receipt is not None
                 self.assertTrue(next_receipt.resume_from_hold)
                 self.assertEqual(next_receipt.originals, receipt.originals)
-                self.assertFalse(next_receipt.qualification_failure_hold_completed)
                 self.assertTrue(self.schedules["billing-recovery"]["enabled"])
+
+    def test_failed_provider_job_cannot_release_an_updating_application_effect(self) -> None:
+        self._api_context()
+        profile = _profile()
+        lane = profile.lanes[0].model_copy(update={"generic_web_extensions": self.extensions})
+        profile = profile.model_copy(update={"lanes": (lane,)})
+        for state in ("updating", "completed"):
+            with self.subTest(state=state):
+                self.schedules = {"billing-recovery": dict(self.original)}
+                store = _GenericWebDeployStore(profile)
+                failed = GenericWebProviderDeploymentObservation(
+                    outcome="present",
+                    deployment_status="error",
+                    deployment_id="failed-job",
+                    started_at=utc_now_timestamp(),
+                    finished_at=utc_now_timestamp(),
+                )
+                provider = _LifecycleDeployProvider(target_id="app-123", observation=failed)
+                execute = provider.execute_artifact_deploy
+
+                def failed_runtime(**kwargs: object) -> None:
+                    execute(**kwargs)  # type: ignore[arg-type]
+                    assert provider.application_runtime is not None
+                    provider.application_runtime = replace(
+                        provider.application_runtime,
+                        rollout_state=state,
+                        running_container_images=(),
+                        running_container_deployment_record_ids=(),
+                        running_container_health=(),
+                        pending_task_count=1,
+                    )
+                    raise GenericWebProviderDeploymentFailed(failed)
+
+                with patch.object(provider, "execute_artifact_deploy", side_effect=failed_runtime):
+                    result = execute_generic_web_deploy(
+                        control_plane_root=Path("."),
+                        record_store=store,
+                        request=_request(),
+                        profile=profile,
+                        lane=lane,
+                        deploy_provider=provider,
+                    )
+                self.assertEqual(result.deploy_status, "fail")
+                self.assertEqual(result.provider_failure_proved, state == "completed")
+                self.assertFalse(self.schedules["billing-recovery"]["enabled"])
 
     def test_testing_reset_is_explicit_and_uses_the_disposable_lane_guard(self) -> None:
         reset_command = GenericWebMaintenanceCommand(

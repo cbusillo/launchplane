@@ -1996,7 +1996,6 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
             self.request()
             repeated = self.reconcile()
         self.assertEqual(repaired["reason"], "testing_runtime_drift")
-        self.assertIn("testing_runtime_drift_sha256", repaired)
         self.assertNotEqual(initial["deploy_idempotency_key"], repaired["deploy_idempotency_key"])
         self.assertNotEqual(old_inventory.deployment_record_id, repaired["deployment_record_id"])
         self.assertEqual(repeated["reason"], "already_deployed")

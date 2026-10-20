@@ -695,7 +695,8 @@ release, supersede, retry, adopt, or write deployment, inventory, idempotency,
 or provider state. The bounded response reports only reservation state and
 timestamps, hashed identifiers, provider outcome/status, retry safety, one of
 `replay_completed`, `wait_for_active_lease`, `adopt_observed`,
-`retry_original_operation`, `close_out_observed`, or `hold_unknown`, and a
+`retry_original_operation`, `close_out_observed`, `settle_testing_failure`, or
+`hold_unknown`, and a
 canonical recovery digest.
 Recovery apply recomputes that evidence and rejects a stale digest. After a
 Launchplane deployment changes provider observation or reconciliation behavior,
@@ -863,6 +864,14 @@ methods. `adopt_observed` stores deployment/inventory evidence from the reviewed
 inspection without re-observing the provider. `retry_original_operation` resumes
 the already-acquired reservation path and preserves `reconcile_required` for
 pre-effect rejection, lease loss, uncertain, or non-durable outcomes.
+`settle_testing_failure` is the explicit hold-only action for a proved failed
+application testing attempt with its exact captured lifecycle baseline. It acquires
+the original recovery lease, preserves its effect checkpoint and repeats only the
+idempotent hold, then stores the failed deployment and completes with 502. The
+provider outcome remains `present` and `retry_safe` remains false. It never invokes
+image, reset, capture, maintenance, schedule activation or post-deploy execution.
+Unknown effects, missing/malformed baseline, changed target or lost lease stay
+fenced. See the [native hold-only recovery steps](private-testing-transport.md).
 `close_out_observed` settles the exact reservation from the reinspected runtime
 evidence without any provider call. The recovery action accepts an apply
 response only when it settles the reservation without retry: `adopt_observed`

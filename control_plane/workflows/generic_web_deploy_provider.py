@@ -642,7 +642,6 @@ def qualify_testing_application_observation(
         target.ship_request.instance != "testing"
         or target.resolved_target.target_type != "application"
         or observation.outcome != "present"
-        or not generic_web_provider_deployment_succeeded(observation.deployment_status)
     ):
         return observation
     if not isinstance(provider, GenericWebTestingApplicationRuntimeProvider):
@@ -704,7 +703,11 @@ def qualify_testing_application_observation(
         if not wait or remaining <= 0:
             if (
                 runtime is not None
-                and (wait or original_deadline_expired)
+                and (
+                    wait
+                    or original_deadline_expired
+                    or not generic_web_provider_deployment_succeeded(observation.deployment_status)
+                )
                 and application_runtime_settled_spec_matches(
                     runtime,
                     artifact_reference=target.ship_request.artifact_id,

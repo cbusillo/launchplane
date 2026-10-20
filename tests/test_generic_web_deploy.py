@@ -1899,6 +1899,7 @@ class GenericWebDeployTests(unittest.TestCase):
         profile = _profile()
         store = _GenericWebDeployStore(profile)
         provider = _FakeGenericWebDeployProvider(
+            original_operation_key="provider-operation:test-failed",
             observation=GenericWebProviderDeploymentObservation(
                 outcome="present",
                 deployment_status="failed",
@@ -1906,7 +1907,7 @@ class GenericWebDeployTests(unittest.TestCase):
                 started_at="2026-07-13T12:00:00Z",
                 finished_at="2026-07-13T12:01:00Z",
                 error_message="provider deployment failed",
-            )
+            ),
         )
         adapter = self._provider_mutation_adapter(
             profile=profile,
@@ -1935,6 +1936,7 @@ class GenericWebDeployTests(unittest.TestCase):
         profile = _profile()
         store = _GenericWebDeployStore(profile)
         provider = _FakeGenericWebDeployProvider(
+            original_operation_key="provider-operation:test-failed-repair",
             observation=GenericWebProviderDeploymentObservation(
                 outcome="present",
                 deployment_status="failed",
@@ -1942,7 +1944,7 @@ class GenericWebDeployTests(unittest.TestCase):
                 started_at="2026-07-13T12:00:00Z",
                 finished_at="2026-07-13T12:01:00Z",
                 error_message="provider deployment failed",
-            )
+            ),
         )
         adapter = self._provider_mutation_adapter(
             profile=profile,

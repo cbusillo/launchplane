@@ -756,6 +756,7 @@ def _execute_generic_web_deploy_unserialized(
     provider_deployment_observation: GenericWebProviderDeploymentObservation | None = None
     key_readback: IntegrationKeyReadbackEvidence | None = None
     application_lifecycle: GenericWebApplicationLifecycle | None = None
+    failure_hold_completed = False
 
     def checkpoint_provider(phase: str) -> None:
         nonlocal post_deploy_update, last_provider_phase, dispatch_refused
@@ -1090,8 +1091,20 @@ def _execute_generic_web_deploy_unserialized(
                 },
             )
     except (click.ClickException, TestingInputSafetyRefused) as exc:
+        provider_failure_observed = isinstance(exc, GenericWebProviderDeploymentFailed)
         if isinstance(exc, GenericWebProviderDeploymentFailed):
             provider_deployment_observation = exc.observation
+            if resolved_lane.instance == "testing" and resolved_target.target_type == "application":
+                failure_observation = qualify_testing_application_observation(
+                    provider=resolved_deploy_provider,
+                    control_plane_root=control_plane_root,
+                    target=prepared_deploy_target,
+                    observation=exc.observation,
+                    deployment_record_id=record_id,
+                )
+                provider_failure_observed = failure_observation.outcome == "present" and not (
+                    generic_web_provider_deployment_succeeded(failure_observation.deployment_status)
+                )
         if application_lifecycle is not None:
             try:
                 require_cleanup_authority()
@@ -1104,14 +1117,13 @@ def _execute_generic_web_deploy_unserialized(
                     )
                 ):
                     application_lifecycle.snapshot.state = "held"
-                    application_lifecycle.snapshot.qualification_failure_hold_completed = False
                     application_lifecycle.hold()
                     if (
-                        isinstance(exc, GenericWebProviderDeploymentFailed)
+                        provider_failure_observed
                         and resolved_lane.instance == "testing"
                         and resolved_target.target_type == "application"
                     ):
-                        application_lifecycle.snapshot.qualification_failure_hold_completed = True
+                        failure_hold_completed = True
                 else:
                     application_lifecycle.snapshot.state = "restore_failed"
                     application_lifecycle.restore()
@@ -1220,11 +1232,8 @@ def _execute_generic_web_deploy_unserialized(
             provider_target_type=target_fields.provider_target_type,
             provider_effect_attempted=provider_effect_attempted,
             provider_failure_proved=(
-                isinstance(exc, GenericWebProviderDeploymentFailed)
-                and (
-                    application_lifecycle is None
-                    or application_lifecycle.snapshot.qualification_failure_hold_completed
-                )
+                provider_failure_observed
+                and (application_lifecycle is None or failure_hold_completed)
                 and not deploy_completed
             ),
             image_effect_attempted=image_effect_attempted,

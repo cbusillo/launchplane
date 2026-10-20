@@ -514,12 +514,12 @@ class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
                 "hold_unknown",
             ),
             ("pre-trigger", "runtime_environment_update", 1, {}, "hold_unknown"),
-            ("completed hold", "application_schedule_hold", 1, {}, "adopt_observed"),
-            ("legacy hold", "application_schedule_hold", 1, {}, "hold_unknown"),
-            ("missing failed record", "records_commit", 1, {}, "hold_unknown"),
+            ("completed hold", "application_schedule_hold", 1, {}, "settle_testing_failure"),
+            ("legacy hold", "application_schedule_hold", 1, {}, "settle_testing_failure"),
+            ("missing failed record", "records_commit", 1, {}, "adopt_observed"),
             ("failed record", "records_commit", 1, {}, "adopt_observed"),
-            ("completed hold record", "records_commit", 1, {}, "adopt_observed"),
-            ("legacy hold record", "records_commit", 1, {}, "hold_unknown"),
+            ("completed hold record", "records_commit", 1, {}, "settle_testing_failure"),
+            ("legacy hold record", "records_commit", 1, {}, "settle_testing_failure"),
         ):
             with self.subTest(name=name), TemporaryDirectory() as temporary_directory_name:
                 root = Path(temporary_directory_name)
@@ -577,7 +577,6 @@ class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
                             source_git_ref=target.ship_request.source_git_ref,
                             extensions=GenericWebLaneExtensions(),
                             state="held",
-                            qualification_failure_hold_completed=name.startswith("completed"),
                         )
                     store.write_deployment_record(
                         build_deployment_record(

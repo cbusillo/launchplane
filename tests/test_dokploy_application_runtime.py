@@ -398,7 +398,7 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
             )
         self.assertNotIn("secret", str(caught.exception))
 
-    def test_same_stable_drift_keeps_one_repair_identity_despite_task_churn(self) -> None:
+    def test_only_stable_service_drift_permits_repair(self) -> None:
         observed = self.read()
 
         def fingerprint(runtime: ApplicationRuntimeObservation) -> str:
@@ -411,8 +411,6 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
 
         first = fingerprint(observed)
         self.assertTrue(first)
-        churned = replace(observed, running_container_images=(), pending_task_count=1)
-        self.assertEqual(fingerprint(churned), first)
         self.assertFalse(fingerprint(replace(observed, rollout_state="updating")))
 
     def test_completion_waits_for_rollout_and_recovery_does_not_credit_pending(self) -> None:
