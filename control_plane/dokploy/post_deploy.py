@@ -5,6 +5,7 @@ from control_plane.production_recipient_evidence import (
     EXECUTION_FENCE_MARKER,
     RUNTIME_OK_MARKER,
 )
+from control_plane.contracts.native_operation_evidence import NATIVE_OPERATION_RESULT_MAX_BYTES
 from contextlib import AbstractContextManager, nullcontext
 from control_plane.contracts.disposable_lane import (
     ODOO_PREVIEW_RESOURCES_OK_MARKER,
@@ -382,8 +383,12 @@ class OdooPostDeployReadbackFailure(click.ClickException):
 
 
 def _safe_odoo_post_deploy_marker(key: str, value: str) -> bool:
-    if key in {"rehearsal_result", "recipient_recovery_retained"}:
-        return bool(re.fullmatch(r"(?:[a-f0-9]{2}){1,32768}", value))
+    if key in {"rehearsal_result", "rehearsal_child_failure", "recipient_recovery_retained"}:
+        return bool(
+            re.fullmatch(
+                r"(?:[a-f0-9]{2}){1," + str(NATIVE_OPERATION_RESULT_MAX_BYTES) + "}", value
+            )
+        )
     if key == WRITER_ACTION_MARKER:
         return value in WRITER_ACTIONS
     if key == RUNTIME_OK_MARKER:

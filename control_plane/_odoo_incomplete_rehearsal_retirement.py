@@ -132,6 +132,6 @@ def incomplete_retirement_locked(spec,root):
         'containers_absent':containers_absent,'volumes_absent':volumes_absent,
         'network_absent':network_absent,'raw_source_absent':raw_absent,
         'public_route':False,'business_host_frozen':False}
-    print('rehearsal_result='+json.dumps(result).encode().hex())
+    emit_rehearsal_result(result)
     return result
 """

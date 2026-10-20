@@ -2838,8 +2838,36 @@ are omitted. `operation_journal_status` distinguishes bound, missing, unbound
 and unrequested journals; no checkpoint is never proof that no effect happened.
 Events are read
 before launching the observation schedule. They are diagnostic candidates, not proof
-that an event belongs to the original apply. Provider prose and source data are
-withheld. Preserve the original request, key and all partial custody until a
+that an event belongs to the original apply. The event projection withholds
+provider prose. A failed rehearsal child preserves `child_failure` in private host
+custody: the failing step, nonzero exit status and bounded redacted child output.
+Only the failure escaping the effect is saved; a recovered startup error cannot
+replace it. Original-key readback checks its intent, attempt and record
+binding before returning it. Arguments, input and environment are never exported.
+The native execution lock keeps observation separate from a running effect.
+For an older initial-upgrade failure with an independently verified source
+snapshot, readback can also return `retained_upgrade_logs`: bounded redacted
+tails from the rehearsal's exclusive log volume and container logs, with source
+metadata. It reads regular log files only and executes no upgrade, registry or SQL.
+The combined result uses the native transport's shared byte budget, shedding
+oldest optional log tails before child failure or custody evidence. Partial logs
+are marked truncated. If diagnostic storage is full or its interrupted pending
+receipt remains, a bounded operation-bound fallback stays in the existing job
+log; `failure_events_after_checkpoint` returns it only for the exact original
+intent, attempt and record. It is diagnostic evidence, never custody proof.
+That provider job log is outside private host-file custody; the marker is
+encoding, not encryption, and retains the same private-data handling rule.
+An unavailable log observation leaves child failure and custody readable and sets
+`retained_upgrade_logs_unavailable`. Credential redaction and byte limits apply
+before transport. These diagnostic fields carry `diagnostics_private: true`:
+they may contain Client record names or exception context. Keep full readbacks
+in private evidence; post only the necessary reviewed error, without Client row
+values. Common PostgreSQL DETAIL/STATEMENT lines are filtered; other SQL or
+Client values may remain, so the private-evidence rule still applies.
+An older discarded child exit status cannot be reconstructed from a log tail;
+neither a log nor a child diagnostic proves successful migration or authorizes
+continuation, replay, retirement or a replacement key.
+Preserve the original request, key and all partial custody until a
 supported continuation is established. Any failed readback preserves a supplied
 original key, including authorization and transport refusals. A read failure
 cannot establish release. Lock loss and integrity contradictions remain
