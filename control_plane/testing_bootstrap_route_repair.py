@@ -14,6 +14,7 @@ from control_plane.durable_operation_authorization import DurableOperationAuthor
 from control_plane.generic_web_testing_exclusion import _target_reservations
 from control_plane.odoo_testing_restore import FreshOdooTestingGeneration, generation_binding
 from control_plane.provider_operations import (
+    _ProviderOperationLeaseLostError,
     ProviderMutationOutcome,
     ProviderMutationRejectedError,
     ProviderObservation,
@@ -22,7 +23,10 @@ from control_plane.provider_operations import (
 )
 from control_plane.testing_event_deploy_recovery import testing_event_execution_lock_name
 from control_plane.testing_initial_generation import require_testing_generation_usage
-from control_plane.testing_replacement_bootstrap import TestingReplacementBootstrapAdapter
+from control_plane.testing_replacement_bootstrap import (
+    TestingReplacementBootstrapAdapter,
+    bootstrap_request_sha256,
+)
 from control_plane.workflows.generic_web_deploy_provider import (
     dokploy_generic_web_provider_target_key,
 )
@@ -84,13 +88,11 @@ class TestingBootstrapRouteRepair:
             lane = stack.enter_context(
                 store.testing_verification_lane_guard(product=base.product, context=request.context)
             )
-            authority = stack.enter_context(store.serialize_disposable_testing_resources())
 
             def check() -> None:
                 original()
                 event()
                 lane()
-                authority()
                 current = store.read_provider_target_record(
                     context_name=request.context, instance_name="testing"
                 )
@@ -115,7 +117,8 @@ class TestingBootstrapRouteRepair:
         self,
     ) -> tuple[FreshOdooTestingGeneration, dokploy_api.JsonObject, TestingBootstrapRouteRepairPlan]:
         base = self.bootstrap
-        generation = base.readback_generation()
+        with base.store.serialize_disposable_testing_resources():
+            generation = base.readback_generation()
         if generation.completed_at or generation.non_use_invalidated:
             raise ValueError(
                 "Route repair requires the original unfinished, unused testing generation."
@@ -206,7 +209,7 @@ class TestingBootstrapRouteRepair:
     ) -> str:
         return "repair-certificate:" + canonical_json_sha256(
             {
-                "generation": generation.model_dump(mode="json"),
+                "generation": generation_binding(generation),
                 "route": {
                     key: route.get(key)
                     for key in (
@@ -231,17 +234,40 @@ class TestingBootstrapRouteRepair:
     def observe(
         self, provider_operation_key: str, provider_effect_phase: str, reconciliation_key: str
     ) -> ProviderObservation:
-        # No absent-effect assertion or blind repetition after dispatch.
+        if not provider_effect_phase:
+            # The runner also checks that no effect timestamp was committed.
+            return ProviderObservation("absent")
         try:
-            with self.locked():
-                generation, route, plan = self.snapshot()
-                if provider_effect_phase != self.effect_binding(generation, route):
-                    return ProviderObservation("unknown")
-                self.bootstrap.readback()
-                plan = plan.model_copy(
-                    update={"plan_sha256": self.bootstrap.request.reviewed_plan_sha256}
-                )
-                return ProviderObservation("present", response_payload=self._response(plan))
+            base = self.bootstrap
+            generation = base.store.read_fresh_odoo_testing_generation(
+                base.product, base.request.context
+            )
+            if generation is None or (
+                generation.operation_id != base.request.operation_id
+                or generation.domain_host != base.request.domain_host
+                or generation.request_sha256 != bootstrap_request_sha256(base.request)
+                or base.store.read_dokploy_target_id_record(
+                    context_name=base.request.context, instance_name="testing"
+                ).target_id
+                != generation.target_id
+            ):
+                return ProviderObservation("unknown")
+            # Adoption proves the dispatched route effect. Later use or copy
+            # completion is not permission to write and does not erase proof.
+            routes = base._domains(generation)
+            if len(routes) != 1 or provider_effect_phase != self.effect_binding(
+                generation, routes[0]
+            ):
+                return ProviderObservation("unknown")
+            plan = TestingBootstrapRouteRepairPlan(
+                product=base.product,
+                context=generation.context,
+                operation_id=generation.operation_id,
+                generation_binding_sha256=generation_binding(generation),
+                certificate_type=generation.certificate_type,
+                plan_sha256=base.request.reviewed_plan_sha256,
+            )
+            return ProviderObservation("present", response_payload=self._response(plan))
         except DurableOperationAuthorizationDeniedError:
             raise
         except (ValueError, FileNotFoundError, RuntimeError, OSError, click.ClickException):
@@ -284,6 +310,9 @@ class TestingBootstrapRouteRepair:
                     )
                 }
                 payload["certificateType"] = generation.certificate_type
+                with self.bootstrap.store.serialize_disposable_testing_resources():
+                    if self.bootstrap.readback_generation() != generation:
+                        raise ValueError("The qualified generation changed before repair.")
                 lease.checkpoint_effect(self.effect_binding(generation, route))
                 dispatched = True
                 dokploy_api.dokploy_request(
@@ -299,17 +328,11 @@ class TestingBootstrapRouteRepair:
                 if self.bootstrap.readback_generation() != generation:
                     raise ValueError("Original generation or route identity changed during repair.")
                 return ProviderMutationOutcome(202, self._response(plan))
-        except DurableOperationAuthorizationDeniedError:
+        except _ProviderOperationLeaseLostError:
             raise
-        except (
-            ValueError,
-            FileNotFoundError,
-            RuntimeError,
-            OSError,
-            click.ClickException,
-        ) as error:
+        except Exception as error:
             if not dispatched:
-                raise ProviderMutationRejectedError(
-                    ValueError("Testing certificate repair was refused before effects.")
-                ) from error
+                # Preserve authorization refusal types so the HTTP route still
+                # reports 403, while releasing this known effect-free reservation.
+                raise ProviderMutationRejectedError(error) from error
             raise

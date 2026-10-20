@@ -61,7 +61,11 @@ def main() -> int:
     if operation_mode == "apply" and (
         not args.reviewed_dry_run or not args.idempotency_key.strip()
     ):
-        parser.error("Apply requires a reviewed dry run and the original stable key.")
+        parser.error(
+            "Repair apply requires a reviewed repair plan and its separate repair key."
+            if repair
+            else "Apply requires a reviewed dry run and the original stable key."
+        )
     if operation_mode == "dry-run" and evidence_path is not None and evidence_path.exists():
         parser.error("Choose new evidence; existing review evidence is preserved.")
     helper = args.operator_helper.expanduser().resolve(strict=True)

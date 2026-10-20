@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from control_plane.contracts.lane_service_restart import SERVICE_RESTART_ROUTE
 from control_plane.testing_retry import TESTING_RETRY_ROUTE
+from control_plane.http_routes.discussion_topics import ROUTE as DISCUSSION_TOPICS_ROUTE
 from control_plane.private_testing_transport import ROUTE as PRIVATE_TESTING_TRANSPORT_ROUTE
 from control_plane.private_testing_activation import ROUTE as PRIVATE_TESTING_ACTIVATION_ROUTE
 from control_plane.contracts.odoo_walkthrough import WALKTHROUGH_ROUTE
@@ -98,6 +99,33 @@ class OperationSpec:
 
 
 OPERATION_SPECS = (
+    OperationSpec(
+        "GET",
+        DISCUSSION_TOPICS_ROUTE,
+        "Read a product's discussion topics within existing product-profile read access.",
+        ("service_api",),
+        ("read",),
+        "none",
+        (),
+    ),
+    OperationSpec(
+        "PUT",
+        DISCUSSION_TOPICS_ROUTE + "/{topic_id}",
+        "Add neutral discussion metadata as an admin or Director agent; retries preserve the topic.",
+        ("service_api",),
+        ("add",),
+        "none",
+        (),
+    ),
+    OperationSpec(
+        "POST",
+        DISCUSSION_TOPICS_ROUTE + "/{topic_id}/close",
+        "Close discussion metadata without accepting a release or changing product configuration.",
+        ("service_api",),
+        ("close",),
+        "none",
+        (),
+    ),
     OperationSpec(
         "GET",
         TESTING_RETRY_ROUTE,

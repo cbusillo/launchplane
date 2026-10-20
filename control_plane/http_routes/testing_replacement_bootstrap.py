@@ -125,13 +125,21 @@ def register_testing_replacement_bootstrap_routes(
             refuse(
                 403,
                 "authorization_denied",
-                "The provider refused the Odoo testing usage read. Preserve the trace and original bootstrap key.",
+                (
+                    "The provider refused the testing usage read. Preserve the trace, repair key and original bootstrap custody."
+                    if body.mode.startswith("route-repair-")
+                    else "The provider refused the Odoo testing usage read. Preserve the trace and original bootstrap key."
+                ),
             )
         except (ValueError, FileNotFoundError, RuntimeError, OSError, click.ClickException):
             refuse(
                 409,
                 "testing_bootstrap_unverified",
-                "Fresh testing bootstrap is unverified. Inspect its original key and exact generation.",
+                (
+                    "Testing certificate repair is unverified. Inspect its repair key and preserve the original bootstrap generation and key."
+                    if body.mode.startswith("route-repair-")
+                    else "Fresh testing bootstrap is unverified. Inspect its original key and exact generation."
+                ),
             )
         return accepted_evidence_response(
             trace_id=trace, records={"operation": body.operation_id}, result=result

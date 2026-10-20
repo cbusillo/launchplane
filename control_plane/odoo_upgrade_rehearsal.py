@@ -24,6 +24,11 @@ from control_plane.contracts.odoo_upgrade_rehearsal import (
     RehearsalPrerequisite,
 )
 from control_plane.dokploy import api, source
+from control_plane.dokploy.network_capacity import (
+    BridgeNetworkCapacityRefused,
+    require_bridge_network_capacity,
+)
+from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 from control_plane.odoo_testing_restore import (
     encoded_restore_source,
     FRESH_TESTING_LOCAL_CREDENTIAL_KEYS,
@@ -72,6 +77,26 @@ class RehearsalRefused(ValueError):
         self.code = code
         self.prerequisite = prerequisite
         super().__init__(code.value)
+
+
+class RehearsalPreparationReadRefused(Exception):
+    """A rejection cause exposed by the runner only after reservation release.
+
+    Never raise this directly: carry it inside ProviderMutationRejectedError.
+    If effects or unresolved custody prevent release, the runner keeps it held
+    and the route cannot emit the release marker.
+    """
+
+    def __init__(self, error: api.DokployRequestFailed | NativeSourceAuthorizationDenied) -> None:
+        self.status_code = (
+            403
+            if isinstance(error, NativeSourceAuthorizationDenied) or error.status_code in {401, 403}
+            else 503
+        )
+        self.code = (
+            "authorization_denied" if self.status_code == 403 else "rehearsal_provider_unavailable"
+        )
+        super().__init__("The rehearsal provider read was refused before any new effect.")
 
 
 def _artifact(store: PostgresRecordStore, artifact_id: str) -> ArtifactIdentityManifest:
@@ -260,7 +285,10 @@ def rehearsal_inputs(
     identity = store.read_dokploy_target_id_record(
         context_name=request.source_context, instance_name="testing"
     )
-    host, token = source.read_dokploy_config(control_plane_root=root)
+    try:
+        host, token = source.read_dokploy_config(control_plane_root=root)
+    except (ValueError, OSError, click.ClickException):
+        raise RehearsalRefused(RehearsalPrerequisite.PLACEMENT_UNAVAILABLE) from None
     placement = api.fetch_dokploy_target_payload(
         host=host, token=token, target_type="compose", target_id=identity.target_id
     )
@@ -1311,6 +1339,10 @@ class OdooRehearsalAdapter:
                 record, _, _ = self.inputs()
                 require_rehearsal_transition(record, self.request.action)
                 require_unaliased_rehearsal(self.store, record)
+            except api.DokployRequestFailed as error:
+                raise ProviderMutationRejectedError(
+                    RehearsalPreparationReadRefused(error)
+                ) from None
             except RehearsalRefused as error:
                 raise ProviderMutationRejectedError(
                     RehearsalRefused(
@@ -1340,6 +1372,28 @@ class OdooRehearsalAdapter:
                 require_unaliased_rehearsal(self.store, fresh)
 
             if self.request.action == "prepare" and not self._continue_prepare_host:
+                existing_placement: tuple[str, str, str] = ("", "", "")
+                if not recovering_project:
+                    try:
+                        existing_placement = created_placement(self.root, record.rehearsal_id)
+                    except IsolatedPlacementObservationRequired:
+                        raise ProviderMutationRejectedError(
+                            RehearsalRefused(
+                                RehearsalPrerequisite.PRECHECK_REFUSED,
+                                prerequisite=RehearsalPrerequisite.RECOVERY_REQUIRED,
+                            )
+                        ) from None
+                    except api.DokployRequestFailed as error:
+                        raise ProviderMutationRejectedError(
+                            RehearsalPreparationReadRefused(error)
+                        ) from None
+                    except (ValueError, OSError, click.ClickException):
+                        raise ProviderMutationRejectedError(
+                            RehearsalRefused(
+                                RehearsalPrerequisite.PRECHECK_REFUSED,
+                                prerequisite=RehearsalPrerequisite.PLACEMENT_UNAVAILABLE,
+                            )
+                        ) from None
                 if recovering_project:
                     checkpoint()
                     if (
@@ -1350,13 +1404,35 @@ class OdooRehearsalAdapter:
                     updated = record.model_copy(update={"project_id": self._observed_project_id})
                     self.store.compare_and_write_odoo_upgrade_rehearsal(record, updated)
                     record = updated
-                elif any(created_placement(self.root, record.rehearsal_id)):
+                elif any(existing_placement):
                     raise ProviderMutationRejectedError(
                         RehearsalRefused(
                             RehearsalPrerequisite.PRECHECK_REFUSED,
                             prerequisite=RehearsalPrerequisite.RECOVERY_REQUIRED,
                         )
                     )
+                elif not any((record.project_id, record.environment_id, record.compose_id)):
+                    # Only a genuinely new placement can be refused cleanly.
+                    # Partial creation stays on its original recovery protocol.
+                    try:
+                        host, token = source.read_dokploy_config(control_plane_root=self.root)
+                    except (ValueError, OSError, click.ClickException):
+                        raise ProviderMutationRejectedError(
+                            RehearsalRefused(
+                                RehearsalPrerequisite.PRECHECK_REFUSED,
+                                prerequisite=RehearsalPrerequisite.PLACEMENT_UNAVAILABLE,
+                            )
+                        ) from None
+                    try:
+                        require_bridge_network_capacity(
+                            host=host, token=token, server_id=record.server_id, required_networks=1
+                        )
+                    except NativeSourceAuthorizationDenied as error:
+                        raise ProviderMutationRejectedError(
+                            RehearsalPreparationReadRefused(error)
+                        ) from None
+                    except BridgeNetworkCapacityRefused as error:
+                        raise ProviderMutationRejectedError(error) from None
                 # The built-in local-password writer is scoped to the new record;
                 # it creates no key that can reach a live system or person grant.
                 prepare_rehearsal_local_credentials(

@@ -6855,6 +6855,71 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
         self.assertEqual(cast(dict[str, object], result["pr_feedback"])["status"], "failed")
         self.assertEqual(self.owner_review_status_calls, [("site", 5)])
 
+    def test_review_publisher_runs_when_unknown_preview_recovery_fails(self) -> None:
+        from github_plan_status.client_test_notes import ENGINEERING_RELEASE_TESTS
+
+        payload = _profile()
+        payload["owner"] = {"github_login": "site-owner", "github_id": "4242"}
+        self.store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(payload)
+        )
+        self.github.pull_request["body"] = "## Client test notes\nTry the changed price list."
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        with patch.object(
+            self.provider,
+            "execute_apply",
+            return_value={"status": "fail", "provider_effect_attempted": True},
+        ) as apply:
+            self.request("preview", 5)
+            self.assertEqual(self.run_once().state, "failed")
+            self.assertEqual(apply.call_count, 1)
+            self.owner_review_status_calls.clear()
+            writes = list(self.comments.writes)
+            held_before = self.store.list_held_odoo_preview_reservations(product="site")
+            self.github.pull_request["body"] = (
+                f"## Client test notes\n{ENGINEERING_RELEASE_TESTS}\nCheck prices at release."
+            )
+
+            self.request("preview", 5)
+            held = self.run_once()
+
+            self.assertEqual(held.state, "failed")
+            self.assertEqual(apply.call_count, 1)
+            self.assertEqual(
+                self.store.list_held_odoo_preview_reservations(product="site"), held_before
+            )
+            self.assertEqual(self.owner_review_status_calls, [("site", 5)])
+            self.assertEqual(self.comments.writes, writes)
+
+    def test_review_publication_failure_preserves_preview_feedback(self) -> None:
+        previous = self.reconcile_preview()["pr_feedback"]
+        writes = list(self.comments.writes)
+
+        with patch.object(
+            self, "write_owner_review_status", side_effect=ValueError("Invalid public origin")
+        ):
+            result = self.reconcile_preview()
+
+        self.assertEqual(result["pr_feedback"], previous)
+        self.assertEqual(self.comments.writes, writes)
+
+    def test_review_publisher_runs_for_a_deferred_preview(self) -> None:
+        from control_plane.product_reconcile import ReconcileOutcome
+
+        self.request("preview", 5)
+        with patch(
+            "control_plane.product_reconcile.reconcile_preview_target",
+            return_value=ReconcileOutcome(
+                {"target": "preview", "deferred": "preview_operation_busy"}, deferred=True
+            ),
+        ):
+            pending = self.run_once()
+
+        self.assertEqual(pending.state, "pending")
+        self.assertEqual(self.owner_review_status_calls, [("site", 5)])
+        self.assertNotIn("pr_feedback", pending.last_plan)
+        self.assertEqual(self.comments.writes, [])
+
     def test_ready_preview_on_an_accepted_head_says_so_instead_of_asking_again(self) -> None:
         payload = _profile()
         payload["owner"] = {"github_login": "site-owner", "github_id": "4242"}

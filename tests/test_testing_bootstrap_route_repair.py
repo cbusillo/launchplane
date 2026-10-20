@@ -1,11 +1,15 @@
 """Original-generation certificate repair never reboots the bootstrap pipeline."""
 
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from typing import Any
 from unittest.mock import Mock, patch
 
 from control_plane.odoo_testing_restore import generation_binding
-from control_plane.provider_operations import ProviderMutationRejectedError
+from control_plane.provider_operations import (
+    ProviderMutationRejectedError,
+    _ProviderOperationLeaseLostError,
+)
+from control_plane.durable_operation_authorization import DurableOperationAuthorizationDeniedError
 from control_plane.testing_bootstrap_route_repair import TestingBootstrapRouteRepair
 from control_plane.testing_replacement_bootstrap import bootstrap_request_sha256
 from tests.test_odoo_testing_restore import generation
@@ -273,3 +277,88 @@ class TestingBootstrapRouteRepairTests(FreshTestingBootstrapScenario):
                 self.repair().observe("repair-key", phases[0], "retained").outcome, "unknown"
             )
             write.assert_called_once()
+
+    def test_pre_dispatch_denial_and_empty_phase_remain_recoverable(self) -> None:
+        plan = self.repair().plan()
+        self.request = self.request.model_copy(update={"reviewed_plan_sha256": plan["plan_sha256"]})
+        denial = DurableOperationAuthorizationDeniedError(
+            code="authorization_denied", message="fixture denied usage read"
+        )
+        self.usage.side_effect = denial
+        with patch(
+            "control_plane.testing_bootstrap_route_repair.dokploy_api.dokploy_request"
+        ) as write:
+            with self.assertRaises(ProviderMutationRejectedError) as caught:
+                self.repair().apply("repair-key", Mock(unsafe=True))
+            self.assertIs(caught.exception.cause, denial)
+            observed = self.repair().observe("repair-key", "", "retained")
+            self.assertEqual(observed.outcome, "absent")
+            self.assertFalse(observed.retry_safe)
+            write.assert_not_called()
+
+    def test_lease_loss_is_not_reclassified_as_a_rejection(self) -> None:
+        plan = self.repair().plan()
+        self.request = self.request.model_copy(update={"reviewed_plan_sha256": plan["plan_sha256"]})
+        lease = Mock(unsafe=True)
+        lease.assert_current.side_effect = _ProviderOperationLeaseLostError("lost lease")
+        with self.assertRaises(_ProviderOperationLeaseLostError):
+            self.repair().apply("repair-key", lease)
+
+    def test_adoption_survives_completion_and_use_without_authorizing_a_write(self) -> None:
+        plan = self.repair().plan()
+        self.request = self.request.model_copy(update={"reviewed_plan_sha256": plan["plan_sha256"]})
+        phase = self.repair().effect_binding(self.generation, self.routes[0])
+        self.routes[0]["certificateType"] = self.generation.certificate_type
+        finished = self.generation.model_copy(
+            update={"completed_at": "2026-10-20T18:00:00Z", "non_use_invalidated": True}
+        )
+        with (
+            patch.object(self.store, "read_fresh_odoo_testing_generation", return_value=finished),
+            patch(
+                "control_plane.testing_bootstrap_route_repair.dokploy_api.dokploy_request"
+            ) as write,
+        ):
+            self.usage.side_effect = ValueError("copy now in use")
+            observed = self.repair().observe("repair-key", phase, "retained")
+            self.assertEqual(observed.outcome, "present")
+            write.assert_not_called()
+
+    def test_network_and_lease_checkpoint_run_outside_authority_lock(self) -> None:
+        held = False
+
+        @contextmanager
+        def authority():
+            nonlocal held
+            held = True
+            try:
+                yield lambda: None
+            finally:
+                held = False
+
+        def read_usage(*args: Any, **kwargs: Any) -> None:
+            self.assertFalse(held)
+
+        def write_route(**kwargs: Any) -> str:
+            self.assertFalse(held)
+            return self.write_route(**kwargs)
+
+        def checkpoint(phase: str) -> None:
+            self.assertFalse(held)
+
+        self.usage.side_effect = read_usage
+        with (
+            patch.object(
+                self.store, "serialize_disposable_testing_resources", side_effect=authority
+            ),
+            patch(
+                "control_plane.testing_bootstrap_route_repair.dokploy_api.dokploy_request",
+                side_effect=write_route,
+            ),
+        ):
+            plan = self.repair().plan()
+            self.request = self.request.model_copy(
+                update={"reviewed_plan_sha256": plan["plan_sha256"]}
+            )
+            lease = Mock(unsafe=True)
+            lease.checkpoint_effect.side_effect = checkpoint
+            self.repair().apply("repair-key", lease)
