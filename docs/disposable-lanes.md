@@ -2522,6 +2522,46 @@ product's production records; application, database and runner topology comes
 from the common Odoo renderer. Only explicit sizing keys are inherited. Routing,
 volumes, credentials, database names, cron and connections are isolated.
 
+Before a rehearsal prepare creates credentials or dispatches its first provider
+create, Launchplane reads the selected server's IPv4 bridge-network headroom
+over Dokploy's existing registered-server terminal transport. The fixed reader
+uses the daemon's effective `DefaultAddressPools`, complete network IPAM and
+all IPv4 route tables. Each overlapping allocation or non-default route consumes
+the pool slots it intersects; duplicate overlaps count once. The rehearsal needs
+one private bridge plus two spare slots. Exactly that headroom passes.
+Route exclusions are conservative: a summary route covering a whole pool makes
+that pool unavailable to admission even if Docker would otherwise allocate it.
+
+HTTP 409 `host_bridge_network_capacity_short` means the measured free capacity
+is below that requirement. `host_bridge_network_capacity_unavailable` means
+capacity is unproved, including absent daemon pool evidence, malformed or
+incomplete reads, or network inventory changing during the read. Neither
+refusal creates credentials or provider placement, and a fresh pre-effect
+operation reservation is released. Provider authorization denials retain their
+403 classification and never select another transport or identity. An already
+partial placement keeps its original-key observation and custody rules, without
+another capacity read; discovering existing placement takes precedence over
+fresh-create admission. Missing provider configuration rejects the fresh
+operation before effects instead of holding an uncertain reservation.
+
+A provider-read refusal carries `X-Launchplane-Mutation-Reservation: released`
+only after the durable runner successfully releases that request's fresh,
+effect-free reservation. The rehearsal helper uses this evidence to distinguish
+a clean refusal from an uncertain operation requiring its original key. This
+header does not assert that older placement is absent. Configuration failures
+use the placement prerequisite; uncertain physical placement keeps the recovery
+prerequisite and cannot be misreported as a capacity shortage.
+
+The reader creates no probe network, schedule, container or host file, and emits
+only capacity counts. It does not assume Docker's stock pool capacity. Hosts
+must expose their configured pools in daemon info; the fleet pool rollout is
+owned by shiny-infra-ops#615. This is a fresh admission check, not a reservation
+against concurrent allocations by other actors. Once placement preparation has
+completed, continuation and retirement do not require another free network.
+Issue #4228 separately tracks ordinary lanes, previews, isolated testing
+candidates and the existing health/host view projection; this slice protects
+standalone upgrade-rehearsal placement only.
+
 Before planning, use the read-only
 `GET /v1/products/{product}/odoo-upgrade-rehearsal/preflight?source_context=…`
 through the service's existing registered testing reader:

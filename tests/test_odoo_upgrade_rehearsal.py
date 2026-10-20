@@ -51,6 +51,166 @@ def python_heredoc(script: str) -> str:
 class RehearsalScenario(unittest.TestCase):
     database_url = ""
 
+    def test_network_capacity_refusal_precedes_credentials_and_provider_creation(self) -> None:
+        from control_plane.dokploy import network_capacity
+        from control_plane.provider_operations import (
+            ProviderMutationRejectedError,
+            ProviderOperationLease,
+        )
+
+        before = self.store.read_odoo_upgrade_rehearsal(self.identifier)
+        for free in (0, network_capacity.BRIDGE_NETWORK_CAPACITY_MARGIN):
+            with (
+                self.subTest(free=free),
+                patch(
+                    "control_plane.odoo_upgrade_rehearsal.require_bridge_network_capacity",
+                    wraps=network_capacity.require_bridge_network_capacity,
+                ),
+                patch("control_plane.dokploy.native_copy_stream._read_remote") as read,
+                patch("control_plane.dokploy.api.dokploy_request", return_value={}) as create,
+                patch(
+                    "control_plane.dokploy.sandbox_placement.created_placement",
+                    return_value=("", "", ""),
+                ),
+                patch(
+                    "control_plane.testing_local_credentials.prepare_rehearsal_local_credentials"
+                ) as credentials,
+                self.assertRaises(ProviderMutationRejectedError) as refused,
+            ):
+                read.side_effect = lambda **kwargs: kwargs["receive"](
+                    {"type": "complete", "result": {"total_slots": 4, "free_slots": free}}
+                )
+                lease = Mock(spec=ProviderOperationLease)
+                self.adapter("prepare").apply("original-operation", lease)
+            cause = refused.exception.cause
+            assert isinstance(cause, network_capacity.BridgeNetworkCapacityRefused)
+            self.assertEqual(cause.code, "host_bridge_network_capacity_short")
+            create.assert_not_called()
+            credentials.assert_not_called()
+            lease.checkpoint_effect.assert_not_called()
+            self.assertEqual(self.store.read_odoo_upgrade_rehearsal(self.identifier), before)
+
+    def test_capacity_read_failure_releases_fresh_operation_without_effects(self) -> None:
+        from control_plane.dokploy import network_capacity
+        from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
+        from control_plane.odoo_upgrade_rehearsal import RehearsalPreparationReadRefused
+
+        for failure in (ValueError("incomplete read"), NativeSourceAuthorizationDenied("refused")):
+            with (
+                self.subTest(failure=type(failure).__name__),
+                patch(
+                    "control_plane.odoo_upgrade_rehearsal.require_bridge_network_capacity",
+                    wraps=network_capacity.require_bridge_network_capacity,
+                ),
+                patch(
+                    "control_plane.dokploy.native_copy_stream._read_remote", side_effect=failure
+                ) as read,
+                patch("control_plane.dokploy.api.dokploy_request") as create,
+                patch(
+                    "control_plane.dokploy.sandbox_placement.created_placement",
+                    return_value=("", "", ""),
+                ),
+                patch(
+                    "control_plane.testing_local_credentials.prepare_rehearsal_local_credentials"
+                ) as credentials,
+            ):
+                expected = (
+                    RehearsalPreparationReadRefused
+                    if isinstance(failure, NativeSourceAuthorizationDenied)
+                    else network_capacity.BridgeNetworkCapacityRefused
+                )
+                for _ in range(2):
+                    # A clean refusal releases the fresh durable reservation;
+                    # repeating the same key reads again rather than holding it.
+                    with self.assertRaises(expected):
+                        self.run_operation(self.adapter("prepare"), "capacity-read-failure")
+                self.assertEqual(read.call_count, 2)
+                create.assert_not_called()
+                credentials.assert_not_called()
+
+    def test_missing_config_is_clean_but_existing_placement_requires_recovery(self) -> None:
+        from control_plane.dokploy.sandbox_placement import IsolatedPlacementObservationRequired
+        from control_plane.provider_operations import (
+            ProviderMutationRejectedError,
+            ProviderOperationLease,
+        )
+
+        with patch(
+            "control_plane.dokploy.source.read_dokploy_config",
+            side_effect=FileNotFoundError("private config path"),
+        ):
+            for _ in range(2):
+                with self.assertRaises(RehearsalRefused) as refused:
+                    self.run_operation(self.adapter("prepare"), "missing-capacity-config")
+                self.assertEqual(
+                    refused.exception.prerequisite, RehearsalPrerequisite.PLACEMENT_UNAVAILABLE
+                )
+                self.assertNotIn("private", str(refused.exception))
+        adapter = self.adapter("prepare")
+        with (
+            patch.object(adapter, "inputs", return_value=(self.record, self.source, self.shape)),
+            patch(
+                "control_plane.dokploy.source.read_dokploy_config",
+                side_effect=ValueError("private malformed config"),
+            ),
+        ):
+            for _ in range(2):
+                with self.assertRaises(RehearsalRefused) as refused:
+                    self.run_operation(adapter, "capacity-config-changed")
+                self.assertEqual(
+                    refused.exception.prerequisite, RehearsalPrerequisite.PLACEMENT_UNAVAILABLE
+                )
+        for ambiguity in (False, True):
+            with (
+                self.subTest(ambiguity=ambiguity),
+                patch(
+                    "control_plane.dokploy.sandbox_placement.created_placement",
+                    return_value=("existing-project", "", ""),
+                    side_effect=IsolatedPlacementObservationRequired("ambiguous")
+                    if ambiguity
+                    else None,
+                ),
+                patch(
+                    "control_plane.odoo_upgrade_rehearsal.require_bridge_network_capacity",
+                    side_effect=AssertionError("Recovery takes precedence"),
+                ) as capacity,
+                self.assertRaises(ProviderMutationRejectedError) as rejected,
+            ):
+                self.adapter("prepare").apply(
+                    "original-operation", Mock(spec=ProviderOperationLease)
+                )
+            cause = rejected.exception.cause
+            assert isinstance(cause, RehearsalRefused)
+            self.assertEqual(cause.prerequisite, RehearsalPrerequisite.RECOVERY_REQUIRED)
+            capacity.assert_not_called()
+
+    def test_initial_target_read_refusal_releases_fresh_operation(self) -> None:
+        from control_plane.dokploy import api
+        from control_plane.odoo_upgrade_rehearsal import RehearsalPreparationReadRefused
+
+        adapter = self.adapter("prepare")
+        for status in (403, 503):
+            with (
+                self.subTest(status=status),
+                patch.object(
+                    api,
+                    "fetch_dokploy_target_payload",
+                    side_effect=api.DokployRequestFailed(
+                        method="GET", path="/api/compose.one", status_code=status, detail="private"
+                    ),
+                ) as read,
+                patch(
+                    "control_plane.testing_local_credentials.prepare_rehearsal_local_credentials"
+                ) as credentials,
+            ):
+                for _ in range(2):
+                    with self.assertRaises(RehearsalPreparationReadRefused) as refused:
+                        self.run_operation(adapter, "target-read-" + str(status))
+                    self.assertEqual(refused.exception.status_code, status)
+                    self.assertNotIn("private", str(refused.exception))
+                self.assertEqual(read.call_count, 2)
+                credentials.assert_not_called()
+
     def test_diagnostic_result_survives_real_marker_budget_and_adapter(self) -> None:
         import io
         from contextlib import redirect_stdout
@@ -208,6 +368,9 @@ class RehearsalScenario(unittest.TestCase):
 
     def setUp(self) -> None:
         fixture = resources.TestingReplacementResourceFixture(self, database_url=self.database_url)
+        self.enterContext(
+            patch("control_plane.odoo_upgrade_rehearsal.require_bridge_network_capacity")
+        )
         self.store = fixture.store
         self.app = fixture.app
         self.root = fixture.root
@@ -708,10 +871,16 @@ class RehearsalScenario(unittest.TestCase):
                     adapter.host(record, "apply", lambda: None)
 
     def test_missing_creation_receipt_requires_recovery_without_starting_a_copy(self) -> None:
+        from control_plane.dokploy import network_capacity
         from control_plane.provider_operations import ProviderOperationLease
 
         before = self.authority()
         with (
+            patch(
+                "control_plane.odoo_upgrade_rehearsal.require_bridge_network_capacity",
+                wraps=network_capacity.require_bridge_network_capacity,
+            ),
+            patch("control_plane.dokploy.native_copy_stream._read_remote") as read,
             patch(
                 "control_plane.dokploy.sandbox_placement.created_placement",
                 return_value=("", "", ""),
@@ -720,8 +889,18 @@ class RehearsalScenario(unittest.TestCase):
             patch.object(OdooRehearsalAdapter, "run_script") as storage,
             self.assertRaises(RehearsalRefused) as refused,
         ):
+            read.side_effect = lambda **kwargs: kwargs["receive"](
+                {
+                    "type": "complete",
+                    "result": {
+                        "total_slots": 16,
+                        "free_slots": 1 + network_capacity.BRIDGE_NETWORK_CAPACITY_MARGIN,
+                    },
+                }
+            )
             self.adapter("prepare").apply("original-operation", Mock(spec=ProviderOperationLease))
         self.assertEqual(refused.exception.code, RehearsalPrerequisite.RECOVERY_REQUIRED)
+        self.assertEqual(read.call_args.kwargs["server_id"], self.record.server_id)
         create.assert_called_once()
         storage.assert_not_called()
         self.assertEqual(self.authority(), before)
@@ -1336,6 +1515,9 @@ class RehearsalScenario(unittest.TestCase):
 
         adapter = self.adapter("prepare")
         with (
+            patch(
+                "control_plane.odoo_upgrade_rehearsal.require_bridge_network_capacity"
+            ) as capacity,
             patch.object(api, "fetch_dokploy_projects", side_effect=lambda **_: tuple(projects)),
             patch.object(api, "dokploy_request", side_effect=provider),
             patch.object(
@@ -1454,6 +1636,7 @@ class RehearsalScenario(unittest.TestCase):
             prepared = self.store.read_odoo_upgrade_rehearsal(self.identifier)
             assert prepared is not None
             self.assertEqual(prepared.state, "prepared")
+            capacity.assert_called_once()
 
     def test_terminal_refusal_releases_the_operation_target_for_a_new_key(self) -> None:
         retained = self.record.model_copy(
@@ -3671,6 +3854,222 @@ class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
         self.fixture = RehearsalScenario()
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
+
+    async def test_client_only_treats_provider_read_refusal_as_clean_after_real_release(
+        self,
+    ) -> None:
+        from control_plane.dokploy import api
+        from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
+        from control_plane.contracts.odoo_upgrade_rehearsal import (
+            ODOO_UPGRADE_REHEARSAL_ROUTE,
+            REHEARSAL_RELEASED_RESERVATION_HEADERS,
+        )
+        from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
+        from control_plane.http_routes.mutation_support import idempotency_scope
+        from control_plane.service_auth import (
+            configured_local_operator_identity,
+            LaunchplaneAuthzPolicy,
+        )
+        from control_plane.storage.postgres import PostgresRecordStore
+        from tests.http_app_test_support import _local_operator_bearer_config
+        from tests.support.http import request
+        from tests.test_odoo_upgrade_rehearsal_client import RehearsalClientTests
+
+        identity = configured_local_operator_identity(
+            _local_operator_bearer_config(token_label="local-owner-write")
+        )
+        assert identity is not None
+        self.fixture.principal = idempotency_scope(identity)
+        updated = self.fixture.record.model_copy(update={"principal": self.fixture.principal})
+        self.fixture.store.compare_and_write_odoo_upgrade_rehearsal(self.fixture.record, updated)
+        self.fixture.record = updated
+        self.fixture.store.seed_authz_policy_if_absent(
+            LaunchplaneAuthzPolicyRecord(
+                record_id="fixture-read-release-policy",
+                source="test",
+                updated_at=updated.updated_at.isoformat(),
+                policy=LaunchplaneAuthzPolicy(schema_version=2),
+            )
+        )
+        payload = self.fixture.adapter("prepare").request.model_dump(mode="json")
+        route = ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=self.fixture.product)
+        client = RehearsalClientTests()
+        self.addCleanup(client.doCleanups)
+
+        def sqlite_runner(**kwargs: Any) -> DurableProviderOperationResult:
+            # Only bypass the HTTP PostgreSQL admission. Real SQLite runner
+            # release/hold behavior is exercised; no PostgreSQL-locking claim.
+            with patch.object(
+                PostgresRecordStore,
+                "database_dialect_name",
+                new_callable=PropertyMock,
+                return_value="sqlite",
+            ):
+                return run_durable_provider_operation(**kwargs)
+
+        with (
+            patch.object(
+                PostgresRecordStore,
+                "database_dialect_name",
+                new_callable=PropertyMock,
+                return_value="postgresql",
+            ),
+            patch(
+                "control_plane.http_app.run_durable_provider_operation", side_effect=sqlite_runner
+            ),
+        ):
+            for status, boundary in ((403, "capacity"), (503, "placement")):
+                key = "fresh-read-" + boundary
+                failure = (
+                    NativeSourceAuthorizationDenied("private denied detail")
+                    if status == 403
+                    else api.DokployRequestFailed(
+                        method="GET",
+                        path="/api/project.all",
+                        status_code=503,
+                        detail="private provider detail",
+                    )
+                )
+                with (
+                    self.subTest(status=status),
+                    patch(
+                        "control_plane.dokploy.sandbox_placement.created_placement",
+                        **(
+                            {"return_value": ("", "", "")}
+                            if boundary == "capacity"
+                            else {"side_effect": failure}
+                        ),
+                    ),
+                    patch(
+                        "control_plane.odoo_upgrade_rehearsal.require_bridge_network_capacity",
+                        side_effect=failure,
+                    ),
+                    patch(
+                        "control_plane.testing_local_credentials.prepare_rehearsal_local_credentials"
+                    ) as credentials,
+                ):
+                    for _ in range(2):
+                        response = await request(
+                            self.fixture.app,
+                            "POST",
+                            route,
+                            payload=payload,
+                            headers={
+                                "Authorization": "Bearer local-operator-token",
+                                "Idempotency-Key": key,
+                            },
+                        )
+                        self.assertEqual(response.status_code, status, response.text)
+                        for name, value in REHEARSAL_RELEASED_RESERVATION_HEADERS.items():
+                            self.assertEqual(response.headers.get(name), value)
+                        self.assertNotIn("private", response.text)
+                        _, result, _ = client.call(
+                            "apply",
+                            failure=(status, response.json()),
+                            failure_headers=dict(response.headers),
+                        )
+                        self.assertFalse(result["original_key_required"])
+                        self.assertEqual(result["status"], "unavailable")
+                    credentials.assert_not_called()
+
+            def denied_after_effect(key: str, lease: Any) -> None:
+                lease.checkpoint_effect("fixture_effect")
+                raise NativeSourceAuthorizationDenied("private post-effect denial")
+
+            with patch.object(OdooRehearsalAdapter, "apply", side_effect=denied_after_effect):
+                response = await request(
+                    self.fixture.app,
+                    "POST",
+                    route,
+                    payload=payload,
+                    headers={
+                        "Authorization": "Bearer local-operator-token",
+                        "Idempotency-Key": "post-effect",
+                    },
+                )
+            self.assertEqual(response.status_code, 403, response.text)
+            for name in REHEARSAL_RELEASED_RESERVATION_HEADERS:
+                self.assertNotIn(name, response.headers)
+            _, result, _ = client.call(
+                "apply",
+                failure=(response.status_code, response.json()),
+                failure_headers=dict(response.headers),
+            )
+            self.assertTrue(result["original_key_required"])
+            self.assertEqual(result["status"], "reconciliation_required")
+        held = self.fixture.store.read_idempotency_record(
+            scope=self.fixture.principal, route_path=route, idempotency_key="post-effect"
+        )
+        assert held is not None
+        self.assertEqual(held.state, "reconcile_required")
+
+    async def test_capacity_refusal_remains_typed_through_http_and_operator_client(self) -> None:
+        from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
+        from control_plane.contracts.host_network_capacity import (
+            HOST_BRIDGE_NETWORK_FAILURE_MESSAGES,
+        )
+        from control_plane.contracts.odoo_upgrade_rehearsal import ODOO_UPGRADE_REHEARSAL_ROUTE
+        from control_plane.dokploy.network_capacity import BridgeNetworkCapacityRefused
+        from control_plane.storage.postgres import PostgresRecordStore
+        from control_plane.service_auth import LaunchplaneAuthzPolicy
+        from tests.support.http import request
+        from tests.test_odoo_upgrade_rehearsal_client import RehearsalClientTests
+
+        client = RehearsalClientTests()
+        self.addCleanup(client.doCleanups)
+        self.fixture.store.seed_authz_policy_if_absent(
+            LaunchplaneAuthzPolicyRecord(
+                record_id="fixture-capacity-policy",
+                source="test",
+                updated_at=self.fixture.record.updated_at.isoformat(),
+                policy=LaunchplaneAuthzPolicy(schema_version=2),
+            )
+        )
+        for code in (
+            "host_bridge_network_capacity_short",
+            "host_bridge_network_capacity_unavailable",
+        ):
+            with (
+                self.subTest(code=code),
+                patch.object(
+                    PostgresRecordStore,
+                    "database_dialect_name",
+                    new_callable=PropertyMock,
+                    return_value="postgresql",
+                ),
+                patch(
+                    "control_plane.http_app.run_durable_provider_operation",
+                    side_effect=BridgeNetworkCapacityRefused(code),
+                ),
+            ):
+                response = await request(
+                    self.fixture.app,
+                    "POST",
+                    ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=self.fixture.product),
+                    payload=self.fixture.request.model_copy(
+                        update={
+                            "mode": "apply",
+                            "rehearsal_id": "",
+                            "reviewed_plan_sha256": self.fixture.record.binding_sha256,
+                        }
+                    ).model_dump(mode="json"),
+                    headers={
+                        "Authorization": "Bearer local-operator-token",
+                        "Idempotency-Key": code,
+                    },
+                )
+            self.assertEqual(response.status_code, 409, response.text)
+            self.assertEqual(response.json()["error"]["code"], code)
+            self.assertEqual(
+                response.json()["error"]["message"], HOST_BRIDGE_NETWORK_FAILURE_MESSAGES[code]
+            )
+            status, result, post = client.call(
+                "apply", failure=(response.status_code, response.json())
+            )
+            self.assertNotEqual(status, 0)
+            self.assertFalse(result["original_key_required"])
+            self.assertEqual(result["status"], "unavailable")
+            post.assert_called_once()
 
     async def test_terminal_http_outcomes_preserve_fixed_refusal_codes_through_the_client(
         self,

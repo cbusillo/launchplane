@@ -131,3 +131,63 @@ class IsolatedPlacementTests(unittest.TestCase):
             self.create()
         self.request.assert_not_called()
         self.guard.assert_not_called()
+
+
+class PlacementObservationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.namespace = "lp-rehearsal-" + uuid4().hex
+        self.enterContext(
+            patch.object(
+                source, "read_dokploy_config", return_value=("provider.invalid", "fixture")
+            )
+        )
+
+    def test_existing_ambiguous_or_foreign_placement_has_typed_recovery_reason(self) -> None:
+        project = {"name": self.namespace, "projectId": "project", "environments": []}
+        environment = {"name": self.namespace, "environmentId": "environment", "compose": []}
+        cases: tuple[object, ...] = (
+            [project, project],
+            [{**project, "projectId": ""}],
+            [{**project, "environments": None}],
+            [{**project, "environments": [None]}],
+            [
+                {
+                    **project,
+                    "environments": [
+                        {**environment, "applications": [{"applicationId": "foreign"}]}
+                    ],
+                }
+            ],
+            [
+                {
+                    **project,
+                    "environments": [{"name": "another", "compose": [{"composeId": "foreign"}]}],
+                }
+            ],
+            [{**project, "environments": [environment, environment]}],
+            [{**project, "environments": [{**environment, "environmentId": ""}]}],
+            [
+                {
+                    **project,
+                    "environments": [{"name": self.namespace, "environmentId": "environment"}],
+                }
+            ],
+            [{**project, "environments": [{**environment, "composes": []}]}],
+            [{**project, "environments": [{**environment, "compose": None}]}],
+            [{**project, "environments": [{**environment, "compose": [{}, {}]}]}],
+            [
+                {
+                    **project,
+                    "environments": [
+                        {**environment, "compose": [{"name": "foreign", "composeId": "foreign"}]}
+                    ],
+                }
+            ],
+        )
+        for projects in cases:
+            with (
+                self.subTest(projects=projects),
+                patch.object(api, "fetch_dokploy_projects", return_value=projects),
+            ):
+                with self.assertRaises(sandbox_placement.IsolatedPlacementObservationRequired):
+                    sandbox_placement.created_placement(Path("."), self.namespace)
