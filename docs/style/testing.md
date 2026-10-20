@@ -140,28 +140,28 @@ lease recovery, and active-operation partial uniqueness. Same-repo CI provides
 the URL via a PostgreSQL service container with an IPv4-only dynamic host port,
 preventing the runner from selecting an IPv6 mapping for an IPv4 connection;
 fork PRs keep the SQLite/unittest path only. Same-repo CI partitions the existing
-integration inventory into six parallel jobs using the unittest shard planner.
+integration inventory into one job per workflow matrix entry using the unittest
+shard planner.
 Each job discovers the CLI's canonical module/class inventory, runs its
 disjoint test IDs in one process, and retains one migrated template database in
 its own PostgreSQL service. `fail-fast: false` lets every shard finish after a
 failure; `ci-gate` requires the whole matrix to succeed. Each log records selected
 test IDs, discovery time, complete subprocess time, and unittest's per-case
 durations (including fixture setup and cleanup). The default local command still
-runs the complete serial inventory; reproduce one CI job with
-`--shard-count 6 --shard-index 0` (or index 1 through 5). Invalid, empty, or
+runs the complete serial inventory; reproduce one CI job by passing the
+`--shard-count` and `--shard-index` recorded in its log. Invalid, empty, or
 unloadable selections fail before execution.
 
 Normal test work and job cleanup must leave headroom before the existing
 20-minute job guard, which bounds stuck lock waits. The CLI emits a live Actions
-warning when its subprocess exceeds `--warn-after-seconds` (ten minutes by
-default), then keeps waiting for the original result. It never terminates,
+warning when its subprocess exceeds `--warn-after-seconds` (see CLI help for
+the default), then keeps waiting for the original result. It never terminates,
 retries, or accepts tests because of that warning. Review it before inventory
 growth or runner variance consumes the remaining guard; the aggregate CI warning
-alone arrives after prerequisite jobs finish. Six shards replace the three-shard
-split that reached the guard at 750 tests in [#4188](https://github.com/cbusillo/launchplane/issues/4188).
-This uses more existing runner slots; it does not reduce total test work or
-increase the job deadline. Treat any flake as a storage or harness bug rather
-than hiding it with a retry loop.
+alone arrives after prerequisite jobs finish. Increasing the matrix uses more
+existing runner slots; it does not reduce total test work or increase the job
+deadline. Treat any flake as a storage or harness bug rather than hiding it with
+a retry loop.
 
 The lower-level CI shard commands remain available for diagnosis:
 

@@ -144,11 +144,13 @@ class PostgresIntegrationCommandTests(unittest.TestCase):
     def test_slow_shard_warns_without_interrupting_or_replacing_its_result(
         self, popen: MagicMock
     ) -> None:
+        warning_seconds = 0.01
         for returncode in (0, 1):
             with self.subTest(returncode=returncode):
                 process = popen.return_value.__enter__.return_value
+                process.reset_mock()
                 process.wait.side_effect = [
-                    subprocess.TimeoutExpired("fixture", 0.01),
+                    subprocess.TimeoutExpired("fixture", warning_seconds),
                     returncode,
                 ]
                 with patch(
@@ -161,7 +163,7 @@ class PostgresIntegrationCommandTests(unittest.TestCase):
                             "--database-url",
                             "postgresql+psycopg://fixture@127.0.0.1/postgres",
                             "--warn-after-seconds",
-                            "0.01",
+                            str(warning_seconds),
                         ],
                     )
                 self.assertEqual(result.exit_code == 0, returncode == 0, result.output)
@@ -170,5 +172,8 @@ class PostgresIntegrationCommandTests(unittest.TestCase):
                     json.loads(line) for line in result.output.splitlines() if line.startswith("{")
                 ]
                 self.assertEqual(summaries[-1]["returncode"], returncode)
+                self.assertEqual(process.wait.call_args_list[0].kwargs["timeout"], warning_seconds)
+                self.assertEqual(process.wait.call_args_list[1].args, ())
+                self.assertEqual(process.wait.call_args_list[1].kwargs, {})
                 process.terminate.assert_not_called()
                 process.kill.assert_not_called()

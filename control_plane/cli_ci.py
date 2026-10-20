@@ -90,7 +90,7 @@ def ci() -> None:
 @click.option(
     "--warn-after-seconds",
     type=click.FloatRange(min=0, min_open=True),
-    default=600.0,
+    default=900.0,
     show_default=True,
     help="Warn while the test subprocess is still running; never stop or retry it.",
 )
