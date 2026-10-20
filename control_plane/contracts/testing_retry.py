@@ -7,6 +7,22 @@ TESTING_RETRY_REARM_ROUTE = "service:testing-retry-rearm"
 TESTING_RETRY_ROUTE = "/v1/products/{product}/testing-retry"
 
 
+def testing_retry_rearm_key(product: str, generation_binding_sha256: str = "") -> str:
+    # Older workers keep reading the original product key and never consume a
+    # fresh-generation boundary they cannot enforce. The record shape stays readable.
+    return (
+        f"{product}:generation:{generation_binding_sha256}"
+        if generation_binding_sha256
+        else product
+    )
+
+
+def testing_retry_history_key(product: str, artifact_id: str) -> str:
+    # Traversal survives generation/phase changes and A/B/A desired builds.
+    # This checkpoint never grants another attempt budget.
+    return f"{product}:artifact:{artifact_id}"
+
+
 class TestingRetryRearm(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 

@@ -2437,8 +2437,12 @@ establish those runtime facts.
 Testing reconciliation follows the original artifact attempt chain after bootstrap.
 Terminal failures from operations created before this qualified generation was
 prepared remain in history but do not consume its retry budget. Operations
-created at or after preparation keep the ordinary retry limit. An unresolved
-earlier operation still prevents a new attempt; no key, fence or effect is cleared.
+created at or after preparation keep the ordinary retry limit. After correcting
+a prerequisite, use the [reviewed exact-artifact retry](testing-deploy-retry.md)
+to give this exact qualified generation another bounded budget. It preserves
+the original upstream-restore mode and custody; a predecessor or existing-data
+retry receipt cannot apply to this generation. An unresolved earlier operation
+still prevents a new attempt; no key, fence or effect is cleared.
 
 Keep the service image that understands initial preparation fences active while
 one is open; forward-fix an interrupted preparation. An older image cannot

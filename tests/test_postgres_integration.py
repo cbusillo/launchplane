@@ -12016,7 +12016,10 @@ class RealPostgresTestingRetryTests(testing_retry_tests.TestingRetryTests):
         def simultaneous(_: int) -> Any:
             barrier.wait(timeout=10)
             return self.store.commit_testing_retry_rearm(
-                expected=plan.request, rearm=rearm, mutation=mutation
+                expected=plan.request,
+                rearm=rearm,
+                mutation=mutation,
+                generation_binding_sha256=plan.generation_binding_sha256,
             )
 
         before = self.store.read_product_reconcile_request("site:testing")
@@ -12026,6 +12029,14 @@ class RealPostgresTestingRetryTests(testing_retry_tests.TestingRetryTests):
         self.assertEqual(responses[0][1], responses[1][1])
         after = self.store.read_product_reconcile_request("site:testing")
         self.assertEqual(after.request_count, before.request_count + 1)
+
+    def test_concurrent_fresh_generation_rearm_commits_one_wakeup(self) -> None:
+        generation = self.fresh_generation()
+        with patch(
+            "control_plane.odoo_testing_restore.read_current_testing_generation",
+            return_value=generation,
+        ):
+            self.test_concurrent_same_key_commits_one_rearm_and_one_wakeup()
 
 
 class RealPostgresTestingPublicIngressTests(public_ingress_tests.TestingPublicIngressTests):

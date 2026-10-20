@@ -451,6 +451,8 @@ from control_plane.contracts.testing_retry import (
     TestingRetryRearm,
     TESTING_RETRY_REARM_SCOPE,
     TESTING_RETRY_REARM_ROUTE,
+    testing_retry_rearm_key,
+    testing_retry_history_key,
 )
 from control_plane.contracts.product_reconcile import (
     PRODUCT_RECONCILE_REQUEST_STATES,
@@ -24280,13 +24282,46 @@ class PostgresRecordStore(HumanSessionStore):
         with self._session_factory() as session:
             return self._testing_retry_binding_in_session(session, product=product, context=context)
 
-    def read_testing_retry_rearm(self, product: str) -> TestingRetryRearm | None:
+    def read_testing_retry_rearm(
+        self, product: str, *, generation_binding_sha256: str = ""
+    ) -> TestingRetryRearm | None:
         record = self.read_idempotency_record(
             scope=TESTING_RETRY_REARM_SCOPE,
             route_path=TESTING_RETRY_REARM_ROUTE,
-            idempotency_key=product,
+            idempotency_key=testing_retry_rearm_key(product, generation_binding_sha256),
         )
         return TestingRetryRearm.model_validate(record.response_payload) if record else None
+
+    def read_testing_retry_history(
+        self, product: str, artifact_id: str, *, context: str, generation_binding_sha256: str = ""
+    ) -> TestingRetryRearm | None:
+        # Old APIs advance only the product key during emergency rollback.
+        # The DB write clock has second resolution; ties prefer the product key.
+        candidates = []
+        for key in dict.fromkeys(
+            (
+                product,
+                testing_retry_rearm_key(product, generation_binding_sha256),
+                testing_retry_history_key(product, artifact_id),
+            )
+        ):
+            record = self.read_idempotency_record(
+                scope=TESTING_RETRY_REARM_SCOPE,
+                route_path=TESTING_RETRY_REARM_ROUTE,
+                idempotency_key=key,
+            )
+            if record is not None:
+                rearm = TestingRetryRearm.model_validate(record.response_payload)
+                if (rearm.context, rearm.artifact_id) == (context, artifact_id):
+                    candidates.append(
+                        (
+                            parse_launchplane_mutation_timestamp(
+                                record.recorded_at, field_name="retry checkpoint write"
+                            ),
+                            rearm,
+                        )
+                    )
+        return max(candidates, key=lambda candidate: candidate[0])[1] if candidates else None
 
     def commit_testing_retry_rearm(
         self,
@@ -24294,9 +24329,11 @@ class PostgresRecordStore(HumanSessionStore):
         expected: ProductReconcileRequestRecord,
         rearm: TestingRetryRearm,
         mutation: DbOnlyMutationRequest,
+        generation_binding_sha256: str = "",
     ) -> tuple[str, LaunchplaneIdempotencyRecord]:
         """Commit a recovery boundary, wakeup and replay receipt in one transaction."""
         from control_plane.testing_retry import TestingRetryRefused
+        from control_plane.odoo_testing_restore import generation_binding
 
         if expected.target_kind != "testing" or expected.state == "running":
             raise TestingRetryRefused("testing_retry_busy")
@@ -24331,6 +24368,21 @@ class PostgresRecordStore(HumanSessionStore):
                 != rearm.lane_binding_sha256
             ):
                 raise TestingRetryRefused("testing_retry_stale")
+            generation_row = session.get(
+                LaunchplaneFreshOdooTestingGenerationRow, (expected.product, rearm.context)
+            )
+            generation = (
+                FreshOdooTestingGeneration.model_validate(generation_row.payload)
+                if generation_row is not None
+                else None
+            )
+            current_generation_sha256 = (
+                generation_binding(generation)
+                if generation is not None and not generation.completed_at
+                else ""
+            )
+            if current_generation_sha256 != generation_binding_sha256:
+                raise TestingRetryRefused("testing_retry_stale")
             target_row = session.get(LaunchplaneDokployTargetRow, (rearm.context, "testing"))
             if (
                 target_row is not None
@@ -24357,11 +24409,15 @@ class PostgresRecordStore(HumanSessionStore):
                 record_id=build_launchplane_mutation_reservation_id(
                     scope=TESTING_RETRY_REARM_SCOPE,
                     route_path=TESTING_RETRY_REARM_ROUTE,
-                    idempotency_key=expected.product,
+                    idempotency_key=testing_retry_rearm_key(
+                        expected.product, generation_binding_sha256
+                    ),
                 ),
                 scope=TESTING_RETRY_REARM_SCOPE,
                 route_path=TESTING_RETRY_REARM_ROUTE,
-                idempotency_key=expected.product,
+                idempotency_key=testing_retry_rearm_key(
+                    expected.product, generation_binding_sha256
+                ),
                 request_fingerprint=canonical_json_sha256(rearm.model_dump(mode="json")),
                 response_status_code=202,
                 response_trace_id=mutation.response_trace_id,
@@ -24369,6 +24425,21 @@ class PostgresRecordStore(HumanSessionStore):
                 response_payload=rearm.model_dump(mode="json"),
             )
             session.merge(self._idempotency_row(marker))
+            history_key = testing_retry_history_key(expected.product, rearm.artifact_id)
+            session.merge(
+                self._idempotency_row(
+                    marker.model_copy(
+                        update={
+                            "record_id": build_launchplane_mutation_reservation_id(
+                                scope=TESTING_RETRY_REARM_SCOPE,
+                                route_path=TESTING_RETRY_REARM_ROUTE,
+                                idempotency_key=history_key,
+                            ),
+                            "idempotency_key": history_key,
+                        }
+                    )
+                )
+            )
             self._fold_product_reconcile_request(
                 session,
                 target=ProductReconcileTarget(product=expected.product, target_kind="testing"),

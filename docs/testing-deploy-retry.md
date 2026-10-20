@@ -3,7 +3,9 @@
 When an Odoo testing artifact exhausts its automatic deploy attempts after a
 control-plane failure, use `POST /v1/products/{product}/testing-retry` on the
 deployed Launchplane service. This control re-arms the reconciler for the exact
-desired artifact, retaining existing data. It does not rebuild the product.
+desired artifact. Completed generations retain existing data. An unfinished
+qualified fresh generation continues its original `upstream_restore` mode on
+the same recipient, allocation and source-copy custody. It does not rebuild the product.
 Use the current service contract's `rearm_testing_retry` operation with an
 authenticated caller that already has `odoo_target_replacement_apply.execute`
 for that product's testing lane. No new grant is part of this operation.
@@ -14,7 +16,8 @@ for that product's testing lane. No new grant is part of this operation.
    desired commit), and a concrete `reason`. Review uses `product_environment.read`
    and needs no write grant or CSRF token. A write-capable caller may also POST
    these inputs with `mode: "dry-run"` and `instance: "testing"`.
-   Review the returned artifact, source, last failed operation and `plan_sha256`.
+   Review the returned artifact, source, last failed operation, `data_source_mode`,
+   generation binding (when unfinished) and `plan_sha256`.
    This step writes no record and queues nothing.
 3. POST those artifact/source/reason inputs with `mode: "apply"`, `instance: "testing"` and
    `reviewed_plan_sha256` equal to that digest. Supply one unique
@@ -43,8 +46,26 @@ after the reviewed failed operation, under its existing stable keys and own
 authorization. It rechecks verified builds, forward movement, image scanning,
 staff holds and active/unknown operations. A changed inventory, release tuple,
 profile or target identity invalidates that re-arm boundary. A re-armed deploy
-uses `data_source_mode: "existing"` and refuses empty data. An incomplete fresh
-testing restore must finish through its own supported recovery first.
+uses `data_source_mode: "existing"` and refuses empty data once the generation
+is complete. For an unfinished, queued fresh generation it retains
+`upstream_restore` with the required initialization flag. The retry boundary
+belongs to that exact generation: an existing-data or predecessor-generation
+receipt cannot replenish its budget. The generation identity is compared again
+under the lane lock at commit. Ordinary execution observations do not change
+that identity. Preparation starts the fresh-copy budget; recorded copy completion
+starts the existing-data budget, including when later release publication fails.
+Terminal failures from the preceding phase stay in history. A failed legacy
+restore without a qualified current generation still refuses; this control never turns an incomplete copy into an existing-data
+deployment or releases an unknown provider effect.
+
+Fresh-generation boundaries use separate keys in the existing metadata store,
+with the unchanged record format. A separate per-artifact traversal checkpoint
+survives generation changes, completion and intervening desired artifacts. It
+skips only previously reviewed terminal history and never authorizes a budget
+reset. Older workers ignore fresh boundaries and may stop with an attempt-chain
+error after long fresh history. When rolling forward, the current worker also reads
+newer legacy-key checkpoints written by the older API. Keep the API and worker
+on compatible source to use this continuation; storage rollback or counter edits are not recovery.
 
 This route accepts only testing lanes. It neither promotes to production nor
 clears old operations, restores data, changes access, or lifts a staff hold.

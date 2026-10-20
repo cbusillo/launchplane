@@ -598,7 +598,10 @@ def reconcile_testing_target(
         record_store=cast(VerifiedArtifactStore, record_store), verified=desired
     )
     # The request the product's testing-deploy workflow sent before Launchplane took over.
-    from control_plane.odoo_testing_restore import read_current_testing_generation
+    from control_plane.odoo_testing_restore import (
+        generation_binding,
+        read_current_testing_generation,
+    )
 
     try:
         generation = read_current_testing_generation(
@@ -614,12 +617,14 @@ def reconcile_testing_target(
     if generation is not None and not generation.reconcile_requested_at:
         plan.update(action="wait", held=True, reason="fresh_testing_bootstrap_incomplete")
         return ReconcileOutcome(plan)
-    rearmed_after = (
-        ""
-        if generation is not None and not generation.completed_at
-        else testing_retry_after_operation(
-            record_store=record_store, profile=profile, lane=lane, artifact_id=manifest.artifact_id
-        )
+    fresh_generation = generation is not None and not generation.completed_at
+    generation_sha256 = generation_binding(generation) if fresh_generation and generation else ""
+    rearmed_after = testing_retry_after_operation(
+        record_store=record_store,
+        profile=profile,
+        lane=lane,
+        artifact_id=manifest.artifact_id,
+        generation_binding_sha256=generation_sha256,
     )
     envelope = OdooTargetReplacementApplyEnvelope(
         product=profile.product,
@@ -627,10 +632,8 @@ def reconcile_testing_target(
             product=profile.product,
             instance=TESTING_INSTANCE,
             strategy="recreate-in-place",
-            allow_empty_data=not bool(rearmed_after),
-            data_source_mode="upstream_restore"
-            if generation and not generation.completed_at
-            else "existing",
+            allow_empty_data=fresh_generation or not bool(rearmed_after),
+            data_source_mode="upstream_restore" if fresh_generation else "existing",
             artifact_id=manifest.artifact_id,
             source_git_ref=manifest.source_commit,
         ),
@@ -656,7 +659,9 @@ def reconcile_testing_target(
             f"{manifest.artifact_id}"
         ),
         idempotency_scope=idempotency_scope,
-        generation_prepared_at=generation.prepared_at if generation is not None else "",
+        generation_budget_started_at=(generation.completed_at or generation.prepared_at)
+        if generation is not None
+        else "",
         rearmed_after_operation_id=rearmed_after,
         history_after_operation_id=testing_retry_after_operation(
             record_store=record_store,
@@ -664,6 +669,7 @@ def reconcile_testing_target(
             lane=lane,
             artifact_id=manifest.artifact_id,
             require_current_binding=False,
+            generation_binding_sha256=generation_sha256,
         ),
     )
     if attempt.last_failed is not None:
@@ -1229,13 +1235,24 @@ def testing_retry_after_operation(
     lane: ProductLaneProfile,
     artifact_id: str,
     require_current_binding: bool = True,
+    generation_binding_sha256: str = "",
 ) -> str:
     if not isinstance(record_store, PostgresRecordStore):
         return ""
-    rearm = record_store.read_testing_retry_rearm(profile.product)
+    if not require_current_binding:
+        rearm = record_store.read_testing_retry_history(
+            profile.product,
+            artifact_id,
+            context=lane.context,
+            generation_binding_sha256=generation_binding_sha256,
+        )
+        return rearm.after_operation_id if rearm is not None else ""
+    rearm = record_store.read_testing_retry_rearm(
+        profile.product, generation_binding_sha256=generation_binding_sha256
+    )
     if rearm is None or (rearm.context, rearm.artifact_id) != (lane.context, artifact_id):
         return ""
-    if require_current_binding and (
+    if (
         record_store.read_testing_retry_binding(product=profile.product, context=lane.context)
         != rearm.lane_binding_sha256
     ):
@@ -1249,16 +1266,21 @@ def testing_artifact_attempt(
     profile: LaunchplaneProductProfileRecord,
     lane: ProductLaneProfile,
     artifact_id: str,
-    generation_prepared_at: str = "",
+    generation_budget_started_at: str = "",
+    generation_binding_sha256: str = "",
 ) -> _TestingAttempt:
     return _next_testing_attempt(
         record_store=record_store,
         testing_runs_desired=lambda: False,
         base_key=f"{RECONCILE_SOURCE}:{profile.product}:{lane.context}:testing:{artifact_id}",
         idempotency_scope=reconcile_reservation_scope(profile.product),
-        generation_prepared_at=generation_prepared_at,
+        generation_budget_started_at=generation_budget_started_at,
         rearmed_after_operation_id=testing_retry_after_operation(
-            record_store=record_store, profile=profile, lane=lane, artifact_id=artifact_id
+            record_store=record_store,
+            profile=profile,
+            lane=lane,
+            artifact_id=artifact_id,
+            generation_binding_sha256=generation_binding_sha256,
         ),
         history_after_operation_id=testing_retry_after_operation(
             record_store=record_store,
@@ -1266,6 +1288,7 @@ def testing_artifact_attempt(
             lane=lane,
             artifact_id=artifact_id,
             require_current_binding=False,
+            generation_binding_sha256=generation_binding_sha256,
         ),
     )
 
@@ -1276,7 +1299,7 @@ def _next_testing_attempt(
     testing_runs_desired: Callable[[], bool],
     base_key: str,
     idempotency_scope: str,
-    generation_prepared_at: str = "",
+    generation_budget_started_at: str = "",
     rearmed_after_operation_id: str = "",
     history_after_operation_id: str = "",
 ) -> _TestingAttempt:
@@ -1288,16 +1311,29 @@ def _next_testing_attempt(
     operation_store = odoo_target_replacement_apply_operation_store(record_store)
     generation_started = (
         parse_launchplane_mutation_timestamp(
-            generation_prepared_at, field_name="testing generation preparation"
+            generation_budget_started_at, field_name="testing generation phase"
         )
-        if generation_prepared_at
+        if generation_budget_started_at
         else None
     )
     # The prefix was terminal and exhausted when re-arm committed under the lane
     # lock. Start at its successor so repeated recoveries do not spend the chain
     # traversal bound on immutable history. Enqueue still checks the entire lane
     # for active/unknown operations, including any reopened historical attempt.
-    boundary = history_after_operation_id or rearmed_after_operation_id
+    if rearmed_after_operation_id and generation_started is not None:
+        reviewed = operation_store.read_odoo_stable_target_replacement_operation_record(
+            rearmed_after_operation_id
+        )
+        if (
+            parse_launchplane_mutation_timestamp(
+                reviewed.created_at, field_name="testing operation creation"
+            )
+            < generation_started
+        ):
+            rearmed_after_operation_id = ""
+    # A current-phase reviewed reset wins even when an older API did not advance
+    # the independent traversal key. Older-phase receipts cannot move us back.
+    boundary = rearmed_after_operation_id or history_after_operation_id
     key = f"{base_key}:after-{boundary}" if boundary else base_key
     failed_attempts = 0
     last_failed: OdooStableTargetReplacementOperationRecord | None = None
@@ -1342,8 +1378,8 @@ def _next_testing_attempt(
                     idempotency_key=key, deployed_operation_id=existing.operation_id
                 )
         elif existing.status != "superseded" and not is_staff_testing_hold_cancellation(existing):
-            # A qualified independent generation preserves the retained target's
-            # failures, but they cannot spend this recipient's retry budget.
+            # Preparation and copy completion start independent phase budgets.
+            # Earlier terminal failures remain history, without spending it.
             # Follow the original chain, including every unresolved attempt.
             if generation_started is None or (
                 parse_launchplane_mutation_timestamp(

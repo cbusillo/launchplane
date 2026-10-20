@@ -115,7 +115,8 @@ def register_testing_retry_routes(
                     "after_operation_id": plan.after_operation_id,
                     "plan_sha256": plan.plan_sha256,
                     "reconcile_requested": body.mode == "apply",
-                    "data_source_mode": "existing",
+                    "data_source_mode": plan.data_source_mode,
+                    "generation_binding_sha256": plan.generation_binding_sha256,
                 },
             )
             if body.mode == "dry-run":
@@ -141,6 +142,7 @@ def register_testing_retry_routes(
                     response_trace_id=trace,
                     response_payload=response.model_dump(mode="json", exclude_none=True),
                 ),
+                generation_binding_sha256=plan.generation_binding_sha256,
             )
             if status == "replayed":
                 return replay_idempotent_response(trace_id=trace, stored_record=receipt)
@@ -233,7 +235,8 @@ def register_testing_retry_routes(
                     "after_operation_id": plan.after_operation_id,
                     "plan_sha256": plan.plan_sha256,
                     "reconcile_requested": False,
-                    "data_source_mode": "existing",
+                    "data_source_mode": plan.data_source_mode,
+                    "generation_binding_sha256": plan.generation_binding_sha256,
                 },
             )
         except TestingRetryRefused as error:
