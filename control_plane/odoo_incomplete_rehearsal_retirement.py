@@ -11,6 +11,7 @@ from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRec
 from control_plane.contracts.idempotency_record import parse_launchplane_mutation_timestamp
 from control_plane.contracts.odoo_upgrade_rehearsal import (
     ODOO_UPGRADE_REHEARSAL_ROUTE,
+    INCOMPLETE_REHEARSAL_TARGET_SUFFIX,
     OdooUpgradeRehearsalRecord,
     IncompleteRehearsalHostResult,
     IncompleteRehearsalRetirementCheckpoint,
@@ -55,7 +56,7 @@ class IncompleteRehearsalRetirement:
         )
 
     def target_key(self) -> str:
-        return self.adapter.target_key() + ":incomplete-retirement"
+        return self.adapter.target_key() + INCOMPLETE_REHEARSAL_TARGET_SUFFIX
 
     def reconciliation_key(self) -> str:
         return self.adapter.reconciliation_key()

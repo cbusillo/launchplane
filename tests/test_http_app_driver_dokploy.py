@@ -1234,6 +1234,13 @@ class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
                             response.json()["error"]["code"], "self_deploy_drain_timeout"
                         )
                         self.assertIn(reservation.record_id, response.text)
+                        details = cast(
+                            tuple[dict[str, object], ...], read_status(store)["operation_details"]
+                        )
+                        self.assertEqual(
+                            json.loads(response.json()["records"]["blocking_operation_refs"]),
+                            [details[0]["operation_ref"]],
+                        )
                 update.assert_not_called()
                 deploy.assert_not_called()
 

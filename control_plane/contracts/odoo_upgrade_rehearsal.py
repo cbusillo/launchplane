@@ -19,6 +19,7 @@ from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBu
 ODOO_UPGRADE_REHEARSAL_ROUTE = "/v1/products/{product}/odoo-upgrade-rehearsal"
 ODOO_UPGRADE_REHEARSAL_PREFLIGHT_ROUTE = ODOO_UPGRADE_REHEARSAL_ROUTE + "/preflight"
 REHEARSAL_RELEASED_RESERVATION_HEADERS = {"X-Launchplane-Mutation-Reservation": "released"}
+INCOMPLETE_REHEARSAL_TARGET_SUFFIX = ":incomplete-retirement"
 REHEARSAL_PUBLIC_FAILURE_MESSAGES = {
     "rehearsal_storage_capacity_insufficient": "No rehearsal action started. Requalify storage capacity and review a new operation key.",
     "rehearsal_precheck_refused": "No rehearsal action started. Requalify the prerequisite and review a new operation key.",
@@ -30,6 +31,11 @@ RehearsalState = Literal["planned", "prepared", "upgraded", "switched", "verifie
 RehearsalBackingRole = Literal[
     "database", "filestore", "runner_scratch", "database_scratch", "host_custody"
 ]
+
+
+def rehearsal_execution_lock_name(provider_target_key: str) -> str:
+    """Execute and incomplete retirement share the original rehearsal executor."""
+    return provider_target_key.removesuffix(INCOMPLETE_REHEARSAL_TARGET_SUFFIX)
 
 
 class RehearsalBackingGroup(BaseModel):

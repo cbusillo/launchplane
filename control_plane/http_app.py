@@ -11934,6 +11934,7 @@ def create_launchplane_fastapi_app(
                 ServiceDeployOutcomeUnknown,
                 ServiceDeployPreEffectRefused,
             )
+            from control_plane.contracts.service_deploy_drain import operation_reference
 
             if isinstance(error, ServiceDeployDrainTimeout):
                 raise _launchplane_http_error(
@@ -11941,7 +11942,12 @@ def create_launchplane_fastapi_app(
                     trace_id=trace_id,
                     code="self_deploy_drain_timeout",
                     message=str(error),
-                    records={"running_operation_ids": json.dumps(error.blockers)},
+                    records={
+                        "running_operation_ids": json.dumps(error.blockers),
+                        "blocking_operation_refs": json.dumps(
+                            [operation_reference(item) for item in error.blockers]
+                        ),
+                    },
                 ) from error
             elif isinstance(error, ServiceDeployDispatchBusy):
                 driver_result = LaunchplaneSelfDeployResult(
@@ -17197,8 +17203,12 @@ def create_launchplane_fastapi_app(
             asyncio.to_thread(execute),
             name=f"provider-mutation:{trace_id}",
         )
+        from control_plane.service_deploy_drain import ServiceDeployDraining
+
         try:
             result = await asyncio.shield(operation_task)
+        except ServiceDeployDraining:
+            raise _service_deploy_draining_error(trace_id) from None
         except asyncio.CancelledError as cancellation:
             while not operation_task.done():
                 try:
@@ -31377,6 +31387,17 @@ def merge_train_controller_fence_http_error(
         trace_id=trace_id,
         code=code,
         message=str(error),
+    )
+
+
+def _service_deploy_draining_error(trace_id: str) -> LaunchplaneHTTPException:
+    return _launchplane_http_error(
+        status_code=409,
+        trace_id=trace_id,
+        code="service_deploy_draining",
+        message="Launchplane is draining provider operations. Retry after the deploy with "
+        "the original request and key; preserve any existing operation custody.",
+        headers={"Retry-After": "10"},
     )
 
 

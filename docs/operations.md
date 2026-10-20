@@ -4724,12 +4724,55 @@ URLs with `preview-<reservation-id>` as the environment selector and the existin
 reservation or recorded fence incident history; an arbitrary preview name is
 not an environment. Original intent absent in legacy records stays unavailable:
 current plans and provider idleness cannot reconstruct the original proof.
-Separately,
-a typed `self_deploy_drain_timeout` uses the existing deploy-failure Discord
-reporter and manual break-glass link. It explicitly reports zero replacement
+### Self-deploy drain timeout and continuation
+
+A typed `self_deploy_drain_timeout` uses the existing deploy-failure Discord
+reporter once in the failed deploy run. It explicitly reports zero replacement
 dispatch; the rollback dispatch classifier still treats that refusal as
-pre-effect. Installation and later live settlement remain separate proof from
-source tests or a merge.
+pre-effect. The absolute ten-minute drain budget survives polls and service
+restarts. For a legacy drain without a saved budget, its first updated poll anchors
+the budget to the prior stored observation. This budget is independent of the
+worker stop, provider deployment and health-verification budgets after dispatch.
+New Client-release/event effects and agent-started rehearsal operations
+wait behind the active drain; rehearsal HTTP calls receive `409/service_deploy_draining`
+with `Retry-After`. Original-key observation, admitted heartbeats and completion
+remain available. Constant fresh traffic cannot extend the drain deadline.
+At timeout the request stops before provider writes and releases its admission
+pause, leaving supported recovery available. It never kills or settles a blocker.
+
+The alert includes bounded opaque blocker references. Match each reference to
+`runtime.release_drain.operation_details[].operation_ref` for its operation ID
+and ownership evidence. Raw operation IDs, keys and private coordinates are not
+sent to Discord. If the alert lists more blockers than fit, inspect the runtime
+status; its detail count and truncation flag report coverage.
+
+Let blockers finish or use their own supported recovery. Then dispatch a fresh
+normal Deploy Launchplane run on the default branch, with a new self-deploy key
+and marker (the workflow normally supplies both). A fresh normal request checks
+the remaining blockers before any provider write; the old timed-out request
+stays non-dispatchable even after blockers clear. A dispatched replacement fences
+new admission until matching startup. This continuation does not authorize an
+operation replay, clear a product recovery fence or supply a missing checkpoint.
+Installation and later live settlement remain separate proof from source tests
+or a merge.
+
+An expired rehearsal reservation can stop blocking replacement only when the
+original rehearsal execution lock proves the API executor has exited. Execution
+and incomplete retirement share that lock. This preserves the journal and custody;
+it does not prove a remote provider job stopped or authorize replay. Other provider
+families keep their existing admission and recovery boundaries. Broader top-level
+admission must preserve admitted child work; provider-target keys alone do not
+prove a live executor. Cooperative long-operation checkpoints and automatic
+startup resume are separate work, not supplied by this drain guard. A fresh
+normal request can still time out while a real blocker remains. If supported
+recovery cannot settle it, the existing approved manual break-glass path remains
+the emergency recovery route; this alert does not dispatch it or grant approval.
+
+Service rollback and marker-bound repair use this same drain. If a rehearsal
+starts on a confirmed replacement before verification fails, automated rollback
+can wait for that rehearsal and reach the bounded refusal. The existing approved
+manual break-glass route remains available for that emergency; a repair marker
+does not authorize killing an operation.
 
 ### Fishbowl import proof on an exact PR artifact
 
