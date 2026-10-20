@@ -20,12 +20,15 @@ from control_plane.product_reconcile import (
     TESTING_DEPLOY_MAX_FAILED_ATTEMPTS,
     TESTING_DEPLOY_MAX_ATTEMPT_CHAIN,
 )
-from control_plane.odoo_testing_restore import FreshOdooTestingGeneration
+from control_plane.odoo_testing_restore import FreshOdooTestingGeneration, generation_binding
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.promotion_record import PostDeployUpdateEvidence
 from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
-from control_plane.storage.postgres import LaunchplaneReleaseTupleRow
+from control_plane.storage.postgres import (
+    LaunchplaneFreshOdooTestingGenerationRow,
+    LaunchplaneReleaseTupleRow,
+)
 from control_plane.contracts.testing_retry import TESTING_RETRY_ROUTE
 from control_plane.testing_lane_hold import STAFF_TESTING_HOLD_REASON
 from control_plane.launchplane_reconcile_authorization import (
@@ -373,6 +376,135 @@ class TestingRetryTests(reconcile_fixtures.ProductReconcileTestCase):
         )
         self.assertEqual(operation.request.data_source_mode, "upstream_restore")
         self.assertTrue(operation.request.allow_empty_data)
+
+    def fresh_generation(self) -> FreshOdooTestingGeneration:
+        operations = self.store.list_odoo_stable_target_replacement_operation_records()
+        prepared = (
+            min(datetime.fromisoformat(op.created_at) for op in operations) - timedelta(seconds=1)
+        ).isoformat()
+        generation = FreshOdooTestingGeneration(
+            product="site",
+            context="cm",
+            operation_id="original-fresh-preparation",
+            target_id="fresh-target",
+            namespace="lp-testing-" + "a" * 32,
+            domain_host="fresh.example.invalid",
+            resources_binding_sha256="b" * 64,
+            bootstrap_plan_sha256="c" * 64,
+            request_sha256="d" * 64,
+            prepared_at=prepared,
+            reconcile_requested_at=prepared,
+        )
+        # The bootstrap producer owns these rows. This fixture isolates retry
+        # admission from its independently tested provider qualification.
+        with self.store._session_factory() as session:
+            session.merge(
+                LaunchplaneFreshOdooTestingGenerationRow(
+                    product=generation.product,
+                    context=generation.context,
+                    payload=generation.model_dump(mode="json"),
+                )
+            )
+            session.commit()
+        return generation
+
+    def test_unfinished_generation_rearms_its_restore_without_rewriting_history(self) -> None:
+        generation = self.fresh_generation()
+        before = self.store.list_odoo_stable_target_replacement_operation_records()
+        with patch(
+            "control_plane.odoo_testing_restore.read_current_testing_generation",
+            return_value=generation,
+        ):
+            dry = self.post(self.draft)
+            self.assertEqual(dry.status_code, 202, dry.text)
+            self.assertEqual(dry.json()["result"]["data_source_mode"], "upstream_restore")
+            body = self.reviewed()
+            applied = self.post(body, "resume-original-generation")
+            self.assertEqual(applied.status_code, 202, applied.text)
+            queued = self.reconcile()["queued_operation_id"]
+            queue = self.store.read_product_reconcile_request("site:testing")
+            replay = self.post(body, "resume-original-generation")
+            self.assertEqual(replay.status_code, 202, replay.text)
+            self.assertTrue(replay.json()["replayed"])
+            self.assertEqual(self.store.read_product_reconcile_request("site:testing"), queue)
+        operation = self.store.read_odoo_stable_target_replacement_operation_record(str(queued))
+        self.assertEqual(operation.request.data_source_mode, "upstream_restore")
+        self.assertTrue(operation.request.allow_empty_data)
+        for original in before:
+            self.assertEqual(
+                self.store.read_odoo_stable_target_replacement_operation_record(
+                    original.operation_id
+                ),
+                original,
+            )
+        self.assertEqual(self.store.read_fresh_odoo_testing_generation("site", "cm"), generation)
+        self.assertIsNone(self.store.read_testing_retry_rearm("site"))
+        self.assertIsNotNone(
+            self.store.read_testing_retry_rearm(
+                "site", generation_binding_sha256=generation_binding(generation)
+            )
+        )
+        self.assertIsNone(
+            self.store.read_testing_retry_rearm(
+                "site",
+                generation_binding_sha256=generation_binding(
+                    generation.model_copy(update={"operation_id": "another-preparation"})
+                ),
+            )
+        )
+
+    def test_generation_change_at_commit_refuses_without_rearm_or_queue_wakeup(self) -> None:
+        generation = self.fresh_generation()
+        original_commit = self.store.commit_testing_retry_rearm
+        queue = self.store.read_product_reconcile_request("site:testing")
+
+        def change_then_commit(**kwargs: Any) -> Any:
+            with self.store._session_factory() as session:
+                row = session.get(LaunchplaneFreshOdooTestingGenerationRow, ("site", "cm"))
+                assert row is not None
+                row.payload = generation.model_copy(
+                    update={"operation_id": "concurrent-successor"}
+                ).model_dump(mode="json")
+                session.commit()
+            return original_commit(**kwargs)
+
+        with (
+            patch(
+                "control_plane.odoo_testing_restore.read_current_testing_generation",
+                return_value=generation,
+            ),
+            patch.object(self.store, "commit_testing_retry_rearm", side_effect=change_then_commit),
+        ):
+            refused = self.post(self.reviewed(), "changed-at-commit")
+        self.assertEqual(refused.status_code, 409, refused.text)
+        self.assertEqual(refused.json()["error"]["code"], "testing_retry_stale")
+        self.assertEqual(self.store.read_product_reconcile_request("site:testing"), queue)
+        self.assertIsNone(
+            self.store.read_testing_retry_rearm(
+                "site", generation_binding_sha256=generation_binding(generation)
+            )
+        )
+
+    def test_fresh_generation_change_refuses_reviewed_rearm(self) -> None:
+        generation = self.fresh_generation()
+        with patch(
+            "control_plane.odoo_testing_restore.read_current_testing_generation",
+            return_value=generation,
+        ):
+            body = self.reviewed()
+        successor = generation.model_copy(update={"operation_id": "successor-preparation"})
+        with self.store._session_factory() as session:
+            row = session.get(LaunchplaneFreshOdooTestingGenerationRow, ("site", "cm"))
+            assert row is not None
+            row.payload = successor.model_dump(mode="json")
+            session.commit()
+        with patch(
+            "control_plane.odoo_testing_restore.read_current_testing_generation",
+            return_value=successor,
+        ):
+            refused = self.post(body, "stale-generation")
+        self.assertEqual(refused.status_code, 409, refused.text)
+        self.assertEqual(refused.json()["error"]["code"], "testing_retry_stale")
 
     def test_unfinished_restore_refuses_rearm_before_apply(self) -> None:
         self.store.write_dokploy_target_id_record(

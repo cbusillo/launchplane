@@ -598,7 +598,10 @@ def reconcile_testing_target(
         record_store=cast(VerifiedArtifactStore, record_store), verified=desired
     )
     # The request the product's testing-deploy workflow sent before Launchplane took over.
-    from control_plane.odoo_testing_restore import read_current_testing_generation
+    from control_plane.odoo_testing_restore import (
+        generation_binding,
+        read_current_testing_generation,
+    )
 
     try:
         generation = read_current_testing_generation(
@@ -614,12 +617,14 @@ def reconcile_testing_target(
     if generation is not None and not generation.reconcile_requested_at:
         plan.update(action="wait", held=True, reason="fresh_testing_bootstrap_incomplete")
         return ReconcileOutcome(plan)
-    rearmed_after = (
-        ""
-        if generation is not None and not generation.completed_at
-        else testing_retry_after_operation(
-            record_store=record_store, profile=profile, lane=lane, artifact_id=manifest.artifact_id
-        )
+    fresh_generation = generation is not None and not generation.completed_at
+    generation_sha256 = generation_binding(generation) if fresh_generation and generation else ""
+    rearmed_after = testing_retry_after_operation(
+        record_store=record_store,
+        profile=profile,
+        lane=lane,
+        artifact_id=manifest.artifact_id,
+        generation_binding_sha256=generation_sha256,
     )
     envelope = OdooTargetReplacementApplyEnvelope(
         product=profile.product,
@@ -627,7 +632,7 @@ def reconcile_testing_target(
             product=profile.product,
             instance=TESTING_INSTANCE,
             strategy="recreate-in-place",
-            allow_empty_data=not bool(rearmed_after),
+            allow_empty_data=fresh_generation or not bool(rearmed_after),
             data_source_mode="upstream_restore"
             if generation and not generation.completed_at
             else "existing",
@@ -664,6 +669,7 @@ def reconcile_testing_target(
             lane=lane,
             artifact_id=manifest.artifact_id,
             require_current_binding=False,
+            generation_binding_sha256=generation_sha256,
         ),
     )
     if attempt.last_failed is not None:
@@ -1229,10 +1235,13 @@ def testing_retry_after_operation(
     lane: ProductLaneProfile,
     artifact_id: str,
     require_current_binding: bool = True,
+    generation_binding_sha256: str = "",
 ) -> str:
     if not isinstance(record_store, PostgresRecordStore):
         return ""
-    rearm = record_store.read_testing_retry_rearm(profile.product)
+    rearm = record_store.read_testing_retry_rearm(
+        profile.product, generation_binding_sha256=generation_binding_sha256
+    )
     if rearm is None or (rearm.context, rearm.artifact_id) != (lane.context, artifact_id):
         return ""
     if require_current_binding and (
@@ -1250,6 +1259,7 @@ def testing_artifact_attempt(
     lane: ProductLaneProfile,
     artifact_id: str,
     generation_prepared_at: str = "",
+    generation_binding_sha256: str = "",
 ) -> _TestingAttempt:
     return _next_testing_attempt(
         record_store=record_store,
@@ -1258,7 +1268,11 @@ def testing_artifact_attempt(
         idempotency_scope=reconcile_reservation_scope(profile.product),
         generation_prepared_at=generation_prepared_at,
         rearmed_after_operation_id=testing_retry_after_operation(
-            record_store=record_store, profile=profile, lane=lane, artifact_id=artifact_id
+            record_store=record_store,
+            profile=profile,
+            lane=lane,
+            artifact_id=artifact_id,
+            generation_binding_sha256=generation_binding_sha256,
         ),
         history_after_operation_id=testing_retry_after_operation(
             record_store=record_store,
@@ -1266,6 +1280,7 @@ def testing_artifact_attempt(
             lane=lane,
             artifact_id=artifact_id,
             require_current_binding=False,
+            generation_binding_sha256=generation_binding_sha256,
         ),
     )
 

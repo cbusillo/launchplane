@@ -45,6 +45,8 @@ class TestingRetryPlan:
     after_operation_id: str
     lane_binding_sha256: str
     plan_sha256: str
+    generation_binding_sha256: str = ""
+    data_source_mode: Literal["existing", "upstream_restore"] = "existing"
 
 
 def testing_retry_binding(store: PostgresRecordStore, product: str, context: str) -> str:
@@ -63,7 +65,10 @@ def build_testing_retry_plan(
         latest_verified_testing_build,
         testing_artifact_attempt,
     )
-    from control_plane.odoo_testing_restore import read_current_testing_generation
+    from control_plane.odoo_testing_restore import (
+        generation_binding,
+        read_current_testing_generation,
+    )
     from control_plane.testing_lane_hold import read_staff_testing_hold
     from control_plane.testing_restore_prerequisite import incomplete_testing_restore
 
@@ -76,10 +81,13 @@ def build_testing_retry_plan(
     generation = read_current_testing_generation(
         store, product=product, context=lane.context, instance="testing", bootstrap_preparation=True
     )
-    if generation is not None and not generation.completed_at:
+    fresh = generation is not None and not generation.completed_at
+    if fresh and generation is not None and not generation.reconcile_requested_at:
         raise TestingRetryRefused("testing_retry_restore_incomplete")
+    generation_sha256 = generation_binding(generation) if fresh and generation else ""
     if (
-        incomplete_testing_restore(
+        not fresh
+        and incomplete_testing_restore(
             store, context=lane.context, instance="testing", generation=generation
         )
         is not None
@@ -104,6 +112,7 @@ def build_testing_retry_plan(
         lane=lane,
         artifact_id=request.artifact_id,
         generation_prepared_at=generation.prepared_at if generation else "",
+        generation_binding_sha256=generation_sha256,
     )
     if attempt.active is not None or attempt.failed_attempts < TESTING_DEPLOY_MAX_FAILED_ATTEMPTS:
         raise TestingRetryRefused("testing_retry_not_exhausted")
@@ -122,6 +131,9 @@ def build_testing_retry_plan(
                 "reason": request.reason,
                 "after_operation_id": attempt.last_failed_operation_id,
                 "lane_binding_sha256": binding,
+                "generation_binding_sha256": generation_sha256,
             }
         ),
+        generation_binding_sha256=generation_sha256,
+        data_source_mode="upstream_restore" if fresh else "existing",
     )

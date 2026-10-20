@@ -451,6 +451,7 @@ from control_plane.contracts.testing_retry import (
     TestingRetryRearm,
     TESTING_RETRY_REARM_SCOPE,
     TESTING_RETRY_REARM_ROUTE,
+    testing_retry_rearm_key,
 )
 from control_plane.contracts.product_reconcile import (
     PRODUCT_RECONCILE_REQUEST_STATES,
@@ -24266,25 +24267,33 @@ class PostgresRecordStore(HumanSessionStore):
             )
 
     def _testing_retry_binding_in_session(self, session: Any, *, product: str, context: str) -> str:
+        from control_plane.odoo_testing_restore import generation_binding
+
         rows = {
             "profile": session.get(LaunchplaneProductProfileRow, product),
             "target_id": session.get(LaunchplaneDokployTargetIdRow, (context, "testing")),
             "inventory": session.get(LaunchplaneInventoryRow, (context, "testing")),
             "release_tuple": session.get(LaunchplaneReleaseTupleRow, (context, "testing")),
         }
-        return canonical_json_sha256(
-            {name: row.payload if row is not None else None for name, row in rows.items()}
-        )
+        payloads = {name: row.payload if row is not None else None for name, row in rows.items()}
+        generation_row = session.get(LaunchplaneFreshOdooTestingGenerationRow, (product, context))
+        if generation_row is not None:
+            payloads["generation"] = generation_binding(
+                FreshOdooTestingGeneration.model_validate(generation_row.payload)
+            )
+        return canonical_json_sha256(payloads)
 
     def read_testing_retry_binding(self, *, product: str, context: str) -> str:
         with self._session_factory() as session:
             return self._testing_retry_binding_in_session(session, product=product, context=context)
 
-    def read_testing_retry_rearm(self, product: str) -> TestingRetryRearm | None:
+    def read_testing_retry_rearm(
+        self, product: str, *, generation_binding_sha256: str = ""
+    ) -> TestingRetryRearm | None:
         record = self.read_idempotency_record(
             scope=TESTING_RETRY_REARM_SCOPE,
             route_path=TESTING_RETRY_REARM_ROUTE,
-            idempotency_key=product,
+            idempotency_key=testing_retry_rearm_key(product, generation_binding_sha256),
         )
         return TestingRetryRearm.model_validate(record.response_payload) if record else None
 
@@ -24294,9 +24303,11 @@ class PostgresRecordStore(HumanSessionStore):
         expected: ProductReconcileRequestRecord,
         rearm: TestingRetryRearm,
         mutation: DbOnlyMutationRequest,
+        generation_binding_sha256: str = "",
     ) -> tuple[str, LaunchplaneIdempotencyRecord]:
         """Commit a recovery boundary, wakeup and replay receipt in one transaction."""
         from control_plane.testing_retry import TestingRetryRefused
+        from control_plane.odoo_testing_restore import generation_binding
 
         if expected.target_kind != "testing" or expected.state == "running":
             raise TestingRetryRefused("testing_retry_busy")
@@ -24331,6 +24342,21 @@ class PostgresRecordStore(HumanSessionStore):
                 != rearm.lane_binding_sha256
             ):
                 raise TestingRetryRefused("testing_retry_stale")
+            generation_row = session.get(
+                LaunchplaneFreshOdooTestingGenerationRow, (expected.product, rearm.context)
+            )
+            generation = (
+                FreshOdooTestingGeneration.model_validate(generation_row.payload)
+                if generation_row is not None
+                else None
+            )
+            current_generation_sha256 = (
+                generation_binding(generation)
+                if generation is not None and not generation.completed_at
+                else ""
+            )
+            if current_generation_sha256 != generation_binding_sha256:
+                raise TestingRetryRefused("testing_retry_stale")
             target_row = session.get(LaunchplaneDokployTargetRow, (rearm.context, "testing"))
             if (
                 target_row is not None
@@ -24357,11 +24383,15 @@ class PostgresRecordStore(HumanSessionStore):
                 record_id=build_launchplane_mutation_reservation_id(
                     scope=TESTING_RETRY_REARM_SCOPE,
                     route_path=TESTING_RETRY_REARM_ROUTE,
-                    idempotency_key=expected.product,
+                    idempotency_key=testing_retry_rearm_key(
+                        expected.product, generation_binding_sha256
+                    ),
                 ),
                 scope=TESTING_RETRY_REARM_SCOPE,
                 route_path=TESTING_RETRY_REARM_ROUTE,
-                idempotency_key=expected.product,
+                idempotency_key=testing_retry_rearm_key(
+                    expected.product, generation_binding_sha256
+                ),
                 request_fingerprint=canonical_json_sha256(rearm.model_dump(mode="json")),
                 response_status_code=202,
                 response_trace_id=mutation.response_trace_id,
