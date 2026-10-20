@@ -936,7 +936,7 @@ web process, a mismatched runtime identity or an absent private alias cannot ren
 the attestation even if the proxy still contains the expected route file.
 
 A successful due refresh retains the publication key and route digest and records
-a new observation digest and 24-hour expiry. Historical publication/readiness
+a new observation digest and expiry under the shared freshness policy. Historical publication/readiness
 timestamps alone cannot renew routing evidence. Missing custody, a foreign target
 alias, unavailable observation or routing drift returns the existing controller's
 attention outcome without restamping the binding. Provider authorization denials
@@ -952,7 +952,11 @@ and all serving authority, while excluding the observation clock and digest.
 Native observations run in the service thread pool, one lane immediately before
 its own write. They do not block the HTTP event loop or expire earlier lanes'
 observations while planning a batch. The existing shared half-life/expiry policy
-owns renewal timing. Completed-key replay returns its receipt before remote IO.
+owns renewal timing. The batch renews its existing reservation before each lane
+and before writes; loss of ownership stops further work. Failure or denial releases
+only the owned parent reservation, preserving committed child receipts. Completed-key
+replay returns its receipt before remote IO. During a rebuild switch or restart, an
+observation can truthfully report attention; a later healthy observation clears it.
 Dry-run observes without writing. A provider authorization denial ends the batch
 with its trace; any earlier per-lane writes retain their original child receipts.
 Legacy managed and external bindings keep their existing paths and bounded failure

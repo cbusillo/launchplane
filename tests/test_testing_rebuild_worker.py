@@ -1783,6 +1783,65 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertEqual(self.current().target.policies.staff_testing_hold, hold)
         self.assertFalse(self.retained["stopped"])
 
+    def test_legacy_refresh_during_first_rebuild_preserves_preparation_and_publication(
+        self,
+    ) -> None:
+        from tests.test_route_binding_refresh_controller import _service_binding
+
+        candidate = self.fixture.candidate
+        binding = _service_binding().model_copy(
+            update={"product": candidate.product, "context": candidate.context}
+        )
+        binding = binding.model_copy(
+            update={
+                "domains": (
+                    binding.domains[0].model_copy(update={"domain_name": self.fixture.route.host}),
+                )
+            }
+        )
+        self.store.write_route_binding_record(binding)
+        self.fixture.before = self.current()
+        self.intent = self.intent.model_copy(update={"before": self.fixture.before})
+        self.capture.return_value = self.intent
+        prepare = service.NativeTestingRebuildExecution.prepare
+        switch = self.switch
+
+        def refresh_evidence() -> None:
+            current = self.current().binding
+            assert current is not None
+            self.store.write_route_binding_record(
+                current.model_copy(
+                    update={
+                        "source": current.source.model_copy(
+                            update={
+                                "refreshed_at": datetime.now(UTC).isoformat(),
+                                "source_versions": {
+                                    **current.source.source_versions,
+                                    "observation": "new-evidence",
+                                },
+                            }
+                        ),
+                        "updated_at": datetime.now(UTC).isoformat(),
+                    }
+                )
+            )
+
+        def interleave_prepare(execution: Any, *args: Any, **kwargs: Any) -> Any:
+            refresh_evidence()
+            return prepare(execution, *args, **kwargs)
+
+        def interleave_switch(*args: Any, **kwargs: Any) -> Any:
+            result = switch(*args, **kwargs)
+            refresh_evidence()
+            return result
+
+        with (
+            patch.object(service.NativeTestingRebuildExecution, "prepare", new=interleave_prepare),
+            patch.object(DokployTestingRouteTransport, "publish", side_effect=interleave_switch),
+        ):
+            self.assertEqual(self.execute().deploy_status, "pass")
+        self.assertEqual(self.effects, ["switch-new", "stop-old"])
+
     def refresh_through_http(self, key: str) -> dict[str, Any]:
         import asyncio
         from tests.test_native_testing_route_refresh import refresh_testing_binding_http

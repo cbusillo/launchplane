@@ -24,7 +24,7 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.secret_record import SecretRecord, SecretBinding
 from control_plane.storage import postgres as db
-from control_plane.contracts.testing_route_refresh import is_native_testing_binding
+from control_plane.route_binding_reconcile import route_binding_authority_projection
 from control_plane.testing_candidate_runtime import (
     testing_profile_binding,
     testing_serving_target_authority,
@@ -47,18 +47,23 @@ def _same(left: object, right: object) -> bool:
 def serving_snapshot_matches(
     actual: TestingServingSnapshot, expected: TestingServingSnapshot
 ) -> bool:
-    """Staff policy and a native route's observation clock do not identify a copy."""
+    """Serving authority and custody identify a copy; observation metadata does not."""
     values = []
     for snapshot in (actual, expected):
         payload = snapshot.model_dump(mode="json")
         payload["target"] = testing_serving_target_authority(snapshot.target)
-        if snapshot.binding is not None and is_native_testing_binding(snapshot.binding):
-            binding = payload["binding"]
-            binding.pop("updated_at", None)
-            source = binding["source"]
-            for key in ("refreshed_at", "stale_after", "freshness_status"):
-                source.pop(key, None)
-            source["source_versions"].pop("testing_route_observation", None)
+        binding = snapshot.binding
+        payload["binding"] = (
+            (
+                route_binding_authority_projection(binding),
+                binding.source.source_kind,
+                binding.source.source_label,
+                binding.source.source_versions.get("testing_publication"),
+                binding.source.source_versions.get("testing_route"),
+            )
+            if binding is not None
+            else None
+        )
         values.append(payload)
     return _same(*values)
 

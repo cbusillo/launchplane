@@ -142,6 +142,35 @@ class TestingPublicationTests(unittest.TestCase):
             observation=self.observation if observation is None else observation,
         )
 
+    def test_real_legacy_refresh_preserves_serving_authority_before_first_rebuild(self) -> None:
+        from tests.test_route_binding_refresh_controller import _service_binding, _Store, _profile
+        from control_plane.route_binding_refresh_controller import (
+            plan_odoo_testing_route_binding_refresh,
+        )
+
+        binding = _service_binding()
+        store = _Store(profiles=(_profile(),), bindings=(binding,))
+        result = plan_odoo_testing_route_binding_refresh(
+            record_store=store, evaluated_at="2026-07-20T13:00:00Z", target_limit=25
+        )
+        self.assertEqual(result.outcomes[0].status, "planned_refresh")
+        plan = result.outcomes[0].reconcile_plan
+        assert plan is not None and plan.record is not None
+        before = self.before.model_copy(update={"binding": binding})
+        after = before.model_copy(update={"binding": plan.record})
+        self.assertNotEqual(binding, plan.record)
+        self.assertTrue(publication.serving_snapshot_matches(before, after))
+        changed_owner = plan.record.model_copy(
+            update={
+                "source": plan.record.source.model_copy(update={"source_label": "foreign-owner"})
+            }
+        )
+        self.assertFalse(
+            publication.serving_snapshot_matches(
+                before, after.model_copy(update={"binding": changed_owner})
+            )
+        )
+
     def test_canonical_local_database_matches_the_prepared_copy(self) -> None:
         self.prepare()
         self.publish()

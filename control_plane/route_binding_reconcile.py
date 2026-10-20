@@ -30,6 +30,8 @@ from control_plane.contracts.testing_route_refresh import (
 )
 
 
+NATIVE_TESTING_ROUTE_REQUIRES_CONTROLLER = "native_testing_route_requires_controller"
+
 _EVIDENCE_SCAN_LIMIT = 1000
 _EVIDENCE_FRESHNESS_WINDOW = timedelta(hours=24)
 _EVIDENCE_REFRESH_THRESHOLD = timedelta(hours=12)
@@ -213,7 +215,7 @@ def plan_route_binding_reconcile(
         return _blocked_plan(
             findings=(
                 RouteBindingReconcileFinding(
-                    code="native_testing_route_requires_controller",
+                    code=NATIVE_TESTING_ROUTE_REQUIRES_CONTROLLER,
                     detail="The Odoo testing route refresh controller owns this published binding; run that controller to observe and renew its route.",
                 ),
             ),

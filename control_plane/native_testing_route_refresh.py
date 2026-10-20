@@ -50,7 +50,6 @@ def plan_native_testing_route_refresh(
     *,
     root: Path,
     current: EnvironmentRouteBindingRecord,
-    evaluated_at: str,
 ) -> RouteBindingReconcilePlan:
     digest = route_binding_record_sha256(current)
     try:
@@ -109,10 +108,6 @@ def plan_native_testing_route_refresh(
             exclude={"deployed_at"}
         ) != snapshot.inventory.runtime_identity.model_dump(exclude={"deployed_at"}):
             raise ValueError("The route backend is not the current running testing copy.")
-        evaluation = datetime.fromisoformat(evaluated_at.replace("Z", "+00:00"))
-        refreshed = datetime.fromisoformat(current.source.refreshed_at.replace("Z", "+00:00"))
-        if evaluation.utcoffset() is None or refreshed.utcoffset() is None:
-            raise ValueError("Native route evidence requires aware timestamps.")
         if not timedelta(0) <= observed_at - started <= timedelta(minutes=2):
             raise ValueError("The current testing route observation is not fresh.")
         if (
