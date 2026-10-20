@@ -144,6 +144,21 @@ def application_runtime_tasks_failed(
     )
 
 
+def application_runtime_attempt_observed(
+    observed: ApplicationRuntimeObservation,
+    *,
+    artifact_reference: str,
+    provider_reference: str,
+    deployment_record_id: str,
+) -> bool:
+    """An inspected task binds this attempt even after its service rolls back."""
+    return observed.task_evidence_complete and any(
+        task.deployment_record_id == deployment_record_id
+        and _service_image_matches(task.image, artifact_reference, provider_reference)
+        for task in observed.tasks
+    )
+
+
 def application_runtime_drift_fingerprint(
     observed: ApplicationRuntimeObservation,
     *,

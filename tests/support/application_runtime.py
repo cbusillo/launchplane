@@ -6,6 +6,7 @@ from control_plane.workflows.generic_web_deploy_provider import (
     GenericWebResolvedDeployTarget,
 )
 from control_plane.workflows.dokploy_deploy import dokploy_deploy_artifact_reference
+from control_plane.workflows import generic_web_application_snapshot
 
 
 def converged_application_runtime(
@@ -30,11 +31,8 @@ def converged_application_runtime(
 
 
 def recovered_application_runtime(
-    target: GenericWebResolvedDeployTarget, deployment_title: str
+    target: GenericWebResolvedDeployTarget, provider_operation_key: str
 ) -> ApplicationRuntimeObservation:
-    # Both the original runtime identity and the provider title carry the same
-    # operation hash. Model the identity the interrupted original deploy wrote.
-    digest = deployment_title.removeprefix("Launchplane operation ")
     request = target.ship_request
     return converged_application_runtime(
         target,
@@ -43,8 +41,8 @@ def recovered_application_runtime(
             instance=request.instance,
             artifact_id=request.artifact_id,
             source_git_ref=request.source_git_ref,
-            deployment_record_id=(
-                f"deployment-provider-operation-{digest}-{request.context}-{request.instance}"
+            deployment_record_id=generic_web_application_snapshot.generic_web_provider_deployment_record_id(
+                provider_operation_key, context=request.context, instance=request.instance
             ),
         ),
     )

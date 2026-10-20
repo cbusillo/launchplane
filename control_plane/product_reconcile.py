@@ -530,6 +530,21 @@ def reconcile_testing_target(
             )
         except FileNotFoundError:
             target = None
+            try:
+                provider_target = cast(
+                    _TestingLaneAuthorityStore, record_store
+                ).read_provider_target_record(
+                    context_name=lane.context, instance_name=lane.instance
+                )
+            except FileNotFoundError:
+                provider_target = None
+            if (
+                provider_target is not None
+                and provider_target.provider_id == "dokploy"
+                and provider_target.provider_target_type == "application"
+            ):
+                plan.update(action="wait", reason="testing_runtime_unverified")
+                return ReconcileOutcome(plan, deferred=True)
         if target is not None and target.target_type == "application":
             hold = read_staff_testing_hold(record_store=record_store, context=lane.context)
             if hold is not None:
@@ -912,11 +927,7 @@ def _deploy_generic_web_testing(
             f"{RECONCILE_SOURCE}:{profile.product}:{lane.context}:{TESTING_INSTANCE}:"
             f"{desired.manifest.image.digest}:authority-{authority}:from-{starting_point}"
             + (f":inputs-{delivery_digest}" if delivery_digest else "")
-            + (
-                f":runtime-{plan['testing_runtime_drift_sha256']}"
-                if plan.get("testing_runtime_drift_sha256")
-                else ""
-            )
+            + (":runtime-repair" if plan.get("testing_runtime_drift_sha256") else "")
         )
         plan["deploy_idempotency_key"] = idempotency_key
         request_fingerprint = _fingerprint(envelope.model_dump(mode="json"))

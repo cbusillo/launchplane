@@ -444,6 +444,7 @@ class _FakeGenericWebDeployProvider:
         observation: GenericWebProviderDeploymentObservation | None = None,
         target_id: str = "target-123",
         target_name: str = "sellyouroutboard-testing-app",
+        original_operation_key: str = "",
     ) -> None:
         self.deploy_error = deploy_error
         self.observation = observation or GenericWebProviderDeploymentObservation(outcome="unknown")
@@ -454,6 +455,7 @@ class _FakeGenericWebDeployProvider:
         self.deployment_titles: list[str] = []
         self.observed_target_ids: list[str] = []
         self.application_runtime: ApplicationRuntimeObservation | None = None
+        self.original_operation_key = original_operation_key
 
     def resolve_deploy_target(
         self,
@@ -537,9 +539,9 @@ class _FakeGenericWebDeployProvider:
     ) -> GenericWebProviderDeploymentObservation:
         del control_plane_root
         self.observed_target_ids.append(resolved_deploy_target.resolved_target.target_id)
-        if self.application_runtime is None:
+        if self.application_runtime is None and self.original_operation_key:
             self.application_runtime = recovered_application_runtime(
-                resolved_deploy_target, deployment_title
+                resolved_deploy_target, self.original_operation_key
             )
         return self.observation
 
@@ -553,8 +555,11 @@ class _FakeGenericWebDeployProvider:
 
 
 class _LegacyFakeGenericWebDeployProvider(_FakeGenericWebDeployProvider):
-    def __init__(self) -> None:
-        super().__init__(observation=GenericWebProviderDeploymentObservation(outcome="absent"))
+    def __init__(self, *, original_operation_key: str = "") -> None:
+        super().__init__(
+            observation=GenericWebProviderDeploymentObservation(outcome="absent"),
+            original_operation_key=original_operation_key,
+        )
         self.legacy_observation_calls = 0
 
     def observe_legacy_artifact_deploy(
@@ -827,7 +832,8 @@ class GenericWebDeployTests(unittest.TestCase):
     def test_provider_inspection_does_not_materialize_observed_records(self) -> None:
         profile = _profile()
         store = _GenericWebDeployStore(profile)
-        provider = _FakeGenericWebDeployProvider()
+        operation_key = "provider-operation:test-inspection"
+        provider = _FakeGenericWebDeployProvider(original_operation_key=operation_key)
         provider.observation = GenericWebProviderDeploymentObservation(
             outcome="present",
             deployment_status="success",
@@ -847,7 +853,7 @@ class GenericWebDeployTests(unittest.TestCase):
             "control_plane.generic_web_deploy_provider_adapter.record_observed_generic_web_deploy"
         ) as materialize:
             inspection = adapter.inspect(
-                provider_operation_key="provider-operation:test-inspection",
+                provider_operation_key=operation_key,
                 provider_effect_phase="deploy_trigger",
                 reconciliation_key=reconciliation_key,
                 expected_provider_target_key=provider_target_key,
@@ -1943,14 +1949,16 @@ class GenericWebDeployTests(unittest.TestCase):
     ) -> None:
         profile = _profile(driver_id="odoo")
         store = _GenericWebDeployStore(profile)
+        operation_key = "provider-operation:test-post-deploy"
         provider = _FakeGenericWebDeployProvider(
+            original_operation_key=operation_key,
             observation=GenericWebProviderDeploymentObservation(
                 outcome="present",
                 deployment_status="success",
                 deployment_id="deployment-success",
                 started_at="2026-07-13T12:00:00Z",
                 finished_at="2026-07-13T12:01:00Z",
-            )
+            ),
         )
         adapter = self._provider_mutation_adapter(
             profile=profile,
@@ -1960,7 +1968,7 @@ class GenericWebDeployTests(unittest.TestCase):
         reconciliation_key = adapter.reconciliation_key()
 
         observation = adapter.observe(
-            "provider-operation:test-post-deploy",
+            operation_key,
             "post_deploy_schedule_trigger",
             reconciliation_key,
         )
@@ -1973,7 +1981,8 @@ class GenericWebDeployTests(unittest.TestCase):
     ) -> None:
         profile = _profile(driver_id="odoo")
         store = _GenericWebDeployStore(profile)
-        provider = _LegacyFakeGenericWebDeployProvider()
+        operation_key = "provider-operation:legacy-correlation"
+        provider = _LegacyFakeGenericWebDeployProvider(original_operation_key=operation_key)
         adapter = self._provider_mutation_adapter(
             profile=profile,
             store=store,
@@ -1981,7 +1990,7 @@ class GenericWebDeployTests(unittest.TestCase):
         )
 
         inspection = adapter.inspect(
-            provider_operation_key="provider-operation:legacy-correlation",
+            provider_operation_key=operation_key,
             provider_effect_phase="deploy_trigger",
             reconciliation_key=adapter.reconciliation_key(),
             legacy_provider_effect_started_at="2026-08-15T12:00:00Z",
@@ -1998,7 +2007,8 @@ class GenericWebDeployTests(unittest.TestCase):
     def test_provider_adapter_observe_uses_effect_start_for_legacy_correlation(self) -> None:
         profile = _profile()
         store = _GenericWebDeployStore(profile)
-        provider = _LegacyFakeGenericWebDeployProvider()
+        operation_key = "provider-operation:legacy-correlation"
+        provider = _LegacyFakeGenericWebDeployProvider(original_operation_key=operation_key)
         adapter = self._provider_mutation_adapter(
             profile=profile,
             store=store,
@@ -2006,7 +2016,7 @@ class GenericWebDeployTests(unittest.TestCase):
         )
 
         observation = adapter.observe_with_effect_started_at(
-            "provider-operation:legacy-correlation",
+            operation_key,
             "deploy_trigger",
             adapter.reconciliation_key(),
             "2026-08-15T12:00:00Z",

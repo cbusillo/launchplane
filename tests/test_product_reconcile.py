@@ -6,7 +6,10 @@ from control_plane.contracts.record_failures import record_failure_summary
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone, tzinfo
 from dataclasses import replace
-from control_plane.dokploy.application_runtime import ApplicationRuntimeObservation
+from control_plane.dokploy.application_runtime import (
+    ApplicationRuntimeObservation,
+    ApplicationTaskObservation,
+)
 from email.message import Message
 import io
 import json
@@ -152,6 +155,7 @@ from control_plane.workflows.generic_web_preview import (
 )
 from tests.support.profiles import _odoo_preview_profile_payload, product_profile_payload
 from tests.test_generic_web_deploy import _FakeGenericWebDeployProvider
+from tests.support.application_runtime import converged_application_runtime
 from control_plane.generic_web_deploy_http import GENERIC_WEB_DEPLOY_ROUTE
 from control_plane.drivers.generic_web_preview_dispatch import GenericWebPreviewVerificationRequest
 from control_plane.generic_web_verification_http import (
@@ -1997,6 +2001,23 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         self.assertEqual(repeated["reason"], "already_deployed")
         self.assertEqual(len(triggered), 2)
 
+        with patch.object(
+            self.application_inputs_provider,
+            "observe_testing_application_runtime",
+            side_effect=lambda **_: (
+                self.rolled_back_application_runtime()
+                if len(triggered) == 2
+                else self.application_runtime()
+            ),
+        ):
+            self.request()
+            later_repair = self.reconcile()
+        self.assertEqual(later_repair["reason"], "testing_runtime_drift")
+        self.assertNotEqual(
+            later_repair["deploy_idempotency_key"], repaired["deploy_idempotency_key"]
+        )
+        self.assertEqual(len(triggered), 3)
+
     def test_pending_runtime_before_skip_waits_without_new_deployment(self) -> None:
         triggered = self.prepare_application_runtime_test()
         self.request()
@@ -2010,6 +2031,74 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
             self.request()
             pending = self.run_once()
         self.assertEqual(pending.last_plan["reason"], "testing_runtime_unverified")
+        self.assertEqual(len(triggered), 1)
+
+    def test_failed_runtime_repair_replays_even_when_its_service_spec_remains(self) -> None:
+        triggered = self.prepare_application_runtime_test()
+        self.request()
+        self.reconcile()
+        baseline = self.store.read_environment_inventory(context_name="cm", instance_name="testing")
+
+        def runtime(**_kwargs: object) -> ApplicationRuntimeObservation:
+            if len(triggered) == 1:
+                return self.rolled_back_application_runtime()
+            current = self.application_runtime()
+            return replace(
+                current,
+                running_container_images=(),
+                running_container_deployment_record_ids=(),
+                running_container_health=(),
+                tasks=(
+                    ApplicationTaskObservation(
+                        image=current.running_container_images[0][0],
+                        deployment_record_id=current.service_deployment_record_id,
+                        state="failed",
+                    ),
+                ),
+            )
+
+        with (
+            patch.object(
+                self.application_inputs_provider,
+                "observe_testing_application_runtime",
+                side_effect=runtime,
+            ),
+            patch(
+                "control_plane.workflows.generic_web_deploy_provider.monotonic",
+                return_value=1e30,
+            ),
+        ):
+            self.request()
+            failed = self.run_once()
+            for _ in range(2):
+                self.request()
+                repeated = self.run_once()
+                self.assertEqual(repeated.last_plan["deploy_operation_status"], "replayed")
+                self.assertEqual(
+                    repeated.last_plan["deploy_idempotency_key"],
+                    failed.last_plan["deploy_idempotency_key"],
+                )
+        self.assertEqual(failed.last_plan["deploy_status"], "fail")
+        self.assertEqual(len(triggered), 2)
+        self.assertEqual(
+            self.store.read_environment_inventory(context_name="cm", instance_name="testing"),
+            baseline,
+        )
+
+    def test_known_application_without_target_configuration_cannot_skip_runtime_proof(self) -> None:
+        triggered = self.prepare_application_runtime_test()
+        self.request()
+        self.reconcile()
+        target = self.store.read_dokploy_target_record(context_name="cm", instance_name="testing")
+        self.store.delete_dokploy_target_record(expected_record=target)
+        with patch.object(
+            self.application_inputs_provider, "observe_testing_application_runtime"
+        ) as observe:
+            self.request()
+            pending = self.run_once()
+        self.assertEqual(pending.last_plan["reason"], "testing_runtime_unverified")
+        self.assertEqual(pending.last_plan["action"], "wait")
+        observe.assert_not_called()
         self.assertEqual(len(triggered), 1)
 
     def test_interrupted_job_success_cannot_resurrect_rolled_back_runtime(self) -> None:
@@ -4470,13 +4559,18 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         self.request()
 
         provider = DokployGenericWebDeployProvider()
+
+        def execute(**kwargs: Any) -> GenericWebProviderDeploymentObservation | None:
+            self.deploys.application_runtime = converged_application_runtime(
+                kwargs["resolved_deploy_target"], kwargs["runtime_identity"]
+            )
+            return provider.execute_artifact_deploy(**kwargs)
+
         with (
             patch.object(
                 provider, "_read_provider_config", return_value=("https://provider.test", "test")
             ),
-            patch.object(
-                self.deploys, "execute_artifact_deploy", wraps=provider.execute_artifact_deploy
-            ),
+            patch.object(self.deploys, "execute_artifact_deploy", side_effect=execute),
             patch("control_plane.dokploy.api.latest_deployment_for_target", return_value={}),
             patch(
                 "control_plane.dokploy.api.fetch_dokploy_target_payload", return_value={"env": ""}

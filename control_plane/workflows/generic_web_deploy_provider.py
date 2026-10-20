@@ -49,6 +49,7 @@ from control_plane.dokploy import runtime_evidence as dokploy_runtime_evidence
 from control_plane.dokploy import source as dokploy_source
 from control_plane.dokploy.application_runtime import (
     ApplicationRuntimeObservation,
+    application_runtime_attempt_observed,
     application_runtime_matches,
     application_runtime_tasks_failed,
     fetch_application_runtime,
@@ -648,7 +649,7 @@ def qualify_testing_application_observation(
     if wait and deadline is None:
         deadline = monotonic() + target.deploy_timeout_seconds
     while True:
-        runtime = None
+        runtime: ApplicationRuntimeObservation | None
         try:
             runtime = provider.observe_testing_application_runtime(
                 control_plane_root=control_plane_root,
@@ -656,9 +657,7 @@ def qualify_testing_application_observation(
             )
             if runtime.application_id != target.resolved_target.target_id:
                 raise ValueError("Runtime observation belongs to another target.")
-            if (
-                not wait or deadline is None or monotonic() < deadline
-            ) and application_runtime_matches(
+            if application_runtime_matches(
                 runtime,
                 artifact_reference=target.ship_request.artifact_id,
                 provider_reference=dokploy_deploy_artifact_reference(
@@ -669,16 +668,26 @@ def qualify_testing_application_observation(
             ):
                 return observation
             if runtime.rollout_state in {"paused", "rollback_paused", "rollback_completed"}:
-                started = parse_launchplane_mutation_timestamp(
-                    observation.started_at, field_name="started_at"
+                belongs_to_attempt = application_runtime_attempt_observed(
+                    runtime,
+                    artifact_reference=target.ship_request.artifact_id,
+                    provider_reference=dokploy_deploy_artifact_reference(
+                        ship_request=target.ship_request, target_type="application"
+                    ),
+                    deployment_record_id=deployment_record_id,
                 )
-                finished = parse_launchplane_mutation_timestamp(
-                    observation.finished_at, field_name="finished_at"
-                )
-                rollout_started = parse_launchplane_mutation_timestamp(
-                    runtime.rollout_started_at, field_name="started_at"
-                )
-                if started <= rollout_started <= finished:
+                if not belongs_to_attempt:
+                    started = parse_launchplane_mutation_timestamp(
+                        observation.started_at, field_name="started_at"
+                    )
+                    finished = parse_launchplane_mutation_timestamp(
+                        observation.finished_at, field_name="finished_at"
+                    )
+                    rollout_started = parse_launchplane_mutation_timestamp(
+                        runtime.rollout_started_at, field_name="started_at"
+                    )
+                    belongs_to_attempt = started <= rollout_started <= finished
+                if belongs_to_attempt:
                     return observation.model_copy(
                         update={
                             "deployment_status": "unhealthy",

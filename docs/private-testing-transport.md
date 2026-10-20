@@ -175,20 +175,29 @@ Container health, when configured, must also pass; private health and authentica
 WSS retain their separate qualification. The reader binds the exact application
 and recorded server to its service, tasks and inspected containers, retaining no
 environment values. A terminal rollback or paused rollout is reported as failure
-only when its start belongs to the exact provider job; ambiguous or pending effects
+when an inspected task binds its image and deployment identity to that attempt,
+or its start belongs to the exact provider job's recorded time window. This avoids
+assuming that the asynchronous Swarm updater and provider job share a clock.
+Ambiguous or pending effects
 retain the original operation's recovery fence. Recovery uses the same runtime
 qualification before crediting a provider job, without enabling production adoption.
 At the original normal-deploy deadline, an unchanged current service with only
 failed or rejected tasks bound to that attempt's image and deployment identity
 proves unsuccessful qualification, even on initial creation without rollout status.
-Missing lineage, task reads, or progressing tasks remain unknown. Recovery without
+This requires stopped attempts, such as a finite restart policy; unlimited restart
+replacement tasks that are still progressing remain unknown. Missing lineage or
+task reads also remain unknown. Recovery without
 proof of the original deadline does not infer that failure or release lifecycle holds.
 
 An ordinary sweep also checks every application testing runtime before skipping
 saved deployment evidence, including legacy false inventory and lanes without inputs.
 Proved stable drift in service image or deployment identity permits one normal
-same-artifact repair under a deterministic service-state identity. Changing task
-IDs, timestamps or replica churn never mint another repair. Unavailable or pending
+same-artifact repair bound to the desired artifact, current authority and inputs,
+and starting inventory. The observed drift fingerprint is audit evidence, not a
+new operation identity: a failed repair replays its original result even when its
+own service specification remains installed. A successful repair advances inventory,
+so later drift can receive its own repair. Changed builds, inputs or authority also
+form new intents. Changing task IDs, timestamps or replica churn never mint another repair. Unavailable or pending
 observations wait instead. Staff/staging holds and unresolved operations still
 prevent dispatch. Recovery preserves only the original readback-verified receipt
 and never credits current inputs to an earlier attempt. An old operation without
@@ -196,6 +205,14 @@ that receipt can settle, then the next normal sweep repairs its inputs. Removing
 a declaration or binding alone does not delete provider-only values; explicit
 retirement remains the deletion contract. Production, preview and Compose
 delivery paths are unchanged.
+After fixing a transient host failure, an explicit retry of a terminal failed
+generic-web testing deployment remains available through the deployed service's
+`POST /v1/drivers/generic-web/deploy` (`apply_generic_web_deploy`). Use the exact
+verified artifact/source and existing exact-lane deploy authority with a new
+Idempotency-Key for that deliberate retry. Retain that key for uncertain replies;
+an unresolved original target fence still refuses another operation. This does
+not grant access, invoke a provider directly, or use the Odoo-only testing-retry
+control. A repeated automatic sweep alone is not a new retry instruction.
 Reaped task history cannot prove convergence or task failure, but stable exact
 service and application placement reads can still prove drift and permit the
 normal repair. A completed historical rollback can match its healthy original

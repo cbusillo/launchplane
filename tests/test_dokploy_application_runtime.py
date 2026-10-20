@@ -9,6 +9,7 @@ import click
 
 from control_plane.dokploy.application_runtime import (
     ApplicationRuntimeObservation,
+    ApplicationTaskObservation,
     application_runtime_drift_fingerprint,
     application_runtime_matches,
     fetch_application_runtime,
@@ -513,6 +514,108 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
             ),
         ):
             self.assertEqual(qualify().outcome, "unknown")
+
+    def test_positive_runtime_read_is_accepted_when_it_finishes_after_deadline(self) -> None:
+        from control_plane.workflows.generic_web_deploy_provider import (
+            DokployGenericWebDeployProvider,
+            GenericWebProviderDeploymentObservation,
+            qualify_testing_application_observation,
+        )
+
+        current = self.read()
+        provider = DokployGenericWebDeployProvider()
+        job = GenericWebProviderDeploymentObservation(
+            outcome="present",
+            deployment_status="done",
+            deployment_id="job-1",
+            started_at="2026-10-20T03:08:20Z",
+            finished_at="2026-10-20T03:08:25Z",
+        )
+        now = 0.0
+
+        def read(**_kwargs: object) -> ApplicationRuntimeObservation:
+            nonlocal now
+            now = 11.0
+            return current
+
+        with (
+            patch.object(
+                provider, "observe_testing_application_runtime", side_effect=read
+            ) as reader,
+            patch(
+                "control_plane.workflows.generic_web_deploy_provider.monotonic",
+                side_effect=lambda: now,
+            ),
+            patch("control_plane.workflows.generic_web_deploy_provider.sleep") as sleeper,
+        ):
+            qualified = qualify_testing_application_observation(
+                provider=provider,
+                control_plane_root=Path("."),
+                target=_application_target(),
+                observation=job,
+                deployment_record_id=current.service_deployment_record_id,
+                wait=True,
+                deadline=10.0,
+            )
+        self.assertEqual(qualified, job)
+        reader.assert_called_once()
+        sleeper.assert_not_called()
+
+    def test_current_attempt_task_attributes_late_rollback_without_clock_slack(self) -> None:
+        from control_plane.workflows.generic_web_deploy_provider import (
+            DokployGenericWebDeployProvider,
+            GenericWebProviderDeploymentObservation,
+            qualify_testing_application_observation,
+        )
+
+        current = self.read()
+        provider = DokployGenericWebDeployProvider()
+        job = GenericWebProviderDeploymentObservation(
+            outcome="present",
+            deployment_status="done",
+            deployment_id="job-1",
+            started_at="2026-10-20T03:08:20Z",
+            finished_at="2026-10-20T03:08:25Z",
+        )
+        task = ApplicationTaskObservation(
+            image=_IMAGE,
+            deployment_record_id=current.service_deployment_record_id,
+            state="failed",
+        )
+        for state in ("paused", "rollback_paused", "rollback_completed"):
+            rollback = replace(
+                current,
+                rollout_state=state,
+                rollout_started_at="2026-10-20T03:08:26Z",
+                service_deployment_record_id="previous-deployment",
+                running_container_images=(),
+                running_container_deployment_record_ids=(),
+                running_container_health=(),
+                tasks=(task,),
+            )
+            for observed_task, expected in (
+                (task, "present"),
+                (replace(task, deployment_record_id="previous-deployment"), "unknown"),
+                (replace(task, image=f"{_REPOSITORY}@sha256:{'e' * 64}"), "unknown"),
+            ):
+                with (
+                    self.subTest(state=state, task=observed_task),
+                    patch.object(
+                        provider,
+                        "observe_testing_application_runtime",
+                        return_value=replace(rollback, tasks=(observed_task,)),
+                    ),
+                ):
+                    qualified = qualify_testing_application_observation(
+                        provider=provider,
+                        control_plane_root=Path("."),
+                        target=_application_target(),
+                        observation=job,
+                        deployment_record_id=current.service_deployment_record_id,
+                    )
+                self.assertEqual(qualified.outcome, expected)
+                if expected == "present":
+                    self.assertEqual(qualified.deployment_status, "unhealthy")
 
     def test_initial_service_terminal_tasks_prove_failure_only_at_original_deadline(self) -> None:
         from control_plane.workflows.generic_web_deploy_provider import (
