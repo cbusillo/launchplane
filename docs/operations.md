@@ -4724,14 +4724,18 @@ URLs with `preview-<reservation-id>` as the environment selector and the existin
 reservation or recorded fence incident history; an arbitrary preview name is
 not an environment. Original intent absent in legacy records stays unavailable:
 current plans and provider idleness cannot reconstruct the original proof.
-Separately,
+### Self-deploy drain timeout and continuation
+
 a typed `self_deploy_drain_timeout` uses the existing deploy-failure Discord
 reporter once in the failed deploy run. It explicitly reports zero replacement
 dispatch; the rollback dispatch classifier still treats that refusal as
 pre-effect. The absolute ten-minute drain budget survives polls and service
-restarts. At timeout, new provider-effect admission remains paused, so constant
-new traffic cannot get ahead of the waiting deploy. Existing executors can still
-renew their leases, finish and commit; a timeout never kills or settles them.
+restarts. New provider-target reservations, including agent-started work, wait
+behind the active drain; fresh HTTP calls receive `409/service_deploy_draining`
+with `Retry-After`. Original-key observation, admitted heartbeats and completion
+remain available. Constant fresh traffic cannot extend the drain deadline.
+At timeout the request stops before provider writes and releases its admission
+pause, leaving supported recovery available. It never kills or settles a blocker.
 
 The alert includes bounded opaque blocker references. Match each reference to
 `runtime.release_drain.operation_details[].operation_ref` for its operation ID
@@ -4744,11 +4748,19 @@ normal Deploy Launchplane run on the default branch, with a new self-deploy key
 and marker (the workflow normally supplies both). No superseded-marker repair
 or break-glass is required for this pre-effect timeout. The fresh request checks
 the remaining blockers before any provider write; the old timed-out request
-stays non-dispatchable even after blockers clear. New admission remains fenced
-until matching replacement startup. This continuation does not authorize an
+stays non-dispatchable even after blockers clear. A dispatched replacement fences
+new admission until matching startup. This continuation does not authorize an
 operation replay, clear a product recovery fence or supply a missing checkpoint.
 Installation and later live settlement remain separate proof from source tests
 or a merge.
+
+An expired rehearsal reservation can stop blocking replacement only when the
+original rehearsal execution lock proves the API executor has exited. Execution
+and incomplete retirement share that lock. This preserves the journal and custody;
+it does not prove a remote provider job stopped or authorize replay. Other provider
+families without executor-exclusion proof remain blockers until supported
+settlement or the bounded timeout. Cooperative long-operation checkpoints and
+automatic startup resume are separate work, not supplied by this drain guard.
 
 ### Fishbowl import proof on an exact PR artifact
 

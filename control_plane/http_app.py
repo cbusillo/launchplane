@@ -17203,8 +17203,12 @@ def create_launchplane_fastapi_app(
             asyncio.to_thread(execute),
             name=f"provider-mutation:{trace_id}",
         )
+        from control_plane.service_deploy_drain import ServiceDeployDraining
+
         try:
             result = await asyncio.shield(operation_task)
+        except ServiceDeployDraining:
+            raise _service_deploy_draining_error(trace_id) from None
         except asyncio.CancelledError as cancellation:
             while not operation_task.done():
                 try:
@@ -31335,6 +31339,14 @@ def create_launchplane_fastapi_app(
         )
 
     app.add_exception_handler(PublicHostAuthorityBusy, public_host_authority_busy_handler)
+    from control_plane.service_deploy_drain import ServiceDeployDraining
+
+    async def service_deploy_draining_handler(request: Request, error: Exception) -> JSONResponse:
+        return await launchplane_http_exception_handler(
+            request, _service_deploy_draining_error(next_trace_id())
+        )
+
+    app.add_exception_handler(ServiceDeployDraining, service_deploy_draining_handler)
     app.add_exception_handler(HTTPException, launchplane_http_exception_handler)
     app.add_exception_handler(
         STARLETTE_HTTP_EXCEPTION,
@@ -31383,6 +31395,17 @@ def merge_train_controller_fence_http_error(
         trace_id=trace_id,
         code=code,
         message=str(error),
+    )
+
+
+def _service_deploy_draining_error(trace_id: str) -> LaunchplaneHTTPException:
+    return _launchplane_http_error(
+        status_code=409,
+        trace_id=trace_id,
+        code="service_deploy_draining",
+        message="Launchplane is draining provider operations. Retry after the deploy with "
+        "the original request and key; preserve any existing operation custody.",
+        headers={"Retry-After": "10"},
     )
 
 

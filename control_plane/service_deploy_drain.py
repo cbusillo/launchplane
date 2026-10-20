@@ -12,6 +12,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 import os
 import hashlib
+import re
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -19,6 +20,10 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select, text
 from control_plane.contracts.product_reconcile import RECONCILE_SOURCE
 from control_plane.contracts.idempotency_record import parse_launchplane_mutation_timestamp
+from control_plane.contracts.odoo_upgrade_rehearsal import (
+    ODOO_UPGRADE_REHEARSAL_ROUTE,
+    rehearsal_execution_lock_name,
+)
 
 
 SERVICE_DEPLOY_DRAIN_TIMEOUT_SECONDS = 10 * 60
@@ -46,7 +51,7 @@ class ServiceDeployDrainBudget(BaseModel):
     drain_timed_out: bool = False
 
 
-class ServiceDeployDraining(ValueError):
+class ServiceDeployDraining(Exception):
     """No new provider effect was admitted while the service drains."""
 
 
@@ -75,7 +80,7 @@ class ServiceDeployDrainTimeout(ServiceDeployPreEffectRefused):
 
     def __init__(self, blockers: tuple[str, ...]) -> None:
         super().__init__(
-            "Self-deploy drain timed out before provider effects; admission remains paused. "
+            "Self-deploy drain timed out before provider effects. "
             "Inspect runtime.release_drain. Let the held operations finish or use their "
             "supported recovery, then submit a fresh normal deploy with a new key and marker. "
             "This timed-out request cannot dispatch."
@@ -166,12 +171,6 @@ def admission_allowed(session: Any, now: str) -> bool:
     if record is None:
         return True
     if record.state == "draining":
-        budget = _read_budget(session, record.request_fingerprint)
-        if budget is not None and budget.drain_timed_out:
-            # Keep new traffic from starving the waiting deploy. Existing
-            # executors can still heartbeat and settle. A fresh deploy request
-            # is the supported continuation; the timed-out intent never replays.
-            return False
         # An abandoned pre-effect request cannot permanently park releases.
         return record.expires_at <= now
     return record.state == "confirmed" and (
@@ -180,18 +179,24 @@ def admission_allowed(session: Any, now: str) -> bool:
     )
 
 
-def reservation_requires_admission(scope: str) -> bool:
-    return scope.strip() == "client-release" or scope.strip().startswith(f"{RECONCILE_SOURCE}:")
+def reservation_requires_admission(scope: str, provider_target_key: str = "") -> bool:
+    return (
+        bool(provider_target_key.strip())
+        or scope.strip() == "client-release"
+        or scope.strip().startswith(f"{RECONCILE_SOURCE}:")
+    )
 
 
-def admit_reservation(store: Any, session: Any, scope: str) -> None:
-    """Order every fresh/retried event effect against the self-deploy fence."""
-    if not reservation_requires_admission(scope):
+def admit_reservation(store: Any, session: Any, scope: str, provider_target_key: str = "") -> None:
+    """Order fresh/retried provider effects against the self-deploy fence."""
+    if not reservation_requires_admission(scope, provider_target_key):
         return
     if not store.database_url.startswith("sqlite"):
         lock(store, session)
     if not admission_allowed(session, store._database_mutation_timestamp(session)):
-        raise ServiceDeployDraining("Launchplane is draining product provider effects.")
+        raise ServiceDeployDraining(
+            "Launchplane is draining provider effects; retry after the deploy."
+        )
 
 
 def _operation_observations(store: Any, session: Any, now: str) -> tuple[dict[str, object], ...]:
@@ -237,6 +242,7 @@ def _operation_observations(store: Any, session: Any, now: str) -> tuple[dict[st
             (
                 (LaunchplaneIdempotencyRow.scope == "client-release")
                 | LaunchplaneIdempotencyRow.scope.startswith(f"{RECONCILE_SOURCE}:")
+                | (LaunchplaneIdempotencyRow.provider_target_key != "")
             ),
             LaunchplaneIdempotencyRow.state.in_(("running", "reconcile_required")),
         )
@@ -254,9 +260,13 @@ def _operation_observations(store: Any, session: Any, now: str) -> tuple[dict[st
         # start an effect between this probe and dispatch admission.
         execution_excluded = False
         execution_lock_name = ""
+        rehearsal_pattern = re.escape(ODOO_UPGRADE_REHEARSAL_ROUTE).replace(
+            re.escape("{product}"), r"[^/]+"
+        )
+        is_rehearsal = re.fullmatch(rehearsal_pattern, row.route_path) is not None
         if (
             not lease_active
-            and row.scope.startswith(f"{RECONCILE_SOURCE}:")
+            and (row.scope.startswith(f"{RECONCILE_SOURCE}:") or is_rehearsal)
             and row.provider_target_key
         ):
             if row.route_path == GENERIC_WEB_DEPLOY_ROUTE and row.state == "reconcile_required":
@@ -266,6 +276,8 @@ def _operation_observations(store: Any, session: Any, now: str) -> tuple[dict[st
                 # their persisted state or missing original intent, proves that
                 # replacement will not interrupt an executor. Keep the row held.
                 execution_lock_name = preview_execution_lock_name(row.provider_target_key)
+            elif is_rehearsal and row.lease_expires_at:
+                execution_lock_name = rehearsal_execution_lock_name(row.provider_target_key)
         if execution_lock_name:
             with store.testing_replacement_execution_lock(execution_lock_name) as check:
                 if check is not None:
@@ -384,10 +396,6 @@ def prepare(
             and current.request_fingerprint != request_fingerprint
             and current.state == "draining"
             and current.expires_at > now
-            and not (
-                (current_budget := _read_budget(session, current.request_fingerprint))
-                and current_budget.drain_timed_out
-            )
         ):
             raise ValueError("Another self-deploy is draining release operations.")
         blockers = _running_operations(store, session, now)
@@ -407,9 +415,8 @@ def prepare(
         ) >= parse_launchplane_mutation_timestamp(
             budget.drain_deadline_at, field_name="drain_deadline_at"
         ):
-            # A timed-out request must never later dispatch on a poll. Retain
-            # admission until a fresh deploy intent continues after the alert;
-            # all running executors and product recovery fences survive.
+            # A timed-out request must never later dispatch on a poll. Expire only
+            # this pre-effect admission pause; all product recovery fences survive.
             _write(
                 session,
                 prior.model_copy(

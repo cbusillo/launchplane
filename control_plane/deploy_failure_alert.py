@@ -166,7 +166,7 @@ def send_failure_alert() -> bool:
                     else "Launchplane replacement failed verification",
                     "description": (
                         "Held provider operations prevented replacement. No replacement was dispatched. "
-                        "New operations remain paused. Match the references in runtime.release_drain "
+                        "Match the references in runtime.release_drain "
                         "operation_details.operation_ref. Let the operations finish or use their supported "
                         "recovery, then submit a fresh normal deploy with a new key and marker."
                         if drain_timeout
@@ -196,7 +196,10 @@ def send_failure_alert() -> bool:
                             if operation_refs
                             else []
                         ),
-                        {"name": "Manual break-glass", "value": break_glass_url},
+                        {
+                            "name": "Deploy workflow" if drain_timeout else "Manual break-glass",
+                            "value": break_glass_url,
+                        },
                     ],
                 }
             ],

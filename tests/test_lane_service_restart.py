@@ -344,6 +344,16 @@ class ServiceRestartTests(unittest.TestCase):
         self.assertIn("local-owner-agent", event.summary)
         self.assertIn(self.provider.container_id, event.summary)
 
+    def test_deploy_drain_refuses_direct_provider_route_before_restart(self) -> None:
+        from tests.test_client_release_redeploy import _prepare
+
+        self.review()
+        _prepare(self.store)
+        status, response = self.invoke(key="restart-after-drain")
+        self.assertEqual(status, 409, response)
+        self.assertEqual(response["error"]["code"], "service_deploy_draining")
+        self.assertFalse(self.provider.writes)
+
     @scoped_agent_test
     def test_denied_scope_and_terminal_identity_never_inspect_or_restart(self) -> None:
         self.app = self.create_app(contexts=("other-context",))

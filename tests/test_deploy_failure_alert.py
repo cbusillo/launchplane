@@ -91,12 +91,12 @@ class DeployFailureAlertTests(unittest.TestCase):
             payload = sender.call_args.args[1]
             self.assertNotIn("private-", json.dumps(payload))
             self.assertNotIn("@everyone", json.dumps(payload))
-            operations = next(
-                field["value"]
-                for field in payload["embeds"][0]["fields"]
-                if field["name"] == "Blocking operation references"
+            self.assertEqual(
+                [field["value"] for field in payload["embeds"][0]["fields"]].count(
+                    operation_reference
+                ),
+                1,
             )
-            self.assertEqual(operations, operation_reference)
             recovery_link = next(
                 field["value"]
                 for field in payload["embeds"][0]["fields"]
