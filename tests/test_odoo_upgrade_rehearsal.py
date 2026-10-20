@@ -1315,6 +1315,27 @@ class RehearsalScenario(unittest.TestCase):
         ):
             adapter.native_readback(self.record, "original", lost)
 
+    def test_running_original_readback_keeps_diagnostics_without_settling_or_replay(self) -> None:
+        adapter = self.adapter("execute")
+        journal = {
+            "operation_state": "running",
+            "provider_effect_phase": "execute",
+            "provider_effect_started_at": self.record.updated_at.isoformat(),
+            "_provider_operation_key": "original-provider-operation",
+            "_stored_refusal_code": "",
+        }
+        event = {"provider_status": "done", "traceback_present": True}
+        with (
+            patch.object(OdooRehearsalAdapter, "operation_readback", return_value=journal),
+            patch.object(OdooRehearsalAdapter, "failure_events", return_value=([event], True)),
+            patch.object(OdooRehearsalAdapter, "host", return_value={"completed": False}) as host,
+        ):
+            result = adapter.native_readback(self.record, "original", lambda: None)
+        self.assertEqual(result["failure_events_after_checkpoint"], [event])
+        self.assertTrue(host.call_args.kwargs["inspect_capture"])
+        self.assertEqual(result["operation_state"], "running")
+        self.assertTrue(result["original_key_required"])
+
     def test_prepare_qualification_availability_preserves_evidence_but_integrity_refuses(
         self,
     ) -> None:
