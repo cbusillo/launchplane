@@ -245,3 +245,88 @@ class LegacyGenericSiblingOwnershipTests(LegacyPreviewReconciliationFixture):
             self.lifecycle.complete()
             self.lifecycle.hold()
             self.assertEqual((await self.apply(plan)).status_code, 409)
+
+    async def test_unproven_sibling_evidence_leaves_provider_classification_intact(self) -> None:
+        from control_plane.legacy_preview_sibling_ownership import current_generic_sibling_ownership
+
+        runtime = await self.produced_sibling()
+        receipt = self.store.find_generic_preview_refresh_receipts(runtime.deployment_record_id)[0]
+        for changed in (
+            receipt.model_copy(update={"response_status_code": 409}),
+            receipt.model_copy(
+                update={
+                    "response_payload": {
+                        **receipt.response_payload,
+                        "result": {
+                            **receipt.response_payload["result"],
+                            "refresh_started_at": "unavailable-old-time",
+                        },
+                    }
+                }
+            ),
+        ):
+            with patch.object(
+                self.store, "find_generic_preview_refresh_receipts", return_value=(changed,)
+            ):
+                self.assertEqual((await self.call("inspect")).status_code, 202)
+                with self.provider_inventory():
+                    self.assertEqual((await self.call("inspect")).status_code, 409)
+                self.search.return_value = ()
+        original_profile = self.profile
+        self.profile = self.profile.model_copy(
+            update={
+                "preview": self.profile.preview.model_copy(
+                    update={"slug_template": "change-{number}"}
+                )
+            }
+        )
+        self.store.write_product_profile_record(self.profile)
+        self.assertEqual((await self.call("inspect")).status_code, 202)
+        with self.provider_inventory():
+            self.assertEqual((await self.call("inspect")).status_code, 409)
+        self.store.write_product_profile_record(original_profile)
+        sibling = self.store.read_preview_record(self.sibling_id)
+        with patch.object(
+            self.store,
+            "find_generic_preview_refresh_receipts",
+            side_effect=ValueError("storage identity failure"),
+        ):
+            with self.assertRaises(ValueError):
+                current_generic_sibling_ownership(self.store, original_profile, sibling, "pr-7")
+
+    async def test_uncertain_lifecycle_discards_even_a_successful_http_exclusion(self) -> None:
+        from control_plane.workflows.generic_web_application_snapshot import (
+            APPLICATION_LIFECYCLE_EVIDENCE_KEY,
+        )
+
+        await self.produced_sibling(configured_lifecycle=True)
+        record = self.store.list_deployment_records()[0]
+        malformed = record.model_copy(
+            update={
+                "post_deploy_update": record.post_deploy_update.model_copy(
+                    update={
+                        "evidence": {APPLICATION_LIFECYCLE_EVIDENCE_KEY: "old-unreadable-snapshot"}
+                    }
+                )
+            }
+        )
+        old_binding = record.model_copy(update={"source_git_ref": "b" * 40})
+        for changed in (malformed, old_binding):
+            with patch.object(self.store, "list_deployment_records", return_value=(changed,)):
+                self.assertEqual((await self.call("inspect")).status_code, 202)
+                with self.provider_inventory():
+                    self.assertEqual((await self.call("inspect")).status_code, 409)
+                self.search.return_value = ()
+        # A second positively qualified receipt must not be treated as merely
+        # missing evidence, even when no provider target currently exists.
+        self.lifecycle.application_id = "conflicting-physical-application"
+        self.lifecycle.snapshot.target_id = self.lifecycle.application_id
+        self.lifecycle.complete()
+        self.assertEqual((await self.call("inspect")).status_code, 409)
+        self.lifecycle.application_id = str(self.application["applicationId"])
+        self.lifecycle.snapshot.target_id = self.lifecycle.application_id
+        self.lifecycle.complete()
+        self.lifecycle.hold()
+        self.assertEqual((await self.call("inspect")).status_code, 202)
+        with self.provider_inventory():
+            self.assertEqual((await self.call("inspect")).status_code, 409)

@@ -3,6 +3,8 @@
 from dataclasses import dataclass
 from datetime import datetime
 
+import click
+
 from control_plane.contracts.idempotency_record import (
     build_launchplane_idempotency_record_id,
     parse_launchplane_mutation_timestamp,
@@ -64,7 +66,7 @@ def current_generic_sibling_ownership(
         or generation.anchor_summary.repo != preview.anchor_repo
         or generation.anchor_summary.pr_number != preview.anchor_pr_number
     ):
-        raise ValueError("Generic sibling runtime has no exact current serving identity.")
+        return None
     name = preview_application_name(
         app_name_prefix=effective_preview_app_name_prefix(profile=profile), preview_slug=slug
     )
@@ -74,14 +76,23 @@ def current_generic_sibling_ownership(
         "preview": preview.model_dump(mode="json"),
         "generation": generation.model_dump(mode="json"),
     }
+    # Storage/index failures remain errors. Only the evidence below is optional.
     receipts = store.find_generic_preview_refresh_receipts(runtime.deployment_record_id)
-    if len(receipts) > 1:
-        raise ValueError("Generic sibling refresh ownership is ambiguous.")
-    if receipts:
-        receipt = receipts[0]
-        result = GenericWebPreviewRefreshResult.model_validate(
-            receipt.response_payload.get("result")
-        )
+    deployments = store.list_deployment_records(context_name=preview.context, instance_name=slug)
+    try:
+        requested_at = _time(generation.requested_at)
+        ready_at = _time(generation.ready_at)
+    except ValueError:
+        return None
+    for receipt in receipts:
+        try:
+            result = GenericWebPreviewRefreshResult.model_validate(
+                receipt.response_payload.get("result")
+            )
+            started_at = _time(result.refresh_started_at)
+            finished_at = _time(result.refresh_finished_at)
+        except ValueError:
+            return None
         records = receipt.response_payload.get("records")
         if (
             receipt.state != "completed"
@@ -106,57 +117,69 @@ def current_generic_sibling_ownership(
             or records.get("preview_id") != preview.preview_id
             or records.get("generation_id") != generation.generation_id
             or records.get("transition") not in {"ready", "verifying"}
-            or _time(result.refresh_started_at) != _time(generation.requested_at)
-            or _time(result.refresh_finished_at) > _time(generation.ready_at)
+            or started_at != requested_at
+            or finished_at > ready_at
         ):
-            raise ValueError("Generic sibling refresh receipt disagrees with serving evidence.")
+            return None
         targets.add(result.application_id)
         receipt_ids = (receipt.record_id,)
         evidence["refresh_receipt"] = receipt.model_dump(mode="json")
-
+    if len(targets) > 1:
+        raise ValueError("Generic sibling receipts disagree on the physical application.")
     # These are distinct real DeploymentRecords; runtime's nonce is not their ID.
     lifecycle_records = []
     lifecycle = []
-    for record in store.list_deployment_records(context_name=preview.context, instance_name=slug):
+    positive_targets = set(targets)
+    for record in deployments:
         if record.delegated_executor != "control-plane.preview-application-lifecycle":
             continue
-        snapshot = recorded_application_lifecycle(record)
-        if snapshot is None or (
-            snapshot.product != profile.product
-            or snapshot.provider_id != "dokploy"
-            or record.deploy.target_type != "application"
-            or record.deploy.deploy_mode != "preview-lifecycle"
-            or record.deploy.target_name != snapshot.target_id
+        try:
+            snapshot = recorded_application_lifecycle(record)
+            captured_at = _time(snapshot.captured_at) if snapshot is not None else None
+        except (ValueError, click.ClickException):
+            return None
+        if (
+            snapshot is None
+            or captured_at is None
+            or (
+                snapshot.product != profile.product
+                or snapshot.provider_id != "dokploy"
+                or record.deploy.target_type != "application"
+                or record.deploy.deploy_mode != "preview-lifecycle"
+                or record.deploy.target_name != snapshot.target_id
+            )
         ):
-            raise ValueError("Generic sibling lifecycle has conflicting physical authority.")
-        lifecycle.append((snapshot, record))
+            return None
+        qualified = (
+            requested_at <= captured_at <= ready_at
+            and snapshot.state == "qualified"
+            and snapshot.mode == "deploy"
+            and (snapshot.artifact_id, snapshot.source_git_ref)
+            == (runtime.artifact_id, runtime.source_git_ref)
+            and record.deploy.status == "pass"
+            and record.post_deploy_update.status == "pass"
+            and bool(snapshot.target_id.strip())
+        )
+        if qualified:
+            positive_targets.add(snapshot.target_id)
+        lifecycle.append((captured_at, snapshot, qualified))
         lifecycle_records.append(record.model_dump(mode="json"))
+    if len(positive_targets) > 1:
+        raise ValueError("Generic sibling receipts disagree on the physical application.")
     if lifecycle:
-        latest_time = max(_time(snapshot.captured_at) for snapshot, _ in lifecycle)
-        latest = [
-            (snapshot, record)
-            for snapshot, record in lifecycle
-            if _time(snapshot.captured_at) == latest_time
-        ]
+        latest_time = max(captured_at for captured_at, _, _ in lifecycle)
+        latest = [item for item in lifecycle if item[0] == latest_time]
         if len(latest) != 1:
-            raise ValueError("Generic sibling lifecycle ordering is ambiguous.")
-        snapshot, record = latest[0]
-        if latest_time >= _time(generation.requested_at):
-            if (
-                snapshot.state != "qualified"
-                or snapshot.mode != "deploy"
-                or (snapshot.artifact_id, snapshot.source_git_ref)
-                != (runtime.artifact_id, runtime.source_git_ref)
-                or latest_time > _time(generation.ready_at)
-                or record.deploy.status != "pass"
-                or record.post_deploy_update.status != "pass"
-                or not snapshot.target_id.strip()
-            ):
-                raise ValueError("A later or unqualified lifecycle supersedes sibling ownership.")
+            return None
+        _, snapshot, qualified = latest[0]
+        if latest_time >= requested_at:
+            if not qualified:
+                # Do not retain an older HTTP exemption after uncertain newer work.
+                return None
             targets.add(snapshot.target_id)
     evidence["application_lifecycle_records"] = lifecycle_records
     if len(targets) > 1:
         raise ValueError("Generic sibling receipts disagree on the physical application.")
-    if not targets:
+    if not targets or len(receipts) > 1:
         return None
     return PreviewSiblingOwnership(targets.pop(), name, evidence, receipt_ids)

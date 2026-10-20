@@ -91,11 +91,16 @@ nonce, requires one receipt, and checks the complete successful response against
 the current preview, generation and runtime. A lifecycle receipt must bind the
 same artifact and source within that serving generation's attempt; older qualified
 receipts, later holds and conflicting physical IDs cannot establish ownership.
-These proofs share the category/unique-owner checks and reviewed authority digest.
+These proofs share category and exclusive physical ownership checks and the
+reviewed authority digest.
 Completion protects HTTP receipts with the exact nonblocking row locks above;
 lifecycle receipts use the existing deployment-authority table lock and fresh
 commit-time binding. Missing physical proof grants no new exclusion, including
-event-only history with no persisted physical evidence.
+event-only history with no persisted physical evidence. Missing, older-shape or
+unreadable sibling evidence grants no exclusion; complete provider inventory must
+still prove absence and refuses any unbound product candidate. An uncertain later
+lifecycle also discards an earlier HTTP exclusion. Conflicting proven physical
+ownership and storage identity inconsistencies continue to refuse reconciliation.
 Unknown renamed raw composes require safe image-source classification.
 YAML and environment values are inspected only
 in memory; returned evidence contains identities and classifications, never raw
@@ -124,9 +129,14 @@ A legacy Odoo generation with no runtime identity may retain interrupted
 nonterminal state, including current pointers, when those executor fences exclude
 current work and complete absence is established. Its history is retained unchanged.
 The atomic Odoo completion stores an exact receipt pointer on the destroyed preview.
+That pointer selects the authenticated completion as its only ordering authority;
+the reviewed reason is descriptive text and cannot establish a service destroy or
+override the completion time. A missing or invalid pointed receipt fails closed.
 Old issued Odoo plans are rejected before provider effects under the same fences.
 The same pre-provider check protects existing active histories: a missing or newer
 ordering record cannot be bypassed by executing first and publishing evidence later.
+Malformed existing ordering also rejects before effect and releases the unused
+provider reservation instead of leaving an operation held for reconciliation.
 Bare preview evidence cannot erase that terminal proof. Generation evidence can
 resume the preview only with a fresh generation requested strictly after completion;
 changing an old generation's timestamps does not qualify. Stale evidence returns

@@ -49,6 +49,7 @@ from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.preview_execution import (
     ODOO_PREVIEW_DESTROY_REASON_PREFIX as _ODOO_PREVIEW_DESTROY_REASON_PREFIX,
     odoo_preview_destroy_issued_at,
+    matches_odoo_preview_service_destroy,
 )
 from control_plane.legacy_preview_completion import (
     ReconciliationReceiptStore,
@@ -575,7 +576,9 @@ def apply_odoo_preview_lifecycle_evidence(
             plan_id=provenance.plan_id,
             issued_at=requested_at,
         )
-        if existing_preview is not None and existing_preview.destroy_reason == destroy_reason:
+        if existing_preview is not None and matches_odoo_preview_service_destroy(
+            existing_preview, destroy_reason
+        ):
             return _odoo_preview_lifecycle_records(
                 preview=existing_preview,
                 status="replayed",
@@ -767,7 +770,7 @@ def validate_odoo_preview_lifecycle_response_current(
             plan_id=provenance.plan_id,
             issued_at=format_launchplane_mutation_timestamp(provenance.issued_at),
         )
-        if preview.state == "destroyed" and preview.destroy_reason == expected_destroy_reason:
+        if matches_odoo_preview_service_destroy(preview, expected_destroy_reason):
             return
         raise OdooPreviewPlanProvenanceError(
             code="odoo_preview_operation_superseded",
@@ -920,10 +923,13 @@ def _odoo_preview_operation_is_stale(
         issued_at,
         field_name="Odoo preview lifecycle issued_at",
     )
-    parsed_existing_issued_at = parse_launchplane_mutation_timestamp(
-        existing_issued_at,
-        field_name="existing preview lifecycle issued_at",
-    )
+    try:
+        parsed_existing_issued_at = parse_launchplane_mutation_timestamp(
+            existing_issued_at,
+            field_name="existing preview lifecycle issued_at",
+        )
+    except ValueError:
+        return True
     return current_issued_at <= parsed_existing_issued_at
 
 
@@ -934,12 +940,11 @@ def _odoo_preview_existing_operation_issued_at(
     product: str = "",
 ) -> str:
     if preview.state == "destroyed":
-        issued_at = odoo_preview_destroy_issued_at(preview.destroy_reason)
-        if issued_at:
-            return issued_at
-        return reconciliation_completion_time(
-            cast(ReconciliationReceiptStore, record_store), preview, product=product
-        )
+        if preview.reconciliation_receipt_id:
+            return reconciliation_completion_time(
+                cast(ReconciliationReceiptStore, record_store), preview, product=product
+            )
+        return odoo_preview_destroy_issued_at(preview.destroy_reason)
     generation_id = preview.serving_generation_id or preview.latest_generation_id
     if not generation_id:
         return ""

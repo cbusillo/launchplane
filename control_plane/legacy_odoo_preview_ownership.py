@@ -8,7 +8,7 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.odoo_preview_apply_http import (
     build_odoo_preview_runtime_identity,
 )
-from control_plane.preview_reservation_recovery import original_preview_intent
+from control_plane.preview_reservation_recovery import validate_original_preview_intent
 from control_plane.storage.postgres import ORIGINAL_MUTATION_INTENT_ROUTE, PostgresRecordStore
 from control_plane.workflows.launchplane import generate_preview_id
 from control_plane.workflows.odoo_preview_runtime import OdooPreviewDokployApplyResult
@@ -39,7 +39,7 @@ def current_odoo_sibling_ownership(
         or generation.preview_id != preview.preview_id
         or generation.generation_id != preview.serving_generation_id
     ):
-        raise ValueError("Sibling preview identity is uncertain.")
+        return None
     operation = store.read_idempotency_record_by_id(runtime.deployment_record_id)
     if operation is None:
         return None
@@ -55,15 +55,29 @@ def current_odoo_sibling_ownership(
         or operation.response_payload.get("status") != "accepted"
         or operation.response_payload.get("trace_id") != operation.response_trace_id
     ):
-        raise ValueError("Sibling preview lacks a successful original operation.")
-    intent = original_preview_intent(operation, profile=profile, store=store)
+        return None
+    retained_intent = store.read_original_mutation_intent(operation)
     original_receipt = store.read_idempotency_record(
         scope=operation.scope,
         route_path=ORIGINAL_MUTATION_INTENT_ROUTE,
         idempotency_key=operation.record_id,
     )
     if original_receipt is None:
-        raise ValueError("Sibling original operation evidence is missing.")
+        return None
+    try:
+        intent = validate_original_preview_intent(
+            operation, profile=profile, intent=retained_intent
+        )
+        expected_runtime = build_odoo_preview_runtime_identity(
+            profile=profile,
+            issued_plan=intent.issued_plan,
+            deployment_record_id=operation.record_id,
+        )
+        result = OdooPreviewDokployApplyResult.model_validate(
+            operation.response_payload.get("result")
+        )
+    except ValueError:
+        return None
     issued = intent.issued_plan
     if (
         issued.operation != "refresh"
@@ -72,10 +86,7 @@ def current_odoo_sibling_ownership(
         or issued.repository != profile.repository
         or issued.plan_request.pr_number != preview.anchor_pr_number
         or issued.preview_url != preview.canonical_url
-        or runtime
-        != build_odoo_preview_runtime_identity(
-            profile=profile, issued_plan=issued, deployment_record_id=operation.record_id
-        )
+        or runtime != expected_runtime
         or runtime.preview_id != preview.preview_id
         or runtime.preview_generation_id != generation.generation_id
         or generation.artifact_id != runtime.artifact_id
@@ -87,7 +98,7 @@ def current_odoo_sibling_ownership(
         or generation.deploy_status != "pass"
         or generation.verify_status != "pass"
     ):
-        raise ValueError("Sibling runtime disagrees with original preview authority.")
+        return None
     records = operation.response_payload.get("records")
     if not isinstance(records, dict) or (
         records.get("lifecycle_evidence_status") not in {"applied", "replayed"}
@@ -95,8 +106,7 @@ def current_odoo_sibling_ownership(
         or records.get("generation_id") != generation.generation_id
         or records.get("transition") != "ready"
     ):
-        raise ValueError("Sibling preview has no applied lifecycle evidence.")
-    result = OdooPreviewDokployApplyResult.model_validate(operation.response_payload.get("result"))
+        return None
     if (
         result.status != "pass"
         or result.operation != "refresh"
@@ -113,7 +123,7 @@ def current_odoo_sibling_ownership(
             and result.compose_id != issued.dry_run_plan.compose_ref
         )
     ):
-        raise ValueError("Sibling provider result does not prove its physical compose.")
+        return None
     return PreviewSiblingOwnership(
         target_id=result.compose_id,
         target_name=result.compose_name,
@@ -121,7 +131,7 @@ def current_odoo_sibling_ownership(
             "preview": preview.model_dump(mode="json"),
             "generation": generation.model_dump(mode="json"),
             "operation": operation.model_dump(mode="json"),
-            "original_intent": store.read_original_mutation_intent(operation),
+            "original_intent": retained_intent,
             "original_intent_receipt": original_receipt.model_dump(mode="json"),
         },
         receipt_ids=(operation.record_id, original_receipt.record_id),

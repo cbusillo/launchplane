@@ -355,6 +355,38 @@ class LegacyOdooPreviewReconciliationTests(legacy_tests.LegacyPreviewReconciliat
         self.produced_sibling(8)
         self.assertEqual((await self.call("inspect")).status_code, 409)
 
+    async def test_missing_sibling_intent_grants_no_exclusion_or_global_refusal(self) -> None:
+        from control_plane.legacy_odoo_preview_ownership import current_odoo_sibling_ownership
+        from control_plane.storage.postgres import ORIGINAL_MUTATION_INTENT_ROUTE
+
+        runtime = self.produced_sibling()
+        sibling = self.store.read_preview_record(runtime.preview_id)
+        intent: dict[str, object]
+        for intent in ({}, {"issued_plan": {}}):
+            with patch.object(self.store, "read_original_mutation_intent", return_value=intent):
+                self.assertEqual((await self.call("inspect")).status_code, 202)
+                self.compose(
+                    name=runtime.instance, image=self.profile.image.repository + ":current"
+                )
+                self.assertEqual((await self.call("inspect")).status_code, 409)
+                self.composes.clear()
+        reader = self.store.read_idempotency_record
+
+        def without_original(**kwargs: Any) -> Any:
+            return (
+                None if kwargs["route_path"] == ORIGINAL_MUTATION_INTENT_ROUTE else reader(**kwargs)
+            )
+
+        with patch.object(self.store, "read_idempotency_record", side_effect=without_original):
+            self.assertEqual((await self.call("inspect")).status_code, 202)
+            self.compose(name=runtime.instance, image=self.profile.image.repository + ":current")
+            self.assertEqual((await self.call("inspect")).status_code, 409)
+        with patch.object(
+            self.store, "read_original_mutation_intent", side_effect=ValueError("storage failure")
+        ):
+            with self.assertRaises(ValueError):
+                current_odoo_sibling_ownership(self.store, self.profile, sibling)
+
     async def test_application_id_cannot_exclude_same_string_compose_id(self) -> None:
         self.compose(image=self.profile.image.repository + ":current")
         self.store.write_dokploy_target_id_record(
@@ -593,6 +625,180 @@ class LegacyOdooPreviewReconciliationTests(legacy_tests.LegacyPreviewReconciliat
             response = await self.apply(await self.plan())
         self.assertEqual(response.status_code, 202, response.text)
         return self.store.read_preview_record(self.preview.preview_id)
+
+    async def test_reconciliation_reason_cannot_choose_ordering_or_destroy_ownership(self) -> None:
+        from control_plane.contracts.idempotency_record import format_launchplane_mutation_timestamp
+        from control_plane.odoo_preview_apply_http import (
+            OdooPreviewPlanProvenanceError,
+            _odoo_preview_destroy_reason,
+        )
+        from control_plane.workflows.launchplane import generate_preview_id
+        from tests.test_product_reconcile import FakePreviewProvider
+
+        now = datetime.now(timezone.utc)
+        completed = now - timedelta(seconds=20)
+        original = self.preview
+        reasons = (
+            "odoo_preview_destroy:copied:" + (completed - timedelta(days=1)).isoformat(),
+            "odoo_preview_destroy:copied:" + (completed + timedelta(days=1)).isoformat(),
+            "odoo_preview_destroy:copied:invalid-time",
+            "exact-service-destroy",
+        )
+        for number, reason in enumerate(reasons, 10):
+            with self.subTest(reason=reason):
+                self.preview = original.model_copy(
+                    update={
+                        "preview_id": generate_preview_id(
+                            context_name=original.context,
+                            anchor_repo=original.anchor_repo,
+                            anchor_pr_number=number,
+                        ),
+                        "anchor_pr_number": number,
+                        "anchor_pr_url": f"https://github.com/{self.profile.repository}/pull/{number}",
+                        "canonical_url": f"https://pr-{number}.example.test",
+                    }
+                )
+                self.store.write_preview_record(self.preview)
+                fake = FakePreviewProvider()
+                destroy = self.prepared_operation(
+                    fake, f"later-destroy-{number}", completed + timedelta(seconds=5), "destroy"
+                )
+                if reason == "exact-service-destroy":
+                    provenance = destroy.adapter._issued_plan.plan_provenance
+                    assert provenance is not None
+                    reason = _odoo_preview_destroy_reason(
+                        plan_id=provenance.plan_id,
+                        issued_at=format_launchplane_mutation_timestamp(provenance.issued_at),
+                    )
+                plan_key = f"reason-plan-{number}"
+                plan = await self.call("plan", key=plan_key, reason=reason)
+                self.assertEqual(plan.status_code, 202, plan.text)
+                with patch(
+                    "control_plane.http_routes.legacy_preview_reconciliation.utc_now_timestamp",
+                    return_value=completed.isoformat(),
+                ):
+                    applied = await self.call(
+                        "apply",
+                        key=f"reason-apply-{number}",
+                        reason=reason,
+                        reviewed_plan=True,
+                        plan_idempotency_key=plan_key,
+                        expected_plan_digest=plan.json()["result"]["plan_digest"],
+                    )
+                self.assertEqual(applied.status_code, 202, applied.text)
+                closed = self.store.read_preview_record(self.preview.preview_id)
+                self.assertEqual(
+                    reconciliation_completion_time(self.store, closed), closed.destroyed_at
+                )
+                old = self.prepared_operation(
+                    fake, f"old-refresh-{number}", completed - timedelta(seconds=5)
+                )
+                with patch.object(old.adapter, "capture_schedule_binding"):
+                    with self.assertRaises(OdooPreviewPlanProvenanceError):
+                        old.run(self.store)
+                self.assertFalse(fake.applied)
+                with patch.object(destroy.adapter, "capture_schedule_binding"):
+                    destroyed = destroy.run(self.store)
+                self.assertEqual(destroyed.response_status_code, 202, destroyed.response_payload)
+                self.assertEqual(
+                    destroyed.response_payload["records"]["lifecycle_evidence_status"], "applied"
+                )
+                self.assertFalse(
+                    self.store.read_preview_record(closed.preview_id).reconciliation_receipt_id
+                )
+                refresh = self.prepared_operation(fake, f"later-refresh-{number}", now)
+                with patch.object(refresh.adapter, "capture_schedule_binding"):
+                    refreshed = refresh.run(self.store)
+                self.assertEqual(refreshed.response_status_code, 202, refreshed.response_payload)
+                self.assertEqual(self.store.read_preview_record(closed.preview_id).state, "active")
+
+    async def test_copied_destroy_reason_is_not_a_replayed_service_completion(self) -> None:
+        from control_plane.contracts.idempotency_record import format_launchplane_mutation_timestamp
+        from control_plane.odoo_preview_apply_http import (
+            OdooPreviewPlanProvenanceError,
+            _odoo_preview_destroy_reason,
+            apply_odoo_preview_lifecycle_evidence,
+            validate_odoo_preview_lifecycle_response_current,
+        )
+        from tests.test_product_reconcile import FakePreviewProvider
+
+        completed = datetime.now(timezone.utc) - timedelta(seconds=10)
+        fake = FakePreviewProvider()
+        operation = self.prepared_operation(
+            fake, "copied-old-destroy", completed - timedelta(seconds=5), "destroy"
+        )
+        issued = operation.adapter._issued_plan
+        assert issued.plan_provenance is not None
+        reason = _odoo_preview_destroy_reason(
+            plan_id=issued.plan_provenance.plan_id,
+            issued_at=format_launchplane_mutation_timestamp(issued.plan_provenance.issued_at),
+        )
+        plan = await self.call("plan", key="review-plan", reason=reason)
+        self.assertEqual(plan.status_code, 202, plan.text)
+        with patch(
+            "control_plane.http_routes.legacy_preview_reconciliation.utc_now_timestamp",
+            return_value=completed.isoformat(),
+        ):
+            applied = await self.apply(plan.json()["result"], reason=reason)
+        self.assertEqual(applied.status_code, 202, applied.text)
+        records = apply_odoo_preview_lifecycle_evidence(
+            control_plane_root_path=self.root,
+            record_store=self.store,
+            profile=self.profile,
+            issued_plan=issued,
+            driver_result=fake.execute_apply(issued_plan=issued),
+        )
+        self.assertEqual(records["lifecycle_evidence_status"], "stale")
+        with self.assertRaises(OdooPreviewPlanProvenanceError):
+            validate_odoo_preview_lifecycle_response_current(
+                record_store=self.store,
+                profile=self.profile,
+                issued_plan=issued,
+                records={**records, "lifecycle_evidence_status": "replayed"},
+            )
+        self.assertTrue(
+            self.store.read_preview_record(self.preview.preview_id).reconciliation_receipt_id
+        )
+
+    async def test_malformed_unpointed_ordering_rejects_without_holding_provider_work(self) -> None:
+        from control_plane.odoo_preview_apply_http import OdooPreviewPlanProvenanceError
+        from tests.test_product_reconcile import FakePreviewProvider
+
+        written = await http_request(
+            self.app,
+            "POST",
+            "/v1/evidence/previews/destroyed",
+            headers={"Authorization": "Bearer local-operator-token"},
+            payload={
+                "product": self.profile.product,
+                "destroy": {
+                    "context": self.preview.context,
+                    "anchor_repo": self.preview.anchor_repo,
+                    "anchor_pr_number": self.preview.anchor_pr_number,
+                    "destroyed_at": datetime.now(timezone.utc).isoformat(),
+                    "destroy_reason": "odoo_preview_destroy:copied:invalid-time",
+                },
+            },
+        )
+        self.assertEqual(written.status_code, 202, written.text)
+        fake = FakePreviewProvider()
+        kinds: tuple[Literal["refresh", "destroy"], ...] = ("refresh", "destroy")
+        for kind in kinds:
+            operation = self.prepared_operation(
+                fake, f"malformed-{kind}", datetime.now(timezone.utc), kind
+            )
+            with patch.object(operation.adapter, "capture_schedule_binding"):
+                with self.assertRaises(OdooPreviewPlanProvenanceError):
+                    operation.run(self.store)
+            self.assertIsNone(
+                self.store.read_idempotency_record(
+                    scope=operation.reservation_scope,
+                    route_path=operation.route_path,
+                    idempotency_key=operation.idempotency_key,
+                )
+            )
+        self.assertFalse(fake.applied)
+        self.assertFalse(self.store.list_held_provider_target_reservations())
 
     async def test_stale_bare_replacement_and_old_generation_cannot_erase_terminal_proof(
         self,
@@ -839,6 +1045,21 @@ class LegacyOdooPreviewReconciliationTests(legacy_tests.LegacyPreviewReconciliat
         self,
     ) -> None:
         closed = await self.closed_preview()
+        from control_plane.odoo_preview_apply_http import _odoo_preview_operation_is_stale
+
+        forged_reason = closed.model_copy(
+            update={
+                "destroy_reason": "odoo_preview_destroy:copied:" + self.preview.created_at,
+            }
+        )
+        self.assertTrue(
+            _odoo_preview_operation_is_stale(
+                record_store=self.store,
+                preview=forged_reason,
+                issued_at=datetime.now(timezone.utc).isoformat(),
+                product=self.profile.product,
+            )
+        )
         self.assertEqual(
             reconciliation_completion_time(self.store, closed, product="wrong-product"), ""
         )
