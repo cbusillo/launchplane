@@ -400,6 +400,7 @@ def _render_script(
         policies=policies or _policies(),
     )
     with (
+        patch("control_plane.dokploy.api.read_dokploy_schedule_baseline", return_value=[]),
         patch(
             "control_plane.dokploy.api.fetch_dokploy_target_payload",
             return_value={
@@ -423,7 +424,6 @@ def _render_script(
         patch(
             "control_plane.dokploy.api.latest_deployment_for_schedule",
             side_effect=(
-                {"deploymentId": "schedule-before"},
                 {
                     "deploymentId": "schedule-after",
                     "logs": [
@@ -436,7 +436,11 @@ def _render_script(
             ),
         ),
         patch(
-            "control_plane.dokploy.api.wait_for_dokploy_schedule_deployment",
+            "control_plane.dokploy.api._read_back_triggered_schedule_deployment",
+            return_value={"deploymentId": "schedule-after"},
+        ),
+        patch(
+            "control_plane.dokploy.api.wait_for_exact_dokploy_schedule_deployment",
             return_value="deployment=schedule-after status=done",
         ),
         patch("control_plane.dokploy.api.dokploy_request", return_value={"ok": True}),
@@ -485,6 +489,7 @@ def _render_post_deploy_script(
         policies=policies or _policies(),
     )
     with (
+        patch("control_plane.dokploy.api.read_dokploy_schedule_baseline", return_value=[]),
         patch(
             "control_plane.dokploy.api.fetch_dokploy_target_payload",
             return_value={
@@ -520,7 +525,6 @@ def _render_post_deploy_script(
         patch(
             "control_plane.dokploy.api.latest_deployment_for_schedule",
             side_effect=(
-                {"deploymentId": "schedule-before"},
                 {
                     "deploymentId": "schedule-after",
                     "logs": [
@@ -534,7 +538,11 @@ def _render_post_deploy_script(
             ),
         ),
         patch(
-            "control_plane.dokploy.api.wait_for_dokploy_schedule_deployment",
+            "control_plane.dokploy.api._read_back_triggered_schedule_deployment",
+            return_value={"deploymentId": "schedule-after"},
+        ),
+        patch(
+            "control_plane.dokploy.api.wait_for_exact_dokploy_schedule_deployment",
             return_value="deployment=schedule-after status=done",
         ),
         patch("control_plane.dokploy.api.dokploy_request", return_value={"ok": True}),

@@ -46,11 +46,14 @@ class FakeProvider:
         *,
         trigger: Callable[[], JsonValue],
         listings: list[Callable[[], list[JsonObject]]],
+        baseline: Callable[[], JsonValue] = lambda: [OLDER, BEFORE],
     ) -> None:
         self._trigger = trigger
         self._listings = listings
+        self._baseline = baseline
         self.trigger_calls: list[int | float] = []
         self.list_calls = 0
+        self.baseline_calls = 0
 
     def request(self, **kwargs: object) -> JsonValue:
         path = kwargs["path"]
@@ -58,6 +61,9 @@ class FakeProvider:
             self.trigger_calls.append(kwargs["timeout_seconds"])  # type: ignore[arg-type]
             return self._trigger()
         if path == LIST_PATH:
+            if not self.trigger_calls:
+                self.baseline_calls += 1
+                return self._baseline()
             listing = self._listings[min(self.list_calls, len(self._listings) - 1)]
             self.list_calls += 1
             return list(listing())
@@ -90,7 +96,9 @@ def _run(provider: FakeProvider, *, execution_timeout_seconds: int = 7200) -> st
             host="https://dokploy.example.com",
             token="secret-token",
             schedule_id=SCHEDULE_ID,
-            before_key="deployment-before",
+            baseline=dokploy_api.read_dokploy_schedule_baseline(
+                host="https://dokploy.example.com", token="fixture", schedule_id=SCHEDULE_ID
+            ),
             execution_timeout_seconds=execution_timeout_seconds,
             readback_grace_seconds=0,
             readback_interval_seconds=0,
@@ -99,6 +107,149 @@ def _run(provider: FakeProvider, *, execution_timeout_seconds: int = 7200) -> st
 
 
 class ScheduleTriggerTests(unittest.TestCase):
+    def test_acknowledged_trigger_observes_unseen_job_even_without_sortable_timestamps(
+        self,
+    ) -> None:
+        known: JsonObject = {"deploymentId": "z-known", "status": "done"}
+        new: JsonObject = {"deploymentId": "a-new", "status": "done"}
+        provider = FakeProvider(
+            trigger=lambda: {"ok": True},
+            baseline=lambda: [known],
+            listings=[lambda: [known, new]],
+        )
+        with patch("control_plane.dokploy.api.time.sleep"):
+            result = _run(provider, execution_timeout_seconds=1)
+        self.assertEqual(dokploy_api.deployment_key_from_wait_result(result), "a-new")
+        self.assertEqual(len(provider.trigger_calls), 1)
+
+    def test_baseline_failure_preserves_only_safe_predispatch_retryability(self) -> None:
+        for status in (502, 400):
+            with self.subTest(status=status):
+                failure = dokploy_api.DokployRequestFailed(
+                    method="GET", path=LIST_PATH, status_code=status, detail="fixture read failed"
+                )
+                with patch.object(dokploy_api, "dokploy_request", side_effect=failure):
+                    with self.assertRaises(dokploy_api.DokployScheduleExecutionFailed) as caught:
+                        dokploy_api.read_dokploy_schedule_baseline(
+                            host="https://provider.invalid",
+                            token="fixture",
+                            schedule_id=SCHEDULE_ID,
+                        )
+                self.assertEqual(
+                    dokploy_api.is_transient_dokploy_error(caught.exception), failure.retryable
+                )
+
+    def test_remote_exit_does_not_attach_an_ambiguous_new_job(self) -> None:
+        def remote_failure() -> JsonValue:
+            raise dokploy_api.DokployRequestFailed(
+                method="POST", path=TRIGGER_PATH, detail="remote exit", remote_command_failed=True
+            )
+
+        provider = FakeProvider(
+            trigger=remote_failure,
+            listings=[
+                lambda: [
+                    {"deploymentId": "new-a", "status": "error"},
+                    {"deploymentId": "new-b", "status": "error"},
+                ]
+            ],
+        )
+        with patch.object(dokploy_api, "dokploy_request", side_effect=provider.request):
+            with self.assertRaises(dokploy_api.DokployScheduleExecutionFailed) as caught:
+                dokploy_api.run_dokploy_schedule(
+                    host="https://provider.invalid",
+                    token="fixture",
+                    schedule_id=SCHEDULE_ID,
+                    timeout_seconds=60,
+                )
+        self.assertEqual(caught.exception.deployment_id, "")
+        self.assertEqual(len(provider.trigger_calls), 1)
+
+    def test_all_known_runs_inside_skew_window_are_excluded_after_timeout(self) -> None:
+        trigger_time = datetime(2026, 10, 20, 3, 59, 8, tzinfo=timezone.utc)
+        baseline: list[JsonObject] = [
+            {"deploymentId": key, "status": "done", "createdAt": created_at}
+            for key, created_at in (
+                ("earlier-one", "2026-10-20T03:58:02.917Z"),
+                ("earlier-two", "2026-10-20T03:58:06.726Z"),
+                ("deployment-before", "2026-10-20T03:58:29.233Z"),
+            )
+        ]
+        new: JsonObject = {
+            "deploymentId": "actual-new-job",
+            "status": "done",
+            "createdAt": "2026-10-20T03:59:08.361Z",
+        }
+        provider = FakeProvider(
+            trigger=_timed_out,
+            baseline=lambda: [*baseline],
+            listings=[lambda: [*baseline, new]],
+        )
+        with patch("control_plane.dokploy.api.time.time", return_value=trigger_time.timestamp()):
+            result = _run(provider)
+        self.assertEqual(dokploy_api.deployment_key_from_wait_result(result), "actual-new-job")
+        self.assertEqual(len(provider.trigger_calls), 1)
+
+    def test_unreadable_baseline_never_dispatches_or_checkpoints(self) -> None:
+        malformed: list[JsonValue] = [None, [{}], [BEFORE, None]]
+        baselines: list[Callable[[], JsonValue]] = [lambda: [*_list_unavailable()]]
+        for payload in malformed:
+            baselines.append(unittest.mock.Mock(return_value=payload))
+        for baseline in baselines:
+            with self.subTest(baseline=baseline):
+                provider = FakeProvider(
+                    trigger=_timed_out, baseline=baseline, listings=[lambda: [BEFORE]]
+                )
+                checkpoint = unittest.mock.Mock()
+                with patch.object(dokploy_api, "dokploy_request", side_effect=provider.request):
+                    with self.assertRaises(dokploy_api.DokployScheduleExecutionFailed) as caught:
+                        dokploy_api.run_dokploy_schedule(
+                            host="https://provider.invalid",
+                            token="fixture",
+                            schedule_id=SCHEDULE_ID,
+                            timeout_seconds=60,
+                            before_trigger=checkpoint,
+                        )
+                self.assertEqual(provider.trigger_calls, [])
+                self.assertEqual(caught.exception.cause, "trigger_baseline_unavailable")
+                checkpoint.assert_not_called()
+
+    def test_known_runs_without_a_new_job_stay_unknown(self) -> None:
+        recent = _deployment("recent-known", "done", timedelta(seconds=-1))
+        provider = FakeProvider(
+            trigger=_timed_out,
+            baseline=lambda: [BEFORE, recent],
+            listings=[lambda: [recent, BEFORE]],
+        )
+        with self.assertRaises(dokploy_api.DokployScheduleExecutionFailed) as raised:
+            _run(provider)
+        self.assertEqual(raised.exception.cause, "trigger_outcome_unknown")
+        self.assertEqual(raised.exception.deployment_id, "")
+        self.assertEqual(len(provider.trigger_calls), 1)
+
+    def test_timestamp_absence_does_not_hide_a_genuinely_ambiguous_job(self) -> None:
+        dated = _deployment("new-dated", "running", timedelta(seconds=1))
+        undated: JsonObject = {"deploymentId": "new-undated", "status": "running"}
+        for jobs in ([dated, undated], [undated, {**undated, "deploymentId": "another"}]):
+            with self.subTest(jobs=jobs):
+                provider = FakeProvider(trigger=_timed_out, listings=[lambda: [BEFORE, *jobs]])
+                with self.assertRaises(dokploy_api.DokployScheduleExecutionFailed) as raised:
+                    _run(provider)
+                self.assertEqual(raised.exception.cause, "trigger_outcome_unknown")
+                self.assertEqual(raised.exception.deployment_id, "")
+                self.assertEqual(len(provider.trigger_calls), 1)
+
+    def test_one_new_undated_job_is_observed_with_known_runs_excluded(self) -> None:
+        known: JsonObject = {"deploymentId": "known-undated", "status": "done"}
+        new: JsonObject = {"deploymentId": "new-undated", "status": "done"}
+        provider = FakeProvider(
+            trigger=_timed_out,
+            baseline=lambda: [known, BEFORE],
+            listings=[lambda: [new, BEFORE, known]],
+        )
+        self.assertEqual(dokploy_api.deployment_key_from_wait_result(_run(provider)), "new-undated")
+        self.assertEqual(len(provider.trigger_calls), 1)
+
     def test_oversize_script_refuses_before_provider_access_or_checkpoint(self) -> None:
         payload: JsonObject = {
             "script": "x" * dokploy_api.DOKPLOY_SCHEDULE_MATERIALIZATION_LIMIT_BYTES
@@ -218,6 +369,7 @@ class ScheduleTriggerTests(unittest.TestCase):
         failure = raised.exception
         self.assertEqual(failure.cause, "trigger_outcome_unknown")
         self.assertEqual(failure.deployment_status, "unknown")
+        self.assertFalse(dokploy_api.is_transient_dokploy_error(failure))
         self.assertIn("not retried", failure.message)
         self.assertEqual(len(provider.trigger_calls), 1)
 
@@ -274,6 +426,42 @@ class ScheduleTriggerTests(unittest.TestCase):
 
 
 class DataWorkflowExecutionBudgetTests(unittest.TestCase):
+    def test_baseline_failure_precedes_backup_trigger_checkpoint(self) -> None:
+        phases: list[str] = []
+        target = control_plane_dokploy.DokployTargetDefinition(
+            context="fixture", instance="prod", target_id="compose", target_name="fixture-prod"
+        )
+        with (
+            patch.object(dokploy_api, "fetch_dokploy_target_payload", return_value={}),
+            patch.object(
+                dokploy_post_deploy,
+                "_resolve_dokploy_schedule_runtime",
+                return_value=("server", "server", "fixture", "server"),
+            ),
+            patch.object(
+                dokploy_api, "upsert_dokploy_schedule", return_value={"scheduleId": SCHEDULE_ID}
+            ),
+            patch.object(dokploy_api, "latest_deployment_for_schedule", return_value=None),
+            patch.object(
+                dokploy_api, "dokploy_request", side_effect=lambda **_kwargs: _list_unavailable()
+            ) as provider,
+        ):
+            with self.assertRaises(dokploy_api.DokployScheduleExecutionFailed) as caught:
+                dokploy_post_deploy.run_compose_odoo_backup_gate(
+                    host="https://provider.invalid",
+                    token="fixture",
+                    target_definition=target,
+                    backup_nonce="fixture",
+                    backup_record_id="backup-fixture",
+                    database_name="fixture",
+                    filestore_path="/data/filestore",
+                    backup_root="/data/backups",
+                    before_provider_mutation=phases.append,
+                )
+        self.assertEqual(caught.exception.cause, "trigger_baseline_unavailable")
+        self.assertNotIn("backup_schedule_trigger", phases)
+        self.assertEqual(provider.call_args.kwargs["path"], LIST_PATH)
+
     def test_restore_gets_a_bounded_budget_larger_than_the_deploy_timeout(self) -> None:
         resolve = dokploy_post_deploy.resolve_data_workflow_execution_timeout_seconds
 
@@ -400,6 +588,7 @@ class GuardedScheduleDispatchTests(unittest.TestCase):
         self.assertEqual(len(provider.trigger_calls), 1)
         self.assertLess(provider.trigger_calls[0], 600)
         self.assertFalse(guarded)
+        self.assertEqual(provider.baseline_calls, 1)
 
 
 if __name__ == "__main__":

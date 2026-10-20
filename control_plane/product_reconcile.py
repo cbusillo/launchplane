@@ -51,7 +51,11 @@ from control_plane.dependency_update_review import pure_dependabot_update
 from control_plane.client_release_repositories import recorded_train_candidate
 from control_plane import secrets
 from control_plane.runtime_environments import RuntimeEnvironmentRecordStore
-from control_plane.dokploy.api import DokployRequestFailed
+from control_plane.dokploy.api import (
+    DokployRequestFailed,
+    DokployScheduleExecutionFailed,
+    is_transient_dokploy_error,
+)
 from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 from control_plane.build_provenance import (
     BUILD_WORKFLOW_PATH,
@@ -2195,7 +2199,13 @@ def _run_preview_operation(
                 }
             )
         except Exception as execution_error:
-            if isinstance(execution_error, DokployRequestFailed) and not execution_error.retryable:
+            if (
+                isinstance(execution_error, DokployRequestFailed)
+                or (
+                    isinstance(execution_error, DokployScheduleExecutionFailed)
+                    and execution_error.cause == "trigger_baseline_unavailable"
+                )
+            ) and not is_transient_dokploy_error(execution_error):
                 plan["preview_execution_refused"] = True
             raise
 
@@ -2378,7 +2388,7 @@ def _run_preview_operation(
     except OdooPreviewPlanProvenanceError:
         return _preview_failure(plan, "preview_provenance_refused")
     except (FileNotFoundError, ValueError, click.ClickException) as error:
-        if isinstance(error, DokployRequestFailed) and error.retryable:
+        if is_transient_dokploy_error(error):
             plan["preview_transport_retryable"] = True
         return _preview_failure(plan, "preview_apply_failed")
 
@@ -2502,7 +2512,7 @@ def _run_generic_web_preview_operation(
             )
             status = str(result.get("destroy_status") or "")
     except (FileNotFoundError, ValueError, click.ClickException) as error:
-        if isinstance(error, DokployRequestFailed) and error.retryable:
+        if is_transient_dokploy_error(error):
             plan["preview_transport_retryable"] = True
         _LOGGER.warning(
             "Generic-web preview %s of %s refused: %s", operation, profile.product, error

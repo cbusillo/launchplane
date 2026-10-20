@@ -52,6 +52,37 @@ def _capture_module_update_runs(
 
 
 class OdooPostDeployWorkflowTests(unittest.TestCase):
+    def test_pretrigger_history_failure_after_upsert_is_determinate(self) -> None:
+        def runner(**kwargs: object) -> dict[str, str]:
+            checkpoint = cast(Callable[[str], None], kwargs["before_provider_mutation"])
+            checkpoint(dokploy_post_deploy.ODOO_POST_DEPLOY_SCHEDULE_UPSERT)
+            raise dokploy_api.DokployScheduleExecutionFailed(
+                schedule_id="fixture",
+                deployment_id="",
+                deployment_status="not_started",
+                cause="trigger_baseline_unavailable",
+            )
+
+        with (
+            TemporaryDirectory() as directory,
+            patch(
+                "control_plane.workflows.odoo_post_deploy.dokploy_source.read_control_plane_dokploy_source_of_truth",
+                return_value=self._source_of_truth(),
+            ),
+            patch(
+                "control_plane.workflows.odoo_post_deploy.dokploy_source.read_dokploy_config",
+                return_value=("fixture", "fixture"),
+            ),
+            patch.object(dokploy_post_deploy, "run_compose_post_deploy_update", side_effect=runner),
+        ):
+            result = execute_odoo_post_deploy(
+                control_plane_root=Path(directory),
+                record_store=FilesystemRecordStore(state_dir=Path(directory) / "state"),
+                request=OdooPostDeployRequest(context="opw", instance="testing"),
+                hold_uncertain_effects=True,
+            )
+        self.assertEqual(result.post_deploy_status, "fail")
+
     def _source_of_truth(self) -> DokploySourceOfTruth:
         return DokploySourceOfTruth(
             schema_version=1,
@@ -355,9 +386,9 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
                             upsert_dokploy_schedule=Mock(
                                 return_value={"scheduleId": "maintenance-schedule"}
                             ),
+                            read_dokploy_schedule_baseline=Mock(return_value=[]),
                             latest_deployment_for_schedule=Mock(
                                 side_effect=[
-                                    {"deploymentId": "previous-maintenance"},
                                     {
                                         "deploymentId": "failed-maintenance",
                                         "status": "done",
@@ -365,7 +396,10 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
                                     },
                                 ]
                             ),
-                            wait_for_dokploy_schedule_deployment=Mock(
+                            _read_back_triggered_schedule_deployment=Mock(
+                                return_value={"deploymentId": "failed-maintenance"}
+                            ),
+                            wait_for_exact_dokploy_schedule_deployment=Mock(
                                 return_value="deployment=failed-maintenance status=done"
                             ),
                             dokploy_request=Mock(return_value={"ok": True}),
@@ -506,13 +540,16 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
                             upsert_dokploy_schedule=Mock(
                                 return_value={"scheduleId": "maintenance"}
                             ),
+                            read_dokploy_schedule_baseline=Mock(return_value=[]),
                             latest_deployment_for_schedule=Mock(
                                 side_effect=[
-                                    {"deploymentId": "previous"},
                                     {"deploymentId": "current", "status": "done", "logs": logs},
                                 ]
                             ),
-                            wait_for_dokploy_schedule_deployment=Mock(
+                            _read_back_triggered_schedule_deployment=Mock(
+                                return_value={"deploymentId": "current"}
+                            ),
+                            wait_for_exact_dokploy_schedule_deployment=Mock(
                                 return_value="deployment=current status=done"
                             ),
                             dokploy_request=Mock(return_value={"ok": True}),
