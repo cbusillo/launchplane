@@ -581,16 +581,16 @@ jobs:
 
       - name: Resolve pnpm store path
         id: pnpm-store
-        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+        run: bash scripts/setup-ci-pnpm-store.sh
 
       - name: Restore pnpm store
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ steps.pnpm-store.outputs.path }}
           key: >-
-            ${{ runner.os }}-node-22-pnpm-${{ hashFiles('frontend/pnpm-lock.yaml') }}
+            ${{ runner.os }}-node-22-pnpm-checkout-${{ hashFiles('frontend/pnpm-lock.yaml') }}
           restore-keys: |
-            ${{ runner.os }}-node-22-pnpm-
+            ${{ runner.os }}-node-22-pnpm-checkout-
 
       - name: Install frontend dependencies
         run: pnpm --dir frontend install --frozen-lockfile
@@ -632,16 +632,16 @@ jobs:
 
       - name: Resolve pnpm store path
         id: pnpm-store
-        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+        run: bash scripts/setup-ci-pnpm-store.sh
 
       - name: Restore pnpm store
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ steps.pnpm-store.outputs.path }}
           key: >-
-            ${{ runner.os }}-node-22-pnpm-${{ hashFiles('frontend/pnpm-lock.yaml') }}
+            ${{ runner.os }}-node-22-pnpm-checkout-${{ hashFiles('frontend/pnpm-lock.yaml') }}
           restore-keys: |
-            ${{ runner.os }}-node-22-pnpm-
+            ${{ runner.os }}-node-22-pnpm-checkout-
 
       - name: Install frontend dependencies
         run: pnpm --dir frontend install --frozen-lockfile
@@ -683,16 +683,16 @@ jobs:
 
       - name: Resolve pnpm store path
         id: pnpm-store
-        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+        run: bash scripts/setup-ci-pnpm-store.sh
 
       - name: Restore pnpm store
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ steps.pnpm-store.outputs.path }}
           key: >-
-            ${{ runner.os }}-node-22-pnpm-${{ hashFiles('frontend/pnpm-lock.yaml') }}
+            ${{ runner.os }}-node-22-pnpm-checkout-${{ hashFiles('frontend/pnpm-lock.yaml') }}
           restore-keys: |
-            ${{ runner.os }}-node-22-pnpm-
+            ${{ runner.os }}-node-22-pnpm-checkout-
 
       - name: Install frontend dependencies
         run: pnpm --dir frontend install --frozen-lockfile
@@ -741,16 +741,16 @@ jobs:
 
       - name: Resolve pnpm store path
         id: pnpm-store
-        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+        run: bash scripts/setup-ci-pnpm-store.sh
 
       - name: Restore pnpm store
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ steps.pnpm-store.outputs.path }}
           key: >-
-            ${{ runner.os }}-node-22-pnpm-${{ hashFiles('frontend/pnpm-lock.yaml') }}
+            ${{ runner.os }}-node-22-pnpm-checkout-${{ hashFiles('frontend/pnpm-lock.yaml') }}
           restore-keys: |
-            ${{ runner.os }}-node-22-pnpm-
+            ${{ runner.os }}-node-22-pnpm-checkout-
 
       - name: Install frontend dependencies
         run: pnpm --dir frontend install --frozen-lockfile
