@@ -12,9 +12,11 @@ from control_plane.provider_target_holds import (
     ProviderHoldLaneSnapshot,
     ProviderTargetHold,
     ProviderOperationReference,
+    TestingReplacementReference,
     bound_provider_target_origin,
     project_provider_target_hold,
     provider_hold_source_sha256,
+    provider_hold_classification,
 )
 from control_plane.contracts.provider_target_origin import (
     ProviderTargetOrigin,
@@ -376,6 +378,9 @@ from control_plane.contracts.odoo_stable_bootstrap_operation import (
 )
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
+    build_odoo_stable_target_replacement_operation_id,
+    odoo_replacement_original_identity,
+    odoo_stable_target_replacement_operation_is_terminal,
 )
 from control_plane.odoo_stable_lane import (
     ODOO_STABLE_LANE_BLOCKING_STATUSES,
@@ -5718,7 +5723,18 @@ class PostgresRecordStore(HumanSessionStore):
                     ("secret-version", secret_id, version_id, status)
                 )
         fence_snapshots: dict[tuple[str, str, str], list[object]] = {}
-        for hold in self.list_provider_target_holds():
+        try:
+            provider_holds = self.list_provider_target_holds()
+        except ValueError:
+            # Malformed provider evidence must wake/retry monitoring, without
+            # suppressing unrelated lane authority or inventing original ownership.
+            provider_holds = ()
+            for profile in profiles:
+                for lane in profile.lanes:
+                    fence_snapshots.setdefault(
+                        (profile.product, lane.context, lane.instance), []
+                    ).append(("provider-holds", "unavailable"))
+        for hold in provider_holds:
             lanes = (hold.lane,) if hold.lane is not None else ()
             for lane_key in lanes:
                 fence_snapshots.setdefault(lane_key, []).append(
@@ -8341,12 +8357,84 @@ class PostgresRecordStore(HumanSessionStore):
             holds = self._project_provider_hold_reservations(session, reservations)
             return provider_hold_page(holds, limit=limit, cursor=cursor)
 
+    def _provider_hold_replacements(
+        self,
+        session: Any,
+        *,
+        references: tuple[str, ...],
+        for_update: bool,
+        lane_key: tuple[str, str, str] | None,
+    ) -> tuple[OdooStableTargetReplacementOperationRecord, ...]:
+        from control_plane.testing_replacement_recovery import service_testing_operation
+
+        reference_ids = tuple(
+            reference.operation_id
+            for value in references
+            if (reference := TestingReplacementReference.parse(value)) is not None
+        )
+        membership = and_(
+            LaunchplaneOdooStableTargetReplacementOperationRow.status.in_(
+                ("pending", "running", "reconciliation_required")
+            )
+        )
+        if lane_key is not None:
+            membership = membership & (
+                (LaunchplaneOdooStableTargetReplacementOperationRow.product == lane_key[0])
+                & (LaunchplaneOdooStableTargetReplacementOperationRow.context == lane_key[1])
+                & (LaunchplaneOdooStableTargetReplacementOperationRow.instance == lane_key[2])
+            )
+        statement = (
+            select(LaunchplaneOdooStableTargetReplacementOperationRow)
+            .where(
+                membership
+                | LaunchplaneOdooStableTargetReplacementOperationRow.operation_id.in_(reference_ids)
+            )
+            .order_by(LaunchplaneOdooStableTargetReplacementOperationRow.operation_id)
+        )
+        if for_update and not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update()
+        records = []
+        for row in session.scalars(statement):
+            record = OdooStableTargetReplacementOperationRecord.model_validate(row.payload)
+            if not service_testing_operation(record):
+                continue
+            parse_launchplane_mutation_timestamp(record.created_at, field_name="created_at")
+            if odoo_stable_target_replacement_operation_is_terminal(record):
+                parse_launchplane_mutation_timestamp(record.finished_at, field_name="finished_at")
+            if record.status == "cancelled" and (
+                record.cancellation is None
+                or record.cancellation.reconciliation_attestation is None
+            ):
+                raise ValueError("Typed provider cancellation proof is unavailable.")
+            canonical = self._payload_dict(record)
+            if (
+                any(value != canonical.get(name) for name, value in row.payload.items())
+                or any(
+                    canonical.get(column.name) != getattr(row, column.name)
+                    for column in LaunchplaneOdooStableTargetReplacementOperationRow.__table__.columns
+                    if column.name != "payload"
+                )
+                or record.operation_id
+                != build_odoo_stable_target_replacement_operation_id(
+                    product=record.product,
+                    context=record.context,
+                    instance=record.instance,
+                    created_at=record.created_at,
+                    idempotency_scope=record.idempotency_scope,
+                    idempotency_key=record.idempotency_key,
+                )
+            ):
+                raise ValueError("Typed provider operation source is unavailable.")
+            records.append(record)
+        return tuple(records)
+
     def _provider_target_holds(
         self,
         session: Any,
         *,
         references: tuple[str, ...] = (),
         for_update: bool = False,
+        lane_key: tuple[str, str, str] | None = None,
     ) -> tuple[tuple[ProviderTargetHold, ...], "_ProviderHoldAuthorityView"]:
         reference_ids = tuple(
             reference.record_id
@@ -8375,14 +8463,17 @@ class PostgresRecordStore(HumanSessionStore):
         projected = self._project_provider_hold_reservations(
             session, reservations, for_update=for_update
         )
-        # Reservation -> authority -> incident is the adoption-compatible lock order.
+        replacements = self._provider_hold_replacements(
+            session, references=references, for_update=for_update, lane_key=lane_key
+        )
+        # Reservation -> typed rows -> nonblocking authority -> incident.
         if for_update and not self.database_url.startswith("sqlite"):
             if not session.scalar(
                 text("select pg_try_advisory_xact_lock_shared(hashtextextended(:lock_name, 0))"),
                 {"lock_name": "launchplane:product-authority-bundle"},
             ):
                 raise ProviderHoldAuthorityBusy("Product authority is being published.")
-        authority = _ProviderHoldAuthorityView(self, session)
+        authority = _ProviderHoldAuthorityView(self, session, replacements=replacements)
         from control_plane.testing_activation import retained_fence_is_separated
         from control_plane.workflows.generic_web_deploy_provider import (
             generic_web_provider_target_key,
@@ -8433,11 +8524,21 @@ class PostgresRecordStore(HumanSessionStore):
     ) -> ProviderHoldLaneSnapshot:
         lane = (product, context, instance)
         by_reference = {hold.reference: hold for hold in holds if hold.reference}
+        replacements = tuple(
+            record
+            for record in authority.replacement_operations
+            if (record.product, record.context, record.instance) == lane
+        )
+        by_replacement_reference = {
+            TestingReplacementReference.from_record(record).encode(): record
+            for record in replacements
+        }
         unavailable = tuple(
             sorted(
                 value
                 for value in references
                 if (value not in by_reference or by_reference[value].lane != lane)
+                and value not in by_replacement_reference
             )
         )
         selected = tuple(
@@ -8449,12 +8550,14 @@ class PostgresRecordStore(HumanSessionStore):
                 and not hold.separated
             )
         )
-        # Source identity includes exact lease/grace inputs and the full records used
-        # by the unchanged separation predicate. The hash stays strictly internal.
+        # Heartbeat timestamps are classified separately at observation and locked
+        # acceptance times. Preserve every other source/separation input exactly.
         material = [
             [
                 (
-                    hold.reservation.model_dump(mode="json"),
+                    hold.reservation.model_dump(
+                        mode="json", exclude={"updated_at", "lease_expires_at"}
+                    ),
                     hold.origin.model_dump(mode="json") if hold.origin else None,
                     hold.attribution,
                     str(hold.operation_nonce),
@@ -8467,6 +8570,12 @@ class PostgresRecordStore(HumanSessionStore):
             references,
             unavailable,
             authority.material_for_lane(product, context, instance),
+            [
+                record.model_dump(
+                    mode="json", exclude={"updated_at", "heartbeat_at", "lease_expires_at"}
+                )
+                for record in replacements
+            ],
         ]
         return ProviderHoldLaneSnapshot(
             product,
@@ -8476,6 +8585,7 @@ class PostgresRecordStore(HumanSessionStore):
             tuple(sorted(references)),
             unavailable,
             provider_hold_source_sha256(material),
+            replacements,
         )
 
     def _retain_original_mutation_intent(
@@ -10013,19 +10123,23 @@ class PostgresRecordStore(HumanSessionStore):
         product: str,
         context: str,
         instance: str,
-    ) -> None:
+        wait: bool = True,
+    ) -> bool:
         dialect_name = session.get_bind().dialect.name
         if dialect_name == "postgresql":
             lane_key = "".join(f"{len(value)}:{value}" for value in (product, context, instance))
-            session.execute(
+            function = "pg_advisory_xact_lock" if wait else "pg_try_advisory_xact_lock"
+            acquired = session.scalar(
                 text(
-                    "SELECT pg_advisory_xact_lock("
-                    "hashtext('launchplane-odoo-stable-lane'), hashtext(:lane_key))"
+                    f"SELECT {function}(hashtext('launchplane-odoo-stable-lane'), hashtext(:lane_key))"
                 ),
                 {"lane_key": lane_key},
             )
-        elif dialect_name == "sqlite":
+            return True if wait else bool(acquired)
+        elif dialect_name == "sqlite" and wait:
             session.execute(text("BEGIN IMMEDIATE"))
+
+        return True
 
     @staticmethod
     def _active_odoo_stable_lane_operation_owner(
@@ -10486,31 +10600,53 @@ class PostgresRecordStore(HumanSessionStore):
     def write_odoo_stable_target_replacement_operation_record(
         self, record: OdooStableTargetReplacementOperationRecord
     ) -> None:
-        self._write_row(
-            LaunchplaneOdooStableTargetReplacementOperationRow(
-                operation_id=record.operation_id,
-                product=record.product,
-                context=record.context,
-                instance=record.instance,
-                idempotency_key=record.idempotency_key,
-                idempotency_scope=record.idempotency_scope,
-                status=record.status,
-                phase=record.phase,
-                created_at=record.created_at,
-                updated_at=record.updated_at,
-                lease_owner=record.lease_owner,
-                lease_expires_at=record.lease_expires_at,
-                heartbeat_at=record.heartbeat_at,
-                attempt=record.attempt,
-                payload=self._payload_dict(record),
-            )
+        row = LaunchplaneOdooStableTargetReplacementOperationRow(
+            operation_id=record.operation_id,
+            product=record.product,
+            context=record.context,
+            instance=record.instance,
+            idempotency_key=record.idempotency_key,
+            idempotency_scope=record.idempotency_scope,
+            status=record.status,
+            phase=record.phase,
+            created_at=record.created_at,
+            updated_at=record.updated_at,
+            lease_owner=record.lease_owner,
+            lease_expires_at=record.lease_expires_at,
+            heartbeat_at=record.heartbeat_at,
+            attempt=record.attempt,
+            payload=self._payload_dict(record),
         )
+        with self._session_factory() as session:
+            self._lock_odoo_stable_lane(
+                session, product=record.product, context=record.context, instance=record.instance
+            )
+            current = session.get(
+                LaunchplaneOdooStableTargetReplacementOperationRow,
+                record.operation_id,
+                with_for_update=True,
+            )
+            if current is None:
+                session.add(row)
+            else:
+                self._sync_odoo_stable_target_replacement_operation_row(current, record)
+            session.commit()
 
     def _sync_odoo_stable_target_replacement_operation_row(
         self,
         row: LaunchplaneOdooStableTargetReplacementOperationRow,
         record: OdooStableTargetReplacementOperationRecord,
     ) -> None:
+        current = OdooStableTargetReplacementOperationRecord.model_validate(row.payload)
+        if odoo_replacement_original_identity(current) != odoo_replacement_original_identity(
+            record
+        ):
+            raise ValueError("Original Odoo replacement request identity cannot change.")
+        if (
+            odoo_stable_target_replacement_operation_is_terminal(current)
+            and current.status != record.status
+        ):
+            raise ValueError("Terminal Odoo replacement status cannot change or be reused.")
         row.product = record.product
         row.context = record.context
         row.instance = record.instance
@@ -14208,7 +14344,9 @@ class PostgresRecordStore(HumanSessionStore):
             )
             completed_at = _utc_now_timestamp()
             if (
-                current_record.status != "running"
+                odoo_replacement_original_identity(current_record)
+                != odoo_replacement_original_identity(record)
+                or current_record.status != "running"
                 or current_record.lease_owner != lease_owner.strip()
                 or not current_record.lease_expires_at
                 or current_record.lease_expires_at <= completed_at
@@ -29174,11 +29312,20 @@ class PostgresRecordStore(HumanSessionStore):
                     from control_plane.service_deploy_drain import lock
 
                     lock(self, session)
+                if not self._lock_odoo_stable_lane(
+                    session,
+                    product=observation.product,
+                    context=observation.context,
+                    instance=observation.instance,
+                    wait=False,
+                ):
+                    return PublicIngressTransitionWriteResult(status="provider_source_changed")
                 try:
                     holds, authority = self._provider_target_holds(
                         session,
                         references=expected_provider_hold_snapshot.references,
                         for_update=True,
+                        lane_key=(observation.product, observation.context, observation.instance),
                     )
                 except (ProviderHoldAuthorityBusy, ValueError):
                     return PublicIngressTransitionWriteResult(status="provider_source_changed")
@@ -29190,7 +29337,15 @@ class PostgresRecordStore(HumanSessionStore):
                     instance=observation.instance,
                     references=expected_provider_hold_snapshot.references,
                 )
-                if current_source.source_sha256 != expected_provider_hold_snapshot.source_sha256:
+                if (
+                    current_source.source_sha256 != expected_provider_hold_snapshot.source_sha256
+                    or provider_hold_classification(
+                        expected_provider_hold_snapshot, checked_at=observation.observed_at
+                    )
+                    != provider_hold_classification(
+                        current_source, checked_at=self._database_mutation_timestamp(session)
+                    )
+                ):
                     return PublicIngressTransitionWriteResult(status="provider_source_changed")
             authority_changed = False
             if expected_profile_sha256:
@@ -32224,7 +32379,14 @@ class _ProviderHoldAuthorityView(PostgresRecordStore):
     it cannot perform a provider call, acquire authority or write a record.
     """
 
-    def __init__(self, store: PostgresRecordStore, session: Any) -> None:
+    def __init__(
+        self,
+        store: PostgresRecordStore,
+        session: Any,
+        *,
+        replacements: tuple[OdooStableTargetReplacementOperationRecord, ...] = (),
+    ) -> None:
+        self.replacement_operations = replacements
         self._profiles = tuple(
             store._read_product_profile_payload(row.payload)
             for row in session.scalars(

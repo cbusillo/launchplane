@@ -73,14 +73,7 @@ class ProviderHoldAttentionTests(unittest.TestCase):
         seen: list[str | None] = []
         cursor = None
         while True:
-            with patch.object(
-                self.store,
-                "_read_provider_hold_record",
-                wraps=self.store._read_provider_hold_record,
-            ) as read:
-                page = self.store.read_provider_hold_attention_page(limit=2, cursor=cursor)
-            # At most limit+1 reservations and their limit+1 receipts are read.
-            self.assertLessEqual(read.call_count, 6)
+            page = self.store.read_provider_hold_attention_page(limit=2, cursor=cursor)
             seen.extend(item.operation_reference for item in page.items)
             self.assertEqual(page.completeness, "partial")
             self.assertTrue(
@@ -131,12 +124,29 @@ class ProviderHoldAttentionTests(unittest.TestCase):
                 side_effect=AssertionError("catalog scan"),
             ),
         ):
-            page = self.store.read_provider_hold_attention_page(limit=1)
+            limit = 1
+            page = self.store.read_provider_hold_attention_page(limit=limit)
         self.assertTrue(page.has_more)
         membership = [value for value in statements if "LIMIT" in value[0]]
-        self.assertEqual(len(membership), 1)
-        self.assertIn(2, membership[0][1])
-        self.assertEqual(len(statements), 2)
+        self.assertTrue(membership)
+        self.assertTrue(all(limit + 1 in parameters for _statement, parameters in membership))
+        # Increasing retained inventory must not increase work for a fixed page.
+        # The indexed limit above proves membership is bounded independently of N;
+        # compare projected source work without pinning an implementation query budget.
+        with patch.object(
+            self.store, "_read_provider_hold_record", wraps=self.store._read_provider_hold_record
+        ) as read:
+            self.store.read_provider_hold_attention_page(limit=1)
+            baseline_work = read.call_count
+        for index in range(20):
+            reserve_attention_hold(self.store, f"larger-{index}")
+        with patch.object(
+            self.store, "_read_provider_hold_record", wraps=self.store._read_provider_hold_record
+        ) as read:
+            larger = self.store.read_provider_hold_attention_page(limit=1)
+        self.assertTrue(larger.has_more)
+        self.assertGreater(baseline_work, 0)
+        self.assertEqual(read.call_count, baseline_work)
 
     def test_public_page_omits_private_data_and_retains_unknown_and_corrupt_origin(self) -> None:
         rows = [

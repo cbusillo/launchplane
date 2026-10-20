@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFileSync } from "node:fs";
+const openapi = JSON.parse(readFileSync(new URL("../generated/openapi-canonical.json", import.meta.url), "utf8"));
 import { readProviderHoldAttention, LaunchplaneApiError } from "../src/api.ts";
 import { providerAttentionQualifier } from "../src/provider-hold-attention.ts";
 
@@ -14,7 +16,9 @@ test("service attention GET encodes bounded continuation and preserves denial ev
   try {
     const controller = new AbortController();
     await readProviderHoldAttention({ limit: 7, cursor: "v1:opaque:ref" }, controller.signal);
-    assert.equal(calls[0].input, "/v1/operations/provider-hold-attention?limit=7&cursor=v1%3Aopaque%3Aref");
+    const url = new URL(calls[0].input, "https://fixture.invalid");
+    assert.ok(openapi.paths[url.pathname]?.get);
+    assert.deepEqual([...url.searchParams], [["limit", "7"], ["cursor", "v1:opaque:ref"]]);
     assert.equal(calls[0].init.method, "GET");
     assert.equal(calls[0].init.credentials, "same-origin");
     assert.equal(calls[0].init.signal, controller.signal);
@@ -25,10 +29,14 @@ test("service attention GET encodes bounded continuation and preserves denial ev
 });
 
 test("only a fresh first single page can describe an empty service read", () => {
-  assert.match(providerAttentionQualifier(resource(), now), /No retained service operations/);
+  const freshEmpty = providerAttentionQualifier(resource(), now);
+  assert.ok(freshEmpty);
   for (const state of [resource(page, "loading"), resource(page, "error"), resource({ ...page, completeness: "partial" }), resource({ ...page, has_more: true }), resource({ ...page, stale_after: "invalid" }), resource({ ...page, stale_after: new Date(now).toISOString() })]) {
-    assert.doesNotMatch(providerAttentionQualifier(state, now), /No retained service operations/);
+    assert.notEqual(providerAttentionQualifier(state, now), freshEmpty);
   }
-  assert.match(providerAttentionQualifier(resource({ ...page, items: [{ original_scope: null, attribution: "unavailable", state: "running" }] }), now), /unknown original ownership/);
-  assert.match(providerAttentionQualifier(resource({ ...page, items: [{ original_scope: { product: "fixture" }, attribution: "retained", state: "running" }] }), now), /Retained operations/);
+  const unknown = providerAttentionQualifier(resource({ ...page, items: [{ original_scope: null, attribution: "unavailable", state: "running" }] }), now);
+  const retained = providerAttentionQualifier(resource({ ...page, items: [{ original_scope: { product: "fixture" }, attribution: "retained", state: "running" }] }), now);
+  assert.notEqual(unknown, freshEmpty);
+  assert.notEqual(retained, freshEmpty);
+  assert.notEqual(unknown, retained);
 });

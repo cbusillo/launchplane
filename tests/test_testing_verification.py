@@ -37,16 +37,13 @@ from tests.support.auth import scoped_agent_transport
 
 
 class TestingVerificationScenario(TestingPublicIngressScenario):
+    installed_operation_running = False
+
     def setUp(self) -> None:
         super().setUp()
         moment = datetime.now(timezone.utc) - timedelta(minutes=10)
         self.started = moment.isoformat()
         self.finished = (moment + timedelta(minutes=1)).isoformat()
-        self.store.write_odoo_stable_target_replacement_operation_record(
-            self.fixture.operation.model_copy(
-                update={"status": "fail", "phase": "failed", "finished_at": self.finished}
-            )
-        )
         self.artifact = _artifact_manifest(
             artifact_id="restored-build",
             source_commit="a" * 40,
@@ -128,6 +125,21 @@ class TestingVerificationScenario(TestingPublicIngressScenario):
                 ),
             }
         )
+        if self.installed_operation_running:
+            operation = operation.model_copy(
+                update={
+                    "status": "running",
+                    "phase": "running",
+                    "finished_at": "",
+                    "lease_owner": "fixture-running",
+                    "lease_expires_at": (
+                        datetime.now(timezone.utc) + timedelta(minutes=5)
+                    ).isoformat(),
+                    "error_code": "",
+                    "error_message": "",
+                }
+            )
+        operation = type(operation).model_validate(operation.model_dump(mode="json"))
         self.store.write_odoo_stable_target_replacement_operation_record(operation)
         self.terminal = operation
         self.verification_request = TestingVerificationRequest(
@@ -296,11 +308,23 @@ class TestingVerificationTests(TestingVerificationScenario):
                         )
                     )
                 else:
-                    self.store.write_odoo_stable_target_replacement_operation_record(
-                        self.terminal.model_copy(
-                            update={"status": "running", "phase": "running", "finished_at": ""}
-                        )
-                    )
+                    scenario = TestingVerificationScenario()
+                    scenario.installed_operation_running = True
+                    try:
+                        scenario.setUp()
+                        matching = [
+                            row
+                            for row in scenario.store.list_odoo_stable_target_replacement_operation_records()
+                            if row.deployment_record_id == scenario.deployment.record_id
+                        ]
+                        self.assertEqual(len(matching), 1)
+                        self.assertEqual(matching[0].status, "running")
+                        with self.assertRaises(ValueError):
+                            scenario.verification().plan()
+                        scenario.receiver.assert_not_called()
+                    finally:
+                        scenario.doCleanups()
+                    continue
                 with self.assertRaises(ValueError):
                     self.verification().plan()
                 self.store.write_deployment_record(self.deployment)

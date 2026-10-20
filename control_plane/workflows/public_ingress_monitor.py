@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-from control_plane.provider_target_holds import ProviderHoldLaneSnapshot, ProviderOperationReference
+from control_plane.provider_target_holds import (
+    ProviderHoldLaneSnapshot,
+    ProviderOperationReference,
+    ProviderOperationAttentionReference,
+    TestingReplacementReference,
+    DEPLOY_FENCE_RECONCILE_GRACE as DEPLOY_FENCE_RECONCILE_GRACE,
+    provider_hold_is_stuck as _deploy_fence_is_stuck,
+)
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -25,7 +32,6 @@ from pydantic import BaseModel, ConfigDict, Field
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.idempotency_record import (
     LaunchplaneIdempotencyRecord,
-    parse_launchplane_mutation_timestamp,
 )
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
@@ -146,8 +152,6 @@ PUBLIC_INGRESS_GITHUB_TOKEN_ENV_KEY = "LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN"
 MISSING_AUTHORITY_SHA256 = "missing"
 DEPLOY_FENCE_PROVIDER = "launchplane"
 DEPLOY_FENCE_CHECK_NAME = "launchplane-deploy-fence"
-# Long enough for a same-key retry or a recovery already underway to settle.
-DEPLOY_FENCE_RECONCILE_GRACE = timedelta(minutes=15)
 # A deploy records its new runtime identity when its own rollout check passes,
 # and the public route can still answer from the previous container for a few
 # seconds. A mismatch is probed once more after this delay before it counts.
@@ -408,7 +412,7 @@ def discover_public_ingress_monitor_targets(
         (operation.product, operation.context, operation.instance): operation
         for operation in (
             read_replacements(instance_name="testing", statuses=("reconciliation_required",))
-            if callable(read_replacements)
+            if callable(read_replacements) and held_deploy_fences is None
             else ()
         )
         if service_testing_operation(operation)
@@ -443,7 +447,15 @@ def discover_public_ingress_monitor_targets(
             fence = None
             replacement = held_replacements.get((profile.product, lane.context, lane.instance))
             if (
-                (snapshot is not None and bool(snapshot.holds or snapshot.references))
+                (
+                    snapshot is not None
+                    and bool(
+                        snapshot.holds
+                        or snapshot.references
+                        or snapshot.unavailable_references
+                        or snapshot.unsettled_replacements
+                    )
+                )
                 or replacement is not None
                 or ((profile.product, lane.context, lane.instance) in open_deploy_fence_lanes)
             ):
@@ -533,27 +545,47 @@ def _held_generic_web_deploy_fences(
         fingerprint = incident.material_fingerprint
         refs = tuple(
             value
-            if ProviderOperationReference.parse(value) is not None
-            else "provider-operation:unavailable"
+            if (
+                ProviderOperationReference.parse(value) is not None
+                or TestingReplacementReference.parse(value) is not None
+            )
+            else (
+                ProviderOperationAttentionReference(attention.record_id).encode()
+                if (attention := ProviderOperationAttentionReference.parse(value)) is not None
+                else "provider-operation:unavailable"
+            )
             for value in (fingerprint.route_authority.target_keys if fingerprint else ())
             if value.startswith("provider-operation:")
         )
+        refs = tuple(sorted(set(refs)))
         # Historical ref-less warnings have no exact settlement proof. Catalog
         # retirement cannot supply it. Never fabricate an incarnation for them.
         references[(incident.product, incident.context, incident.instance)] = refs or (
             "provider-operation:unavailable",
         )
-    return cast(
-        dict[tuple[str, str, str], ProviderHoldLaneSnapshot],
-        read(
-            lane_keys=tuple(
-                (profile.product, lane.context, lane.instance)
-                for profile in profiles
-                for lane in profile.lanes
-            ),
-            references_by_lane=references,
-        ),
+    lane_keys = tuple(
+        (profile.product, lane.context, lane.instance)
+        for profile in profiles
+        for lane in profile.lanes
     )
+    try:
+        return cast(
+            dict[tuple[str, str, str], ProviderHoldLaneSnapshot],
+            read(lane_keys=lane_keys, references_by_lane=references),
+        )
+    except ValueError:
+        # The strict source read remains unavailable, not an empty inventory or
+        # attributed hold. Keep unrelated probes running; these unaccepted provider
+        # snapshots cannot resolve incidents even if source repairs before publication.
+        return {
+            lane: ProviderHoldLaneSnapshot(
+                *lane,
+                holds=(),
+                references=references.get(lane, ()),
+                unavailable_references=("provider-operation:unavailable",),
+            )
+            for lane in lane_keys
+        }
 
 
 def _deploy_fence_monitor_target(
@@ -1157,6 +1189,12 @@ def _store_monitor_observation(
         if write_status == "provider_source_changed":
             # Do not publish the stale pass or its recovery/outbox. A bounded next
             # scheduler observation re-evaluates pure local source from scratch.
+            summary = (
+                "Provider operation evidence is unavailable; observation was not accepted."
+                if expected_provider_hold_snapshot is not None
+                and not expected_provider_hold_snapshot.source_sha256
+                else "Provider operation evidence changed before publication; observation was not accepted."
+            )
             unavailable = record.model_copy(
                 update={
                     "status": "skipped",
@@ -1166,12 +1204,12 @@ def _store_monitor_observation(
                             update={
                                 "status": "skipped",
                                 "failure_code": None,
-                                "summary": "Provider source changed; observation was not accepted.",
+                                "summary": summary,
                             }
                         )
                         for target in record.targets
                     ),
-                    "summary": "Provider operation evidence changed before publication; observation was not accepted.",
+                    "summary": summary,
                     "incident_id": "",
                     "incident_event_id": "",
                     "material_fingerprint": None,
@@ -2579,6 +2617,18 @@ def check_public_ingress_target(
             sorted(
                 {
                     *(hold.reference for hold in snapshot.holds if hold.reference),
+                    *(
+                        ProviderOperationAttentionReference(
+                            hold.reservation.record_id, state
+                        ).encode()
+                        for hold in snapshot.holds
+                        if not hold.reference
+                        for state in ("held", "unverified")
+                    ),
+                    *(
+                        TestingReplacementReference.from_record(record).encode()
+                        for record in snapshot.unsettled_replacements
+                    ),
                     *snapshot.unavailable_references,
                 }
             )
@@ -3010,7 +3060,8 @@ def _check_deploy_fence(
         unavailable = bool(snapshot.unavailable_references) or any(
             hold.origin is None for hold in snapshot.holds
         )
-        if stuck or unavailable:
+        replacements = snapshot.unsettled_replacements
+        if stuck or unavailable or replacements:
             selected = stuck[0].reservation if stuck else None
             detail = (
                 f" Operation {selected.record_id} remains {selected.state}, last phase "
@@ -3018,6 +3069,11 @@ def _check_deploy_fence(
                 if selected
                 else ""
             )
+            if replacements:
+                detail += (
+                    f" Testing replacement {replacements[0].operation_id} remains fenced; "
+                    "its exact typed operation has not reached a terminal state."
+                )
             return PublicIngressTargetObservation(
                 target="provider",
                 url=url,
@@ -3073,31 +3129,6 @@ def _check_deploy_fence(
             "it is recovered with the generic-web deploy recovery dry-run."
         ),
     )
-
-
-def _deploy_fence_is_stuck(fence: LaunchplaneIdempotencyRecord, *, checked_at: str) -> bool:
-    observed_at = parse_launchplane_mutation_timestamp(checked_at, field_name="checked_at")
-    if fence.state == "running":
-        # The heartbeat renews a live deploy's lease, so an expired lease means it died.
-        return bool(fence.lease_expires_at) and (
-            parse_launchplane_mutation_timestamp(
-                fence.lease_expires_at, field_name="lease_expires_at"
-            )
-            <= observed_at
-        )
-    if not fence.updated_at:
-        return True
-    held_since = parse_launchplane_mutation_timestamp(fence.updated_at, field_name="updated_at")
-    if fence.lease_expires_at:
-        # A later refused deploy re-marks an expired fence and moves updated_at;
-        # the lease expiry it kept is when the fence really stopped.
-        held_since = min(
-            held_since,
-            parse_launchplane_mutation_timestamp(
-                fence.lease_expires_at, field_name="lease_expires_at"
-            ),
-        )
-    return held_since + DEPLOY_FENCE_RECONCILE_GRACE <= observed_at
 
 
 def _profile_uses_generic_web(profile: LaunchplaneProductProfileRecord) -> bool:

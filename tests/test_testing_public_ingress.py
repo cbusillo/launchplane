@@ -143,11 +143,26 @@ class TestingPublicIngressScenario(FreshTestingBootstrapScenario):
             source_observation=source_observation,
         )
         self.store.write_native_testing_copy_capture(self.copy_witness)
-        self.store.write_odoo_stable_target_replacement_operation_record(
-            self.fixture.operation.model_copy(
-                update={"status": "superseded", "phase": "superseded"}
-            )
+        from tests.support.disposable_lanes import record_safety
+
+        preparation = self.store.read_disposable_replacement_preparation(
+            self.fixture.operation.operation_id
         )
+        assert preparation is not None
+        record_safety(
+            self.store,
+            self.profile.product,
+            self.fixture.context,
+            "testing",
+            replaces_operation_id=self.fixture.operation.operation_id,
+            replaced_target_id=preparation.retained_target_id,
+            production_resources="separation_ready",
+        )
+        self.assertTrue(self.store.supersede_disposable_testing_replacement(self.fixture.operation))
+        superseded = self.store.read_odoo_stable_target_replacement_operation_record(
+            self.fixture.operation.operation_id
+        )
+        self.assertEqual(superseded.status, "superseded")
         self.store.request_fresh_testing_reconcile(generation)
         self.client = EdgeClient()
         self.endpoint = EdgeEndpointRecord(

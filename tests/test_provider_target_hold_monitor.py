@@ -76,9 +76,10 @@ class ProviderTargetHoldMonitorTests(unittest.TestCase):
             ).record
 
     def observe(self, checked_at: str = "2026-10-01T01:00:00Z") -> PublicIngressMonitorResult:
-        return run_public_ingress_monitor_once(
-            record_store=self.store, checked_at=checked_at, notify=False
-        )
+        with patch.object(self.store, "_database_mutation_timestamp", return_value=checked_at):
+            return run_public_ingress_monitor_once(
+                record_store=self.store, checked_at=checked_at, notify=False
+            )
 
     def complete(self, row: LaunchplaneIdempotencyRecord) -> None:
         self.store.write_idempotency_record(
@@ -96,8 +97,28 @@ class ProviderTargetHoldMonitorTests(unittest.TestCase):
         old = self.reserve("private-old-key")
         live_origin = self.origin.model_copy(update={"target_id": "new-target"})
         live = self.reserve("private-live-key", origin=live_origin, now="2026-10-01T01:00:00Z")
-        result = self.observe()
+        transition = self.store.write_public_ingress_transition_with_outbox
+
+        def heartbeat_then_publish(**kwargs: Any) -> PublicIngressTransitionWriteResult:
+            with patch.object(
+                self.store, "_database_mutation_timestamp", return_value="2026-10-01T01:00:30Z"
+            ):
+                self.assertEqual(
+                    self.store.renew_mutation_reservation(
+                        reservation=live, lease_seconds=120
+                    ).status,
+                    "updated",
+                )
+                return transition(**kwargs)
+
+        with patch.object(
+            self.store,
+            "write_public_ingress_transition_with_outbox",
+            side_effect=heartbeat_then_publish,
+        ):
+            result = self.observe()
         self.assertEqual(result.fail_count, 1)
+        self.assertEqual(result.open_incident_count, 1)
         snapshot = discover_public_ingress_monitor_targets(self.store)[0].provider_hold_snapshot
         assert snapshot is not None
         self.assertEqual(
@@ -113,6 +134,520 @@ class ProviderTargetHoldMonitorTests(unittest.TestCase):
             old.provider_target_key,
         ):
             self.assertNotIn(private, material)
+
+    def test_acceptance_rechecks_classification_after_lease_change_or_elapsed_grace(self) -> None:
+        from control_plane.workflows.public_ingress_monitor import DEPLOY_FENCE_RECONCILE_GRACE
+        from control_plane.contracts.idempotency_record import (
+            parse_launchplane_mutation_timestamp,
+            format_launchplane_mutation_timestamp,
+        )
+
+        row = self.reserve("classification")
+        target = discover_public_ingress_monitor_targets(self.store)[0]
+        snapshot = target.provider_hold_snapshot
+        assert snapshot is not None
+        observed_at = row.lease_expires_at
+        observation = check_public_ingress_target(
+            target=target,
+            checked_at=observed_at,
+            timeout_seconds=1,
+            http_get=Mock(),
+            tls_get=Mock(),
+        )
+        self.assertEqual(observation.status, "fail")
+        renewed = row.model_copy(update={"lease_expires_at": _minutes_after(observed_at, 10)})
+        with self.store._session_factory.begin() as session:
+            stored = session.get(LaunchplaneIdempotencyRow, row.record_id)
+            assert stored is not None
+            self.store._sync_idempotency_row(stored, renewed)
+        with patch.object(self.store, "_database_mutation_timestamp", return_value=observed_at):
+            result = self.store.write_public_ingress_transition_with_outbox(
+                observation=observation, incidents=(), expected_provider_hold_snapshot=snapshot
+            )
+        self.assertEqual(result.status, "provider_source_changed")
+
+        held = renewed.model_copy(
+            update={
+                "state": "reconcile_required",
+                "updated_at": observed_at,
+                "lease_expires_at": "",
+            }
+        )
+        with self.store._session_factory.begin() as session:
+            stored = session.get(LaunchplaneIdempotencyRow, row.record_id)
+            assert stored is not None
+            self.store._sync_idempotency_row(stored, held)
+        target = discover_public_ingress_monitor_targets(self.store)[0]
+        observation = check_public_ingress_target(
+            target=target,
+            checked_at=observed_at,
+            timeout_seconds=1,
+            http_get=Mock(),
+            tls_get=Mock(),
+        )
+        self.assertEqual(observation.status, "pass")
+        accepted_at = format_launchplane_mutation_timestamp(
+            parse_launchplane_mutation_timestamp(observed_at, field_name="observed_at")
+            + DEPLOY_FENCE_RECONCILE_GRACE
+        )
+        with patch.object(self.store, "_database_mutation_timestamp", return_value=accepted_at):
+            result = self.store.write_public_ingress_transition_with_outbox(
+                observation=observation,
+                incidents=(),
+                expected_provider_hold_snapshot=target.provider_hold_snapshot,
+            )
+        self.assertEqual(result.status, "provider_source_changed")
+        self.assertEqual(self.store.list_public_ingress_observation_records(), ())
+
+    def test_corrupt_provider_source_keeps_other_probes_and_scheduler_running(self) -> None:
+        from control_plane.health_monitor_scheduler import HealthMonitorScheduler
+        from control_plane.contracts.private_health_endpoint_record import (
+            PrivateHealthEndpointRecord,
+        )
+        from control_plane.contracts.product_profile_record import ProductLaneHealthCheck
+        from control_plane.outbound_http import PublicTlsProbeResult
+        from control_plane.storage.postgres import (
+            LaunchplaneDokployTargetRow,
+            LaunchplaneDokployTargetIdRow,
+        )
+        from control_plane.workflows.public_ingress_monitor import HttpObservation
+        from tests.test_public_ingress_monitor import _route_binding, _tls_certificate
+
+        row = self.reserve("corrupt")
+        self.observe()
+        profile = _profile()
+        lane = profile.lanes[0]
+        lane = lane.model_copy(
+            update={
+                "health_monitoring": lane.health_monitoring.model_copy(
+                    update={
+                        "checks": (
+                            *lane.health_monitoring.checks,
+                            ProductLaneHealthCheck(
+                                name="private-runtime",
+                                kind="private_http",
+                                private_endpoint_key="fixture-private",
+                            ),
+                        )
+                    }
+                )
+            }
+        )
+        self.store.write_product_profile_record(profile.model_copy(update={"lanes": (lane,)}))
+        self.store.write_private_health_endpoint_record(
+            PrivateHealthEndpointRecord(
+                endpoint_key="fixture-private",
+                product=profile.product,
+                context=lane.context,
+                instance=lane.instance,
+                url="http://10.0.0.5:8080/health",
+                updated_at=row.created_at,
+            )
+        )
+        self.store.write_route_binding_record(_route_binding())
+        corrupt_authority = (
+            LaunchplaneProviderTargetRow(
+                context="unrelated-source",
+                instance="prod",
+                provider_id="fixture",
+                target_category="compose",
+                target_id="fixture",
+                display_name="fixture",
+                provider_target_type="compose",
+                updated_at=row.created_at,
+                payload={},
+            ),
+            LaunchplaneDokployTargetRow(
+                context="unrelated-source",
+                instance="prod",
+                updated_at=row.created_at,
+                payload={},
+            ),
+            LaunchplaneDokployTargetIdRow(
+                context="unrelated-source",
+                instance="prod",
+                target_id="fixture",
+                updated_at=row.created_at,
+                payload={},
+            ),
+        )
+        for index, authority in enumerate((None, *corrupt_authority)):
+            with self.subTest(source=type(authority).__name__):
+                with self.store._session_factory.begin() as session:
+                    if authority is None:
+                        stored = session.get(LaunchplaneIdempotencyRow, row.record_id)
+                        assert stored is not None
+                        stored.state = "reconcile_required"  # Contradicts the valid payload.
+                    else:
+                        session.add(authority)
+                try:
+                    http = Mock(side_effect=lambda url, timeout: HttpObservation(200, url, 0))
+                    private = Mock(side_effect=lambda url, timeout: HttpObservation(200, url, 0))
+                    tls = Mock(
+                        return_value=PublicTlsProbeResult(
+                            status="valid",
+                            failure_code=None,
+                            summary="fixture certificate",
+                            validated_address_count=1,
+                            certificate=_tls_certificate(),
+                        )
+                    )
+                    checked_at = _minutes_after("2026-10-01T01:00:00Z", index + 1)
+                    with patch.object(
+                        self.store, "_database_mutation_timestamp", return_value=checked_at
+                    ):
+                        result = run_public_ingress_monitor_once(
+                            record_store=self.store,
+                            checked_at=checked_at,
+                            notify=False,
+                            http_get=http,
+                            private_http_get=private,
+                            tls_get=tls,
+                        )
+                    self.assertTrue(http.called)
+                    self.assertTrue(private.called)
+                    self.assertTrue(tls.called)
+                    provider = [
+                        record for record in result.records if record.check_kind == "provider"
+                    ]
+                    self.assertEqual([record.status for record in provider], ["skipped"])
+                    self.assertEqual(result.resolved_incident_count, 0)
+                    self.assertTrue(self.store.list_public_ingress_incident_records(status="open"))
+                    persisted = self.store.list_public_ingress_observation_records()
+                    self.assertTrue(
+                        {"public_http", "private_http", "tls"}.issubset(
+                            {
+                                record.check_kind
+                                for record in persisted
+                                if record.observed_at == checked_at
+                            }
+                        )
+                    )
+                    if authority is None:
+                        with self.assertRaises(ValueError):
+                            self.store.read_provider_hold_attention_page()
+                    with self.assertRaises(ValueError):
+                        self.store.list_provider_target_holds()
+                    probe = Mock()
+                    scheduler = HealthMonitorScheduler(
+                        self.store, run_monitor=probe, clock=lambda: 1_800_000_000 + index * 3600
+                    )
+                    self.assertTrue(scheduler.run_once())
+                    self.assertTrue(probe.called)
+                finally:
+                    with self.store._session_factory.begin() as session:
+                        if authority is None:
+                            stored = session.get(LaunchplaneIdempotencyRow, row.record_id)
+                            assert stored is not None
+                            self.store._sync_idempotency_row(stored, row)
+                        else:
+                            session.delete(session.merge(authority))
+
+    def typed_operation(self, key: str, *, running: bool = False) -> Any:
+        from datetime import datetime, timedelta, timezone
+        from control_plane.contracts.odoo_stable_target_replacement import (
+            OdooStableTargetReplacementApplyRequest,
+        )
+        from control_plane.contracts.odoo_stable_target_replacement_operation import (
+            OdooStableTargetReplacementOperationRecord,
+            build_odoo_stable_target_replacement_operation_id,
+        )
+        from control_plane.launchplane_reconcile_authorization import (
+            build_launchplane_reconcile_authorization,
+        )
+
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        created_at = now.isoformat().replace("+00:00", "Z")
+        profile = self.profile.model_copy(
+            update={"lanes": (ProductLaneProfile(context=self.origin.context, instance="testing"),)}
+        )
+        self.store.write_product_profile_record(profile)
+        scope = "launchplane-reconcile:" + profile.product
+        operation = OdooStableTargetReplacementOperationRecord(
+            schema_version=2,
+            operation_id=build_odoo_stable_target_replacement_operation_id(
+                product=profile.product,
+                context=self.origin.context,
+                instance="testing",
+                created_at=created_at,
+                idempotency_key=key,
+                idempotency_scope=scope,
+            ),
+            product=profile.product,
+            context=self.origin.context,
+            instance="testing",
+            created_at=created_at,
+            updated_at=created_at,
+            idempotency_key=key,
+            idempotency_scope=scope,
+            request_fingerprint="PRIVATE-TYPED-FINGERPRINT",
+            request=OdooStableTargetReplacementApplyRequest(
+                product=profile.product,
+                instance="testing",
+                strategy="recreate-in-place",
+                data_source_mode="existing",
+            ),
+            authorization=build_launchplane_reconcile_authorization(
+                product=profile.product,
+                context=self.origin.context,
+                authorized_at=created_at,
+            ),
+            status="running" if running else "reconciliation_required",
+            phase="apply",
+            error_code="" if running else "operation_reconciliation_required",
+            error_message="" if running else "Fixture requires reconciliation.",
+            lease_owner="fixture" if running else "",
+            lease_expires_at=(now + timedelta(minutes=10)).isoformat().replace("+00:00", "Z")
+            if running
+            else "",
+            heartbeat_at=created_at if running else "",
+        )
+        self.store.write_odoo_stable_target_replacement_operation_record(operation)
+        return operation
+
+    def test_typed_participant_terminal_failure_settles_exact_reference_and_mixed_generic(
+        self,
+    ) -> None:
+        from control_plane.provider_target_holds import TestingReplacementReference
+
+        operation = self.typed_operation("PRIVATE-TYPED-KEY")
+        generic = self.reserve(
+            "generic", origin=self.origin.model_copy(update={"instance": "testing"})
+        )
+        opened = self.observe(operation.updated_at)
+        self.assertEqual(opened.open_incident_count, 1)
+        fingerprint = opened.records[0].material_fingerprint
+        assert fingerprint is not None
+        self.assertIn(
+            TestingReplacementReference.from_record(operation).encode(),
+            fingerprint.route_authority.target_keys,
+        )
+        public = opened.records[0].model_dump_json()
+        self.assertNotIn(operation.request_fingerprint, public)
+        self.assertNotIn(operation.idempotency_scope, public)
+        self.assertNotIn(operation.idempotency_key, public)
+        self.complete(generic)
+        self.assertEqual(self.observe(operation.updated_at).resolved_incident_count, 0)
+        terminal = operation.model_copy(
+            update={
+                "status": "fail",
+                "phase": "failed",
+                "finished_at": operation.updated_at,
+                "error_code": "fixture_failed",
+                "error_message": "Fixture terminal failure.",
+            }
+        )
+        self.store.write_odoo_stable_target_replacement_operation_record(terminal)
+        resolved = self.observe(operation.updated_at)
+        self.assertEqual(resolved.resolved_incident_count, 1)
+        self.assertEqual(resolved.pass_count, 1)
+
+    def test_typed_missing_corrupt_mismatched_or_nonterminal_record_never_settles(self) -> None:
+        from control_plane.storage.postgres import (
+            LaunchplaneOdooStableTargetReplacementOperationRow,
+        )
+
+        for corruption in ("missing", "indexed-status", "created-at", "family", "pending"):
+            with self.subTest(corruption=corruption):
+                operation = self.typed_operation(corruption)
+                self.observe(operation.updated_at)
+                with self.store._session_factory.begin() as session:
+                    row = session.get(
+                        LaunchplaneOdooStableTargetReplacementOperationRow, operation.operation_id
+                    )
+                    assert row is not None
+                    if corruption == "missing":
+                        session.delete(row)
+                    elif corruption == "indexed-status":
+                        row.status = "pass"
+                    elif corruption == "created-at":
+                        row.payload = {**row.payload, "created_at": "changed-original-time"}
+                    elif corruption == "family":
+                        row.payload = {
+                            **row.payload,
+                            "request": {
+                                **row.payload["request"],
+                                "data_source_mode": "empty",
+                                "allow_empty_data": True,
+                            },
+                        }
+                    else:
+                        self.store._sync_odoo_stable_target_replacement_operation_row(
+                            row,
+                            operation.model_copy(
+                                update={
+                                    "status": "pending",
+                                    "error_code": "",
+                                    "error_message": "",
+                                }
+                            ),
+                        )
+                observed = self.observe(operation.updated_at)
+                self.assertEqual(observed.pass_count, 0)
+                self.assertEqual(observed.resolved_incident_count, 0)
+                self.assertEqual(
+                    observed.skipped_count, int(corruption in {"indexed-status", "created-at"})
+                )
+                with self.store._session_factory.begin() as session:
+                    session.execute(
+                        delete(LaunchplaneOdooStableTargetReplacementOperationRow).where(
+                            LaunchplaneOdooStableTargetReplacementOperationRow.operation_id
+                            == operation.operation_id
+                        )
+                    )
+
+    def test_typed_heartbeat_is_stable_but_new_membership_before_acceptance_is_rejected(
+        self,
+    ) -> None:
+        operation = self.typed_operation("typed-live", running=True)
+        self.assertEqual(self.observe(operation.updated_at).target_count, 0)
+        self.reserve("generic-stuck", origin=self.origin.model_copy(update={"instance": "testing"}))
+        transition = self.store.write_public_ingress_transition_with_outbox
+
+        def renew_before_publish(**kwargs: Any) -> PublicIngressTransitionWriteResult:
+            self.store.write_odoo_stable_target_replacement_operation_record(
+                operation.model_copy(
+                    update={
+                        "updated_at": _minutes_after(operation.updated_at, 1),
+                        "heartbeat_at": _minutes_after(operation.updated_at, 1),
+                        "lease_expires_at": _minutes_after(operation.lease_expires_at, 1),
+                    }
+                )
+            )
+            return transition(**kwargs)
+
+        with patch.object(
+            self.store,
+            "write_public_ingress_transition_with_outbox",
+            side_effect=renew_before_publish,
+        ):
+            self.assertEqual(self.observe(operation.updated_at).open_incident_count, 1)
+        # Settle the live typed operation before admitting a successor: the native
+        # active-lane index correctly refuses overlapping typed admissions.
+        self.assertTrue(
+            self.store.complete_odoo_stable_target_replacement_operation_record(
+                record=operation.model_copy(
+                    update={
+                        "status": "fail",
+                        "phase": "failed",
+                        "finished_at": operation.updated_at,
+                        "lease_owner": "",
+                        "lease_expires_at": "",
+                        "heartbeat_at": "",
+                        "error_code": "fixture_failed",
+                        "error_message": "Fixture finished.",
+                    }
+                ),
+                lease_owner=operation.lease_owner,
+            )
+        )
+        # Remove the generic hold: a proposed recovery must still reject a new typed hold.
+        self.complete(self.store.list_held_provider_target_reservations()[0])
+
+        def add_before_publish(**kwargs: Any) -> PublicIngressTransitionWriteResult:
+            self.typed_operation("new-typed-held")
+            return transition(**kwargs)
+
+        with patch.object(
+            self.store,
+            "write_public_ingress_transition_with_outbox",
+            side_effect=add_before_publish,
+        ):
+            result = self.observe(operation.updated_at)
+        self.assertEqual(result.pass_count, 0)
+        self.assertEqual(result.resolved_incident_count, 0)
+        self.assertEqual(result.skipped_count, 1)
+
+    def test_typed_import_preserves_original_identity_and_terminal_record_and_completion_cas(
+        self,
+    ) -> None:
+        from control_plane.storage.filesystem import FilesystemRecordStore
+
+        operation = self.typed_operation("import", running=True)
+        directory = self.enterContext(TemporaryDirectory())
+        source = FilesystemRecordStore(state_dir=Path(directory))
+        source.write_odoo_stable_target_replacement_operation_record(operation)
+        self.store.import_core_records_from_filesystem(
+            source
+        )  # Identical import remains supported.
+        changed = operation.model_copy(update={"request_fingerprint": "different-original-request"})
+        source.write_odoo_stable_target_replacement_operation_record(changed)
+        with self.assertRaises(ValueError):
+            self.store.import_core_records_from_filesystem(source)
+        terminal = operation.model_copy(
+            update={
+                "status": "fail",
+                "phase": "failed",
+                "finished_at": operation.updated_at,
+                "error_code": "fixture_failed",
+                "error_message": "Fixture failed.",
+                "lease_owner": "",
+                "lease_expires_at": "",
+                "heartbeat_at": "",
+            }
+        )
+        self.assertFalse(
+            self.store.complete_odoo_stable_target_replacement_operation_record(
+                record=terminal.model_copy(
+                    update={"request_fingerprint": changed.request_fingerprint}
+                ),
+                lease_owner=operation.lease_owner,
+            )
+        )
+        self.assertTrue(
+            self.store.complete_odoo_stable_target_replacement_operation_record(
+                record=terminal, lease_owner=operation.lease_owner
+            )
+        )
+        # Same-terminal historical evidence remains authorable; its identity/status do not change.
+        terminal = terminal.model_copy(
+            update={"error_message": "Updated historical failure evidence."}
+        )
+        source.write_odoo_stable_target_replacement_operation_record(terminal)
+        self.store.import_core_records_from_filesystem(source)
+        for changed_status in (
+            operation,
+            terminal.model_copy(
+                update={
+                    "status": "reconciliation_required",
+                    "phase": "apply",
+                    "finished_at": "",
+                }
+            ),
+            terminal.model_copy(
+                update={
+                    "status": "pass",
+                    "phase": "completed",
+                    "error_code": "",
+                    "error_message": "",
+                }
+            ),
+        ):
+            # Validate the proposed model so refusal proves the storage guard,
+            # rather than an unrelated malformed-fixture validation error.
+            changed_status = type(operation).model_validate(changed_status.model_dump(mode="json"))
+            source.write_odoo_stable_target_replacement_operation_record(changed_status)
+            with self.assertRaises(ValueError):
+                self.store.import_core_records_from_filesystem(source)
+            self.assertEqual(
+                self.store.read_odoo_stable_target_replacement_operation_record(
+                    operation.operation_id
+                ),
+                terminal,
+            )
+        source.write_odoo_stable_target_replacement_operation_record(
+            terminal.model_copy(
+                update={
+                    "request": terminal.request.model_copy(
+                        update={"reason": "different original intent"}
+                    )
+                }
+            )
+        )
+        with self.assertRaises(ValueError):
+            self.store.import_core_records_from_filesystem(source)
+        source.write_odoo_stable_target_replacement_operation_record(terminal)
+        self.store.import_core_records_from_filesystem(source)
 
     def test_captured_product_never_moves_to_product_reusing_context(self) -> None:
         self.reserve("old")
@@ -280,6 +815,111 @@ class ProviderTargetHoldMonitorTests(unittest.TestCase):
                 if (ref := ProviderOperationReference.parse(value))
             },
             {first.record_id, second.record_id},
+        )
+
+    def test_mixed_legacy_participants_remain_unverified_in_both_completion_orders(self) -> None:
+        from control_plane.provider_target_holds import ProviderOperationAttentionReference
+
+        def make_legacy(row: LaunchplaneIdempotencyRecord) -> None:
+            with self.store._session_factory.begin() as session:
+                session.execute(
+                    delete(LaunchplaneIdempotencyRow).where(
+                        LaunchplaneIdempotencyRow.route_path == ORIGINAL_MUTATION_INTENT_ROUTE,
+                        LaunchplaneIdempotencyRow.idempotency_key == row.record_id,
+                    )
+                )
+
+        # A legacy encoded origin is attributable, but cannot establish incarnation.
+        for strong_first in (False, True):
+            with self.subTest(strong_first=strong_first):
+                legacy = _hold_deploy_fence(self.store, idempotency_key=f"legacy-{strong_first}")
+                make_legacy(legacy)
+                strong = self.reserve(
+                    f"strong-{strong_first}",
+                    origin=self.origin.model_copy(update={"target_id": f"strong-{strong_first}"}),
+                    now=legacy.created_at,
+                )
+                checked_at = _minutes_after(legacy.updated_at, 60)
+                opened = self.observe(checked_at)
+                fingerprint = opened.records[0].material_fingerprint
+                assert fingerprint is not None
+                markers = {
+                    parsed.state
+                    for value in fingerprint.route_authority.target_keys
+                    if (parsed := ProviderOperationAttentionReference.parse(value))
+                    and parsed.record_id == legacy.record_id
+                }
+                self.assertEqual(markers, {"held", "unverified"})
+                repeated = self.observe(_minutes_after(checked_at, 1))
+                self.assertEqual(repeated.incident_events, ())
+                first, second = (strong, legacy) if strong_first else (legacy, strong)
+                self.complete(first)
+                changed = self.observe(_minutes_after(checked_at, 2))
+                self.assertEqual(changed.fail_count, 1)
+                self.assertEqual(changed.resolved_incident_count, 0)
+                self.assertTrue(changed.incident_events)
+                self.complete(second)
+                final = self.observe(_minutes_after(checked_at, 3))
+                self.assertEqual(final.fail_count, 1)
+                self.assertEqual(final.resolved_incident_count, 0)
+
+    def test_missing_legacy_is_material_but_never_settles_and_order_is_stable(self) -> None:
+        from control_plane.provider_target_holds import ProviderOperationAttentionReference
+
+        first = _hold_deploy_fence(self.store, idempotency_key="legacy-member")
+        with self.store._session_factory.begin() as session:
+            session.execute(
+                delete(LaunchplaneIdempotencyRow).where(
+                    LaunchplaneIdempotencyRow.route_path == ORIGINAL_MUTATION_INTENT_ROUTE,
+                    LaunchplaneIdempotencyRow.idempotency_key == first.record_id,
+                )
+            )
+        checked_at = _minutes_after(first.updated_at, 60)
+        self.observe(checked_at)
+        self.reserve(
+            "strong-member", origin=self.origin.model_copy(update={"target_id": "another"})
+        )
+        added = self.observe(_minutes_after(checked_at, 1))
+        self.assertTrue(added.incident_events)
+        target = discover_public_ingress_monitor_targets(self.store)[0]
+        snapshot = target.provider_hold_snapshot
+        assert snapshot is not None
+        reversed_observation = check_public_ingress_target(
+            target=replace(
+                target,
+                provider_hold_snapshot=replace(snapshot, holds=tuple(reversed(snapshot.holds))),
+            ),
+            checked_at=_minutes_after(checked_at, 1),
+            timeout_seconds=1,
+            http_get=Mock(),
+            tls_get=Mock(),
+        )
+        self.assertEqual(
+            reversed_observation.material_fingerprint_sha256,
+            added.records[0].material_fingerprint_sha256,
+        )
+        with self.store._session_factory.begin() as session:
+            session.execute(
+                delete(LaunchplaneIdempotencyRow).where(
+                    LaunchplaneIdempotencyRow.record_id == first.record_id
+                )
+            )
+        removed = self.observe(_minutes_after(checked_at, 2))
+        self.assertTrue(removed.incident_events)
+        self.assertNotEqual(
+            removed.records[0].material_fingerprint_sha256,
+            added.records[0].material_fingerprint_sha256,
+        )
+        self.assertEqual(removed.resolved_incident_count, 0)
+        fingerprint = removed.records[0].material_fingerprint
+        assert fingerprint is not None
+        self.assertIn(
+            ProviderOperationAttentionReference(first.record_id).encode(),
+            fingerprint.route_authority.target_keys,
+        )
+        self.assertNotIn(
+            ProviderOperationAttentionReference(first.record_id, "held").encode(),
+            fingerprint.route_authority.target_keys,
         )
 
     def test_old_fingerprint_without_references_keeps_parser_and_hash(self) -> None:

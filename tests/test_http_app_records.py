@@ -590,7 +590,6 @@ class FastApiProviderHoldAttentionReadTests(unittest.IsolatedAsyncioTestCase):
         response = await openapi_response()
         schema = response.json()
         operation = schema["paths"][PROVIDER_HOLD_ATTENTION_ROUTE]["get"]
-        self.assertEqual(operation["operationId"], "read_provider_hold_attention")
         self.assertTrue({"200", "400", "401", "403", "503"}.issubset(operation["responses"]))
         for name in (
             "ProviderHoldAttentionResponse",

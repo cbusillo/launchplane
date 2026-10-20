@@ -11807,6 +11807,7 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
 
         for scenario in (
             TestingReplacementRecoveryTests.test_new_isolated_target_supersedes_a_journalless_testing_fence_without_past_effect_proof,
+            TestingReplacementRecoveryTests.test_recovery_excludes_surviving_worker_then_cancels_with_proof_and_wakes_reconcile,
             TestingReplacementRecoveryTests.test_disposable_supersession_refuses_same_target_production_and_protected_data,
         ):
             with self.subTest(scenario=scenario.__name__), _head_postgres_database() as url:
@@ -15234,7 +15235,9 @@ class RealPostgresProviderHoldMonitorTests(unittest.TestCase):
         from control_plane.workflows.generic_web_deploy_provider import (
             decode_generic_web_provider_reconciliation_target,
         )
-        from control_plane.workflows.public_ingress_monitor import run_public_ingress_monitor_once
+        from tests.test_public_ingress_monitor import (
+            _run_provider_monitor_at as run_public_ingress_monitor_once,
+        )
         from tests.test_public_ingress_monitor import _hold_deploy_fence, _minutes_after, _profile
 
         from control_plane.contracts.public_ingress_monitoring import (
@@ -15551,6 +15554,46 @@ class RealPostgresProviderHoldMonitorTests(unittest.TestCase):
                 monitors.ProviderTargetHoldMonitorTests,
                 "test_completed_reference_with_drifted_sql_projection_is_never_settlement",
             ),
+            (
+                monitors,
+                monitors.ProviderTargetHoldMonitorTests,
+                "test_acceptance_rechecks_classification_after_lease_change_or_elapsed_grace",
+            ),
+            (
+                monitors,
+                monitors.ProviderTargetHoldMonitorTests,
+                "test_typed_participant_terminal_failure_settles_exact_reference_and_mixed_generic",
+            ),
+            (
+                monitors,
+                monitors.ProviderTargetHoldMonitorTests,
+                "test_typed_missing_corrupt_mismatched_or_nonterminal_record_never_settles",
+            ),
+            (
+                monitors,
+                monitors.ProviderTargetHoldMonitorTests,
+                "test_typed_heartbeat_is_stable_but_new_membership_before_acceptance_is_rejected",
+            ),
+            (
+                monitors,
+                monitors.ProviderTargetHoldMonitorTests,
+                "test_typed_import_preserves_original_identity_and_terminal_record_and_completion_cas",
+            ),
+            (
+                monitors,
+                monitors.ProviderTargetHoldMonitorTests,
+                "test_corrupt_provider_source_keeps_other_probes_and_scheduler_running",
+            ),
+            (
+                monitors,
+                monitors.ProviderTargetHoldMonitorTests,
+                "test_mixed_legacy_participants_remain_unverified_in_both_completion_orders",
+            ),
+            (
+                monitors,
+                monitors.ProviderTargetHoldMonitorTests,
+                "test_missing_legacy_is_material_but_never_settles_and_order_is_stable",
+            ),
         )
         for module, case_type, method in scenarios:
             with self.subTest(method=method), _store_for_fresh_head_database() as store:
@@ -15583,7 +15626,9 @@ class RealPostgresProviderHoldMonitorTests(unittest.TestCase):
     def test_monitor_transition_and_generic_insertion_serialize_in_both_orders(self) -> None:
         from control_plane.contracts.product_profile_record import ProductLaneProfile
         from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
-        from control_plane.workflows.public_ingress_monitor import run_public_ingress_monitor_once
+        from tests.test_public_ingress_monitor import (
+            _run_provider_monitor_at as run_public_ingress_monitor_once,
+        )
         from tests.test_public_ingress_monitor import _hold_deploy_fence, _minutes_after, _profile
 
         for insertion_first in (True, False):
@@ -15698,12 +15743,134 @@ class RealPostgresProviderHoldMonitorTests(unittest.TestCase):
                     self.assertEqual(observed.pass_count, 0)
                     self.assertEqual(observed.authority_changed_count, 1)
 
+    def test_typed_admission_and_monitor_lane_exclusion_in_both_orders(self) -> None:
+        from control_plane.contracts.odoo_stable_target_replacement_operation import (
+            build_odoo_stable_target_replacement_operation_id,
+        )
+        from tests.test_provider_target_hold_monitor import ProviderTargetHoldMonitorTests
+
+        for admission_first in (False, True):
+            with self.subTest(admission_first=admission_first), _head_postgres_database() as url:
+                monitor, writer = (PostgresRecordStore(database_url=url) for _ in range(2))
+                self.addCleanup(monitor.close)
+                self.addCleanup(writer.close)
+                fixture = ProviderTargetHoldMonitorTests()
+                fixture.store = monitor
+                from tests.test_public_ingress_monitor import _profile
+                from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
+
+                fixture.profile = _profile()
+                fixture.origin = ProviderTargetOrigin(
+                    product=fixture.profile.product,
+                    context="example-site",
+                    instance="testing",
+                    provider_id="fixture",
+                    target_type="compose",
+                    target_id="fixture",
+                )
+                old = fixture.typed_operation("old")
+                self.assertEqual(fixture.observe(old.updated_at).open_incident_count, 1)
+                monitor.write_odoo_stable_target_replacement_operation_record(
+                    old.model_copy(
+                        update={
+                            "status": "fail",
+                            "phase": "failed",
+                            "finished_at": old.updated_at,
+                        }
+                    )
+                )
+                replacement = old.model_copy(
+                    update={
+                        "operation_id": build_odoo_stable_target_replacement_operation_id(
+                            product=old.product,
+                            context=old.context,
+                            instance=old.instance,
+                            created_at=old.created_at,
+                            idempotency_key="new",
+                            idempotency_scope=old.idempotency_scope,
+                        ),
+                        "idempotency_key": "new",
+                    }
+                )
+                held, release = threading.Event(), threading.Event()
+                read = monitor._provider_target_holds
+
+                def source(*args: Any, **kwargs: Any) -> Any:
+                    if kwargs.get("for_update"):
+                        held.set()
+                        if not release.wait(10):
+                            raise AssertionError("monitor source barrier was not released")
+                    return read(*args, **kwargs)
+
+                def before_insert(
+                    _connection: Any,
+                    _cursor: Any,
+                    statement: str,
+                    _params: Any,
+                    _context: Any,
+                    _many: bool,
+                ) -> None:
+                    if statement.startswith(
+                        "INSERT INTO launchplane_odoo_stable_target_replacement_operations"
+                    ):
+                        held.set()
+                        if not release.wait(10):
+                            raise AssertionError("typed admission barrier was not released")
+
+                if admission_first:
+                    event.listen(writer._engine, "before_cursor_execute", before_insert)
+                try:
+                    with (
+                        patch.object(
+                            monitor,
+                            "_provider_target_holds",
+                            side_effect=read if admission_first else source,
+                        ),
+                        ThreadPoolExecutor(max_workers=2) as pool,
+                    ):
+                        if admission_first:
+                            initial = pool.submit(
+                                writer.write_odoo_stable_target_replacement_operation_record,
+                                replacement,
+                            )
+                            try:
+                                self.assertTrue(held.wait(10))
+                                # This must return while admission holds the lane: the monitor
+                                # uses TRY on the existing namespace, never waits behind it.
+                                observed = pool.submit(fixture.observe, old.updated_at).result(10)
+                                self.assertEqual(observed.skipped_count, 1)
+                                self.assertEqual(observed.resolved_incident_count, 0)
+                            finally:
+                                release.set()
+                                initial.result(10)
+                        else:
+                            monitor_future = pool.submit(fixture.observe, old.updated_at)
+                            try:
+                                self.assertTrue(held.wait(10))
+                                contender = pool.submit(
+                                    writer.write_odoo_stable_target_replacement_operation_record,
+                                    replacement,
+                                )
+                                self.wait_for_advisory_wait(monitor)
+                            finally:
+                                release.set()
+                            observed = monitor_future.result(10)
+                            contender.result(10)
+                            self.assertEqual(observed.resolved_incident_count, 1)
+                finally:
+                    release.set()
+                    if admission_first:
+                        event.remove(writer._engine, "before_cursor_execute", before_insert)
+                self.assertEqual(fixture.observe(old.updated_at).fail_count, 1)
+
     def test_publisher_holding_authority_cannot_deadlock_or_publish_stale_provider_pass(
         self,
     ) -> None:
         from control_plane.contracts.product_profile_record import ProductLaneProfile
         from control_plane.storage.postgres import LaunchplaneIdempotencyRow
-        from control_plane.workflows.public_ingress_monitor import run_public_ingress_monitor_once
+        from tests.test_public_ingress_monitor import (
+            _run_provider_monitor_at as run_public_ingress_monitor_once,
+        )
         from tests.test_public_ingress_monitor import _hold_deploy_fence, _minutes_after, _profile
 
         with _head_postgres_database() as url:

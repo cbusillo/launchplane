@@ -1578,11 +1578,27 @@ New incident material retains opaque reservation-ID/operation-nonce references
 in the existing route authority. A matching completed row establishes only
 that this incarnation no longer holds a key, even if its terminal result was a
 failure. A missing row, mismatched nonce or invalid receipt remains unverified.
+Nonce-less participants also retain typed attention markers: one records current
+held membership, and one records unverified history. Neither marker establishes
+an incarnation or proves settlement. Adding or removing a held legacy row changes
+incident material, while its unverified component remains, including in mixed
+nonce-backed/legacy warnings. This missing-incarnation limit applies even when a
+warning is newly opened for an old operation. Recovery never backfills a nonce.
 Historical reference-less warnings cannot acquire strong incarnation proof
 from present-day absence, and generic monitoring retirement does not resolve
 them. This conservative limit also covers indistinguishable historical Odoo
-replacement warnings; typed replacement holds and preview reservation probes
-keep their own existing paths. The monitor never clears a provider fence.
+replacement warnings. New service-testing replacement participants retain a
+separate typed reference to their captured operation ID, lane and creation time.
+The exact canonical typed row and indexed projection must still agree. Missing,
+corrupt or changed identity remains unavailable. Pending/running operations do
+not open a new stuck warning; a previously captured participant stays unresolved
+until its terminal record is proved. Genuine cancellation, supersession or
+terminal failure settles only that typed hold, never deployment verification.
+The shared typed writer preserves original request identity across updates and
+imports and refuses every terminal status change/reinitialization. Initial,
+identical and valid same-terminal metadata imports remain supported; source
+revalidation still fences changed terminal evidence during observation. Owner completion rejects changed original identity.
+Preview reservation probes keep their own existing path. The monitor never clears a provider fence.
 
 Original custody comes from the immutable receipt, or a legacy encoded snapshot
 whose product is present and physical key recomputes exactly. Current target
@@ -1627,13 +1643,28 @@ replay, retry, release, or clear authority.
 Provider observations are accepted only after a short same-session source
 recheck under the existing membership advisory lock. Fresh insertion, unbound
 reclaim and supersession join that lock before row locks and lease timestamps.
-The monitor locks reservation/reference rows before checking separation and
-incident authority. A nonblocking shared product-authority lock avoids waiting
+For typed membership the monitor first tries the existing Odoo lane admission
+lock without waiting; contention leaves the provider observation unaccepted.
+It then locks reservation/reference rows and only the expected lane's typed
+candidates plus exact referenced IDs before checking separation and incident
+authority. Typed row changes and new admission are therefore fenced through
+acceptance; there is no provider I/O under these locks. Lease renewal alone does not invalidate the semantic source
+witness. The same stuck/grace predicate classifies the original observation and
+the locked current rows at database acceptance time; a classification change,
+including elapsed grace without a row write, rejects the observation. All other
+source identity, membership, incarnation and authority checks remain exact.
+A nonblocking shared product-authority lock avoids waiting
 behind a publisher that holds authority and needs a reservation. A changed or
 busy source leaves the observation unaccepted/skipped, with no persisted pass,
 recovery event or notification outbox. Normal scheduler change detection or
 cadence retries it. No provider or notification call runs under these locks.
-Lanes with no hold and no open warning receive no provider probe.
+Lanes with no hold and no open warning receive no provider probe. Malformed
+reservation or provider-authority evidence makes the provider source explicitly
+unavailable: its observation remains unaccepted/skipped and cannot clear an
+incident. HTTP, TLS and private checks and scheduler authority detection continue;
+no invalid held row is treated as absent or assigned an invented owner. The
+strict service attention read still returns unavailable for contradictory held
+records rather than an empty page.
 
 `public_http` uses the centralized public outbound HTTP policy. Every initial
 destination and redirect hop is resolved independently; all IPv4 and IPv6
