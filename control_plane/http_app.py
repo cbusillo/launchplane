@@ -151,6 +151,8 @@ from control_plane.http_routes.local_consumer_delivery import (
 )
 from control_plane import service_status as control_plane_service_status
 from control_plane import live_target_runtime as control_plane_live_target_runtime
+from control_plane import browser_runtime_sync
+from control_plane.contracts.runtime_sync import RuntimeSyncReview
 from control_plane.http_routes.lane_service_restart import (
     ServiceRestartDependencies,
     register_service_restart_route,
@@ -2685,6 +2687,12 @@ class IngressCanaryRouteApplyEnvelope(BaseModel):
         if self.schema_version != 1:
             raise ValueError("Unsupported ingress canary route apply schema version")
         return self
+
+
+class RuntimeSyncResponse(AcceptedEvidenceResponse):
+    review: RuntimeSyncReview | None = Field(
+        default=None, json_schema_extra={"x-launchplane-optional-response": True}
+    )
 
 
 class DokployTargetSetupResponse(AcceptedEvidenceResponse):
@@ -5524,6 +5532,24 @@ def create_launchplane_fastapi_app(
             return identity
         return read_write_identity(authorization=authorization)
 
+    def read_live_target_runtime_identity(
+        request: Request,
+        response: Response,
+        authorization: Annotated[str, Header(alias="Authorization")] = "",
+        cookie: Annotated[str, Header(alias="Cookie")] = "",
+    ) -> LaunchplaneIdentity:
+        identity = resolve_browser_mutation_identity(
+            request=request,
+            response=response,
+            authorization=authorization,
+            cookie=cookie,
+            allow_owner=False,
+        )
+        if isinstance(identity, GitHubHumanIdentity):
+            require_route_repair_administrator(identity)
+            return identity
+        return read_disposable_runtime_identity(identity=identity, authorization=authorization)
+
     def require_route_repair_administrator(identity: GitHubHumanIdentity) -> None:
         if not resolved_authz_policy_runtime.policy.names_administrator(identity):
             raise _launchplane_http_error(
@@ -5619,6 +5645,10 @@ def create_launchplane_fastapi_app(
         read_role_products=resolved_authz_policy_runtime.read_role_products,
         http_error=_launchplane_http_error,
         error_response_model=LaunchplaneErrorResponse,
+        is_administrator=lambda identity: (
+            isinstance(identity, GitHubHumanIdentity)
+            and resolved_authz_policy_runtime.policy.names_administrator(identity)
+        ),
     )
     register_health_alert_drill_routes(
         app, dependencies=read_route_dependencies, mutation_identity=read_write_identity
@@ -21728,9 +21758,173 @@ def create_launchplane_fastapi_app(
             ) from error
         return solo_administration_confirmation_response(revoked)
 
+    def runtime_sync_response(response: AcceptedEvidenceResponse) -> RuntimeSyncResponse:
+        result = dict(response.result or {})
+        review = result.pop("runtime_sync_review")
+        return RuntimeSyncResponse(
+            **response.model_dump(exclude={"result"}),
+            result=result,
+            review=RuntimeSyncReview.model_validate(review),
+        )
+
+    async def apply_browser_runtime_sync(
+        *,
+        request: Request,
+        runtime_request: control_plane_live_target_runtime.LiveTargetRuntimeApplyEnvelope,
+        identity: GitHubHumanIdentity,
+        record_store: object,
+        idempotency_key: str,
+        trace_id: str,
+    ) -> RuntimeSyncResponse:
+        action = (
+            "live_target_runtime.apply"
+            if runtime_request.apply_changes
+            else "live_target_runtime.plan"
+        )
+        if not resolved_authz_policy_runtime.allows(
+            identity=identity,
+            action=action,
+            product=runtime_request.product,
+            context=runtime_request.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Runtime sync requires the signed-in administrator.",
+            )
+        store = require_live_target_runtime_database_store(
+            record_store=record_store, trace_id=trace_id
+        )
+        key = idempotency_key.strip()
+        if runtime_request.apply_changes and not key:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="idempotency_key_required",
+                message="Runtime sync apply requires its original Idempotency-Key.",
+            )
+        fingerprint = idempotency_request_fingerprint(
+            route_path=_LIVE_TARGET_RUNTIME_APPLY_ROUTE, payload=await request.json()
+        )
+        prior = (
+            store.read_idempotency_record(
+                scope=idempotency_scope(identity),
+                route_path=_LIVE_TARGET_RUNTIME_APPLY_ROUTE,
+                idempotency_key=key,
+            )
+            if runtime_request.apply_changes
+            else None
+        )
+        if prior is not None:
+            if prior.request_fingerprint != fingerprint:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="idempotency_key_reused",
+                    message="Preserve the original runtime sync request and key.",
+                )
+            if prior.state not in {"running", "reconcile_required"}:
+                terminal_error = prior.response_payload.get("error")
+                if (
+                    prior.response_status_code == 409
+                    and isinstance(terminal_error, dict)
+                    and terminal_error.get("code") == "stale"
+                ):
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=prior.response_trace_id,
+                        code="stale",
+                        message="Runtime sync inputs changed; review again.",
+                    )
+                replay = replay_stored_apply_idempotency(
+                    record_store=store,
+                    identity=identity,
+                    route_path=_LIVE_TARGET_RUNTIME_APPLY_ROUTE,
+                    idempotency_key=key,
+                    request_fingerprint_value=fingerprint,
+                    trace_id=trace_id,
+                )
+                if replay is not None:
+                    return runtime_sync_response(replay)
+        try:
+            if prior is not None and prior.state in {"running", "reconcile_required"}:
+                original = store.read_original_mutation_intent(prior)
+                intent = browser_runtime_sync.RuntimeSyncIntent.model_validate(
+                    original["runtime_sync"]
+                )
+            else:
+                captured = browser_runtime_sync.prepare_runtime_sync(
+                    store, resolved_control_plane_root, runtime_request
+                )
+                intent = captured.intent
+                original = {"runtime_sync": intent.model_dump(mode="json")}
+            if not runtime_request.apply_changes:
+                result = browser_runtime_sync.runtime_sync_result(captured, applied=False)
+                return runtime_sync_response(
+                    accepted_evidence_response(trace_id=trace_id, records={}, result=result)
+                )
+            assert runtime_request.browser_review is not None
+            # A completed/uncertain original is resolved above before any new-plan
+            # comparison; observation must not compare the now-changed baseline.
+            adapter = browser_runtime_sync.ReviewedRuntimeSync(
+                store=store,
+                root=resolved_control_plane_root,
+                request=runtime_request,
+                intent=intent,
+                trace_id=trace_id,
+            )
+
+            def operation(active_store: PostgresRecordStore) -> DurableProviderOperationResult:
+                return run_durable_provider_operation(
+                    store=active_store,
+                    scope=idempotency_scope(identity),
+                    route_path=_LIVE_TARGET_RUNTIME_APPLY_ROUTE,
+                    idempotency_key=key,
+                    request_fingerprint=fingerprint,
+                    lease_owner=trace_id,
+                    response_trace_id=trace_id,
+                    adapter=adapter,
+                    original_intent=original,
+                )
+
+            response = await run_provider_operation_http(
+                record_store=store,
+                route_path=_LIVE_TARGET_RUNTIME_APPLY_ROUTE,
+                trace_id=trace_id,
+                operation=operation,
+                in_progress_message="Runtime sync is in progress; preserve its request and key.",
+                reconcile_message="Runtime sync outcome is unknown; preserve its request and key.",
+                public_failure_messages={"stale": "Runtime sync inputs changed; review again."},
+            )
+            return runtime_sync_response(response)
+        except browser_runtime_sync.RuntimeSyncRefused as error:
+            raise _launchplane_http_error(
+                status_code=409 if error.code == "runtime_sync_lane_unqualified" else 503,
+                trace_id=trace_id,
+                code="runtime_sync_lane_unqualified"
+                if error.code == "runtime_sync_lane_unqualified"
+                else "runtime_sync_unavailable",
+                message="Runtime sync inputs changed or this lane is unavailable; review again.",
+            ) from error
+        except (
+            ValueError,
+            FileNotFoundError,
+            click.ClickException,
+            SQLAlchemyError,
+            control_plane_live_target_runtime.LiveTargetRuntimeError,
+        ) as error:
+            # Provider exceptions may contain private values or response bodies.
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="runtime_sync_unavailable",
+                message="Runtime sync evidence is unavailable; preserve any original request and key.",
+            ) from error
+
     async def apply_live_target_runtime(
         request: Request,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_disposable_runtime_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_live_target_runtime_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
@@ -21764,6 +21958,29 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Request could not be completed.",
             ) from error
+        if isinstance(identity, GitHubHumanIdentity):
+            if live_target_runtime_request.browser_review is None:
+                raise _launchplane_http_error(
+                    status_code=403,
+                    trace_id=trace_id,
+                    code="authorization_denied",
+                    message="Browser runtime sync requires its reviewed lane request.",
+                )
+            return await apply_browser_runtime_sync(
+                request=request,
+                runtime_request=live_target_runtime_request,
+                identity=identity,
+                record_store=record_store,
+                idempotency_key=idempotency_key,
+                trace_id=trace_id,
+            )
+        if live_target_runtime_request.browser_review is not None:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Browser runtime sync requires the signed-in administrator.",
+            )
         action = (
             "live_target_runtime.apply"
             if live_target_runtime_request.apply_changes
@@ -30639,7 +30856,7 @@ def create_launchplane_fastapi_app(
         apply_live_target_runtime,
         methods=["POST"],
         status_code=202,
-        response_model=AcceptedEvidenceResponse,
+        response_model=RuntimeSyncResponse,
         response_model_exclude_none=True,
         openapi_extra={
             "requestBody": {

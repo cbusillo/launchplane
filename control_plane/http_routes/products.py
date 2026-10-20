@@ -1,3 +1,4 @@
+from control_plane.browser_runtime_sync import runtime_sync_availability
 from contextlib import ExitStack
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -1802,6 +1803,17 @@ def register_product_config_status_read_routes(
         )
         config_status = ProductEnvironmentConfigStatus.model_validate(
             product_read_result.payload["config_status"]
+        )
+        config_status = config_status.model_copy(
+            update={
+                "runtime_sync": runtime_sync_availability(
+                    record_store,
+                    administrator=common.is_administrator(identity),
+                    product=config_status.product,
+                    context=config_status.context,
+                    instance=config_status.environment,
+                )
+            }
         )
         return ProductEnvironmentConfigStatusResponse(
             trace_id=trace_id,

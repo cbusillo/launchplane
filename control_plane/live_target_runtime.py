@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import AbstractContextManager, nullcontext
+from dataclasses import dataclass, field
 from pathlib import Path
 from collections.abc import Callable, Iterable, Mapping
 from typing import Protocol, cast
@@ -18,6 +19,7 @@ from control_plane.contracts.product_profile_record import (
 )
 from control_plane.contracts.runtime_identity import COMPOSE_IMAGE_REFERENCE_ENV_KEYS
 from control_plane.contracts.secret_record import SecretBinding
+from control_plane.contracts.runtime_sync import BrowserRuntimeSyncRequest
 from control_plane.disposable_lanes import (
     DisposableLaneStore,
     DisposableLaneSafetyUnknown,
@@ -72,6 +74,7 @@ class LiveTargetRuntimeApplyEnvelope(BaseModel):
     reviewed_binding_sha256: str = ""
     no_cache: bool = False
     deploy_timeout_seconds: int | None = Field(default=None, gt=0)
+    browser_review: BrowserRuntimeSyncRequest | None = None
 
     @field_validator("mode")
     @classmethod
@@ -92,6 +95,11 @@ class LiveTargetRuntimeApplyEnvelope(BaseModel):
             raise ValueError("Live target runtime apply requires context.")
         if not self.instance:
             raise ValueError("Live target runtime apply requires instance.")
+        if self.browser_review is not None:
+            if self.separation_only or self.deploy or self.no_cache or self.deploy_timeout_seconds:
+                raise ValueError("Browser runtime sync does not deploy or stage separation.")
+            if (self.mode == "apply") != bool(self.browser_review.reviewed_plan_sha256):
+                raise ValueError("Browser apply requires its reviewed plan digest.")
         if self.separation_only and (
             self.instance != "testing"
             or self.deploy
@@ -803,22 +811,31 @@ def require_dokploy_target_definition(
     return target_definition
 
 
-def apply_live_target_runtime_environment(
+@dataclass(frozen=True)
+class PreparedLiveTargetRuntime:
+    control_plane_root: Path
+    database_url: str | None = field(repr=False)
+    product_name: str
+    context_name: str
+    instance_name: str
+    allow_owned_preview: bool
+    target_definition: dokploy_source.DokployTargetDefinition = field(repr=False)
+    desired_env_map: dict[str, str] = field(repr=False)
+    retired_keys: set[str] = field(repr=False)
+    host: str = field(repr=False)
+    token: str = field(repr=False)
+    live_env_map: dict[str, str] = field(repr=False)
+
+
+def prepare_live_target_runtime_environment(
     *,
     control_plane_root: Path,
     database_url: str | None = None,
     product_name: str = "",
     context_name: str,
     instance_name: str,
-    apply_changes: bool,
-    deploy: bool,
-    no_cache: bool,
-    deploy_timeout_seconds: int | None,
-    deploy_trigger: DokployDeployTrigger,
-    before_provider_mutation: Callable[[], None] | None = None,
-    provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
     allow_owned_preview: bool = False,
-) -> dict[str, object]:
+) -> PreparedLiveTargetRuntime:
     source_of_truth = dokploy_source.read_control_plane_dokploy_source_of_truth(
         control_plane_root=control_plane_root,
         database_url=database_url,
@@ -923,6 +940,46 @@ def apply_live_target_runtime_environment(
             "was created with; replace the lane through a fresh testing generation.",
             code="retained_database_credential_changed",
         )
+    return PreparedLiveTargetRuntime(
+        control_plane_root=control_plane_root,
+        database_url=database_url,
+        product_name=product_name,
+        context_name=context_name,
+        instance_name=instance_name,
+        allow_owned_preview=allow_owned_preview,
+        target_definition=target_definition,
+        desired_env_map=desired_env_map.copy(),
+        retired_keys=retired_keys.copy(),
+        host=host,
+        token=token,
+        live_env_map=live_env_map.copy(),
+    )
+
+
+def apply_prepared_live_target_runtime_environment(
+    prepared: PreparedLiveTargetRuntime,
+    *,
+    apply_changes: bool,
+    deploy: bool,
+    no_cache: bool,
+    deploy_timeout_seconds: int | None,
+    deploy_trigger: DokployDeployTrigger,
+    before_provider_mutation: Callable[[], None] | None = None,
+    provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
+    before_provider_env_write: Callable[[dict[str, str]], None] | None = None,
+) -> dict[str, object]:
+    control_plane_root = prepared.control_plane_root
+    database_url = prepared.database_url
+    product_name = prepared.product_name
+    context_name = prepared.context_name
+    instance_name = prepared.instance_name
+    allow_owned_preview = prepared.allow_owned_preview
+    target_definition = prepared.target_definition
+    desired_env_map = prepared.desired_env_map.copy()
+    retired_keys = prepared.retired_keys.copy()
+    host = prepared.host
+    token = prepared.token
+    live_env_map = prepared.live_env_map.copy()
     provider_env_platform_credentials = provider_env_platform_credential_report(
         live_env_map=live_env_map, retired_keys=retired_keys
     )
@@ -993,23 +1050,32 @@ def apply_live_target_runtime_environment(
                     )
             finally:
                 postgres_store.close()
-        try:
-            refreshed_payload = dokploy_api.fetch_dokploy_target_payload(
+
+        def refreshed_environment() -> tuple[dokploy_api.JsonObject, dict[str, str], str]:
+            payload = dokploy_api.fetch_dokploy_target_payload(
                 host=host,
                 token=token,
                 target_type=target_definition.target_type,
                 target_id=target_definition.target_id,
             )
-            refreshed_env_map = dokploy_api.parse_dokploy_env_text(
-                str(refreshed_payload.get("env") or "")
-            )
-            updated_env_map = control_plane_runtime_environments.merge_provider_environment(
-                current_env_map=refreshed_env_map,
+            environment = dokploy_api.parse_dokploy_env_text(str(payload.get("env") or ""))
+            updated = control_plane_runtime_environments.merge_provider_environment(
+                current_env_map=environment,
                 desired_env_map=desired_env_map,
                 retired_keys=retired_keys,
             )
-            env_text = dokploy_api.serialize_dokploy_env_text(updated_env_map)
+            return payload, environment, dokploy_api.serialize_dokploy_env_text(updated)
+
+        try:
+            # Existing machine/separation callers keep remote reads outside their
+            # bounded write guard. The reviewed browser opts into a protected refresh.
+            write_input = refreshed_environment() if before_provider_env_write is None else None
             with provider_mutation_guard() if provider_mutation_guard else nullcontext():
+                if write_input is None:
+                    write_input = refreshed_environment()
+                refreshed_payload, refreshed_env_map, env_text = write_input
+                if before_provider_env_write is not None:
+                    before_provider_env_write(refreshed_env_map)
                 if before_provider_mutation is not None:
                     before_provider_mutation()
                 dokploy_api.update_dokploy_target_env(
@@ -1092,6 +1158,42 @@ def apply_live_target_runtime_environment(
             "result": deploy_result,
         },
     }
+
+
+def apply_live_target_runtime_environment(
+    *,
+    control_plane_root: Path,
+    database_url: str | None = None,
+    product_name: str = "",
+    context_name: str,
+    instance_name: str,
+    apply_changes: bool,
+    deploy: bool,
+    no_cache: bool,
+    deploy_timeout_seconds: int | None,
+    deploy_trigger: DokployDeployTrigger,
+    before_provider_mutation: Callable[[], None] | None = None,
+    provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
+    allow_owned_preview: bool = False,
+) -> dict[str, object]:
+    prepared = prepare_live_target_runtime_environment(
+        control_plane_root=control_plane_root,
+        database_url=database_url,
+        product_name=product_name,
+        context_name=context_name,
+        instance_name=instance_name,
+        allow_owned_preview=allow_owned_preview,
+    )
+    return apply_prepared_live_target_runtime_environment(
+        prepared,
+        apply_changes=apply_changes,
+        deploy=deploy,
+        no_cache=no_cache,
+        deploy_timeout_seconds=deploy_timeout_seconds,
+        deploy_trigger=deploy_trigger,
+        before_provider_mutation=before_provider_mutation,
+        provider_mutation_guard=provider_mutation_guard,
+    )
 
 
 def trigger_and_wait_for_dokploy_target_deploy(

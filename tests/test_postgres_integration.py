@@ -20,6 +20,7 @@ import unittest
 from tests import test_product_retirement_previews as integrated_retirement_tests
 from tests import test_odoo_secret_transport as secret_transport_tests
 from tests import test_testing_runtime_separation as testing_separation
+from tests import test_browser_runtime_sync as browser_runtime_sync_tests
 from tests import test_testing_separation_resources as independent_storage
 from tests import test_testing_activation as testing_activation
 from tests import test_testing_hold_rehearsal as testing_hold_rehearsal
@@ -15205,3 +15206,56 @@ class RealPostgresNativeTestingWorkerTests(unittest.TestCase):
         self.run_worker_case(
             "test_unknown_dispatched_stop_is_not_excluded_or_repeated_when_health_recovers"
         )
+
+
+class RealPostgresBrowserRuntimeSyncTests(browser_runtime_sync_tests.BrowserRuntimeSyncTests):
+    def setUp(self) -> None:
+        database = _head_postgres_database()
+        self.database_url = database.__enter__()
+        self.addCleanup(database.__exit__, None, None, None)
+        super().setUp()
+
+    async def test_runtime_sync_guard_excludes_runtime_and_key_policy_writers(self) -> None:
+        from control_plane import browser_runtime_sync
+        from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyPolicyRecord
+        from control_plane.live_target_runtime import LiveTargetRuntimeApplyEnvelope
+
+        second = PostgresRecordStore(database_url=self.store.database_url)
+        self.addCleanup(second.close)
+        payload = LiveTargetRuntimeApplyEnvelope.model_validate(self.payload)
+        captured = browser_runtime_sync.prepare_runtime_sync(self.store, self.root, payload)
+        adapter = browser_runtime_sync.ReviewedRuntimeSync(
+            self.store, self.root, payload, captured.intent, "fixture-guard"
+        )
+        original_lock = second._lock_product_authority_bundle_write
+        for change in ("runtime-setting", "key-policy"):
+            reached = threading.Event()
+
+            def lock(session: Any) -> None:
+                reached.set()
+                original_lock(session)
+
+            def write() -> None:
+                if change == "runtime-setting":
+                    second.write_runtime_environment_record(self.setting)
+                else:
+                    second.write_runtime_key_safety_policy_record(
+                        RuntimeKeySafetyPolicyRecord(
+                            record_id="guard-policy",
+                            source="fixture",
+                            updated_at=self.profile.updated_at,
+                            rules=(),
+                        )
+                    )
+
+            with (
+                self.subTest(change=change),
+                patch.object(second, "_lock_product_authority_bundle_write", side_effect=lock),
+                ThreadPoolExecutor(max_workers=1) as pool,
+            ):
+                with adapter.guard():
+                    future = pool.submit(write)
+                    self.assertTrue(reached.wait(10))
+                    with self.assertRaises(TimeoutError):
+                        future.result(timeout=0.1)
+                future.result(timeout=10)

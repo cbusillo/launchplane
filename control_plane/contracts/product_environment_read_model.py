@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from control_plane.contracts.runtime_sync import RuntimeSyncAvailability
+
 import json
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -627,6 +629,9 @@ class ProductEnvironmentConfigStatus(BaseModel):
     managed_secrets: tuple[ProductManagedSecretConfigStatusItem, ...] = ()
     production_backup_authorities: tuple[ProductionBackupAuthorityStatus, ...] = ()
     write_availability: ProductConfigWriteAvailability
+    runtime_sync: RuntimeSyncAvailability | None = Field(
+        default=None, json_schema_extra={"x-launchplane-optional-response": True}
+    )
     warnings: tuple[str, ...] = ()
     trust_state: FreshnessStatus
     provenance: DataProvenance
