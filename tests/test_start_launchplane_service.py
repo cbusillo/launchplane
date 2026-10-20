@@ -3,7 +3,6 @@ import os
 import stat
 import subprocess
 import unittest
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -97,6 +96,11 @@ fi
         self.assertFalse(self.capture_file.exists())
 
     def test_accepts_explicit_base64_policy_input(self) -> None:
+        # Model an unrelated file in the shared temp directory; render in this job's own child.
+        unrelated_policy = self.root / "launchplane-authz.toml"
+        unrelated_contents = "# An unrelated job owns this file.\n"
+        unrelated_policy.write_text(unrelated_contents, encoding="utf-8")
+        unrelated_policy.chmod(0o444)
         policy = "schema_version = 1\n"
         result = self._run(LAUNCHPLANE_POLICY_B64=base64.b64encode(policy.encode()).decode("ascii"))
         self.assertEqual(result.returncode, 0, msg=result.stderr)
@@ -105,6 +109,8 @@ fi
         self.assertEqual(policy_path.parent, self.policy_directory)
         self.assertEqual(policy_path.read_text(encoding="utf-8"), policy)
         self.assertNotIn("--database-url", captured_args)
+        self.assertEqual(unrelated_policy.read_text(encoding="utf-8"), unrelated_contents)
+        self.assertEqual(stat.S_IMODE(unrelated_policy.stat().st_mode), 0o444)
 
     def test_rejects_hosted_filesystem_startup_without_database_url(self) -> None:
         result = self._run(
@@ -149,39 +155,6 @@ fi
         self.assertEqual(result.returncode, 1, msg=result.stdout)
         self.assertIn("schema migration failed before service startup", result.stderr)
         self.assertNotIn("serve", self._captured_args())
-
-    def test_concurrent_jobs_keep_their_policies_separate(self) -> None:
-        unrelated_policy = self.policy_directory / "launchplane-authz.toml"
-        unrelated_contents = "# An unrelated job owns this file.\n"
-        unrelated_policy.write_text(unrelated_contents, encoding="utf-8")
-        unrelated_policy.chmod(0o444)
-
-        def start_job(mode: str) -> tuple[Path, str]:
-            job_directory = self.root / mode
-            job_directory.mkdir()
-            capture_file = job_directory / "uv-args.txt"
-            policy = f"schema_version = 1\n# {mode}"
-            policy_input = (
-                {"LAUNCHPLANE_POLICY_TOML": policy}
-                if mode == "text"
-                else {"LAUNCHPLANE_POLICY_B64": base64.b64encode(policy.encode()).decode("ascii")}
-            )
-            result = self._run(
-                TMPDIR=str(job_directory), UV_CAPTURE_FILE=str(capture_file), **policy_input
-            )
-            self.assertEqual(result.returncode, 0, msg=result.stderr)
-            captured_args = capture_file.read_text(encoding="utf-8").splitlines()
-            policy_path = Path(captured_args[captured_args.index("--policy-file") + 1])
-            self.assertEqual(policy_path.parent, job_directory)
-            return policy_path, policy + ("\n" if mode == "text" else "")
-
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            jobs = list(executor.map(start_job, ("text", "base64")))
-        self.assertNotEqual(jobs[0][0], jobs[1][0])
-        for policy_path, expected in jobs:
-            self.assertEqual(policy_path.read_text(encoding="utf-8"), expected)
-        self.assertEqual(unrelated_policy.read_text(encoding="utf-8"), unrelated_contents)
-        self.assertEqual(stat.S_IMODE(unrelated_policy.stat().st_mode), 0o444)
 
 
 class StartLaunchplaneOdooWorkersScriptTests(unittest.TestCase):

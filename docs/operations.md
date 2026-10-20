@@ -2031,9 +2031,8 @@ The Launchplane container entrypoint now fails closed unless one of
 checked-in `.example` policy path.
 
 Inline text and base64 inputs are rendered to `launchplane-authz.toml` in
-`TMPDIR` (default `/tmp`). Startup tests give each job its own temporary
-directory, so they never write or remove a shared host policy file. The
-explicit `LAUNCHPLANE_POLICY_FILE` input is read in place and is not rewritten.
+`TMPDIR` (default `/tmp`). The explicit `LAUNCHPLANE_POLICY_FILE` input is
+read in place and is not rewritten.
 
 ## Launchplane Service Deploy Posture
 
