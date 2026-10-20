@@ -434,8 +434,8 @@ def execute_generic_web_prod_promotion(
                         request=request,
                         source_lane=source_lane,
                     )
-                except GenericWebPromotionSourceRefused as error:
-                    source_refusal = error
+                except GenericWebPromotionSourceRefused as refusal:
+                    source_refusal = refusal
                     raise
                 source_admitted = True
 

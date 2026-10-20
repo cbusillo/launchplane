@@ -347,8 +347,9 @@ class WebCutoverTests(unittest.TestCase):
 
 
 class WebCutoverDeploymentTests(unittest.TestCase):
+    @staticmethod
     def seed(
-        self, root: Path, target: str
+        root: Path, target: str
     ) -> tuple[FilesystemRecordStore, GenericWebCutoverPlan, Provider]:
         intent = plan(target)
         production_manifest, candidate_manifest = (
@@ -904,10 +905,11 @@ class WebCutoverReviewRecoveryTests(unittest.TestCase):
                     timeout_seconds=None,
                 )
 
+    @staticmethod
     def promotion_fixture(
-        self, root: Path, target: str
+        root: Path, target: str
     ) -> tuple[FilesystemRecordStore, GenericWebCutoverPlan, Provider]:
-        store, intent, provider = WebCutoverDeploymentTests().seed(root, target)
+        store, intent, provider = WebCutoverDeploymentTests.seed(root, target)
         profile = store.read_product_profile_record("fixture")
         profile.lanes = (
             ProductLaneProfile(context="fixture", instance="testing"),
