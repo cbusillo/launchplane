@@ -125,7 +125,7 @@ class ScheduleTriggerTests(unittest.TestCase):
         )
         with patch("control_plane.dokploy.api.time.time", return_value=trigger_time.timestamp()):
             result = _run(provider)
-        self.assertEqual(result, "deployment=actual-new-job status=done")
+        self.assertEqual(dokploy_api.deployment_key_from_wait_result(result), "actual-new-job")
         self.assertEqual(len(provider.trigger_calls), 1)
 
     def test_unreadable_baseline_never_dispatches_or_checkpoints(self) -> None:
@@ -186,7 +186,7 @@ class ScheduleTriggerTests(unittest.TestCase):
             baseline=lambda: [known, BEFORE],
             listings=[lambda: [new, BEFORE, known]],
         )
-        self.assertEqual(_run(provider), "deployment=new-undated status=done")
+        self.assertEqual(dokploy_api.deployment_key_from_wait_result(_run(provider)), "new-undated")
         self.assertEqual(len(provider.trigger_calls), 1)
 
     def test_oversize_script_refuses_before_provider_access_or_checkpoint(self) -> None:
@@ -364,6 +364,42 @@ class ScheduleTriggerTests(unittest.TestCase):
 
 
 class DataWorkflowExecutionBudgetTests(unittest.TestCase):
+    def test_baseline_failure_precedes_backup_trigger_checkpoint(self) -> None:
+        phases: list[str] = []
+        target = control_plane_dokploy.DokployTargetDefinition(
+            context="fixture", instance="prod", target_id="compose", target_name="fixture-prod"
+        )
+        with (
+            patch.object(dokploy_api, "fetch_dokploy_target_payload", return_value={}),
+            patch.object(
+                dokploy_post_deploy,
+                "_resolve_dokploy_schedule_runtime",
+                return_value=("server", "server", "fixture", "server"),
+            ),
+            patch.object(
+                dokploy_api, "upsert_dokploy_schedule", return_value={"scheduleId": SCHEDULE_ID}
+            ),
+            patch.object(dokploy_api, "latest_deployment_for_schedule", return_value=None),
+            patch.object(
+                dokploy_api, "dokploy_request", side_effect=lambda **_kwargs: _list_unavailable()
+            ) as provider,
+        ):
+            with self.assertRaises(dokploy_api.DokployScheduleExecutionFailed) as caught:
+                dokploy_post_deploy.run_compose_odoo_backup_gate(
+                    host="https://provider.invalid",
+                    token="fixture",
+                    target_definition=target,
+                    backup_nonce="fixture",
+                    backup_record_id="backup-fixture",
+                    database_name="fixture",
+                    filestore_path="/data/filestore",
+                    backup_root="/data/backups",
+                    before_provider_mutation=phases.append,
+                )
+        self.assertEqual(caught.exception.cause, "trigger_baseline_unavailable")
+        self.assertNotIn("backup_schedule_trigger", phases)
+        self.assertEqual(provider.call_args.kwargs["path"], LIST_PATH)
+
     def test_restore_gets_a_bounded_budget_larger_than_the_deploy_timeout(self) -> None:
         resolve = dokploy_post_deploy.resolve_data_workflow_execution_timeout_seconds
 

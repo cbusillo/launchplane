@@ -1406,7 +1406,7 @@ def run_dokploy_schedule(
         schedule_id=schedule_id,
     )
     before_key = deployment_key(latest_before)
-    dispatch: ScheduleTriggerGuardOptions = {}
+    dispatch: ScheduleTriggerGuardOptions = {"before_trigger": before_trigger}
     if provider_mutation_guard is not None:
         dispatch = {
             "provider_mutation_guard": provider_mutation_guard,
