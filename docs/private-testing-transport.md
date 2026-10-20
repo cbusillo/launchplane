@@ -182,6 +182,13 @@ signup, server-action and maintenance responses, including response completion
 and product assertions. Interrupted dispatched exchanges remain unknown and
 skip data cleanup; browser teardown does not prove remote completion. These
 boundaries do not promise termination of arbitrary asynchronous product jobs.
+Actual browser request events open exchanges, so a local click failure that
+dispatches nothing can remain a truthful failure. An observed QR server action
+still requires its product success evidence; HTTP 200 alone is insufficient.
+Production source admission during an unknown testing attempt is a separate
+gate tracked in [#4259](https://github.com/cbusillo/launchplane/issues/4259).
+It must account for the current original-operation fence before a fresh
+production release; retaining old inventory does not qualify unknown work.
 
 An exact original reservation with no effect checkpoint may settle before any
 lifecycle receipt was captured. Its renewed lease verifies that no-effect

@@ -345,6 +345,8 @@ class VeriReelTestingPostDeployTests(unittest.TestCase):
     def test_fixture_identity_is_available_even_if_cleanup_cannot_continue(self) -> None:
         browser = MagicMock()
         page = browser.new_context.return_value.__enter__.return_value.new_page.return_value
+        page.is_closed.return_value = False
+        browser.is_connected.return_value = True
         page.wait_for_load_state.side_effect = RuntimeError("signup failed")
         evidence: dict[str, str] = {}
         with (
@@ -456,6 +458,8 @@ class VeriReelTestingPostDeployTests(unittest.TestCase):
     def test_browser_failure_cleans_up_its_fixture_and_closes_browser(self) -> None:
         browser = MagicMock()
         page = browser.new_context.return_value.__enter__.return_value.new_page.return_value
+        page.is_closed.return_value = False
+        browser.is_connected.return_value = True
         page.wait_for_load_state.side_effect = RuntimeError("signup failed")
         evidence: dict[str, str] = {}
         with (

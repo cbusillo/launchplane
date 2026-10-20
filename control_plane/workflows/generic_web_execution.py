@@ -141,7 +141,7 @@ def observe_execution(
     rows: dict[str, object] = {}
     terminal = True
     for index, entry in enumerate(receipt.entries):
-        if entry.kind == "schedule_run" and entry.acknowledgement != "rejected":
+        if entry.kind == "schedule_run" and not entry.terminal:
             try:
                 history = read_history(entry.target_id)
             except Exception:
@@ -177,9 +177,36 @@ class ExecutionRecorder:
     store: ExecutionRecordStore
     record_id: str
     receipt: ExecutionReceipt = field(default_factory=ExecutionReceipt)
+    expected_record: DeploymentRecord | None = field(default=None, repr=False)
 
     def evidence(self) -> dict[str, str]:
         return {EXECUTION_EVIDENCE_KEY: self.receipt.model_dump_json()}
+
+    def write_pending(self, record: DeploymentRecord) -> None:
+        record = record.model_copy(
+            update={
+                "post_deploy_update": record.post_deploy_update.model_copy(
+                    update={"evidence": {**record.post_deploy_update.evidence, **self.evidence()}}
+                )
+            }
+        )
+        publisher = getattr(self.store, "publish_generic_web_testing_result", None)
+        if publisher is not None:
+            try:
+                inventory = getattr(self.store, "read_environment_inventory")(
+                    context_name=record.context, instance_name=record.instance
+                )
+            except FileNotFoundError:
+                inventory = None
+            publisher(
+                expected_deployment=self.expected_record,
+                expected_inventory=inventory,
+                deployment=record,
+                inventory=None,
+            )
+        else:
+            self.store.write_deployment_record(record)
+        self.expected_record = record
 
     def save(self) -> None:
         record = self.store.read_deployment_record(self.record_id)
@@ -189,7 +216,24 @@ class ExecutionRecorder:
         update = record.post_deploy_update.model_copy(
             update={"evidence": {**record.post_deploy_update.evidence, **self.evidence()}}
         )
-        self.store.write_deployment_record(record.model_copy(update={"post_deploy_update": update}))
+        merge = getattr(self.store, "advance_generic_web_execution_receipt", None)
+        if merge is not None:
+            merge(record_id=self.record_id, receipt_json=self.receipt.model_dump_json())
+        else:
+            self.store.write_deployment_record(
+                record.model_copy(update={"post_deploy_update": update})
+            )
+        if self.expected_record is not None:
+            expected = self.expected_record
+            self.expected_record = expected.model_copy(
+                update={
+                    "post_deploy_update": expected.post_deploy_update.model_copy(
+                        update={
+                            "evidence": {**expected.post_deploy_update.evidence, **self.evidence()}
+                        }
+                    )
+                }
+            )
 
     def begin(
         self,
@@ -287,6 +331,13 @@ class RecordedScheduleExecution:
 
 def require_terminal_execution(observation: ExecutionObservation) -> None:
     if observation.outcome != "terminal":
+        raise ProviderMutationUnknownError(
+            "Original application execution has no attributable terminal proof."
+        )
+
+
+def require_recorded_execution(receipt: ExecutionReceipt) -> None:
+    if any(not entry.terminal for entry in receipt.entries):
         raise ProviderMutationUnknownError(
             "Original application execution has no attributable terminal proof."
         )

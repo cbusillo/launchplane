@@ -10,7 +10,10 @@ import click
 from control_plane.generic_web_source_qualification import GenericWebPromotionSourceRefused
 from control_plane.generic_web_testing_inputs import TestingInputSafetyRefused
 from control_plane.provider_operations import ProviderMutationUnknownError
-from control_plane.workflows.generic_web_execution import ExecutionRecorder
+from control_plane.workflows.generic_web_execution import (
+    ExecutionRecorder,
+    require_recorded_execution,
+)
 from control_plane.lane_movement import (
     LaneBuild,
     LaneMovementRefused,
@@ -113,6 +116,9 @@ class GenericWebDeployRequest(BaseModel):
         if not self.source_git_ref.strip():
             raise ValueError("Generic web deploy requires source_git_ref.")
         return self
+
+
+GenericWebDeploymentPublisher = Callable[[DeploymentRecord, EnvironmentInventory | None], None]
 
 
 class GenericWebDeployResult(BaseModel):
@@ -494,6 +500,7 @@ def execute_generic_web_deploy(
     post_deploy_executor: GenericWebPostDeployExecutor | None = None,
     post_deploy_authority_digest: str = "",
     execution_recorder: ExecutionRecorder | None = None,
+    publish_deployment: GenericWebDeploymentPublisher | None = None,
     deploy_provider: GenericWebDeployProvider | None = None,
     resolved_deploy_target: GenericWebResolvedDeployTarget | None = None,
     provider_operation_title: str = "",
@@ -616,6 +623,7 @@ def execute_generic_web_deploy(
             post_deploy_executor=post_deploy_executor,
             post_deploy_authority_digest=post_deploy_authority_digest,
             execution_recorder=execution_recorder,
+            publish_deployment=publish_deployment,
             deploy_provider=deploy_provider,
             resolved_deploy_target=resolved_deploy_target,
             provider_operation_title=provider_operation_title,
@@ -642,6 +650,7 @@ def _execute_generic_web_deploy_unserialized(
     post_deploy_executor: GenericWebPostDeployExecutor | None = None,
     post_deploy_authority_digest: str = "",
     execution_recorder: ExecutionRecorder | None = None,
+    publish_deployment: GenericWebDeploymentPublisher | None = None,
     deploy_provider: GenericWebDeployProvider | None = None,
     resolved_deploy_target: GenericWebResolvedDeployTarget | None = None,
     provider_operation_title: str = "",
@@ -742,6 +751,8 @@ def _execute_generic_web_deploy_unserialized(
                 artifact_id=request.artifact_id,
                 include_deploy_reference=False,
             )
+        if execution_recorder is not None:
+            require_recorded_execution(execution_recorder.receipt)
         if before_failure_records_commit is not None:
             before_failure_records_commit()
         record_store.write_deployment_record(
@@ -777,6 +788,12 @@ def _execute_generic_web_deploy_unserialized(
     key_readback: IntegrationKeyReadbackEvidence | None = None
     application_lifecycle: GenericWebApplicationLifecycle | None = None
 
+    def write_pending(record: DeploymentRecord) -> None:
+        if execution_recorder is not None:
+            execution_recorder.write_pending(record)
+        else:
+            record_store.write_deployment_record(record)
+
     def checkpoint_provider(phase: str) -> None:
         nonlocal post_deploy_update, last_provider_phase, dispatch_refused
         if provider_effect_checkpoint is not None:
@@ -807,7 +824,7 @@ def _execute_generic_web_deploy_unserialized(
                     }
                 }
             )
-            record_store.write_deployment_record(
+            write_pending(
                 build_deployment_record(
                     request=ship_request,
                     record_id=record_id,
@@ -975,7 +992,7 @@ def _execute_generic_web_deploy_unserialized(
                     **(execution_recorder.evidence() if execution_recorder else {}),
                 },
             )
-            record_store.write_deployment_record(
+            write_pending(
                 build_deployment_record(
                     request=ship_request,
                     record_id=record_id,
@@ -1187,18 +1204,30 @@ def _execute_generic_web_deploy_unserialized(
             deployment_record = deployment_record.model_copy(
                 update={"failure": exc.record_failure()}
             )
+        if execution_recorder is not None:
+            require_recorded_execution(execution_recorder.receipt)
         if before_failure_records_commit is not None:
             before_failure_records_commit()
         elif before_records_commit is not None:
             before_records_commit()
-        record_store.write_deployment_record(deployment_record)
+        if publish_deployment is not None:
+            publish_deployment(
+                deployment_record,
+                build_environment_inventory(
+                    deployment_record=deployment_record, updated_at=recorded_finished_at
+                )
+                if deploy_completed
+                else None,
+            )
+        else:
+            record_store.write_deployment_record(deployment_record)
         if isinstance(exc, TestingInputSafetyRefused) and not provider_effect_attempted:
             # The durable runner releases a pre-effect refusal after publishing
             # its failed record; effects already attempted stay result-classified.
             raise exc
         if isinstance(exc, LaneMovementRefused) and exc.code == "source_order_unavailable":
             raise
-        if deploy_completed:
+        if deploy_completed and publish_deployment is None:
             record_store.write_environment_inventory(
                 build_environment_inventory(
                     deployment_record=deployment_record,
@@ -1266,17 +1295,20 @@ def _execute_generic_web_deploy_unserialized(
         ),
         runtime_source=verified_build_evidence,
     ).model_copy(update={"integration_key_readback": key_readback})
+    if execution_recorder is not None:
+        require_recorded_execution(execution_recorder.receipt)
     if before_records_commit is not None:
         before_records_commit()
     if execution_recorder is not None:
         deployment_record.post_deploy_update.evidence.update(execution_recorder.evidence())
-    record_store.write_deployment_record(deployment_record)
-    record_store.write_environment_inventory(
-        build_environment_inventory(
-            deployment_record=deployment_record,
-            updated_at=recorded_finished_at,
-        )
+    inventory = build_environment_inventory(
+        deployment_record=deployment_record, updated_at=recorded_finished_at
     )
+    if publish_deployment is not None:
+        publish_deployment(deployment_record, inventory)
+    else:
+        record_store.write_deployment_record(deployment_record)
+        record_store.write_environment_inventory(inventory)
     target_fields = _deploy_result_target_fields(resolved_deploy_target=prepared_deploy_target)
     return GenericWebDeployResult(
         deployment_record_id=record_id,
@@ -1374,34 +1406,52 @@ def build_observed_generic_web_deploy(
         runtime_identity=runtime_identity,
         runtime_source=existing_record.runtime_source if existing_record is not None else {},
     )
-    target_fields = _deploy_result_target_fields(resolved_deploy_target=resolved_deploy_target)
-    result = GenericWebDeployResult(
-        deployment_record_id=deployment_record_id,
-        deploy_status=deploy_status,
-        deploy_started_at=deployment_record.deploy.started_at or started_at,
-        deploy_finished_at=deployment_record.deploy.finished_at or finished_at,
+    if existing_record is not None:
+        deployment_record = existing_record.model_copy(
+            update={
+                "deploy": deployment_record.deploy,
+                "post_deploy_update": deployment_record.post_deploy_update,
+                "runtime_identity": deployment_record.runtime_identity,
+            }
+        )
+    records, result = generic_web_record_result(
+        record=deployment_record,
         product=profile.product,
-        context=lane.context,
-        instance=lane.instance,
-        target_name=target_fields.target_name,
-        target_id=target_fields.target_id,
-        target_category=target_fields.target_category,
-        provider_id=target_fields.provider_id,
-        provider_target_type=target_fields.provider_target_type,
-        post_deploy_status=_generic_web_deploy_post_deploy_status(
-            deployment_record.post_deploy_update
-        ),
-        error_message=(
-            deployment_record.post_deploy_update.detail
-            if deployment_record.post_deploy_update.status == "fail"
-            else observation.error_message
-        ),
+        target=resolved_deploy_target,
+        observation=observation,
     )
-    return (
-        deployment_record,
-        {"deployment_record_id": deployment_record_id},
-        result.model_dump(mode="json"),
+    return deployment_record, records, result
+
+
+def generic_web_record_result(
+    *,
+    record: DeploymentRecord,
+    product: str,
+    target: GenericWebResolvedDeployTarget,
+    observation: GenericWebProviderDeploymentObservation,
+) -> tuple[dict[str, object], dict[str, object]]:
+    if record.deploy.status not in {"pass", "fail"}:
+        raise ValueError("Original deployment has no final image result.")
+    fields = _deploy_result_target_fields(resolved_deploy_target=target)
+    result = GenericWebDeployResult(
+        deployment_record_id=record.record_id,
+        deploy_status=record.deploy.status,
+        deploy_started_at=record.deploy.started_at or observation.started_at,
+        deploy_finished_at=record.deploy.finished_at or observation.finished_at,
+        product=product,
+        context=record.context,
+        instance=record.instance,
+        target_name=fields.target_name,
+        target_id=fields.target_id,
+        target_category=fields.target_category,
+        provider_id=fields.provider_id,
+        provider_target_type=fields.provider_target_type,
+        post_deploy_status=_generic_web_deploy_post_deploy_status(record.post_deploy_update),
+        error_message=record.post_deploy_update.detail
+        if record.post_deploy_update.status == "fail"
+        else observation.error_message,
     )
+    return {"deployment_record_id": record.record_id}, result.model_dump(mode="json")
 
 
 def record_observed_generic_web_deploy(

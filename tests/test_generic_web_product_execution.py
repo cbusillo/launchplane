@@ -56,17 +56,23 @@ class _Locator:
         self.first = self.last = self
 
     def fill(self, _value: str) -> None:
+        if self.page.browser.failure == "disconnected":
+            raise OSError("Browser transport disconnected.")
         if self.page.browser.failure == "fill":
             raise RuntimeError("local input unavailable")
 
     def click(self) -> None:
         name = str(self.label)
         if "create account" in name:
+            if self.page.browser.failure == "signup-click":
+                raise TimeoutError("signup button cannot be clicked before dispatch")
             self.page.emit("POST", "/api/auth/sign-up/email")
             self.page.url = "https://video.test/billing"
             self.page.emit("GET", "/billing")
             self.page.emit("GET", "/billing")
         else:
+            if self.page.browser.failure == "qr-click":
+                raise TimeoutError("QR button cannot be clicked before dispatch")
             self.page.emit("POST", "/dashboard")
 
     def get_attribute(self, _name: str) -> str:
@@ -83,6 +89,9 @@ class _Page:
     def on(self, event: str, callback: Callable[[Any], None]) -> None:
         self.listeners.setdefault(event, []).append(callback)
 
+    def is_closed(self) -> bool:
+        return self.browser.failure == "disconnected"
+
     def event(self, event: str, value: Any) -> None:
         for callback in self.listeners.get(event, []):
             callback(value)
@@ -91,11 +100,21 @@ class _Page:
         if event != "requestfinished" or timeout <= 0:
             raise AssertionError("Request completion needs a bounded built-in wait.")
         self.browser.events.append("bounded-body-wait")
+        for request in self.browser.requests:
+            if (
+                self.browser.failure == "billing-pending"
+                and request.url.endswith("/billing")
+                and predicate(request)
+            ):
+                self.browser.finished.add(request)
+                self.event("requestfinished", request)
+                return
         raise TimeoutError("response headers arrived without body completion")
 
     def emit(self, method: str, path: str) -> _Response:
         response = _Response(self, method, path)
         request = response.request
+        self.browser.requests.append(request)
         self.event("request", request)
         self.event("response", response)
         if path.endswith("/api/auth/sign-up/email") and self.browser.failure in {
@@ -104,7 +123,10 @@ class _Page:
         }:
             if self.browser.failure == "signup":
                 self.event("requestfailed", request)
+        elif path == "/billing" and self.browser.failure == "billing-pending":
+            pass
         else:
+            self.browser.finished.add(request)
             self.browser.events.append("finished:" + response.url)
             self.event("requestfinished", request)
         if self.expected is not None and self.expected[0](response):
@@ -157,10 +179,15 @@ class _Page:
 
 
 class _Browser:
+    def is_connected(self) -> bool:
+        return self.failure != "disconnected"
+
     def __init__(self, failure: str) -> None:
         self.failure = failure
         self.admin = False
         self.events: list[str] = []
+        self.requests: list[_Request] = []
+        self.finished: set[_Request] = set()
         self.closed = False
 
     def new_context(self) -> Any:
@@ -204,6 +231,12 @@ class ProductExecutionTests(unittest.TestCase):
         ) -> None:
             actions.append(action)
             browser.events.append("maintenance:" + action)
+            if action == "grant-sponsored":
+                self.billing_at_grant = [
+                    request in browser.finished
+                    for request in browser.requests
+                    if request.url.endswith("/billing")
+                ]
             if failure == "maintenance" and action == "grant-sponsored":
                 with patch(
                     "control_plane.workflows.verireel_app_maintenance.urlopen",
@@ -259,17 +292,17 @@ class ProductExecutionTests(unittest.TestCase):
         return recorder, browser, actions
 
     def test_real_verifier_finishes_dynamic_refresh_and_action_responses(self) -> None:
-        recorder, browser, actions = self.verify("")
-        self.assertEqual(recorder.receipt.entries[0].terminal, "executor_completed")
-        self.assertTrue(browser.closed)
-        self.assertEqual(actions, ["grant-sponsored", "promote-owner", "delete-user"])
-        grant = browser.events.index("maintenance:grant-sponsored")
-        self.assertEqual(
-            sum(item == "finished:https://video.test/billing" for item in browser.events[:grant]), 2
-        )
+        for failure in ("", "billing-pending"):
+            with self.subTest(failure=failure):
+                recorder, browser, actions = self.verify(failure)
+                self.assertEqual(recorder.receipt.entries[0].terminal, "executor_completed")
+                self.assertTrue(browser.closed)
+                self.assertIn("delete-user", actions)
+                self.assertTrue(self.billing_at_grant)
+                self.assertTrue(all(self.billing_at_grant))
 
     def test_lost_signup_or_maintenance_reply_skips_data_cleanup(self) -> None:
-        for failure in ("signup", "body_pending", "maintenance", "qr"):
+        for failure in ("signup", "body_pending", "maintenance", "qr", "disconnected"):
             with self.subTest(failure=failure):
                 with self.assertRaises(ProviderMutationUnknownError):
                     self.verify(failure)
@@ -280,7 +313,7 @@ class ProductExecutionTests(unittest.TestCase):
                     self.assertIn("bounded-body-wait", self.browser.events)
 
     def test_local_or_answered_assertion_failure_keeps_terminal_proof(self) -> None:
-        for failure in ("fill", "assertion"):
+        for failure in ("fill", "assertion", "signup-click", "qr-click"):
             with self.subTest(failure=failure):
                 with self.assertRaises(click.ClickException):
                     self.verify(failure)

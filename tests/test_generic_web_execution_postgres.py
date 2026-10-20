@@ -9,7 +9,9 @@ from typing import Any
 import unittest
 from unittest.mock import patch
 
-from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.idempotency_record import format_launchplane_mutation_timestamp
 from control_plane.generic_web_deploy_http import GenericWebDeployEnvelope
 from control_plane.generic_web_deploy_provider_adapter import (
@@ -62,18 +64,49 @@ class OriginalExecutionPostgresTests(unittest.TestCase):
                 trace_id="old-worker",
                 deploy_provider=provider,
             )
+            target = adapter._resolve_deploy_target()
+            first.write_dokploy_target_record(
+                DokployTargetRecord(
+                    context=profile.lanes[0].context,
+                    instance="testing",
+                    target_type="application",
+                    target_name=target.resolved_target.target_name,
+                    updated_at=datetime.now(UTC).isoformat(),
+                )
+            )
+            first.write_dokploy_target_id_record(
+                DokployTargetIdRecord(
+                    context=profile.lanes[0].context,
+                    instance="testing",
+                    target_id=target.resolved_target.target_id,
+                    updated_at=datetime.now(UTC).isoformat(),
+                )
+            )
+            first.write_provider_target_record(
+                ProviderTargetRecord(
+                    context=profile.lanes[0].context,
+                    instance="testing",
+                    provider_id=provider.provider_id,
+                    target_category="application",
+                    provider_target_type="application",
+                    target_id=target.resolved_target.target_id,
+                    display_name="fixture",
+                    updated_at=datetime.now(UTC).isoformat(),
+                )
+            )
             at_publication, release = Event(), Event()
             now = [datetime.now(UTC)]
-            write = first.write_deployment_record
+            publish = first.publish_generic_web_testing_result
             record_ids: list[str] = []
 
-            def pause_write(record: DeploymentRecord) -> None:
+            def pause_write(**kwargs: Any) -> None:
+                record = kwargs["deployment"]
                 if record.deploy.status == "pass":
                     record_ids.append(record.record_id)
                     at_publication.set()
                     if not release.wait(15):
                         raise RuntimeError("Coordinator did not replace the lease")
-                write(record)
+                publish(**kwargs)
 
             def run() -> Any:
                 return run_durable_provider_operation(
@@ -95,7 +128,7 @@ class OriginalExecutionPostgresTests(unittest.TestCase):
                     "_database_mutation_timestamp",
                     side_effect=lambda _session: format_launchplane_mutation_timestamp(now[0]),
                 ),
-                patch.object(first, "write_deployment_record", side_effect=pause_write),
+                patch.object(first, "publish_generic_web_testing_result", side_effect=pause_write),
                 ThreadPoolExecutor(max_workers=1) as pool,
             ):
                 old = pool.submit(run)

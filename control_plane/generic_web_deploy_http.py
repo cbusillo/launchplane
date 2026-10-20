@@ -15,6 +15,7 @@ from control_plane.drivers.generic_web_dispatch import (
 )
 from control_plane.workflows.generic_web_deploy import (
     GenericWebDeployStore,
+    GenericWebDeploymentPublisher,
     execute_generic_web_deploy,
     product_profile_uses_generic_web_base,
 )
@@ -91,6 +92,7 @@ def execute_generic_web_deploy_result(
     proved_pre_image_retry: bool = False,
     post_deploy_authority_digest: str = "",
     execution_recorder: ExecutionRecorder | None = None,
+    publish_deployment: GenericWebDeploymentPublisher | None = None,
 ) -> tuple[dict[str, object], dict[str, object]]:
     driver_result = execute_generic_web_deploy(
         control_plane_root=control_plane_root,
@@ -103,6 +105,7 @@ def execute_generic_web_deploy_result(
         ),
         post_deploy_authority_digest=post_deploy_authority_digest,
         execution_recorder=execution_recorder,
+        publish_deployment=publish_deployment,
         deploy_provider=deploy_provider,
         resolved_deploy_target=resolved_deploy_target,
         provider_operation_title=provider_operation_title,

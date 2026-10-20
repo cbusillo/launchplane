@@ -14,6 +14,10 @@ from control_plane.generic_web_deploy_provider_adapter import (
 )
 from control_plane.provider_operations import (
     DurableProviderOperationResult,
+    ProviderOperationLease,
+    ProviderEvidenceLease,
+    ProviderObservation,
+    ProviderMutationUnknownError,
     build_provider_operation_key,
     run_durable_provider_operation,
 )
@@ -24,8 +28,16 @@ from control_plane.workflows.generic_web_deploy_provider import (
     GenericWebProviderDeploymentObservation,
 )
 from tests.test_generic_web_application_lifecycle import _extensions, _LifecycleDeployProvider
-from tests.test_generic_web_deploy import _GenericWebDeployStore, _profile, _request
-from control_plane.contracts.deployment_record import DeploymentRecord
+from tests.test_generic_web_deploy import (
+    _GenericWebDeployStore,
+    _FakeGenericWebDeployProvider,
+    _profile,
+    _request,
+)
+from control_plane.contracts.deployment_record import (
+    DeploymentRecord,
+    IntegrationKeyReadbackEvidence,
+)
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.generic_web_testing_inputs import testing_input_authority
 from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
@@ -33,6 +45,7 @@ from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
     DeploymentEvidence,
     PostDeployUpdateEvidence,
+    RecordFailure,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
@@ -63,9 +76,30 @@ from tests.test_generic_web_deploy_recovery import (
 )
 from tests.support.profiles import product_profile_payload as _product_profile_payload
 from control_plane.workflows.inventory import build_environment_inventory
+from control_plane.workflows.evidence_ingestion import apply_deployment_evidence
+from control_plane.generic_web_testing_settlement import settle_testing_pre_image_attempt
 
 
 class OriginalExecutionTests(unittest.TestCase):
+    def test_durable_terminal_run_does_not_reobserve_later_cron_history(self) -> None:
+        entry = ExecutionEntry(
+            kind="schedule_run",
+            name="canary",
+            target_id="schedule",
+            payload_digest=evidence_digest({}),
+            acknowledgement="synchronous",
+            terminal="done",
+        )
+        reads: list[str] = []
+
+        def history(schedule: str) -> tuple[api.JsonObject, ...]:
+            reads.append(schedule)
+            return ({"deploymentId": "later-cron", "status": "running"},)
+
+        observation = observe_execution(ExecutionReceipt(entries=(entry,)), history)
+        self.assertEqual(observation.outcome, "terminal")
+        self.assertEqual(reads, [])
+
     def test_foreign_response_and_history_cannot_complete_original_callback(self) -> None:
         records = _GenericWebDeployStore(_profile())
         records.write_deployment_record(
@@ -373,6 +407,8 @@ class OriginalExecutionTests(unittest.TestCase):
             self.assertEqual(first.record.state, "reconcile_required")
             self.assertEqual(successor.status, "target_busy")
             self.assertEqual(triggers, [extensions.maintenance[0].name])
+            self.assertEqual(records.inventories, [])
+            self.assertEqual(records.deployments[0].deploy.status, "pending")
 
 
 class ExecutionRecoveryTests(unittest.TestCase):
@@ -433,6 +469,526 @@ class ExecutionRecoveryTests(unittest.TestCase):
             )
         )
 
+    def complete_original(
+        self, phase: str, *, action: str = "adopt_observed"
+    ) -> tuple[int, dict[str, Any]]:
+        with patch(
+            "control_plane.generic_web_deploy_provider_adapter.default_generic_web_deploy_provider",
+            return_value=self.provider,
+        ):
+            status, dry = _invoke_recovery(
+                self.app,
+                original_deploy=self.request,
+                idempotency_key=phase,
+                reason="Complete only original work.",
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(dry["proposed_action"], action)
+            return _invoke_recovery_apply(
+                self.app,
+                original_deploy=self.request,
+                idempotency_key=phase,
+                reason="Complete only original work.",
+                expected_recovery_digest=dry["recovery_digest"],
+            )
+
+    def test_recovery_preserves_already_final_corrected_record_and_inventory(self) -> None:
+        record_id = self.prepare("records_commit", ExecutionReceipt(), qualified=True)
+        record = self.store.read_deployment_record(record_id)
+        corrected = record.model_copy(
+            update={
+                "integration_key_readback": IntegrationKeyReadbackEvidence(
+                    status="pass", checked_binding_keys=("fixture-key",)
+                ),
+                "failure": RecordFailure(
+                    code="fixture-correction", description="Retained diagnostic"
+                ),
+                "deploy": record.deploy.model_copy(update={"started_at": "2026-08-15T11:59:00Z"}),
+            }
+        )
+        apply_deployment_evidence(record_store=self.store, deployment_record=corrected)
+        inventory = self.store.read_environment_inventory(
+            context_name=corrected.context, instance_name="testing"
+        ).model_copy(update={"bootstrap_record_id": "retained-correction"})
+        self.store.write_environment_inventory(inventory)
+        status, result = self.complete_original("records_commit")
+        self.assertEqual(status, 202)
+        self.assertEqual(result["reservation_state"], "completed")
+        self.assertEqual(self.store.read_deployment_record(record_id), corrected)
+        self.assertEqual(
+            self.store.read_environment_inventory(
+                context_name=inventory.context, instance_name="testing"
+            ),
+            inventory,
+        )
+
+    def test_historical_completion_keeps_newer_inventory_and_original_evidence(self) -> None:
+        record_id = self.prepare("records_commit", ExecutionReceipt(), qualified=True)
+        original = self.store.read_deployment_record(record_id)
+        newer = original.model_copy(
+            update={
+                "record_id": "newer",
+                "post_deploy_update": original.post_deploy_update.model_copy(
+                    update={"evidence": {}}
+                ),
+            }
+        )
+        apply_deployment_evidence(record_store=self.store, deployment_record=newer)
+        inventory = self.store.read_environment_inventory(
+            context_name=original.context, instance_name="testing"
+        )
+        status, result = self.complete_original("records_commit")
+        self.assertEqual(status, 202)
+        self.assertEqual(result["reservation_state"], "completed")
+        self.assertEqual(self.store.read_deployment_record(record_id), original)
+        self.assertEqual(
+            self.store.read_environment_inventory(
+                context_name=original.context, instance_name="testing"
+            ),
+            inventory,
+        )
+
+    def test_legacy_failed_image_completes_failed_without_new_inventory(self) -> None:
+        record_id = self.prepare("deploy_trigger", None, qualified=True)
+        record = self.store.read_deployment_record(record_id)
+        self.store.write_deployment_record(
+            record.model_copy(
+                update={"deploy": record.deploy.model_copy(update={"status": "fail"})}
+            )
+        )
+        self.provider.observation = self.provider.observation.model_copy(
+            update={"deployment_status": "error"}
+        )
+        status, result = self.complete_original("deploy_trigger")
+        self.assertEqual(status, 202)
+        self.assertEqual(result["reservation_state"], "completed")
+        completed = self.store.read_idempotency_record(
+            scope=self.reservation.scope,
+            route_path=self.reservation.route_path,
+            idempotency_key="deploy_trigger",
+        )
+        assert completed is not None
+        self.assertEqual(completed.response_status_code, 502)
+        self.assertEqual(completed.response_payload["result"]["deploy_status"], "fail")
+        with self.assertRaises(FileNotFoundError):
+            self.store.read_environment_inventory(
+                context_name=record.context, instance_name="testing"
+            )
+
+    def test_settlement_updates_failed_qualification_only_on_original_inventory_baseline(
+        self,
+    ) -> None:
+        for independent in (False, True):
+            with self.subTest(independent=independent):
+                key = f"terminal-failure-{independent}"
+                prior = DeploymentRecord(
+                    record_id=f"prior-{independent}",
+                    context=self.target.ship_request.context,
+                    instance="testing",
+                    source_git_ref=self.target.ship_request.source_git_ref,
+                    artifact_identity=ArtifactIdentityReference(
+                        artifact_id=self.target.ship_request.artifact_id
+                    ),
+                    deploy=DeploymentEvidence(
+                        target_name="testing",
+                        target_type="application",
+                        deploy_mode="application",
+                        status="pass",
+                        deployment_id="previous-image",
+                    ),
+                )
+                apply_deployment_evidence(record_store=self.store, deployment_record=prior)
+                baseline = self.store.read_environment_inventory(
+                    context_name=prior.context, instance_name="testing"
+                )
+                entry = ExecutionEntry(
+                    kind="product_executor",
+                    name="verify",
+                    target_id=self.target.resolved_target.target_id,
+                    payload_digest=evidence_digest({}),
+                    acknowledgement="completed",
+                    terminal="executor_completed",
+                )
+                record_id = self.prepare(
+                    "post_deploy_finished",
+                    ExecutionReceipt(
+                        inventory_baseline_digest=evidence_digest(baseline.model_dump(mode="json")),
+                        entries=(entry,),
+                    ),
+                    idempotency_key=key,
+                )
+                if independent:
+                    newer = prior.model_copy(update={"record_id": f"newer-{independent}"})
+                    apply_deployment_evidence(record_store=self.store, deployment_record=newer)
+                    baseline = self.store.read_environment_inventory(
+                        context_name=prior.context, instance_name="testing"
+                    )
+                status, result = self.complete_original(key, action="settle_testing_failure")
+                self.assertEqual(status, 202)
+                self.assertEqual(result["reservation_state"], "completed")
+                inventory = self.store.read_environment_inventory(
+                    context_name=prior.context, instance_name="testing"
+                )
+                if independent:
+                    self.assertEqual(inventory, baseline)
+                else:
+                    self.assertEqual(inventory.deployment_record_id, record_id)
+                    self.assertEqual(inventory.post_deploy_update.status, "fail")
+
+    def test_receipt_merge_preserves_correction_between_recorder_read_and_write(self) -> None:
+        record_id = self.prepare("records_commit", ExecutionReceipt())
+        current = self.store.read_idempotency_record(
+            scope=self.reservation.scope,
+            route_path=self.reservation.route_path,
+            idempotency_key="records_commit",
+        )
+        assert current is not None
+        acquired = self.store.retry_reconciled_mutation(
+            reservation=current, lease_owner="receipt-owner", preserve_effect_checkpoint=True
+        )
+        assert acquired.record is not None
+        owner = acquired.record
+        record = self.store.read_deployment_record(record_id)
+        recorder = ExecutionRecorder(
+            self.store, record_id, ExecutionReceipt(), expected_record=record
+        )
+        with self.store.provider_evidence_guard(lambda: owner):
+            index = recorder.begin(
+                "product_executor", "verify", self.target.resolved_target.target_id, {}
+            )
+            merge = self.store.advance_generic_web_execution_receipt
+
+            def correct_then_merge(**kwargs: Any) -> None:
+                with closing(
+                    PostgresRecordStore(
+                        database_url=f"sqlite+pysqlite:///{self.root / 'records.db'}"
+                    )
+                ) as writer:
+                    saved = writer.read_deployment_record(record_id)
+                    correction = saved.model_copy(
+                        update={
+                            "post_deploy_update": saved.post_deploy_update.model_copy(
+                                update={"status": "fail", "detail": "Preserve supported correction"}
+                            ),
+                            "integration_key_readback": IntegrationKeyReadbackEvidence(
+                                status="pass"
+                            ),
+                        }
+                    )
+                    apply_deployment_evidence(record_store=writer, deployment_record=correction)
+                merge(**kwargs)
+
+            with patch.object(
+                self.store, "advance_generic_web_execution_receipt", side_effect=correct_then_merge
+            ):
+                recorder.update(index, acknowledgement="completed", terminal="executor_completed")
+        saved = self.store.read_deployment_record(record_id)
+        self.assertEqual(saved.post_deploy_update.status, "fail")
+        self.assertEqual(saved.post_deploy_update.detail, "Preserve supported correction")
+        self.assertIsNotNone(saved.integration_key_readback)
+        self.assertEqual(
+            ExecutionReceipt.model_validate_json(
+                saved.post_deploy_update.evidence[EXECUTION_EVIDENCE_KEY]
+            )
+            .entries[index]
+            .terminal,
+            "executor_completed",
+        )
+        self.assertNotEqual(saved, recorder.expected_record)
+
+    def normal_adapter(self) -> GenericWebDeployProviderMutationAdapter:
+        provider = _FakeGenericWebDeployProvider(observation=self.provider.observation)
+        provider.provider_id = "dokploy"
+        adapter = GenericWebDeployProviderMutationAdapter(
+            control_plane_root=self.root,
+            record_store=self.store,
+            deploy_request=GenericWebDeployEnvelope.model_validate(self.request),
+            profile=self.profile,
+            lane=self.profile.lanes[0],
+            trace_id="normal-publication",
+            deploy_provider=provider,
+            recorded_artifact=True,
+        )
+        adapter._resolved_deploy_target = self.target
+        return adapter
+
+    def run_normal(
+        self, adapter: GenericWebDeployProviderMutationAdapter, key: str
+    ) -> DurableProviderOperationResult:
+        return run_durable_provider_operation(
+            store=self.store,
+            scope="normal-fixture",
+            route_path="/v1/drivers/generic-web/deploy",
+            idempotency_key=key,
+            request_fingerprint=key,
+            lease_owner="normal-worker",
+            response_trace_id="normal-result",
+            adapter=adapter,
+        )
+
+    def test_normal_failed_qualification_updates_only_unchanged_inventory_baseline(self) -> None:
+        self.profile = _profile()
+        self.store.write_product_profile_record(self.profile)
+        for independent in (False, True):
+            with self.subTest(independent=independent):
+                prior = DeploymentRecord(
+                    record_id=f"baseline-{independent}",
+                    context=self.target.ship_request.context,
+                    instance="testing",
+                    source_git_ref=self.target.ship_request.source_git_ref,
+                    artifact_identity=ArtifactIdentityReference(
+                        artifact_id=self.target.ship_request.artifact_id
+                    ),
+                    deploy=DeploymentEvidence(
+                        target_name="testing",
+                        target_type="application",
+                        deploy_mode="application",
+                        status="pass",
+                        deployment_id="previous-image",
+                    ),
+                )
+                apply_deployment_evidence(record_store=self.store, deployment_record=prior)
+                newer_inventory = None
+
+                def answered_failure(*_args: object) -> PostDeployUpdateEvidence:
+                    nonlocal newer_inventory
+                    if independent:
+                        newer = prior.model_copy(update={"record_id": "independent-newer"})
+                        with closing(
+                            PostgresRecordStore(
+                                database_url=f"sqlite+pysqlite:///{self.root / 'records.db'}"
+                            )
+                        ) as writer:
+                            apply_deployment_evidence(record_store=writer, deployment_record=newer)
+                            newer_inventory = writer.read_environment_inventory(
+                                context_name=prior.context, instance_name="testing"
+                            )
+                    return PostDeployUpdateEvidence(
+                        attempted=True, status="fail", detail="Answered product assertion failed."
+                    )
+
+                with patch(
+                    "control_plane.generic_web_deploy_http._generic_web_post_deploy_executor_for_profile",
+                    return_value=answered_failure,
+                ):
+                    outcome = self.run_normal(self.normal_adapter(), f"failed-{independent}")
+                self.assertEqual(outcome.status, "completed")
+                assert outcome.record is not None
+                record_id = outcome.record.response_payload["records"]["deployment_record_id"]
+                saved = self.store.read_deployment_record(record_id)
+                self.assertEqual(saved.deploy.status, "pass")
+                self.assertEqual(saved.post_deploy_update.status, "fail")
+                current = self.store.read_environment_inventory(
+                    context_name=prior.context, instance_name="testing"
+                )
+                if independent:
+                    self.assertEqual(current, newer_inventory)
+                else:
+                    self.assertEqual(current.deployment_record_id, record_id)
+                    self.assertEqual(current.post_deploy_update.status, "fail")
+
+    def test_normal_publication_checks_actual_config_change_after_callback(self) -> None:
+        self.profile = _profile()
+        self.store.write_product_profile_record(self.profile)
+        lane = self.profile.lanes[0]
+        settings = RuntimeEnvironmentRecord(
+            scope="instance",
+            context=lane.context,
+            instance="testing",
+            env={"SITE_MODE": "reviewed"},
+            updated_at="2026-08-15T12:00:00Z",
+        )
+
+        def configure(value: str) -> None:
+            with closing(
+                PostgresRecordStore(database_url=f"sqlite+pysqlite:///{self.root / 'records.db'}")
+            ) as writer:
+                writer.write_product_authority_bundle(
+                    ProductAuthorityBundle(
+                        required_product_config_target=(
+                            self.profile.product,
+                            lane.context,
+                            "testing",
+                        ),
+                        runtime_environments=(
+                            settings.model_copy(update={"env": {"SITE_MODE": value}}),
+                        ),
+                    )
+                )
+
+        with patch.dict(os.environ, {"LAUNCHPLANE_MASTER_ENCRYPTION_KEY": "test-master-key"}):
+            configure("reviewed")
+            self.target = self.target.model_copy(
+                update={
+                    "testing_runtime_digest": testing_input_authority(
+                        self.store, self.profile, lane
+                    )
+                }
+            )
+            publisher = self.store.publish_generic_web_testing_result
+
+            def changed_then_publish(**kwargs: Any) -> None:
+                if kwargs["deployment"].deploy.status == "pass":
+                    configure("changed-after-callback")
+                publisher(**kwargs)
+
+            with patch.object(
+                self.store, "publish_generic_web_testing_result", side_effect=changed_then_publish
+            ):
+                outcome = self.run_normal(self.normal_adapter(), "normal-authority-race")
+        self.assertEqual(outcome.status, "reconcile_required")
+        with self.assertRaises(FileNotFoundError):
+            self.store.read_environment_inventory(
+                context_name=lane.context, instance_name="testing"
+            )
+
+    def test_pre_image_settlement_records_enable_and_delete_and_fences_lost_enable(self) -> None:
+        class Provider(_RecoveryObservationProvider, DokployGenericWebDeployProvider):
+            pass
+
+        extensions = _extensions()
+        lane = self.profile.lanes[0].model_copy(update={"generic_web_extensions": extensions})
+        self.profile = self.profile.model_copy(update={"lanes": (lane,)})
+        self.store.write_product_profile_record(self.profile)
+        self.target = self.target.model_copy(
+            update={"testing_runtime_digest": evidence_digest({"captured": "inputs"})}
+        )
+        for lost in (False, True):
+            with self.subTest(lost=lost):
+                key = f"pre-image-{lost}"
+                original = schedule_payload(
+                    extensions.schedules[0], self.target.resolved_target.target_id, enabled=True
+                )
+                snapshot = ApplicationLifecycleSnapshot(
+                    product=self.profile.product,
+                    context=lane.context,
+                    instance="testing",
+                    provider_id="dokploy",
+                    target_id=self.target.resolved_target.target_id,
+                    artifact_id=self.target.ship_request.artifact_id,
+                    source_git_ref=self.target.ship_request.source_git_ref,
+                    extensions=extensions,
+                    originals={extensions.schedules[0].name: original, "created": None},
+                    managed_names=(extensions.schedules[0].name, "created"),
+                )
+                with patch(
+                    "tests.test_generic_web_deploy_recovery._generic_web_recovery_target",
+                    return_value=self.target,
+                ):
+                    record_id = self.prepare(
+                        "runtime_environment_update",
+                        ExecutionReceipt(),
+                        snapshot=snapshot,
+                        idempotency_key=key,
+                    )
+                # The next fixture uses a distinct original key without changing its target.
+                reserved = self.reservation
+                record = self.store.read_deployment_record(record_id)
+                self.store.write_deployment_record(
+                    record.model_copy(
+                        update={"deploy": record.deploy.model_copy(update={"status": "fail"})}
+                    )
+                )
+                schedules = {
+                    extensions.schedules[0].name: {**original, "enabled": False},
+                    "created": {**original, "name": "created", "enabled": False},
+                }
+                writes: list[str] = []
+
+                def upsert(**kwargs: Any) -> api.JsonObject:
+                    payload = cast(api.JsonObject, kwargs["schedule_payload"])
+                    current = self.store.read_deployment_record(record_id)
+                    self.assertFalse(
+                        ExecutionReceipt.model_validate_json(
+                            current.post_deploy_update.evidence[EXECUTION_EVIDENCE_KEY]
+                        )
+                        .entries[-1]
+                        .terminal
+                    )
+                    schedules[str(payload["name"])] = payload
+                    writes.append("enable")
+                    if lost:
+                        raise ProviderMutationUnknownError("Original enable reply lost.")
+                    return payload
+
+                def delete(**kwargs: Any) -> None:
+                    schedules.pop(kwargs["schedule_payload"]["name"])
+                    writes.append("delete")
+
+                class Adapter:
+                    def target_key(inner) -> str:
+                        return reserved.provider_target_key
+
+                    def reconciliation_key(inner) -> str:
+                        return reserved.reconciliation_key
+
+                    def observe(inner, *_args: object) -> ProviderObservation:
+                        return ProviderObservation(
+                            outcome="absent", retry_safe=True, preserve_effect_checkpoint=True
+                        )
+
+                    def apply(inner, operation: str, lease: ProviderOperationLease) -> Any:
+                        with self.store.provider_evidence_guard(
+                            cast(ProviderEvidenceLease, lease).evidence_reservation
+                        ):
+                            return settle_testing_pre_image_attempt(
+                                record_store=self.store,
+                                profile=self.profile,
+                                lane=lane,
+                                target=self.target,
+                                operation_key=operation,
+                                phase="runtime_environment_update",
+                                no_effect_checkpoint=False,
+                                superseded=True,
+                                provider=Provider(
+                                    GenericWebProviderDeploymentObservation(outcome="absent")
+                                ),
+                                control_plane_root=self.root,
+                                lease=lease,
+                                check_execution=lambda: None,
+                                trace_id="pre-image-settlement",
+                            )
+
+                with (
+                    patch(
+                        "control_plane.dokploy.source.read_dokploy_config",
+                        return_value=("https://provider.invalid", "fixture"),
+                    ),
+                    patch.object(
+                        api,
+                        "read_dokploy_application_schedule",
+                        side_effect=lambda **kwargs: schedules.get(kwargs["schedule_name"]),
+                    ),
+                    patch.object(api, "upsert_dokploy_application_schedule", side_effect=upsert),
+                    patch.object(api, "delete_dokploy_application_schedule", side_effect=delete),
+                ):
+                    outcome = run_durable_provider_operation(
+                        store=self.store,
+                        scope=reserved.scope,
+                        route_path=reserved.route_path,
+                        idempotency_key=reserved.idempotency_key,
+                        request_fingerprint=reserved.request_fingerprint,
+                        lease_owner="settlement-worker",
+                        response_trace_id="settlement",
+                        adapter=Adapter(),
+                    )
+                saved = self.store.read_deployment_record(record_id)
+                receipt = ExecutionReceipt.model_validate_json(
+                    saved.post_deploy_update.evidence[EXECUTION_EVIDENCE_KEY]
+                )
+                if lost:
+                    self.assertEqual(outcome.status, "reconcile_required")
+                    self.assertEqual(writes, ["enable"])
+                    self.assertFalse(receipt.entries[-1].terminal)
+                else:
+                    self.assertEqual(outcome.status, "completed")
+                    self.assertEqual(writes, ["enable", "delete"])
+                    self.assertEqual(
+                        [entry.kind for entry in receipt.entries],
+                        ["schedule_write", "schedule_delete"],
+                    )
+                    self.assertTrue(all(entry.terminal for entry in receipt.entries))
+
     def prepare(
         self,
         phase: str,
@@ -440,12 +996,13 @@ class ExecutionRecoveryTests(unittest.TestCase):
         *,
         qualified: bool = False,
         snapshot: ApplicationLifecycleSnapshot | None = None,
+        idempotency_key: str = "",
     ) -> str:
         reservation = _write_generic_web_recovery_reservation(
             self.store,
             _generic_web_recovery_reservation(
                 original_deploy=self.request,
-                idempotency_key=phase,
+                idempotency_key=idempotency_key or phase,
                 state="running",
                 provider_effect_phase=phase,
             ),
@@ -733,7 +1290,7 @@ class ExecutionRecoveryTests(unittest.TestCase):
                 return_value=self.target,
             ):
                 record_id = self.prepare("records_commit", ExecutionReceipt(), qualified=True)
-            original = self.store.publish_generic_web_testing_recovery
+            original = self.store.publish_generic_web_testing_result
 
             def change_then_publish(**kwargs: Any) -> None:
                 write_settings("changed-after-checkpoint")
@@ -752,7 +1309,7 @@ class ExecutionRecoveryTests(unittest.TestCase):
                 self.assertEqual(dry["proposed_action"], "adopt_observed")
                 with patch.object(
                     self.store,
-                    "publish_generic_web_testing_recovery",
+                    "publish_generic_web_testing_result",
                     side_effect=change_then_publish,
                 ):
                     status, refused = _invoke_recovery_apply(
@@ -778,7 +1335,7 @@ class ExecutionRecoveryTests(unittest.TestCase):
         newer = build_environment_inventory(
             deployment_record=record, updated_at="2026-08-15T12:01:00Z"
         ).model_copy(update={"deployment_record_id": "newer"})
-        original = self.store.publish_generic_web_testing_recovery
+        original = self.store.publish_generic_web_testing_result
 
         def change_then_publish(**kwargs: Any) -> None:
             with closing(
@@ -798,7 +1355,7 @@ class ExecutionRecoveryTests(unittest.TestCase):
                 reason="Publish reviewed completion.",
             )
             with patch.object(
-                self.store, "publish_generic_web_testing_recovery", side_effect=change_then_publish
+                self.store, "publish_generic_web_testing_result", side_effect=change_then_publish
             ):
                 status, _refused = _invoke_recovery_apply(
                     self.app,
@@ -819,7 +1376,7 @@ class ExecutionRecoveryTests(unittest.TestCase):
     def test_legacy_image_only_publication_refuses_repointed_current_target(self) -> None:
         record_id = self.prepare("deploy_trigger", None, qualified=True)
         record = self.store.read_deployment_record(record_id)
-        original = self.store.publish_generic_web_testing_recovery
+        original = self.store.publish_generic_web_testing_result
 
         def repoint_then_publish(**kwargs: Any) -> None:
             lane = self.profile.lanes[0]
@@ -852,7 +1409,7 @@ class ExecutionRecoveryTests(unittest.TestCase):
             )
             self.assertEqual(dry["proposed_action"], "adopt_observed")
             with patch.object(
-                self.store, "publish_generic_web_testing_recovery", side_effect=repoint_then_publish
+                self.store, "publish_generic_web_testing_result", side_effect=repoint_then_publish
             ):
                 status, _refused = _invoke_recovery_apply(
                     self.app,

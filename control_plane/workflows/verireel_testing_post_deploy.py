@@ -273,8 +273,6 @@ def _goto(
     guard: GenericWebPostDeployGuard | None = None,
     exchanges: "_TestingPageExchanges | None" = None,
 ) -> None:
-    if guard is not None:
-        guard.begin_exchange("page-load")
     try:
         response = page.goto(f"{base_url}{path}", wait_until="domcontentloaded")
         if guard is not None:
@@ -283,7 +281,6 @@ def _goto(
             if exchanges is None:
                 raise ProviderMutationUnknownError("Testing response observer is unavailable.")
             exchanges.finish_response(response)
-            guard.complete_exchange("page-load")
     except Exception as error:
         if guard is not None:
             raise ProviderMutationUnknownError(
@@ -333,6 +330,12 @@ class _TestingPageExchanges:
         name = f"dynamic-request:{len(self.guard.exchanges)}"
         self.requests[request] = name
         self.guard.begin_exchange(name)
+        if (
+            request.method == "POST"
+            and url.path == "/dashboard"
+            and "next-action" in request.headers
+        ):
+            self.guard.begin_exchange("qr-success")
 
     def finish_response(self, response: BrowserResponse) -> None:
         self.finish_request(response.request)
@@ -363,14 +366,11 @@ class _TestingPageExchanges:
 
 def _finish_action(
     response: BrowserResponse,
-    guard: GenericWebPostDeployGuard,
-    name: str,
     exchanges: _TestingPageExchanges,
 ) -> None:
     if response.status >= 400:
         raise ProviderMutationUnknownError("Testing submitted action completion is unknown.")
     exchanges.finish_response(response)
-    guard.complete_exchange(name)
 
 
 def verification_path(base_url: str, href: str) -> str:
@@ -415,7 +415,6 @@ def verify_verireel_testing_product(
                             "Quartz!Canopy$" + "-".join(str(randbelow(10)) for _ in range(18))
                         )
                         checkpoint_testing_effect(guard, "post_deploy_fixture_signup")
-                        guard.begin_exchange("signup-submit")
                         with page.expect_response(
                             lambda response: (
                                 response.request.method == "POST"
@@ -425,7 +424,7 @@ def verify_verireel_testing_product(
                             page.get_by_role(
                                 "button", name=re.compile("create account and choose a plan", re.I)
                             ).click()
-                        _finish_action(signup.value, guard, "signup-submit", exchanges)
+                        _finish_action(signup.value, exchanges)
                         page.wait_for_url(f"{base_url}/billing", wait_until="domcontentloaded")
                         exchanges.finish()
                         assert_verireel_testing_identity(base_url, context)
@@ -452,8 +451,6 @@ def verify_verireel_testing_product(
                         page.get_by_label("Public verification label").fill(public_label)
                         page.get_by_label("Destination URL").fill(destination)
                         checkpoint_testing_effect(guard, "post_deploy_fixture_qr")
-                        guard.begin_exchange("qr-submit")
-                        guard.begin_exchange("qr-success")
                         with page.expect_response(
                             lambda response: (
                                 response.request.method == "POST"
@@ -465,7 +462,7 @@ def verify_verireel_testing_product(
                             page.get_by_role(
                                 "button", name=re.compile("create verification qr", re.I)
                             ).click()
-                        _finish_action(qr.value, guard, "qr-submit", exchanges)
+                        _finish_action(qr.value, exchanges)
                         link = page.locator("a[href*='/v/']").last
                         expect(link).to_be_visible(timeout=30_000)
                         href = link.get_attribute("href") or ""
@@ -518,6 +515,10 @@ def verify_verireel_testing_product(
                         raise
                     except Exception as error:
                         try:
+                            if page.is_closed() or not browser.is_connected():
+                                raise ProviderMutationUnknownError(
+                                    "Testing browser observability was lost."
+                                )
                             exchanges.finish()
                             guard.require_completed_exchanges()
                         except Exception as completion_error:

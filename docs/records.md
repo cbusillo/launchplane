@@ -1942,6 +1942,11 @@ turn unknown work into completed work. Cleanup appends evidence; it never
 replaces earlier unresolved effects. Terminal execution and testing
 qualification remain separate: a healthy image with failed product assertions
 can retain its image fact while the original operation settles as failed.
+Receipt-only advances merge against the current row under the original lease
+and authority transaction, so a simultaneous supported evidence correction is
+retained. Final publication compares the producer's expected pending record;
+it does not adopt a correction as permission to overwrite it. Recorded terminal
+facts survive later cron activity and do not require another history read.
 
 Failed Odoo stable bootstrap and production backup restore deployments use
 `failure` for a code and a fixed Launchplane description. Bootstrap codes

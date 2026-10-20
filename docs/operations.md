@@ -862,9 +862,11 @@ the durable mutation store, then uses the existing exact-match adoption or retry
 methods. For in-place application testing, `adopt_observed` reacquires the
 original lease and rechecks the reviewed execution, captured authority, image
 and exact inventory before publication. It runs no deploy, maintenance,
-canary or activation. Missing final publication can complete only against
-missing inventory, the same original deployment, or the exact pre-attempt
-inventory bound before dispatch. Newer or changed inventory remains held.
+canary or activation. Missing current-lane publication can complete only against
+missing inventory or the exact pre-attempt inventory bound before dispatch.
+Already final deployment evidence and independently corrected inventory are
+preserved. If another inventory is now current, recovery can complete the
+truthful historical original result while leaving that inventory unchanged.
 Automatic observation is read-only and can adopt only an already saved qualified
 result with matching durable inventory; adoption compares both again in the
 reservation transaction. Other scopes retain direct reviewed-evidence adoption.
@@ -874,6 +876,11 @@ recovery envelope preserves the original failed HTTP 502 result and replays
 without effects. An unqualified healthy image retains its separate image fact;
 settlement never creates a successful lane projection. Missing execution proof
 stays `hold_unknown` even if cleanup is the last saved phase.
+An answered failed qualification after successful image execution updates the
+unchanged original inventory baseline to failed qualification, through the same
+locked publisher used by ordinary completion. A failed image creates no fresh
+inventory. Durable terminal execution facts are not re-derived from later cron
+history; only unresolved original entries require provider observation.
 `retry_original_operation` resumes
 the already-acquired reservation path and preserves `reconcile_required` for
 pre-effect rejection, lease loss, uncertain, or non-durable outcomes.

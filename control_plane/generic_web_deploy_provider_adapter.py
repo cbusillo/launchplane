@@ -57,7 +57,7 @@ from control_plane.workflows.generic_web_execution import (
     ExecutionObservation,
     execution_receipt,
     observe_execution,
-    require_terminal_execution,
+    require_recorded_execution,
     evidence_digest,
 )
 from control_plane.dokploy.api import JsonObject
@@ -65,6 +65,7 @@ from control_plane.workflows.generic_web_deploy import (
     GenericWebDeployStore,
     normalize_generic_web_artifact_id,
     record_observed_generic_web_deploy,
+    generic_web_record_result,
     build_observed_generic_web_deploy,
 )
 from control_plane.workflows.inventory import build_environment_inventory
@@ -113,8 +114,8 @@ class _ExecutionInventoryReader(Protocol):
     ) -> EnvironmentInventory: ...
 
 
-class _TestingRecoveryPublisher(Protocol):
-    def publish_generic_web_testing_recovery(
+class _TestingResultPublisher(Protocol):
+    def publish_generic_web_testing_result(
         self,
         *,
         reservation: LaunchplaneIdempotencyRecord,
@@ -202,8 +203,10 @@ class GenericWebDeployProviderMutationAdapter:
 
         record_id = self._deployment_record_id(operation_key)
         try:
-            receipt = execution_receipt(self._record_store.read_deployment_record(record_id))
+            record = self._record_store.read_deployment_record(record_id)
+            receipt = execution_receipt(record)
         except FileNotFoundError:
+            record = None
             receipt = None
         if receipt is None:
             try:
@@ -219,7 +222,7 @@ class GenericWebDeployProviderMutationAdapter:
                     inventory.model_dump(mode="json") if inventory else None
                 )
             )
-        return ExecutionRecorder(self._record_store, record_id, receipt)
+        return ExecutionRecorder(self._record_store, record_id, receipt, expected_record=record)
 
     def _execution_evidence(
         self, operation_key: str, target: GenericWebResolvedDeployTarget, phase: str
@@ -500,15 +503,11 @@ class GenericWebDeployProviderMutationAdapter:
                 or saved_record.deploy.deployment_id != observation.deployment_id
             ):
                 return ProviderObservation(outcome="unknown")
-            records, result = record_observed_generic_web_deploy(
-                record_store=self._record_store,
-                profile=self._profile,
-                lane=self._lane,
-                resolved_deploy_target=inspection.resolved_deploy_target,
+            records, result = generic_web_record_result(
+                record=saved_record,
+                product=self._profile.product,
+                target=inspection.resolved_deploy_target,
                 observation=observation,
-                deployment_record_id=saved_record.record_id,
-                post_deploy_unobserved=False,
-                publish=False,
             )
             return ProviderObservation(
                 outcome="present",
@@ -606,21 +605,6 @@ class GenericWebDeployProviderMutationAdapter:
                 except FileNotFoundError:
                     saved_inventory = None
                 evidence = replace(evidence, execution_inventory=saved_inventory)
-                captured = execution_receipt(record) if record is not None else None
-                if (
-                    saved_inventory is not None
-                    and saved_inventory.deployment_record_id
-                    != self._deployment_record_id(provider_operation_key)
-                    and (
-                        captured is None
-                        or captured.inventory_baseline_digest
-                        != evidence_digest(saved_inventory.model_dump(mode="json"))
-                    )
-                ):
-                    return replace(
-                        evidence,
-                        observation=GenericWebProviderDeploymentObservation(outcome="unknown"),
-                    )
         observation = evidence.observation
         if (
             evidence.resolved_deploy_target is not None
@@ -1162,6 +1146,37 @@ class GenericWebDeployProviderMutationAdapter:
             instance=self._lane.instance,
         )
 
+    def _require_testing_publication_authority(
+        self,
+        target: GenericWebResolvedDeployTarget,
+        *,
+        current_lane: bool,
+        check_inputs: bool,
+    ) -> None:
+        from control_plane.generic_web_testing_inputs import (
+            require_testing_application_target_authority,
+        )
+
+        self.execution_check()
+        if self._record_store.read_product_profile_record(self._profile.product) != self._profile:
+            raise ProviderMutationUnknownError("Reviewed product ownership changed.")
+        if current_lane:
+            require_testing_application_target_authority(
+                self._record_store,
+                self._profile,
+                self._lane,
+                target_id=target.resolved_target.target_id,
+                provider_id=self._deploy_provider.provider_id,
+                driver_id=self._profile.driver_id,
+            )
+            if (
+                check_inputs
+                and target.testing_runtime_digest
+                and testing_input_authority(self._record_store, self._profile, self._lane)
+                != target.testing_runtime_digest
+            ):
+                raise ProviderMutationUnknownError("Original testing input authority changed.")
+
     def recover_execution(
         self,
         operation_key: str,
@@ -1193,9 +1208,6 @@ class GenericWebDeployProviderMutationAdapter:
             application_lifecycle_for_lane,
             DokployApplicationLifecycle,
         )
-        from control_plane.generic_web_testing_inputs import (
-            require_testing_application_target_authority,
-        )
         from control_plane.provider_operations import build_provider_operation_key
 
         target = reviewed.resolved_deploy_target
@@ -1207,29 +1219,44 @@ class GenericWebDeployProviderMutationAdapter:
         ):
             raise ProviderMutationUnknownError("Original terminal execution is unavailable.")
 
-        def authority_checkpoint() -> None:
-            # Read-only under the existing authority lock: do not acquire the
-            # lease mutex while its reservation row may block the heartbeat.
-            self.execution_check()
-            if (
-                self._record_store.read_product_profile_record(self._profile.product)
-                != self._profile
-            ):
-                raise ProviderMutationUnknownError("Reviewed product ownership changed.")
-            require_testing_application_target_authority(
-                self._record_store,
-                self._profile,
-                self._lane,
-                target_id=target.resolved_target.target_id,
-                provider_id=self._deploy_provider.provider_id,
-                driver_id=self._profile.driver_id,
+        saved_inventory = reviewed.execution_inventory
+        saved = reviewed.execution_record
+        receipt = execution_receipt(saved) if saved is not None else None
+        original_lane = (
+            saved_inventory is None
+            or saved_inventory.deployment_record_id == self._deployment_record_id(operation_key)
+            or (
+                receipt is not None
+                and receipt.inventory_baseline_digest
+                == evidence_digest(saved_inventory.model_dump(mode="json"))
             )
-            if (
-                target.testing_runtime_digest
-                and testing_input_authority(self._record_store, self._profile, self._lane)
-                != target.testing_runtime_digest
-            ):
-                raise ProviderMutationUnknownError("Original testing input authority changed.")
+        )
+        already_published = (
+            saved_inventory is not None
+            and saved_inventory.deployment_record_id == self._deployment_record_id(operation_key)
+        )
+        lifecycle_snapshot = recorded_application_lifecycle(saved) if saved is not None else None
+        hold_needed = (
+            settle
+            and original_lane
+            and not (
+                saved is not None
+                and saved.post_deploy_update.status == "fail"
+                and (lifecycle_snapshot is None or lifecycle_snapshot.state == "held")
+            )
+        )
+        publish_inventory = (
+            original_lane
+            and not already_published
+            and generic_web_provider_deployment_succeeded(reviewed.observation.deployment_status)
+            and (not settle or saved_inventory is not None)
+        )
+        current_lane = hold_needed or publish_inventory
+
+        def authority_checkpoint() -> None:
+            self._require_testing_publication_authority(
+                target, current_lane=current_lane, check_inputs=not settle
+            )
 
         guard = getattr(self._record_store, "provider_evidence_guard", None)
         with (
@@ -1315,7 +1342,7 @@ class GenericWebDeployProviderMutationAdapter:
                         completed.update(index, terminal="done")
                 record = receipt_update_record(completed.receipt)
                 expected_record = record
-            if settle:
+            if settle and hold_needed:
                 assert record is not None
                 checkpoint("testing_failure_settlement")
                 snapshot = recorded_application_lifecycle(record)
@@ -1342,56 +1369,92 @@ class GenericWebDeployProviderMutationAdapter:
                     update={
                         "post_deploy_update": record.post_deploy_update.model_copy(
                             update={
-                                "attempted": True,
-                                "status": "fail",
-                                "detail": "Original terminal testing work settled with schedules held.",
                                 "evidence": {
                                     **record.post_deploy_update.evidence,
                                     **(lifecycle.snapshot.evidence() if lifecycle else {}),
-                                },
+                                }
                             }
                         )
                     }
                 )
-            elif reviewed.terminal_unqualified:
+            if settle and record is not None and record.post_deploy_update.status != "fail":
+                record = record.model_copy(
+                    update={
+                        "post_deploy_update": record.post_deploy_update.model_copy(
+                            update={
+                                "attempted": True,
+                                "status": "fail",
+                                "detail": "Original terminal testing work did not qualify.",
+                            }
+                        )
+                    }
+                )
+            elif not settle and reviewed.terminal_unqualified:
                 raise ProviderMutationUnknownError(
                     "Unqualified testing work requires hold-only settlement."
                 )
             checkpoint("testing_failure_settlement" if settle else "records_commit")
-            published, records, result = build_observed_generic_web_deploy(
-                record_store=self._record_store,
-                profile=self._profile,
-                lane=self._lane,
-                resolved_deploy_target=target,
-                observation=observation,
-                deployment_record_id=self._deployment_record_id(operation_key),
-                post_deploy_unobserved=settle,
+            same_final_image = (
+                record is not None
+                and record.deploy.status in {"pass", "fail"}
+                and record.deploy.deployment_id == observation.deployment_id
             )
-            if settle:
+            if same_final_image:
                 assert record is not None
-                published = published.model_copy(
-                    update={"post_deploy_update": record.post_deploy_update}
+                published = record
+                records, result = generic_web_record_result(
+                    record=record,
+                    product=self._profile.product,
+                    target=target,
+                    observation=observation,
                 )
+            else:
+                published, records, result = build_observed_generic_web_deploy(
+                    record_store=self._record_store,
+                    profile=self._profile,
+                    lane=self._lane,
+                    resolved_deploy_target=target,
+                    observation=observation,
+                    deployment_record_id=self._deployment_record_id(operation_key),
+                    post_deploy_unobserved=settle,
+                )
+                if settle and record is not None:
+                    published = published.model_copy(
+                        update={"post_deploy_update": record.post_deploy_update}
+                    )
+            failed = (
+                settle
+                or published.deploy.status == "fail"
+                or published.post_deploy_update.status == "fail"
+                or not generic_web_provider_deployment_succeeded(observation.deployment_status)
+            )
+            if failed:
                 result.update(
                     deploy_status="fail",
-                    post_deploy_status="fail",
-                    error_message=record.post_deploy_update.detail,
+                    error_message=published.post_deploy_update.detail or observation.error_message,
                 )
-            inventory = (
-                build_environment_inventory(
+            if settle:
+                result["post_deploy_status"] = "fail"
+            inventory = None
+            if publish_inventory and (not failed or settle):
+                inventory = build_environment_inventory(
                     deployment_record=published,
                     updated_at=published.deploy.finished_at or observation.finished_at,
                 )
-                if not settle
-                or (
-                    reviewed.execution_inventory is not None
-                    and reviewed.execution_inventory.deployment_record_id == published.record_id
+            elif (
+                settle
+                and already_published
+                and saved_inventory is not None
+                and published != expected_record
+            ):
+                inventory = saved_inventory.model_copy(
+                    update={
+                        "deploy": published.deploy,
+                        "post_deploy_update": published.post_deploy_update,
+                        "destination_health": published.destination_health,
+                    }
                 )
-                else None
-            )
-            cast(
-                _TestingRecoveryPublisher, self._record_store
-            ).publish_generic_web_testing_recovery(
+            cast(_TestingResultPublisher, self._record_store).publish_generic_web_testing_result(
                 reservation=lease.evidence_reservation(),
                 expected_deployment=expected_record,
                 expected_inventory=reviewed.execution_inventory,
@@ -1399,7 +1462,7 @@ class GenericWebDeployProviderMutationAdapter:
                 inventory=inventory,
             )
             return ProviderMutationOutcome(
-                response_status_code=502 if settle else 202,
+                response_status_code=502 if failed else 202,
                 response_payload=provider_operation_response_payload(
                     trace_id=self._trace_id, records=records, result=result
                 ),
@@ -1478,6 +1541,60 @@ class GenericWebDeployProviderMutationAdapter:
 
         proved_pre_image_retry = self._proved_pre_image_operation == provider_operation_key
         self._proved_pre_image_operation = ""
+        resolved_target = self._resolve_deploy_target()
+        recorder = (
+            self._execution_recorder(provider_operation_key)
+            if self._application_testing(resolved_target)
+            else None
+        )
+
+        def publish_deployment(
+            record: DeploymentRecord, inventory: EnvironmentInventory | None
+        ) -> None:
+            assert recorder is not None
+            require_recorded_execution(recorder.receipt)
+            try:
+                current_inventory = cast(
+                    _ExecutionInventoryReader, self._record_store
+                ).read_environment_inventory(
+                    context_name=record.context, instance_name=record.instance
+                )
+            except FileNotFoundError:
+                current_inventory = None
+            if (
+                inventory is not None
+                and recorder.receipt.inventory_baseline_digest
+                != evidence_digest(
+                    current_inventory.model_dump(mode="json")
+                    if current_inventory is not None
+                    else None
+                )
+            ):
+                inventory = None
+            guard = getattr(self._record_store, "provider_evidence_guard", None)
+            if guard is None or not isinstance(lease, ProviderEvidenceLease):
+                raise ProviderMutationUnknownError(
+                    "Testing publication requires its original execution."
+                )
+
+            def authority() -> None:
+                self._require_testing_publication_authority(
+                    resolved_target,
+                    current_lane=inventory is not None,
+                    check_inputs=inventory is not None and deployment_record_passed(record),
+                )
+
+            with guard(lease.evidence_reservation, authority_checkpoint=authority):
+                cast(
+                    _TestingResultPublisher, self._record_store
+                ).publish_generic_web_testing_result(
+                    reservation=lease.evidence_reservation(),
+                    expected_deployment=recorder.expected_record,
+                    expected_inventory=current_inventory,
+                    deployment=record,
+                    inventory=inventory,
+                )
+
         try:
             resolved_target = self._resolve_deploy_target()
             records, result = execute_generic_web_deploy_result(
@@ -1490,8 +1607,11 @@ class GenericWebDeployProviderMutationAdapter:
                 deployment_record_id=self._deployment_record_id(provider_operation_key),
                 deploy_provider=self._deploy_provider,
                 post_deploy_authority_digest=self._qualification_authority_digest,
-                execution_recorder=self._execution_recorder(provider_operation_key)
-                if self._application_testing(resolved_target)
+                execution_recorder=recorder,
+                publish_deployment=publish_deployment
+                if recorder is not None
+                and getattr(self._record_store, "publish_generic_web_testing_result", None)
+                is not None
                 else None,
                 resolved_deploy_target=resolved_target,
                 provider_effect_checkpoint=checkpoint,
@@ -1521,15 +1641,6 @@ class GenericWebDeployProviderMutationAdapter:
                 raise ProviderMutationRejectedError(error) from error
             raise ProviderMutationUnknownError(str(error)) from error
         provider_effect_attempted = result.pop("provider_effect_attempted", False) is True
-        execution, _record = self._execution_evidence(
-            provider_operation_key, resolved_target, "records_commit"
-        )
-        if execution is not None and (
-            _record is not None
-            or provider_effect_attempted
-            or _string_field(result, "deploy_status") == "pass"
-        ):
-            require_terminal_execution(execution)
         provider_failure_proved = result.pop("provider_failure_proved", False) is True
         if (
             _string_field(result, "deploy_status") == "fail"

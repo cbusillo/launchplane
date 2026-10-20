@@ -5877,23 +5877,12 @@ class PostgresRecordStore(HumanSessionStore):
                             "Original execution facts require their current provider execution."
                         )
                     if current != prior and reservation_reader is not None:
-                        from control_plane.provider_operations import build_provider_operation_key
-                        from control_plane.workflows.generic_web_application_snapshot import (
-                            generic_web_provider_deployment_record_id,
+                        self._require_generic_web_execution_owner(
+                            record_id=row.record_id,
+                            context=row.context,
+                            instance=row.instance,
+                            reservation=reservation_reader(),
                         )
-
-                        owner = reservation_reader()
-                        operation = build_provider_operation_key(
-                            scope=owner.scope,
-                            route_path=owner.route_path,
-                            idempotency_key=owner.idempotency_key,
-                            request_fingerprint=owner.request_fingerprint,
-                            reconciliation_key=owner.reconciliation_key,
-                        )
-                        if row.record_id != generic_web_provider_deployment_record_id(
-                            operation, context=row.context, instance=row.instance
-                        ):
-                            raise ValueError("Original execution facts have a different operation.")
                     if existing is not None:
                         if prior is not None:
                             if current is None:
@@ -5949,16 +5938,88 @@ class PostgresRecordStore(HumanSessionStore):
             raise ValueError("Provider operation no longer owns this evidence write.")
         return current
 
-    def publish_generic_web_testing_recovery(
+    @staticmethod
+    def _require_generic_web_execution_owner(
+        *,
+        record_id: str,
+        context: str,
+        instance: str,
+        reservation: LaunchplaneIdempotencyRecord,
+    ) -> None:
+        from control_plane.provider_operations import build_provider_operation_key
+        from control_plane.workflows.generic_web_application_snapshot import (
+            generic_web_provider_deployment_record_id,
+        )
+
+        operation = build_provider_operation_key(
+            scope=reservation.scope,
+            route_path=reservation.route_path,
+            idempotency_key=reservation.idempotency_key,
+            request_fingerprint=reservation.request_fingerprint,
+            reconciliation_key=reservation.reconciliation_key,
+        )
+        if record_id != generic_web_provider_deployment_record_id(
+            operation, context=context, instance=instance
+        ):
+            raise ValueError("Original execution facts have a different operation.")
+
+    def advance_generic_web_execution_receipt(self, *, record_id: str, receipt_json: str) -> None:
+        """Merge only original execution facts, retaining concurrent evidence corrections."""
+        from control_plane.workflows.generic_web_execution import (
+            ExecutionReceipt,
+            EXECUTION_EVIDENCE_KEY,
+            execution_receipt,
+            require_receipt_extension,
+        )
+
+        reader = getattr(self._provider_evidence_context, "reservation_reader", None)
+        if reader is None:
+            raise ValueError("Original execution facts require their current provider execution.")
+        receipt = ExecutionReceipt.model_validate_json(receipt_json)
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            reservation = self.require_current_provider_execution(session, reader())
+            row = session.scalar(
+                select(LaunchplaneDeploymentRow)
+                .where(LaunchplaneDeploymentRow.record_id == record_id)
+                .with_for_update()
+            )
+            if row is None:
+                raise FileNotFoundError(record_id)
+            record = DeploymentRecord.model_validate(row.payload)
+            self._require_generic_web_execution_owner(
+                record_id=record_id,
+                context=record.context,
+                instance=record.instance,
+                reservation=reservation,
+            )
+            previous = execution_receipt(record)
+            if previous is not None:
+                require_receipt_extension(previous, receipt)
+            update = record.post_deploy_update.model_copy(
+                update={
+                    "evidence": {
+                        **record.post_deploy_update.evidence,
+                        EXECUTION_EVIDENCE_KEY: receipt.model_dump_json(),
+                    }
+                }
+            )
+            row.payload = self._payload_dict(
+                record.model_copy(update={"post_deploy_update": update})
+            )
+            session.commit()
+
+    def publish_generic_web_testing_result(
         self,
         *,
-        reservation: LaunchplaneIdempotencyRecord,
+        reservation: LaunchplaneIdempotencyRecord | None = None,
         expected_deployment: DeploymentRecord | None,
         expected_inventory: EnvironmentInventory | None,
         deployment: DeploymentRecord,
         inventory: EnvironmentInventory | None,
     ) -> None:
-        """Compare and publish original testing recovery under its existing authority lock."""
+        """Compare and publish original testing evidence under its existing authority lock."""
         from control_plane.workflows.generic_web_execution import (
             execution_receipt,
             require_execution_record_extension,
@@ -5968,7 +6029,12 @@ class PostgresRecordStore(HumanSessionStore):
         if deployment.instance != "testing" or (
             inventory is not None and inventory.deployment_record_id != deployment.record_id
         ):
-            raise ValueError("Testing recovery publication has a different binding.")
+            raise ValueError("Testing publication has a different binding.")
+        if reservation is None:
+            reader = getattr(self._provider_evidence_context, "reservation_reader", None)
+            if reader is None:
+                raise ValueError("Testing publication requires its original execution.")
+            reservation = reader()
         with self._session_factory() as session:
             self._begin_serialized_write(session)
             self._lock_product_authority_bundle_write(session)
@@ -6003,8 +6069,16 @@ class PostgresRecordStore(HumanSessionStore):
                 raise ValueError("Reviewed testing publication changed.")
             prior = execution_receipt(stored) if stored is not None else None
             current = execution_receipt(deployment)
+            if current is not None:
+                self._require_generic_web_execution_owner(
+                    record_id=deployment.record_id,
+                    context=deployment.context,
+                    instance=deployment.instance,
+                    reservation=reservation,
+                )
             if (
-                stored_inventory is not None
+                inventory is not None
+                and stored_inventory is not None
                 and stored_inventory.deployment_record_id != deployment.record_id
                 and (
                     prior is None
@@ -6012,25 +6086,26 @@ class PostgresRecordStore(HumanSessionStore):
                     != evidence_digest(stored_inventory.model_dump(mode="json"))
                 )
             ):
-                raise ValueError("Testing recovery cannot replace another published deployment.")
+                raise ValueError("Testing publication cannot replace another published deployment.")
             if prior is not None:
                 if current is None:
                     raise ValueError("Original execution facts cannot be removed.")
                 assert stored is not None
                 require_execution_record_extension(stored, deployment)
-            self._invalidate_testing_non_use_in_session(session, context=deployment.context)
-            session.merge(
-                LaunchplaneDeploymentRow(
-                    record_id=deployment.record_id,
-                    context=deployment.context,
-                    instance=deployment.instance,
-                    artifact_id=_artifact_id_from_model(deployment),
-                    source_git_ref=deployment.source_git_ref,
-                    deploy_started_at=deployment.deploy.started_at,
-                    deploy_finished_at=deployment.deploy.finished_at,
-                    payload=self._payload_dict(deployment),
+            if deployment != stored:
+                self._invalidate_testing_non_use_in_session(session, context=deployment.context)
+                session.merge(
+                    LaunchplaneDeploymentRow(
+                        record_id=deployment.record_id,
+                        context=deployment.context,
+                        instance=deployment.instance,
+                        artifact_id=_artifact_id_from_model(deployment),
+                        source_git_ref=deployment.source_git_ref,
+                        deploy_started_at=deployment.deploy.started_at,
+                        deploy_finished_at=deployment.deploy.finished_at,
+                        payload=self._payload_dict(deployment),
+                    )
                 )
-            )
             if inventory is not None:
                 session.merge(self._environment_inventory_row(inventory))
             session.commit()

@@ -2,6 +2,7 @@
 
 from collections.abc import Callable
 from pathlib import Path
+from contextlib import nullcontext
 from typing import Protocol, cast
 
 from control_plane.contracts.deployment_record import DeploymentRecord
@@ -25,7 +26,17 @@ from control_plane.provider_operations import (
     provider_operation_response_payload,
     provider_operation_title,
 )
-from control_plane.workflows.generic_web_application_lifecycle import application_lifecycle_for_lane
+from control_plane.workflows.generic_web_application_lifecycle import (
+    application_lifecycle_for_lane,
+    DokployApplicationLifecycle,
+)
+from control_plane.workflows.generic_web_execution import (
+    ExecutionRecorder,
+    ExecutionReceipt,
+    ExecutionRecordStore,
+    execution_receipt,
+    require_recorded_execution,
+)
 from control_plane.workflows.generic_web_application_snapshot import (
     ApplicationLifecycleSnapshot,
     generic_web_provider_deployment_record_id,
@@ -44,7 +55,7 @@ TESTING_PRE_IMAGE_SETTLED = "testing_deploy_pre_image_settled"
 TESTING_DISPATCH_REFUSED_SETTLED = "testing_deploy_dispatch_refused_settled"
 
 
-class _SettlementStore(TestingInputStore, Protocol):
+class _SettlementStore(TestingInputStore, ExecutionRecordStore, Protocol):
     def read_deployment_record(self, record_id: str) -> DeploymentRecord: ...
 
     def write_deployment_record(self, record: DeploymentRecord) -> object: ...
@@ -273,6 +284,18 @@ def settle_testing_pre_image_attempt(
                 "Original testing image outcome is no longer absent."
             )
         record, receipt = _record_and_receipt(store, profile, lane, target, operation_key)
+        recorder = (
+            ExecutionRecorder(
+                store,
+                record.record_id,
+                execution_receipt(record) or ExecutionReceipt(),
+                expected_record=record,
+            )
+            if record is not None
+            else None
+        )
+        if recorder is not None:
+            require_recorded_execution(recorder.receipt)
         settlement_without_effects = no_effect_checkpoint
 
         def checkpoint(_phase: str = "") -> None:
@@ -310,6 +333,8 @@ def settle_testing_pre_image_attempt(
                 effect_started=lambda: None,
             )
             assert lifecycle is not None
+            if isinstance(lifecycle, DokployApplicationLifecycle):
+                lifecycle.execution_recorder = recorder
             if refused_dispatch or receipt.resume_from_hold or receipt.state == "held":
                 lifecycle.hold()
                 receipt.state = "held"
@@ -347,6 +372,7 @@ def settle_testing_pre_image_attempt(
                 "evidence": {
                     **record.post_deploy_update.evidence,
                     **(receipt.evidence() if receipt is not None else {}),
+                    **(recorder.evidence() if recorder is not None else {}),
                 },
             }
         )
@@ -359,7 +385,35 @@ def settle_testing_pre_image_attempt(
             }
         )
         checkpoint()
-        store.write_deployment_record(record)
+        if recorder is not None:
+            require_recorded_execution(recorder.receipt)
+        publisher = getattr(store, "publish_generic_web_testing_result", None)
+        if publisher is not None:
+            try:
+                inventory = getattr(store, "read_environment_inventory")(
+                    context_name=lane.context, instance_name=lane.instance
+                )
+            except FileNotFoundError:
+                inventory = None
+            guard = getattr(store, "provider_evidence_guard", None)
+
+            def authority() -> None:
+                check_execution()
+                _require_target(store, profile, lane, target)
+
+            with (
+                guard(lease.evidence_reservation, authority_checkpoint=authority)
+                if guard is not None and isinstance(lease, ProviderEvidenceLease)
+                else nullcontext()
+            ):
+                publisher(
+                    expected_deployment=recorder.expected_record if recorder is not None else None,
+                    expected_inventory=inventory,
+                    deployment=record,
+                    inventory=None,
+                )
+        else:
+            store.write_deployment_record(record)
         return ProviderMutationOutcome(
             response_status_code=502,
             response_payload=provider_operation_response_payload(
