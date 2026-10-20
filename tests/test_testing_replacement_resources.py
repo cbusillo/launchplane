@@ -51,13 +51,8 @@ class TestingReplacementResourceFixture:
     idempotency_key = "resource-fixture"
 
     def __init__(self, owner: unittest.TestCase, *, database_url: str = "") -> None:
-        from control_plane.contracts.host_network_capacity import BridgeNetworkCapacity
-
-        self.capacity_read = owner.enterContext(
-            patch(
-                "control_plane.dokploy.network_capacity.read_bridge_network_capacity",
-                return_value=BridgeNetworkCapacity(total_slots=16, free_slots=16),
-            )
+        owner.enterContext(
+            patch("control_plane.workflows.dokploy_target_adoption.require_bridge_network_capacity")
         )
         self.database_url = database_url
         temporary = TemporaryDirectory()
@@ -136,7 +131,10 @@ class TestingReplacementResourceHttpTests(
     ) -> None:
         from contextlib import nullcontext
         from unittest.mock import Mock
-        from control_plane.dokploy.network_capacity import BridgeNetworkCapacityRefused
+        from control_plane.dokploy.network_capacity import (
+            BridgeNetworkCapacityRefused,
+            require_bridge_network_capacity,
+        )
         from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
         from control_plane.provider_operations import (
             ProviderMutationRejectedError,
@@ -160,6 +158,13 @@ class TestingReplacementResourceHttpTests(
         # This unit check covers the adapter's error boundary; native integration
         # retains the actual PostgreSQL serialization and atomic-adoption proof.
         with (
+            patch(
+                "control_plane.workflows.dokploy_target_adoption.require_bridge_network_capacity",
+                wraps=require_bridge_network_capacity,
+            ),
+            patch(
+                "control_plane.dokploy.network_capacity.read_bridge_network_capacity"
+            ) as capacity_read,
             patch.object(
                 self.store, "serialize_disposable_testing_resources", side_effect=nullcontext
             ),
@@ -185,7 +190,7 @@ class TestingReplacementResourceHttpTests(
                 BridgeNetworkCapacityRefused("host_bridge_network_capacity_short"),
                 NativeSourceAuthorizationDenied("Fixture denial"),
             ):
-                self.capacity_read.side_effect = error
+                capacity_read.side_effect = error
                 with (
                     self.subTest(error=type(error)),
                     self.assertRaises(ProviderMutationRejectedError) as rejected,
