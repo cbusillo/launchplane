@@ -350,6 +350,8 @@ class RehearsalHostResult(BaseModel):
     attachment_mismatch: RehearsalAttachmentMismatch | None = None
     child_failure: RehearsalChildFailure | None = None
     retained_upgrade_logs: RehearsalRetainedLogs | None = None
+    retained_upgrade_logs_unavailable: bool = False
+    diagnostics_private: bool = False
     capture_attachment_validation: (
         Literal[
             "dependency_unavailable",

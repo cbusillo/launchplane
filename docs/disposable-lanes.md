@@ -2834,16 +2834,23 @@ are omitted. `operation_journal_status` distinguishes bound, missing, unbound
 and unrequested journals; no checkpoint is never proof that no effect happened.
 Events are read
 before launching the observation schedule. They are diagnostic candidates, not proof
-that an event belongs to the original apply. Provider prose and source data are
-withheld. A failed rehearsal child now preserves `child_failure` in private host
-custody: the failing step, nonzero exit status and at most 4,096 characters of
-redacted child output. Original-key readback checks its intent, attempt and record
+that an event belongs to the original apply. The event projection withholds
+provider prose. A failed rehearsal child preserves `child_failure` in private host
+custody: the failing step, nonzero exit status and bounded redacted child output.
+Only the failure escaping the effect is saved; a recovered startup error cannot
+replace it. Original-key readback checks its intent, attempt and record
 binding before returning it. Arguments, input and environment are never exported.
 The native execution lock keeps observation separate from a running effect.
 For an older initial-upgrade failure with an independently verified source
 snapshot, readback can also return `retained_upgrade_logs`: bounded redacted
-tails from the rehearsal's exclusive log volume, with file size and modification
-time. It reads regular log files only and executes no upgrade, registry or SQL.
+tails from the rehearsal's exclusive log volume and container logs, with source
+metadata. It reads regular log files only and executes no upgrade, registry or SQL.
+An unavailable log observation leaves child failure and custody readable and sets
+`retained_upgrade_logs_unavailable`. Credential redaction and byte limits apply
+before transport. These diagnostic fields carry `diagnostics_private: true`:
+they may contain Client record names or exception context. Keep full readbacks
+in private evidence; post only the necessary reviewed error, without Client row
+values. SQL statement and row-detail lines are withheld.
 An older discarded child exit status cannot be reconstructed from a log tail;
 neither a log nor a child diagnostic proves successful migration or authorizes
 continuation, replay, retirement or a replacement key.

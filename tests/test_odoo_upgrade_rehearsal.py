@@ -1623,28 +1623,39 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         )
         (root / "verify.started").touch()
         (root / ".execution.lock").touch()
-        self.host["COMMAND_FAILURE_CONTEXT"] = (spec, root)
         error_text = "psycopg2.errors.UndefinedColumn: column legacy_code does not exist"
         secret = "fixture-password-do-not-export"
         with patch.object(
             self.host["subprocess"],
             "run",
-            return_value=subprocess.CompletedProcess(
-                [],
-                7,
-                stdout=b"initialization stopped",
-                stderr=(error_text + "\nPASSWORD=" + secret).encode(),
-            ),
+            side_effect=[
+                subprocess.CompletedProcess([], 1, b"", b"transient startup error"),
+                subprocess.CompletedProcess(
+                    [], 7, b"initialization stopped", (error_text + "\nPASSWORD=" + secret).encode()
+                ),
+                subprocess.CompletedProcess([], 9, b"", b"cleanup also failed"),
+            ],
         ):
             with self.assertRaises(self.host["RehearsalCommandFailure"]) as failure:
-                self.host["command"](["fixture-child"])
-        diagnostic = failure.exception.diagnostic
+                with self.host["command_failure_scope"](spec, root):
+                    try:
+                        self.host["command"](["transient-child"])
+                    except self.host["RehearsalCommandFailure"]:
+                        pass
+                    try:
+                        self.host["command"](["fixture-child"])
+                    finally:
+                        self.host["command"](["cleanup-child"])
+        self.assertEqual(failure.exception.diagnostic["exit_status"], 9)
+        diagnostic = self.host["read_command_failure"](spec, root)
         self.assertEqual(
             diagnostic["step"],
             self.test_failed_child_preserves_exit_and_redacted_error_for_readback.__name__,
         )
         self.assertEqual(diagnostic["exit_status"], 7)
         self.assertIn(error_text, diagnostic["error_text"])
+        self.assertIn("initialization stopped", diagnostic["error_text"])
+        self.assertNotIn("transient startup error", diagnostic["error_text"])
         self.assertNotIn(secret, str(diagnostic))
         spec.update(mode="observe", inspect_capture=True)
         observed = self.run_host(spec)
@@ -1662,6 +1673,44 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         path.symlink_to(root / "aliased-diagnostic")
         with self.assertRaises(OSError):
             self.run_host(spec)
+
+    def test_optional_log_failures_preserve_child_error_and_custody(self) -> None:
+        import json
+
+        spec, root, containers = self.storage_fixture(
+            {"database_bytes": 40, "filestore_bytes": 80, "staging_bytes": 20, "reserve_bytes": 10}
+        )
+        spec.update(mode="observe", action="execute", inspect_capture=True)
+        spec["record"]["state"] = "prepared"
+        (root / "execute.started").touch()
+        (root / ".execution.lock").touch()
+        source = self.host["database_names"](spec)["source"]
+        (root / source).mkdir()
+        (root / source / "receipt.json").write_text(json.dumps({"database": source}))
+        self.host["validate_snapshots"] = Mock()
+        self.host["retain_command_failure"](
+            spec,
+            root,
+            {"step": "clone", "exit_status": 1, "error_text": "clone could not complete"},
+        )
+        containers["web"][1]["State"]["Running"] = False
+        for failure in ("inspection", "writer", "logs"):
+            with self.subTest(failure=failure):
+                self.host["inspection"] = Mock(
+                    return_value=containers,
+                    side_effect=RuntimeError("source runtime is still selected")
+                    if failure == "inspection"
+                    else None,
+                )
+                containers["web"][1]["State"]["Running"] = failure == "writer"
+                self.host["retained_upgrade_logs"] = Mock(side_effect=ValueError("log unavailable"))
+                observed = self.run_host(spec)
+                self.assertEqual(
+                    observed["child_failure"]["error_text"], "clone could not complete"
+                )
+                self.assertTrue(observed["custody"]["effect_started"])
+                self.assertTrue(observed["retained_upgrade_logs_unavailable"])
+                self.assertFalse(observed["completed"])
 
     def test_diagnostic_bounds_redact_known_secrets_and_credential_forms(self) -> None:
         from control_plane._odoo_rehearsal_diagnostics import REHEARSAL_DIAGNOSTIC_TEXT_LIMIT
@@ -1684,10 +1733,21 @@ class RehearsalHostSafetyTests(unittest.TestCase):
             "standalone-known-secret",
         ):
             self.assertNotIn(secret, redacted)
+        unicode_text = self.host["diagnostic_text"]("🙂" * (REHEARSAL_DIAGNOSTIC_TEXT_LIMIT * 2))
+        self.assertLessEqual(len(unicode_text.encode()), REHEARSAL_DIAGNOSTIC_TEXT_LIMIT)
+        self.assertEqual(
+            self.host["diagnostic_text"]("password authentication failed"),
+            "password authentication failed",
+        )
+        self.assertNotIn(
+            "client@example.invalid",
+            self.host["diagnostic_text"](
+                "DETAIL: Key (login)=(client@example.invalid) already exists"
+            ),
+        )
 
     def test_retained_logs_are_bounded_read_only_and_exclude_symlinks(self) -> None:
         from control_plane._odoo_rehearsal_diagnostics import REHEARSAL_DIAGNOSTIC_TEXT_LIMIT
-        from subprocess import CompletedProcess
 
         spec, root, containers = self.storage_fixture(
             {"database_bytes": 40, "filestore_bytes": 80, "staging_bytes": 20, "reserve_bytes": 10}
@@ -1712,14 +1772,11 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         private = self.fixture.root / "private.log"
         private.write_text("must never be read")
         (logs / "alias.log").symlink_to(private)
-        with patch.object(
-            self.host["subprocess"],
-            "run",
-            return_value=CompletedProcess([], 0, b"retained runtime error"),
-        ) as read:
+        with patch.dict(
+            self.host,
+            diagnostic_process_output=Mock(return_value=(True, b"retained runtime error")),
+        ):
             result = self.host["retained_upgrade_logs"](spec, containers, root)
-        for call in read.call_args_list:
-            self.assertEqual(call.args[0][:2], ["docker", "logs"])
         self.assertTrue(all(log["available"] for log in result["runtime"]))
         self.assertEqual(len(result["files"]), 1)
         self.assertIn("RuntimeError: unknown upgrade module", result["files"][0]["tail"])
@@ -1728,6 +1785,39 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         self.assertEqual(path.read_bytes(), content)
         self.assertEqual(path.stat().st_mtime_ns, before.st_mtime_ns)
         self.assertLessEqual(len(result["files"][0]["tail"]), REHEARSAL_DIAGNOSTIC_TEXT_LIMIT)
+
+    def test_native_subprocess_readers_bound_and_preserve_failure(self) -> None:
+        import sys
+
+        read = self.host["diagnostic_process_output"]
+        self.assertEqual(
+            read([sys.executable, "-c", "print('retained error')"]), (True, b"retained error\n")
+        )
+        available, _ = read([sys.executable, "-c", "raise SystemExit(7)"])
+        self.assertFalse(available)
+        available, _ = read(
+            [sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'x'*(2*1024*1024))"]
+        )
+        self.assertFalse(available)
+        spec, root, _ = self.storage_fixture(
+            {"database_bytes": 40, "filestore_bytes": 80, "staging_bytes": 20, "reserve_bytes": 10}
+        )
+        (root / "verify.started").touch()
+        with self.assertRaises(self.host["RehearsalCommandFailure"]):
+            with self.host["command_failure_scope"](spec, root):
+                self.host["bounded_capture"](
+                    [
+                        sys.executable,
+                        "-c",
+                        "import sys;sys.stdout.write('private capture bytes');sys.stderr.write('capture child error');sys.exit(7)",
+                    ],
+                    root / "partial.dump",
+                    1024,
+                )
+        diagnostic = self.host["read_command_failure"](spec, root)
+        self.assertEqual(diagnostic["exit_status"], 7)
+        self.assertIn("capture child error", diagnostic["error_text"])
+        self.assertNotIn("private capture bytes", str(diagnostic))
 
     @staticmethod
     def attachment_mismatch_fixture() -> dict[str, Any]:

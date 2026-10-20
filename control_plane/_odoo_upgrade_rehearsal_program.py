@@ -50,8 +50,6 @@ def command(arguments, *, stdin=None, stdout=None, environment=None):
         stderr=subprocess.PIPE, env=environment, check=False)
     if result.returncode:
         diagnostic=command_diagnostic(arguments,result,environment)
-        if COMMAND_FAILURE_CONTEXT is not None:
-            retain_command_failure(*COMMAND_FAILURE_CONTEXT,diagnostic)
         raise RehearsalCommandFailure(diagnostic)
     return result.stdout if stdout is None else b''
 
@@ -93,9 +91,6 @@ def bounded_capture(arguments,path,bound):
             errors.seek(max(0,errors.seek(0,os.SEEK_END)-65536))
             diagnostic=command_diagnostic(arguments,subprocess.CompletedProcess(
                 arguments,status,stdout=b'',stderr=errors.read(65536)),None)
-            diagnostic['step']='bounded_capture'
-            if COMMAND_FAILURE_CONTEXT is not None:
-                retain_command_failure(*COMMAND_FAILURE_CONTEXT,diagnostic)
             raise RehearsalCommandFailure(diagnostic)
         if not size:
             raise RuntimeError('Incomplete source copy')
@@ -534,10 +529,15 @@ def observe(spec, root, receipt, lock_held=False):
             names=database_names(spec)
             if (action=='execute' and record['state']=='prepared'
                     and {copy['database'] for copy in copies}=={names['source']}):
-                containers=inspection(spec,names['upgrade'],spec['target_image'])
-                if containers['web'][1].get('State',{}).get('Running') is not False:
-                    raise RuntimeError('Failed upgrade writer is active')
-                result['retained_upgrade_logs']=retained_upgrade_logs(spec,containers,root)
+                try:
+                    containers=inspection(spec,names['upgrade'],spec['target_image'])
+                    if containers['web'][1].get('State',{}).get('Running') is not False:
+                        raise RuntimeError('Failed upgrade writer is active')
+                    result['retained_upgrade_logs']=retained_upgrade_logs(spec,containers,root)
+                except (RuntimeError,OSError,ValueError,KeyError):
+                    result['retained_upgrade_logs_unavailable']=True
+            if result.get('child_failure') is not None or result.get('retained_upgrade_logs') is not None:
+                result['diagnostics_private']=True
         mismatch=None
         if (lock_held and spec.get('inspect_capture') is True and action=='execute'
                 and record['state']=='prepared' and not copies and custody['effect_started']):
@@ -611,7 +611,7 @@ def main():
         return
     root.mkdir(mode=0o700,parents=True,exist_ok=True)
     os.chmod(root,0o700)
-    with (root/'.execution.lock').open('a') as lock:
+    with (root/'.execution.lock').open('a') as lock,command_failure_scope(spec,root):
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         if receipt.exists():
             raise RuntimeError('Completed effect requires observation, never replay')
@@ -627,7 +627,6 @@ def main():
         database,image=current(spec)
         if action=='prepare':
             (root/(action+'.started')).touch(mode=0o600)
-            COMMAND_FAILURE_CONTEXT=(spec,root)
             compose(spec,root,image=spec['source_image'],database=names['source'])
             deadline=time.monotonic()+120
             while True:
@@ -677,7 +676,6 @@ def main():
                 print('rehearsal_result='+json.dumps(result).encode().hex())
                 return
             (root/(action+'.started')).touch(mode=0o600)
-            COMMAND_FAILURE_CONTEXT=(spec,root)
             copies=list(record['copies'])
             if action=='execute':
                 raw=capture(spec,root,containers,names['source'])

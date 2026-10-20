@@ -1121,6 +1121,8 @@ class OdooRehearsalAdapter:
             or result["completed"] is not False
         ):
             raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
+        if child is not None or result.get("retained_upgrade_logs") is not None:
+            result["diagnostics_private"] = True
         return result
 
     def refusal_response(self, result: dict[str, object]) -> dict[str, object]:
