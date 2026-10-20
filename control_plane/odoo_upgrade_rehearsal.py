@@ -380,8 +380,13 @@ def rehearsal_host_program() -> str:
     from control_plane._odoo_testing_storage_program import STORAGE_MAINTENANCE_LIBRARY
     from control_plane._odoo_upgrade_rehearsal_program import ODOO_UPGRADE_REHEARSAL_PROGRAM
 
+    from control_plane._odoo_incomplete_rehearsal_retirement import (
+        INCOMPLETE_REHEARSAL_RETIREMENT_LIBRARY,
+    )
+
     return (
-        COPY_RUNTIME_INSPECTION_LIBRARY
+        INCOMPLETE_REHEARSAL_RETIREMENT_LIBRARY
+        + COPY_RUNTIME_INSPECTION_LIBRARY
         + STORAGE_MAINTENANCE_LIBRARY
         + ODOO_UPGRADE_REHEARSAL_PROGRAM
     )
@@ -986,7 +991,7 @@ class OdooRehearsalAdapter:
         operation_key: str = "",
         inspect_capture: bool = False,
     ) -> str:
-        if mode == "observe" or self.request.action in {"verify", "retire"}:
+        if mode == "observe" or self.request.action in {"verify", "retire", "retire-incomplete"}:
             source_values: dict[str, str] = {}
             shape: dict[str, str] = {}
             credentials: dict[str, str] = {}

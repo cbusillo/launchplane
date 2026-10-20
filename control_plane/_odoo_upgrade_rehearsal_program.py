@@ -556,6 +556,9 @@ def main():
     if root.is_symlink() or root.resolve()!=root.absolute():
         raise RuntimeError('Rehearsal custody path is aliased')
     action=spec['action']
+    if action=='retire-incomplete':
+        incomplete_retirement(spec,root)
+        return
     receipt=root/(action+'.json')
     if spec['mode']=='observe':
         lock_path=root/'.execution.lock'

@@ -18,7 +18,9 @@ REHEARSAL_PUBLIC_FAILURE_MESSAGES = {
     "rehearsal_storage_capacity_insufficient": "No rehearsal action started. Requalify storage capacity and review a new operation key.",
     "rehearsal_precheck_refused": "No rehearsal action started. Requalify the prerequisite and review a new operation key.",
 }
-RehearsalAction = Literal["prepare", "execute", "simulate-final", "verify", "retire"]
+RehearsalAction = Literal[
+    "prepare", "execute", "simulate-final", "verify", "retire", "retire-incomplete"
+]
 RehearsalState = Literal["planned", "prepared", "upgraded", "switched", "verified", "retired"]
 RehearsalBackingRole = Literal[
     "database", "filestore", "runner_scratch", "database_scratch", "host_custody"

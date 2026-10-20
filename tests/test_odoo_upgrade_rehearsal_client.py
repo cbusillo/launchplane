@@ -306,6 +306,34 @@ class RehearsalClientTests(unittest.TestCase):
                 )
             return code, json.loads(output.getvalue()), post
 
+    def test_incomplete_retirement_requires_disposal_and_original_hold_release(self) -> None:
+        receipt = {
+            "action": "retire-incomplete",
+            "state": "retired",
+            "completed": True,
+            "copies": [],
+            "disposed": True,
+            "original_operation_released": True,
+            "recovery_tuples_produced": False,
+            "resources_preserved": False,
+            "raw_source_retained": False,
+            "public_route": False,
+            "business_host_frozen": False,
+            "plan_sha256": "a" * 64,
+        }
+        for mode in ("apply", "readback"):
+            code, result, _ = self.call(mode, action="retire-incomplete", response_result=receipt)
+            self.assertEqual(code, 0)
+            self.assertTrue(result["disposed"])
+            for field in ("disposed", "original_operation_released", "raw_source_retained"):
+                with self.subTest(mode=mode, missing=field):
+                    incomplete = {key: value for key, value in receipt.items() if key != field}
+                    code, result, _ = self.call(
+                        mode, action="retire-incomplete", response_result=incomplete
+                    )
+                    self.assertNotEqual(code, 0)
+                    self.assertTrue(result["original_key_required"])
+
     def test_dry_run_saves_its_exact_private_review_without_mutating(self) -> None:
         code, result, post = self.call("dry-run")
         self.assertEqual(code, 0)

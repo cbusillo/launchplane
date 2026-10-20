@@ -146,6 +146,35 @@ def register_odoo_upgrade_rehearsal_routes(
             principal = previous.principal
         adapter = OdooRehearsalAdapter(root, record_store, product, body, principal, trace)
         try:
+            if body.action == "retire-incomplete":
+                from control_plane.odoo_incomplete_rehearsal_retirement import (
+                    IncompleteRehearsalRetirement,
+                )
+
+                retirement = IncompleteRehearsalRetirement(adapter, idempotency_key)
+                if body.mode == "apply":
+                    return await run_provider_mutation(
+                        record_store=record_store,
+                        identity=identity,
+                        route_path=ROUTE.format(product=product),
+                        # Keep the original execute's held reservation intact
+                        # until native disposal and placement absence are proved.
+                        reservation_scope=principal + "|incomplete-retirement",
+                        idempotency_key=idempotency_key,
+                        request_fingerprint=request_fingerprint(
+                            {"product": product, **body.model_dump(mode="json")}
+                        ),
+                        trace_id=trace,
+                        adapter=retirement,
+                        in_progress_message="The original incomplete rehearsal retirement is running.",
+                        reconcile_message="Retirement is uncertain. Preserve the original key and custody.",
+                    )
+                result = await run_in_worker_thread(
+                    retirement.readback if body.mode == "readback" else retirement.plan
+                )
+                return accepted_evidence_response(
+                    trace_id=trace, records={"rehearsal": body.rehearsal_id}, result=result
+                )
             if body.mode == "apply":
                 return await run_provider_mutation(
                     record_store=record_store,

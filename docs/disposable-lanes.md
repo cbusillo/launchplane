@@ -2593,6 +2593,37 @@ execution. Existing read authority covers planning and readback. It is a source
 capability until the completing PR is deployed; a missing route is unavailable,
 not a reason to invoke a local live-target command.
 
+For a held execute that never produced its sanitized recovery copies, use
+`action: retire-incomplete` with the **unchanged original execute intent and
+execute key**. Take it through the same client dry-run, saved review, apply and
+readback. It accepts only `prepared` with no copy receipts and an exact original
+`reconcile_required` execute checkpoint. Verified, running, unbound or
+production-aliased operations refuse. Ordinary `retire` still requires both
+verified final recovery tuples; incomplete retirement produces neither tuple.
+
+The dry-run acquires executor exclusion and inspects the exact private placement,
+containers, private network, labeled local volumes and backing identities. It
+checks that no container can see raw host custody and that the rehearsal web
+writer is stopped. Apply rechecks the reviewed binding, acquires the existing
+host lock, and records a private disposal manifest before stopping/removing only
+those containers, volumes and network. It deletes raw capture and partial host
+storage, retaining only the disposal manifest and unlocked lock file. It removes
+the isolated provider compose through the existing compose retirement path,
+then its empty project. No source read, source mutation, credential creation,
+public-route operation or grant is involved.
+
+After native absence checks and placement absence, one DB transaction marks the
+rehearsal retired, removes its physical target registration and completes the
+original held execute with an explicit incomplete-retirement result. This frees
+its operation hold without advertising a successful execute. The retirement's
+own reservation uses a separate scope under the same principal and original
+key, so it cannot displace the held execute before disposal. Completed same-key
+apply replay returns its stored result; readback verifies that receipt and
+provider placement absence. An interrupted/unknown retirement keeps both
+journals held and never replays destructive effects automatically. Preserve the
+same key and disposal custody for supported reconciliation; a failed readback
+never authorizes a new capture.
+
 After prepare, keep the returned `rehearsal_id` in the private intent and take
 each next `action` through its own dry-run/review/apply with a distinct stable
 key and new evidence file:
