@@ -2854,6 +2854,12 @@ before launching the observation schedule. They are diagnostic candidates, not p
 that an event belongs to the original apply. The event projection withholds
 provider prose. A failed rehearsal child preserves `child_failure` in private host
 custody: the failing step, nonzero exit status and bounded redacted child output.
+The rehearsal copy runner sends each Odoo CLI command's error logging to its own
+stderr, overriding config-directed files and log levels. This makes the upgrade
+process's exception available to that same bounded receipt; container endpoint
+logs alone do not retain a separate exec process's output. Ordinary testing copy
+commands keep their artifact's logging behavior. This cannot reconstruct output
+discarded by a historical execution, and absence of an exception remains unknown.
 Only the failure escaping the effect is saved; a recovered startup error cannot
 replace it. Original-key readback checks its intent, attempt and record
 binding before returning it. Arguments, input and environment are never exported.

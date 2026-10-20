@@ -1735,6 +1735,54 @@ class RehearsalScenario(unittest.TestCase):
 
 
 class RehearsalHostSafetyTests(unittest.TestCase):
+    def test_upgrade_exception_reaches_the_bound_child_diagnostic(self) -> None:
+        import ast
+        import sys
+        from control_plane.odoo_testing_restore import rehearsal_copy_runner
+        from control_plane._odoo_rehearsal_diagnostics import REHEARSAL_DIAGNOSTIC_TEXT_LIMIT
+
+        spec, root, _ = self.storage_fixture(
+            {"database_bytes": 40, "filestore_bytes": 80, "staging_bytes": 20, "reserve_bytes": 10}
+        )
+        spec["action"] = "execute"
+        (root / "execute.started").touch()
+        spec["workflow"] = {"ODOO_DB_PASSWORD": "synthetic-private-value"}
+        # Real child logging starts with a silent config. The emitted rehearsal
+        # subclass must make its error reach the original-operation receipt.
+        program = ast.parse(rehearsal_copy_runner(sanitize_source_only=False))
+        runner_class = next(
+            node
+            for node in program.body
+            if isinstance(node, ast.ClassDef) and node.name == "CopyRunner"
+        )
+        child = self.fixture.root / "synthetic-odoo.py"
+        child.write_text("""import argparse, logging, os
+parser = argparse.ArgumentParser()
+parser.add_argument('--logfile', default=os.devnull)
+parser.add_argument('--log-level', default='critical')
+options, _ = parser.parse_known_args()
+logging.basicConfig(filename=options.logfile, level=options.log_level.upper())
+logging.error('RuntimeError: synthetic upgrade failed PASSWORD=synthetic-private-value')
+raise SystemExit(255)
+""")
+        harness = f"""import shlex, subprocess, sys
+expected_copy_instance = 'rehearsal'
+class OdooDataWorkflowRunner:
+    def run_command(self, command):
+        subprocess.run([sys.executable, {str(child)!r}, *shlex.split(command)[1:]], check=True)
+{ast.unparse(runner_class)}
+CopyRunner().run_command('/odoo/odoo-bin --stop-after-init --update all')
+"""
+        with self.assertRaises(self.host["RehearsalCommandFailure"]):
+            with self.host["command_failure_scope"](spec, root):
+                self.host["command"]([sys.executable, "-c", harness])
+        failure = self.host["read_command_failure"](spec, root)
+        self.assertIn("RuntimeError: synthetic upgrade failed", failure["error_text"])
+        self.assertNotIn("synthetic-private-value", str(failure))
+        self.assertLessEqual(len(failure["error_text"].encode()), REHEARSAL_DIAGNOSTIC_TEXT_LIMIT)
+        self.assertEqual(failure["attempt_sha256"], spec["attempt_sha256"])
+        self.assertEqual(failure["record_binding_sha256"], spec["record_binding_sha256"])
+
     def test_persistence_refusals_keep_bound_child_in_existing_job_output(self) -> None:
         import errno
         import io

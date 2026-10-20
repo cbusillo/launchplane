@@ -146,6 +146,7 @@ TESTING_COPY_RUNNER = (
 import logging
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 sys.path.insert(0, '/volumes/scripts')
@@ -166,6 +167,15 @@ os.environ["NO_SANITIZE"] = "false"
 
 
 class CopyRunner(OdooDataWorkflowRunner):
+    def run_command(self, command):
+        if expected_copy_instance == "rehearsal":
+            arguments = shlex.split(command)
+            if arguments[:1] == ["/odoo/odoo-bin"] or arguments[:2] == ["/venv/bin/python", "/odoo/odoo-bin"]:
+                # Config-directed logging must not hide the upgrade exception
+                # from the host's bounded, private original-operation receipt.
+                command += " --logfile=/dev/stderr --log-level=error --log-handler=:ERROR"
+        return super().run_command(command)
+
     def overwrite_filestore(self, target_owner):
         # Host capture has already staged the fresh local filestore. No SSH key
         # or network source exists inside this container.
