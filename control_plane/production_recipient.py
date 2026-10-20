@@ -1067,6 +1067,9 @@ class ProductionRecipientAdapter:
             for volume in template["volumes"].values():
                 volume["external"] = True
             if not configured:
+                env_text = api.serialize_dokploy_env_text(
+                    runtime_values(self.store, self.root, record)
+                )
                 record = self.save(record, phase="configure_recipient")
                 checkpoint(record.phase)
                 api.dokploy_request(
@@ -1080,9 +1083,7 @@ class ProductionRecipientAdapter:
                         "composePath": "docker-compose.yml",
                         "composeFile": json.dumps(template),
                         "autoDeploy": False,
-                        "env": api.serialize_dokploy_env_text(
-                            runtime_values(self.store, self.root, record)
-                        ),
+                        "env": env_text,
                     },
                 )
             self.verify(record)

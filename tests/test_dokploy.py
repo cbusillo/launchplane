@@ -160,6 +160,7 @@ class DokployConfigTests(unittest.TestCase):
                 b'"SERVICE_TOKEN":"secret-token"}'
             ),
         )
+        self.addCleanup(error.close)
         with patch("control_plane.dokploy.api.urlopen", side_effect=error):
             with self.assertRaises(dokploy_api.DokployRequestFailed) as raised:
                 dokploy_api.dokploy_request(
@@ -170,10 +171,40 @@ class DokployConfigTests(unittest.TestCase):
                     payload={"scheduleId": "schedule-one"},
                 )
 
+        self.assertTrue(error.closed)
         self.assertTrue(raised.exception.remote_command_failed)
         self.assertNotIn("password", raised.exception.format_message())
         self.assertNotIn("secret-token", raised.exception.format_message())
         self.assertIn("[redacted]", raised.exception.format_message())
+
+    def test_dokploy_request_closes_http_error_when_its_body_times_out(self) -> None:
+        class TimeoutBody(BytesIO):
+            def read(self, size: int | None = -1) -> bytes:
+                raise TimeoutError("read timed out")
+
+        body = TimeoutBody()
+        error = HTTPError(
+            url="https://dokploy.example/api/application.one",
+            code=500,
+            msg="Internal Server Error",
+            hdrs=Message(),
+            fp=body,
+        )
+        self.addCleanup(error.close)
+        with (
+            patch("control_plane.dokploy.api.urlopen", side_effect=error),
+            self.assertRaises(dokploy_api.DokployRequestFailed) as raised,
+        ):
+            dokploy_api.dokploy_request(
+                host="https://dokploy.example",
+                token="provider-token",
+                path="/api/application.one",
+                method="GET",
+            )
+        self.assertTrue(error.closed)
+        self.assertTrue(body.closed)
+        self.assertEqual(raised.exception.status_code, error.code)
+        self.assertIn("response read timed out", raised.exception.format_message())
 
     def test_dokploy_request_converts_response_read_timeout_to_request_failure(self) -> None:
         class TimeoutResponse:
@@ -2905,6 +2936,36 @@ domains = ["cm-testing.shinycomputers.com"]
             wait_target_deployment.call_args.kwargs["deployment_title"],
             "Launchplane post-deploy exact",
         )
+
+    def test_post_deploy_unencodable_environment_does_not_checkpoint_or_write(self) -> None:
+        target_definition = control_plane_dokploy.DokployTargetDefinition(
+            context="opw", instance="prod", target_id="compose-123", target_name="opw-prod"
+        )
+        effects: list[str] = []
+        with (
+            patch(
+                "control_plane.dokploy.api.fetch_dokploy_target_payload",
+                return_value={"env": "ODOO_DB_NAME=fixture\nAPP_SETTING=bad\x00value"},
+            ),
+            patch("control_plane.dokploy.api.update_dokploy_target_env") as update,
+            patch("control_plane.dokploy.api.trigger_deployment") as deploy,
+            patch("control_plane.dokploy.api.upsert_dokploy_schedule") as schedule,
+            self.assertRaises(dokploy_api.DokployEnvironmentEncodingError),
+        ):
+            control_plane_dokploy.run_compose_post_deploy_update(
+                host="https://dokploy.example",
+                token="fixture-token",
+                target_definition=target_definition,
+                env_file=None,
+                workflow_environment_overrides={
+                    LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED_ENV_KEY: "true"
+                },
+                before_provider_mutation=effects.append,
+            )
+        self.assertFalse(effects)
+        update.assert_not_called()
+        deploy.assert_not_called()
+        schedule.assert_not_called()
 
     def test_run_compose_post_deploy_update_fails_when_runtime_override_env_does_not_persist(
         self,

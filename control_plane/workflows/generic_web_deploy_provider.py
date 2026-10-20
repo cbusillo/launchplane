@@ -9,7 +9,7 @@ import re
 from typing import Literal, Protocol, cast, runtime_checkable
 
 import click
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane import secrets as control_plane_secrets
@@ -40,6 +40,8 @@ from control_plane.contracts.ship_request import ShipRequest
 from control_plane.workflows.dokploy_deploy import (
     dokploy_deploy_artifact_reference,
     execute_dokploy_artifact_deploy,
+    prepare_dokploy_testing_environment,
+    require_dokploy_testing_environment_representable,
 )
 from control_plane.dokploy import api as dokploy_api
 from control_plane.dokploy import runtime_evidence as dokploy_runtime_evidence
@@ -58,6 +60,12 @@ class GenericWebResolvedDeployTarget(BaseModel):
     deployed_target: DeployedTargetReference | None = None
     deploy_timeout_seconds: int = Field(ge=1)
     provider_dispatch_evidence: dict[str, object] = Field(default_factory=dict)
+    testing_runtime_digest: str = Field(default="", exclude_if=lambda value: not value)
+    testing_runtime_verified_digest: str = Field(default="", exclude=True)
+    testing_runtime_values: dict[str, str] = Field(default_factory=dict, exclude=True, repr=False)
+    testing_runtime_retired_keys: frozenset[str] = Field(default=frozenset(), exclude=True)
+    _testing_runtime_check: Callable[[bool], None] | None = PrivateAttr(default=None)
+    _testing_runtime_prepare: Callable[[], None] | None = PrivateAttr(default=None)
 
 
 class GenericWebProviderReconciliationTarget(BaseModel):
@@ -66,6 +74,7 @@ class GenericWebProviderReconciliationTarget(BaseModel):
     schema_version: int = Field(default=1, ge=1)
     original_event_deploy: dict[str, object] | None = None
     qualification_authority_digest: str = Field(default="", exclude_if=lambda value: not value)
+    testing_runtime_digest: str = Field(default="", exclude_if=lambda value: not value)
     product: str = ""
     context: str
     instance: str
@@ -141,6 +150,7 @@ def build_generic_web_provider_reconciliation_key(
         product=product.strip(),
         original_event_deploy=original_event_deploy,
         qualification_authority_digest=qualification_authority_digest,
+        testing_runtime_digest=resolved_deploy_target.testing_runtime_digest,
         context=ship_request.context,
         instance=ship_request.instance,
         provider_id=ship_request.provider_id,
@@ -232,7 +242,102 @@ def resolve_generic_web_provider_reconciliation_target(
             provider_target_type=snapshot.provider_target_type,
         ),
         deploy_timeout_seconds=snapshot.deploy_timeout_seconds,
+        testing_runtime_digest=snapshot.testing_runtime_digest,
     )
+
+
+def prepare_generic_web_testing_runtime(
+    target: GenericWebResolvedDeployTarget,
+    store: object,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+    *,
+    capture: bool = True,
+) -> None:
+    from control_plane.generic_web_testing_inputs import (
+        TestingInputSafetyRefused,
+        prepare_testing_inputs,
+        require_testing_input_key_safety,
+        require_testing_application_target_authority,
+        testing_input_authority,
+    )
+
+    if capture:
+        target.testing_runtime_digest = testing_input_authority(store, profile, lane)
+    if not target.testing_runtime_digest or target._testing_runtime_check is not None:
+        return
+
+    def prepare() -> None:
+        from control_plane.live_target_runtime import (
+            LiveTargetRuntimeError,
+            runtime_key_safety_error_message,
+        )
+
+        try:
+            envelope = prepare_testing_inputs(store, profile, lane, target.testing_runtime_digest)
+        except LiveTargetRuntimeError as error:
+            raise TestingInputSafetyRefused(runtime_key_safety_error_message(error)) from error
+        except click.ClickException as error:
+            raise TestingInputSafetyRefused(error.format_message()) from error
+        except (FileNotFoundError, ValueError) as error:
+            raise TestingInputSafetyRefused(
+                "Application testing runtime inputs are unavailable."
+            ) from error
+        current_target = getattr(store, "read_dokploy_target_id_record")(
+            context_name=lane.context, instance_name=lane.instance
+        )
+        if current_target.target_id != target.resolved_target.target_id:
+            raise TestingInputSafetyRefused(
+                "Application testing input target changed before delivery."
+            )
+        environment = envelope.environment
+        require_dokploy_testing_environment_representable(environment.values)
+        target.testing_runtime_values = environment.values
+        target.testing_runtime_retired_keys = environment.retired_keys
+
+        def check(require_unchanged_inputs: bool) -> None:
+            try:
+                require_testing_application_target_authority(
+                    store,
+                    profile,
+                    lane,
+                    target_id=target.resolved_target.target_id,
+                    provider_id=target.ship_request.provider_id,
+                )
+                current_digest = (
+                    testing_input_authority(store, profile, lane)
+                    if require_unchanged_inputs
+                    else target.testing_runtime_digest
+                )
+            except TestingInputSafetyRefused:
+                raise
+            except (FileNotFoundError, ValueError, click.ClickException) as error:
+                raise TestingInputSafetyRefused(
+                    "Application testing runtime input authority is unavailable."
+                ) from error
+            if current_digest != target.testing_runtime_digest:
+                raise TestingInputSafetyRefused(
+                    "Application testing input authority changed before mutation."
+                )
+            try:
+                require_testing_input_key_safety(
+                    store,
+                    lane,
+                    envelope,
+                )
+            except TestingInputSafetyRefused:
+                raise
+            except LiveTargetRuntimeError as error:
+                raise TestingInputSafetyRefused(runtime_key_safety_error_message(error)) from error
+            except (FileNotFoundError, ValueError, click.ClickException) as error:
+                raise TestingInputSafetyRefused(
+                    "Application testing runtime key safety is unavailable."
+                ) from error
+
+        target._testing_runtime_check = check
+        target._testing_runtime_prepare = None
+
+    target._testing_runtime_prepare = prepare
 
 
 class GenericWebProviderDeploymentObservation(BaseModel):
@@ -521,6 +626,13 @@ class TestingEventDeployRecoveryRefused(ValueError):
         self.code = code
 
 
+@runtime_checkable
+class GenericWebTestingRuntimePreflightProvider(Protocol):
+    def preflight_testing_runtime(
+        self, *, control_plane_root: Path, target: GenericWebResolvedDeployTarget
+    ) -> None: ...
+
+
 class DokployGenericWebDeployProvider:
     def __init__(
         self,
@@ -572,7 +684,7 @@ class DokployGenericWebDeployProvider:
         fallback_target_name: str,
         request_deploy_reference: str = "",
     ) -> GenericWebResolvedDeployTarget:
-        del control_plane_root, request_artifact_id, profile
+        del control_plane_root, request_artifact_id
         dokploy_store = _require_dokploy_deploy_store(record_store)
         context_name = lane.context.strip()
         instance_name = lane.instance.strip()
@@ -655,11 +767,31 @@ class DokployGenericWebDeployProvider:
             timeout_override_seconds=request_timeout_seconds,
             target_definition=target_definition,
         )
-        return GenericWebResolvedDeployTarget(
+        resolved = GenericWebResolvedDeployTarget(
             ship_request=ship_request,
             resolved_target=resolved_target,
             deployed_target=deployed_target,
             deploy_timeout_seconds=deploy_timeout_seconds,
+        )
+        prepare_generic_web_testing_runtime(resolved, record_store, profile, lane)
+        return resolved
+
+    def preflight_testing_runtime(
+        self, *, control_plane_root: Path, target: GenericWebResolvedDeployTarget
+    ) -> None:
+        if not target.testing_runtime_digest:
+            return
+        host, token = self._read_provider_config(control_plane_root=control_plane_root)
+        payload = dokploy_api.fetch_dokploy_target_payload(
+            host=host,
+            token=token,
+            target_type=target.resolved_target.target_type,
+            target_id=target.resolved_target.target_id,
+        )
+        prepare_dokploy_testing_environment(
+            target_payload=payload,
+            desired=target.testing_runtime_values,
+            retired_keys=target.testing_runtime_retired_keys,
         )
 
     def execute_artifact_deploy(
@@ -672,6 +804,8 @@ class DokployGenericWebDeployProvider:
         before_provider_mutation: Callable[[str], None],
         effect_started: Callable[[], None],
     ) -> GenericWebProviderDeploymentObservation | None:
+        if resolved_deploy_target._testing_runtime_prepare is not None:
+            resolved_deploy_target._testing_runtime_prepare()
         host, token = self._read_provider_config(control_plane_root=control_plane_root)
 
         def retain_dispatch(known_ids: frozenset[str]) -> None:
@@ -682,6 +816,32 @@ class DokployGenericWebDeployProvider:
             }
             before_provider_mutation("provider_dispatch_prepared")
 
+        def checked_mutation(phase: str) -> None:
+            from control_plane.generic_web_testing_inputs import (
+                TESTING_DISPATCH_REFUSED_PHASE,
+                TestingInputSafetyRefused,
+            )
+
+            if resolved_deploy_target._testing_runtime_check is not None:
+                # The trigger is reached only after image save returns. Finish
+                # those captured inputs while current target/key safety still
+                # governs dispatch; a crash has no such continuation authority.
+                try:
+                    resolved_deploy_target._testing_runtime_check(phase != "deploy_trigger")
+                except TestingInputSafetyRefused:
+                    if phase == "deploy_trigger":
+                        # This callback is reached only after saveDockerProvider
+                        # returns. A crash/uncertain save never earns this proof.
+                        before_provider_mutation(TESTING_DISPATCH_REFUSED_PHASE)
+                    raise
+            before_provider_mutation(phase)
+
+        def runtime_verified() -> None:
+            resolved_deploy_target.testing_runtime_verified_digest = (
+                resolved_deploy_target.testing_runtime_digest
+            )
+            checked_mutation("runtime_inputs_verified")
+
         try:
             untitled_deployment = execute_dokploy_artifact_deploy(
                 host=host,
@@ -691,8 +851,13 @@ class DokployGenericWebDeployProvider:
                 deploy_timeout_seconds=resolved_deploy_target.deploy_timeout_seconds,
                 runtime_identity=runtime_identity,
                 deployment_title=deployment_title,
-                before_provider_mutation=before_provider_mutation,
+                before_provider_mutation=checked_mutation,
                 effect_started=effect_started,
+                runtime_environment=resolved_deploy_target.testing_runtime_values
+                if resolved_deploy_target.testing_runtime_digest
+                else None,
+                retired_runtime_keys=resolved_deploy_target.testing_runtime_retired_keys,
+                runtime_verified=runtime_verified,
                 dispatch_evidence_checkpoint=retain_dispatch,
                 accept_sole_new_deployment=(
                     resolved_deploy_target.resolved_target.target_type == "compose"

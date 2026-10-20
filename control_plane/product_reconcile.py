@@ -515,6 +515,27 @@ def reconcile_testing_target(
         repository_id=repository_id,
         transport=transport,
     )
+    if isinstance(desired, VerifiedGenericWebBuild) and plan.get("reason") == "already_deployed":
+        from control_plane.generic_web_testing_inputs import (
+            DELIVERY_RECEIPT_KEY,
+            testing_input_authority,
+        )
+
+        lane = next(lane for lane in profile.lanes if lane.instance == TESTING_INSTANCE)
+        delivery_digest = testing_input_authority(record_store, profile, lane)
+        if delivery_digest:
+            try:
+                deployed = cast(GenericWebDeployStore, record_store).read_deployment_record(
+                    _current_testing_deployment_id(record_store=record_store, lane=lane)
+                )
+            except FileNotFoundError:
+                deployed = None
+            if (
+                deployed is None
+                or deployed.deploy.status != "pass"
+                or deployed.runtime_source.get(DELIVERY_RECEIPT_KEY) != delivery_digest
+            ):
+                plan.update(action="deploy", reason="testing_runtime_inputs_missing")
     if (
         isinstance(desired, VerifiedGenericWebBuild)
         and declares_verireel_testing_extension(profile, instance=TESTING_INSTANCE)
@@ -791,9 +812,13 @@ def _deploy_generic_web_testing(
     plan["held"] = False
     try:
         authority = _generic_web_testing_authority(record_store=record_store, lane=lane)
+        from control_plane.generic_web_testing_inputs import testing_input_authority
+
+        delivery_digest = testing_input_authority(record_store, profile, lane)
         idempotency_key = (
             f"{RECONCILE_SOURCE}:{profile.product}:{lane.context}:{TESTING_INSTANCE}:"
             f"{desired.manifest.image.digest}:authority-{authority}:from-{starting_point}"
+            + (f":inputs-{delivery_digest}" if delivery_digest else "")
         )
         plan["deploy_idempotency_key"] = idempotency_key
         request_fingerprint = _fingerprint(envelope.model_dump(mode="json"))
@@ -802,6 +827,20 @@ def _deploy_generic_web_testing(
             route_path=GENERIC_WEB_DEPLOY_ROUTE,
             idempotency_key=idempotency_key,
         )
+        from control_plane.generic_web_testing_settlement import testing_attempt_was_settled
+
+        base_idempotency_key = idempotency_key
+        while existing is not None and testing_attempt_was_settled(existing):
+            # A settled operation is immutable. Returning to the same inputs
+            # starts one deterministic successor instead of replaying its failure.
+            predecessor = hashlib.sha256(existing.record_id.encode()).hexdigest()
+            idempotency_key = f"{base_idempotency_key}:after-{predecessor}"
+            existing = record_store.read_idempotency_record(
+                scope=reconcile_reservation_scope(profile.product),
+                route_path=GENERIC_WEB_DEPLOY_ROUTE,
+                idempotency_key=idempotency_key,
+            )
+        plan["deploy_idempotency_key"] = idempotency_key
         if existing is None and not _scan_deploy_artifact(profile, plan, desired):
             return ReconcileOutcome(plan)
         provider = (
@@ -868,6 +907,32 @@ def _deploy_generic_web_testing(
                         # This exact old recipient remains fenced. The qualified
                         # new recipient has its own executor and reservation key.
                         continue
+                    from control_plane.testing_event_deploy_recovery import (
+                        settle_obsolete_testing_event_deploy,
+                    )
+
+                    settlement = settle_obsolete_testing_event_deploy(
+                        store=record_store,
+                        reservation=reservation,
+                        profile=profile,
+                        context=lane.context,
+                        current_target_key=adapter.target_key(),
+                        desired_fingerprint=request_fingerprint,
+                        provider=provider,
+                        root=control_plane_root,
+                        trace_id=trace_id,
+                        check_execution_lock=check_execution_lock,
+                    )
+                    if settlement is not None:
+                        if settlement.record is not None and testing_attempt_was_settled(
+                            settlement.record
+                        ):
+                            plan["testing_deploy_recovery"] = {
+                                "action": "settle_obsolete_testing_pre_image_attempt",
+                                "reservation_id": reservation.record_id,
+                            }
+                            continue
+                        return _generic_web_testing_outcome(plan=plan, result=settlement)
                     if (
                         reservation.provider_target_key == adapter.target_key()
                         and reservation.request_fingerprint == request_fingerprint
@@ -1093,6 +1158,20 @@ def _generic_web_testing_outcome(
         plan["deferred"] = "lane_busy"
         return ReconcileOutcome(plan, deferred=True)
     if result.status in {"target_busy", "reconcile_required"}:
+        from control_plane.generic_web_testing_inputs import TESTING_DISPATCH_REFUSED_PHASE
+
+        if (
+            result.record is not None
+            and result.record.provider_effect_phase == TESTING_DISPATCH_REFUSED_PHASE
+        ):
+            return ReconcileOutcome(
+                plan,
+                error=(
+                    "Testing dispatch was refused after image save, before deployment. "
+                    "The original operation stays held until recovery proves current "
+                    "target authority and deployment absence."
+                ),
+            )
         return ReconcileOutcome(
             plan,
             error=(

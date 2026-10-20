@@ -2581,23 +2581,24 @@ def execute_odoo_stable_target_replacement_apply(
                 "replacement.",
                 tuple(provider_only_keys),
             )
-        # A value the provider env text cannot carry intact, such as a multiline
-        # key, would persist as fragments; refuse it by name before any write.
-        unportable_keys = sorted(
-            key
-            for key, value in runtime_environment_values.items()
-            if dokploy_api.parse_dokploy_env_text(
+        # Preserve the Compose preflight's existing single-line/trim boundary:
+        # its later environment-file consumer is not the application consumer.
+        unportable_keys: list[str] = []
+        for key, value in runtime_environment_values.items():
+            if value.rstrip() != value or (value and value.splitlines() != [value]):
+                unportable_keys.append(key)
+                continue
+            try:
                 dokploy_api.serialize_dokploy_env_text({key: value})
-            )
-            != {key: value}
-        )
+            except dokploy_api.DokployEnvironmentEncodingError:
+                unportable_keys.append(key)
         if unportable_keys:
             raise OdooTargetReplacementStageError(
                 deploy_blocked_code("unportable_values"),
                 "Odoo target replacement cannot carry the value of env key(s) "
                 + ", ".join(unportable_keys)
-                + " in the provider env; store them as single-line values.",
-                tuple(unportable_keys),
+                + " in the provider env; use values supported by the provider format.",
+                tuple(sorted(unportable_keys)),
             )
         if runtime_override_payload is not None:
             missing_override_secret_keys = tuple(

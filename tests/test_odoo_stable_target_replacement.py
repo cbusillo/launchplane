@@ -5587,6 +5587,38 @@ class OdooStableTargetReplacementSiteEnvironmentTests(unittest.TestCase):
                     )
         return result, persisted_env, sync_source
 
+    def test_compose_keeps_its_portability_refusal_before_provider_writes(self) -> None:
+        for value in ("fixture\x00value", "fixture\nsecond line", "fixture "):
+            with self.subTest(value=value):
+
+                def write_records(record_store: PostgresRecordStore) -> None:
+                    record_store.write_runtime_environment_record(
+                        RuntimeEnvironmentRecord(
+                            scope="context",
+                            context="cm",
+                            env={"APP_SETTING": value},
+                            updated_at="2026-07-25T00:00:00Z",
+                        )
+                    )
+
+                result, persisted_env, sync_source = self._apply(
+                    write_records=write_records,
+                    policy_rules=(
+                        RuntimeSecretSafetyRule(
+                            binding_key="ODOO_DB_PASSWORD",
+                            secret_class="testing",
+                            allowed_contexts=("cm",),
+                            allowed_instances=("testing",),
+                        ),
+                    ),
+                )
+                self.assertEqual(result.deploy_status, "fail")
+                self.assertEqual(result.error_code, "deploy_blocked.unportable_values")
+                self.assertEqual(result.error_detail_keys, ("APP_SETTING",))
+                self.assertNotIn(value, result.error_message)
+                self.assertNotIn("APP_SETTING", persisted_env)
+                sync_source.assert_not_called()
+
     def test_plan_lists_the_keys_it_would_deliver_without_requiring_declarations(self) -> None:
         store = _Store(
             target_record=_target_record(),

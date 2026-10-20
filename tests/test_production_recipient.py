@@ -276,6 +276,40 @@ class ProductionRecipientTests(unittest.TestCase):
         self.assertNotIn(self.values["DB_PASSWORD"], output)
         self.assert_old_preserved()
 
+    def test_unencodable_input_retains_prior_fences_without_configure_checkpoint(self) -> None:
+        from control_plane.dokploy import api
+
+        self.values["APP_SETTING"] = "fixture\x00value"
+        effects: list[str] = []
+        checkpoint = self.store.checkpoint_mutation_provider_effect
+
+        def record_checkpoint(**kwargs: Any) -> Any:
+            effects.append(kwargs["effect_phase"])
+            return checkpoint(**kwargs)
+
+        with (
+            patch.object(
+                self.store, "checkpoint_mutation_provider_effect", side_effect=record_checkpoint
+            ),
+            patch.object(
+                api, "serialize_dokploy_env_text", wraps=api.serialize_dokploy_env_text
+            ) as render,
+        ):
+            result = self.run_operation()
+        self.assertEqual(result.response_status_code, 409)
+        self.assertTrue(
+            any(
+                call.args[0].get("APP_SETTING") == "fixture\x00value"
+                for call in render.call_args_list
+            )
+        )
+        self.assertNotIn("configure_recipient", effects)
+        self.assertTrue(effects)
+        self.assertIn("/api/compose.create", self.effects)
+        self.assertNotIn("/api/compose.update", self.effects)
+        self.assertTrue(self.store.list_held_provider_target_reservations())
+        self.assert_old_preserved()
+
     def test_unknown_create_retains_custody_and_refuses_new_keys_without_redispatch(self) -> None:
         real_write = self.provider_write
 

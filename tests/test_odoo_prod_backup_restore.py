@@ -434,8 +434,21 @@ class OdooProdBackupRestoreApplyTests(unittest.TestCase):
     def test_public_canonical_restore_keeps_origin_probes(self) -> None:
         self._assert_apply_runs_durable_phases(("cellmechanic.com", "www.cellmechanic.com"))
 
-    def _assert_apply_runs_durable_phases(self, public_hosts: tuple[str, ...] = ()) -> None:
+    def test_unencodable_environment_keeps_prior_restore_effects_without_env_checkpoint(
+        self,
+    ) -> None:
+        self._assert_apply_runs_durable_phases(unencodable_value=True)
+
+    def _assert_apply_runs_durable_phases(
+        self, public_hosts: tuple[str, ...] = (), *, unencodable_value: bool = False
+    ) -> None:
         store = _Store()
+        if unencodable_value:
+            store.runtime_records = (
+                store.runtime_records[0].model_copy(
+                    update={"env": {**store.runtime_records[0].env, "APP_SETTING": "bad\x00value"}}
+                ),
+            )
         store.target_record = store.target_record.model_copy(update={"public_hosts": public_hosts})
         live_env = _live_env()
 
@@ -529,7 +542,7 @@ class OdooProdBackupRestoreApplyTests(unittest.TestCase):
             patch(
                 "control_plane.workflows.odoo_prod_backup_restore.dokploy_api.update_dokploy_target_env",
                 side_effect=update_target_env,
-            ),
+            ) as update,
             patch(
                 "control_plane.workflows.odoo_prod_backup_restore.dokploy_api.latest_deployment_for_target",
                 return_value=None,
@@ -609,6 +622,15 @@ class OdooProdBackupRestoreApplyTests(unittest.TestCase):
                 ),
             )
 
+        if unencodable_value:
+            self.assertEqual(result.restore_status, "fail")
+            self.assertNotIn(("target_env_update_started", "target_env_update"), provider_effects)
+            self.assertNotIn(("deployment_started", "deploy_trigger"), provider_effects)
+            self.assertIn("filestore_activated", [phase for phase, _ in phase_checkpoints])
+            self.assertTrue(provider_effects)
+            self.assertEqual(live_env["ODOO_DB_VOLUME"], OLD_DB_VOLUME)
+            update.assert_not_called()
+            return
         self.assertEqual(result.restore_status, "pass")
         self.assertEqual(
             verify_readiness.call_args.kwargs["base_url"],
