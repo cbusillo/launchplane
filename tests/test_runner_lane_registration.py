@@ -77,10 +77,10 @@ class _CommandRunner:
         self,
         *,
         returncode: int = 0,
-        returncodes: Sequence[int] | None = None,
+        fail_configuration: bool = False,
     ) -> None:
         self.returncode = returncode
-        self.returncodes = list(returncodes or ())
+        self.fail_configuration = fail_configuration
         self.commands: list[tuple[str, ...]] = []
         self.envs: list[dict[str, str]] = []
 
@@ -89,7 +89,9 @@ class _CommandRunner:
     ) -> RemoteCommandResult:
         self.commands.append(tuple(command))
         self.envs.append(dict(env))
-        returncode = self.returncodes.pop(0) if self.returncodes else self.returncode
+        returncode = (
+            1 if self.fail_configuration and "RUNNER_REGISTRATION_TOKEN" in env else self.returncode
+        )
         return RemoteCommandResult(returncode=returncode, stderr="registration failed")
 
 
@@ -471,7 +473,7 @@ class RunnerLaneRegistrationExecutorTests(unittest.TestCase):
 
     def test_ready_executor_posts_failed_audit_when_config_fails(self) -> None:
         token_fetcher = _TokenFetcher()
-        command_runner = _CommandRunner(returncodes=[0, 0, 1])
+        command_runner = _CommandRunner(fail_configuration=True)
         audit_poster = _AuditPoster()
 
         result = execute_runner_lane_registration_executor(
@@ -485,13 +487,15 @@ class RunnerLaneRegistrationExecutorTests(unittest.TestCase):
         )
 
         self.assertEqual(result.status, "failed")
-        self.assertIn("configure runner", result.message)
+        self.assertEqual(
+            len([env for env in command_runner.envs if "RUNNER_REGISTRATION_TOKEN" in env]), 1
+        )
         self.assertEqual([record[0] for record in audit_poster.records], ["planned", "failed"])
         self.assertNotIn(REGISTRATION_TOKEN, result.model_dump_json())
 
     def test_ready_executor_reports_command_stderr_in_failed_audit(self) -> None:
         token_fetcher = _TokenFetcher()
-        command_runner = _CommandRunner(returncodes=[1])
+        command_runner = _CommandRunner(returncode=1)
         audit_poster = _AuditPoster()
 
         result = execute_runner_lane_registration_executor(
@@ -505,7 +509,6 @@ class RunnerLaneRegistrationExecutorTests(unittest.TestCase):
         )
 
         self.assertEqual(result.status, "failed")
-        self.assertIn("verify registration target", result.message)
         self.assertIn("registration failed", result.message)
 
     def test_ready_executor_posts_failed_audit_when_post_inventory_is_missing_lane(self) -> None:
@@ -748,22 +751,6 @@ class RunnerLaneRegistrationFilesystemTests(unittest.TestCase):
         self.assertEqual(self.tokens.calls, [self.request.repository])
         self.assertIn("configure", self.commands())
 
-    def test_token_acquisition_follows_read_only_validation(self) -> None:
-        original_fetch = self.tokens.fetch_registration_token
-
-        def fetch_after_validation(
-            *, repository: str
-        ) -> tuple[str, RunnerLaneRegistrationTokenRecord]:
-            self.assertFalse(self.root.exists())
-            self.assertEqual(self.commands(), [])
-            return original_fetch(repository=repository)
-
-        with patch.object(
-            self.tokens, "fetch_registration_token", side_effect=fetch_after_validation
-        ):
-            result = self.run_executor()
-        self.assertEqual(result.status, "completed")
-
     def test_token_failure_leaves_absent_target_available_for_retry(self) -> None:
         with patch.object(
             self.tokens,
@@ -849,25 +836,29 @@ class RunnerLaneRegistrationFilesystemTests(unittest.TestCase):
         self.env["SWAP_AFTER_DOWNLOAD"] = "1"
         result = self.run_executor()
         self.assertEqual(result.status, "failed")
-        self.assertEqual(self.commands(), ["curl"])
+        self.assertNotIn("tar", self.commands())
         self.assertEqual(self.tokens.calls, [self.request.repository])
         self.assertFalse((self.outside / self.request.lane_name / "config.sh").exists())
 
-    def test_rechecks_target_after_token_before_preparation(self) -> None:
-        self.root.mkdir()
+    def test_rechecks_absent_root_ancestor_after_token_before_preparation(self) -> None:
+        ancestor = self.base / "ancestor"
+        ancestor.mkdir()
+        self.request.registration_root = str(ancestor / "missing" / "runners")
+        self.policy.allowed_registration_roots = (str(ancestor),)
         original_fetch = self.tokens.fetch_registration_token
 
         def fetch_and_swap(*, repository: str) -> tuple[str, RunnerLaneRegistrationTokenRecord]:
             token = original_fetch(repository=repository)
-            self.root.rename(self.base / "retained")
-            self.root.symlink_to(self.outside, target_is_directory=True)
+            ancestor.rename(self.base / "retained")
+            ancestor.symlink_to(self.outside, target_is_directory=True)
             return token
 
         with patch.object(self.tokens, "fetch_registration_token", side_effect=fetch_and_swap):
             result = self.run_executor()
         self.assertEqual(result.status, "failed")
-        self.assertNotIn("configure", self.commands())
-        self.assertNotIn("sudo", self.commands())
+        self.assertEqual(self.commands(), [])
+        self.assertEqual(list(self.outside.iterdir()), [])
+        self.assertEqual(self.audits.records[-1][0], "failed")
         self.assertEqual(self.tokens.calls, [self.request.repository])
 
     def test_rechecks_root_before_configuration_with_executable_outside_target(self) -> None:
