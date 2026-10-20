@@ -22,6 +22,8 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-o
     const writes: { key: string; body: Record<string, unknown> }[] = [];
     const selectedCommit = "c".repeat(40);
     const csrfToken = "fixture-csrf";
+    const rebuildDenialMessage = outcome === "recovery-denied"
+      ? "The retained request needs its original administrator." : "This request is denied.";
     const originalScope = "fixture-original-administrator";
     const settling = outcome.startsWith("settlement-") || outcome === "replay-conflict-settlement";
     let settlements = 0;
@@ -55,7 +57,7 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-o
       if ((["lost-reply", "recovery-denied", "lookup-not-observed"].includes(outcome) || settling) && writes.length === 1) return route.abort();
       if (outcome === "replay-conflict-settlement") return route.fulfill({ status: 409, json: { trace_id: "replay-conflict", error: { code: "testing_rebuild_not_ready", message: "The inspected build changed." } } });
       if (settling) return route.fulfill({ status: 403, json: { trace_id: "recovery-denial", error: { code: "authorization_denied", message: "Recovery was denied." } } });
-      if (["denied", "recovery-denied", "lookup-not-observed"].includes(outcome)) return route.fulfill({ status: 403, json: { trace_id: "denied-trace", error: { code: "authorization_denied", message: "This request is denied." } } });
+      if (["denied", "recovery-denied", "lookup-not-observed"].includes(outcome)) return route.fulfill({ status: 403, json: { trace_id: "denied-trace", error: { code: "authorization_denied", message: rebuildDenialMessage } } });
       if (outcome === "stale-build") return route.fulfill({ status: 409, json: { trace_id: "stale-trace", error: { code: "testing_rebuild_not_ready", message: "The inspected build changed. Inspect again." } } });
       return route.fulfill({ json: receipt("pending") });
     });
@@ -158,6 +160,7 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-o
       }
       if (["recovery-denied", "lookup-not-observed"].includes(outcome)) {
         await expect(panel.getByRole("button", { name: "Find the original rebuild" })).toBeEnabled();
+        if (outcome === "recovery-denied") await expect(panel.getByRole("status")).toContainText(rebuildDenialMessage);
         await panel.screenshot({ path: testInfo.outputPath("testing-rebuild-read-only-recovery.png") });
         await page.reload();
         await panel.getByRole("button", { name: "Find the original rebuild" }).click();
