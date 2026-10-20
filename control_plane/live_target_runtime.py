@@ -1008,6 +1008,7 @@ def apply_live_target_runtime_environment(
                 desired_env_map=desired_env_map,
                 retired_keys=retired_keys,
             )
+            env_text = dokploy_api.serialize_dokploy_env_text(updated_env_map)
             with provider_mutation_guard() if provider_mutation_guard else nullcontext():
                 if before_provider_mutation is not None:
                     before_provider_mutation()
@@ -1017,7 +1018,7 @@ def apply_live_target_runtime_environment(
                     target_type=target_definition.target_type,
                     target_id=target_definition.target_id,
                     target_payload=refreshed_payload,
-                    env_text=dokploy_api.serialize_dokploy_env_text(updated_env_map),
+                    env_text=env_text,
                 )
             persisted_payload = dokploy_api.fetch_dokploy_target_payload(
                 host=host,

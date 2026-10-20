@@ -1434,6 +1434,7 @@ class TestingActivationAdapter:
                     template = json.loads(record.compose_source)
                     for volume in template["volumes"].values():
                         volume["external"] = True
+                    env_text = api.serialize_dokploy_env_text(values)
                     record = self.save(record, phase="configure_new_recipient")
                     checkpoint(record.phase)
                     api.dokploy_request(
@@ -1449,7 +1450,7 @@ class TestingActivationAdapter:
                             "composePath": "docker-compose.yml",
                             "autoDeploy": False,
                             "composeFile": json.dumps(template),
-                            "env": api.serialize_dokploy_env_text(values),
+                            "env": env_text,
                         },
                     )
                 record = self.materialize_source(record, checkpoint)

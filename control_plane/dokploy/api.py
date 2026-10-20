@@ -1977,6 +1977,8 @@ def _dokploy_request(
                 status_code=error.code,
                 detail="response read timed out",
             ) from read_error
+        finally:
+            error.close()
         redacted_error_body = redact_dokploy_log_line(error_body).strip()
         raise DokployRequestFailed(
             method=method,

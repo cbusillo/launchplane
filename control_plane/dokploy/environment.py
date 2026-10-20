@@ -21,6 +21,7 @@ _LINE = re.compile(
     rf"{_SPACE}*`(?:\\`|[^`])*`|[^#\r\n]+)?"
     rf"{_SPACE}*(?:#[^\n\u2028\u2029]*)?(?=\Z|[\n\u2028\u2029])",
 )
+_QUOTED = re.compile(r"(?:\A|(?<=[\n\u2028\u2029]))(['\"`])([\s\S]*)\1(?=\Z|[\n\u2028\u2029])")
 
 
 class DokployEnvironmentEncodingError(ValueError):
@@ -35,8 +36,7 @@ def parse_dokploy_env_text(raw_env_text: str) -> dict[str, str]:
             continue
         value = (match[2] or "").strip(_WHITESPACE)
         quote = value[:1]
-        if quote in {"'", '"', "`"} and value[-1:] == quote and len(value) >= 2:
-            value = value[1:-1]
+        value = _QUOTED.sub(r"\2", value)
         if quote == '"':
             value = value.replace("\\n", "\n").replace("\\r", "\r")
         values[match[1]] = value

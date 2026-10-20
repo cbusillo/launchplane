@@ -44,11 +44,22 @@ class DokployEnvironmentTests(unittest.TestCase):
             "$NAME ${NAME} $$ $(command)",
             "trailing\\",
             "'#trailing\\",
+            "x\u2028'y'",
+            "x\u2029'y'",
+            "'a' x'\u2028y",
         ):
             with self.subTest(value=value):
                 values = {"APP": value, "AFTER": "next"}
                 rendered = api.serialize_dokploy_env_text(values)
                 self.assertEqual(api.parse_dokploy_env_text(rendered), values)
+
+    def test_reads_quotes_at_ecmascript_line_boundaries(self) -> None:
+        for separator in ("\u2028", "\u2029"):
+            with self.subTest(separator=separator):
+                self.assertEqual(
+                    api.parse_dokploy_env_text(f"APP=x{separator}'y'"),
+                    {"APP": f"x{separator}y"},
+                )
 
     def test_refuses_values_that_the_provider_cannot_consume_intact(self) -> None:
         for key, value in (("APP", "'\"`#\nvalue"), ("APP", "nul\x00value"), ("A\nB", "value")):
