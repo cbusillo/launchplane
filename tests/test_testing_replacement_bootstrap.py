@@ -39,10 +39,9 @@ from tests import test_testing_replacement_resources as resource_tests
 
 class FreshTestingBootstrapScenario(unittest.TestCase):
     def seed(self, store_url: str, *, initial_generation: bool = False) -> None:
-        self.fixture = resource_tests.TestingReplacementResourceHttpTests()
-        self.fixture.database_url = store_url
-        self.fixture.setUp()
-        self.addCleanup(self.fixture.doCleanups)
+        self.fixture = resource_tests.TestingReplacementResourceFixture(
+            self, database_url=store_url
+        )
         fixture = self.fixture
         self.store = fixture.store
         from tests.support.stores import _write_runtime_key_safety_policy
@@ -972,9 +971,7 @@ class FreshTestingBootstrapObservationTests(unittest.TestCase):
 
 class TestingBootstrapHttpRefusalTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
-        self.fixture = resource_tests.TestingReplacementResourceHttpTests()
-        self.fixture.setUp()
-        self.addCleanup(self.fixture.doCleanups)
+        self.fixture = resource_tests.TestingReplacementResourceFixture(self)
 
     async def post(self, **changes: object) -> Any:
         from tests.support.http import request

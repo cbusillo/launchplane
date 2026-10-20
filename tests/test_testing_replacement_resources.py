@@ -46,19 +46,20 @@ class LegacyResourceRequestTests(unittest.TestCase):
         )
 
 
-class TestingReplacementResourceHttpTests(unittest.IsolatedAsyncioTestCase):
+class TestingReplacementResourceFixture:
     database_url = ""
     idempotency_key = "resource-fixture"
 
-    def setUp(self) -> None:
+    def __init__(self, owner: unittest.TestCase, *, database_url: str = "") -> None:
+        self.database_url = database_url
         temporary = TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
+        owner.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.store = PostgresRecordStore(
             database_url=self.database_url or f"sqlite+pysqlite:///{self.root / 'state.db'}"
         )
         self.store.ensure_schema()
-        self.addCleanup(self.store.close)
+        owner.addCleanup(self.store.close)
         self.profile = LaunchplaneProductProfileRecord.model_validate(
             _odoo_profile_payload_with_prod_lane("example-odoo")
         )
@@ -114,6 +115,13 @@ class TestingReplacementResourceHttpTests(unittest.IsolatedAsyncioTestCase):
                 **changes,
             },
         )
+
+
+class TestingReplacementResourceHttpTests(
+    unittest.IsolatedAsyncioTestCase, TestingReplacementResourceFixture
+):
+    def setUp(self) -> None:
+        TestingReplacementResourceFixture.__init__(self, self)
 
     async def test_pending_route_effects_keep_the_retained_target_attached(self) -> None:
         from control_plane.contracts.dokploy_target_record import PublicHostEffect

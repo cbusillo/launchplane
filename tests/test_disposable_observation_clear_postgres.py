@@ -20,14 +20,12 @@ from tests.test_postgres_integration import _head_postgres_database
 class RealPostgresDisposableObservationClearTests(unittest.TestCase):
     def test_reviewed_clear_keeps_target_and_preview_writers_excluded_through_commit(self) -> None:
         from control_plane import disposable_lanes
-        from tests.test_director_bounded_writes import DirectorBoundedWritesTests
+        from tests.test_director_bounded_writes import DirectorBoundedWritesFixture
         from tests.support.disposable_lanes import record_safety
 
         for change in ("target-id", "preview-insert"):
             with self.subTest(change=change), _head_postgres_database() as url:
-                fixture = DirectorBoundedWritesTests()
-                fixture.setUp()
-                self.addCleanup(fixture.doCleanups)
+                fixture = DirectorBoundedWritesFixture(self)
                 marker = "reviewed-clear-" + change
                 writer_url = make_url(url).update_query_dict({"application_name": marker})
                 with (
@@ -149,12 +147,10 @@ class RealPostgresDisposableObservationClearTests(unittest.TestCase):
 
     def test_busy_authority_times_out_without_clearing_the_reviewed_report(self) -> None:
         from control_plane import disposable_lanes
-        from tests.test_director_bounded_writes import DirectorBoundedWritesTests
+        from tests.test_director_bounded_writes import DirectorBoundedWritesFixture
         from tests.support.disposable_lanes import record_safety
 
-        fixture = DirectorBoundedWritesTests()
-        fixture.setUp()
-        self.addCleanup(fixture.doCleanups)
+        fixture = DirectorBoundedWritesFixture(self)
         with (
             _head_postgres_database() as url,
             closing(PostgresRecordStore(database_url=url)) as first,
