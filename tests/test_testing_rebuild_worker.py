@@ -2540,6 +2540,12 @@ class NativeTestingWorkerTests(unittest.TestCase):
             self.assertRaises(service.NativeTestingRebuildPending),
         ):
             self.execute()
+        previous_reservation = self.store.read_idempotency_record(
+            scope=REBUILD_SCOPE,
+            route_path=REBUILD_ROUTE,
+            idempotency_key=self.operation.operation_id,
+        )
+        assert previous_reservation is not None
         authorization = durable_operation_authorization_payload(
             action="odoo_target_replacement_apply.execute",
             managed_rule_id="native-testing-fixture",
@@ -2575,7 +2581,10 @@ class NativeTestingWorkerTests(unittest.TestCase):
                     )
                     assert original is not None
                     self.assertGreater(original.attempt, 1)
-                    self.assertFalse(original.provider_effect_started_at)
+                    self.assertEqual(
+                        original.provider_effect_started_at,
+                        previous_reservation.provider_effect_started_at,
+                    )
                     raise denial
 
             return service.execute_native_testing_rebuild(**{**kwargs, "authorize": checkpoint})

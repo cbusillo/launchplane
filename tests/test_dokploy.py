@@ -2948,8 +2948,13 @@ domains = ["cm-testing.shinycomputers.com"]
         with (
             patch(
                 "control_plane.dokploy.api.fetch_dokploy_target_payload",
-                return_value={"env": "ODOO_DB_NAME=fixture\nAPP_SETTING=bad\x00value"},
+                return_value={
+                    "env": "ODOO_DB_NAME=fixture\nAPP_SETTING=bad\x00value",
+                    "appName": "fixture-app",
+                    "serverId": "fixture-server",
+                },
             ),
+            patch("control_plane.dokploy.api.find_matching_dokploy_schedule", return_value=None),
             patch("control_plane.dokploy.api.update_dokploy_target_env") as update,
             patch("control_plane.dokploy.api.trigger_deployment") as deploy,
             patch("control_plane.dokploy.api.upsert_dokploy_schedule") as schedule,
@@ -3002,6 +3007,7 @@ domains = ["cm-testing.shinycomputers.com"]
                 side_effect=lambda **_kwargs: None,
             ),
             patch("control_plane.dokploy.api.trigger_deployment"),
+            patch("control_plane.dokploy.api.find_matching_dokploy_schedule", return_value=None),
             patch("control_plane.dokploy.api.upsert_dokploy_schedule") as upsert_schedule,
         ):
             with self.assertRaises(click.ClickException) as raised_error:
