@@ -132,7 +132,7 @@ class _LaneFixture:
 
 
 class StableLaneSyncRefusalTests(unittest.TestCase):
-    def test_unchanged_compose_literal_requires_explicit_qualification(self) -> None:
+    def test_unchanged_compose_literal_can_be_explicitly_qualified(self) -> None:
         value = "hello $NAME"
         lane = _LaneFixture(self, _instance_record({"APP_MODE": value}))
         _seed_tracked_target_records(
@@ -149,15 +149,26 @@ class StableLaneSyncRefusalTests(unittest.TestCase):
         transport = report["compose_transport"]
         assert isinstance(transport, dict)
         self.assertEqual(transport["unqualified_keys"], ["APP_MODE"])
-        with self.assertRaises(LiveTargetRuntimeError) as refusal:
-            lane.sync(provider_env=legacy)
-        self.assertEqual(refusal.exception.code, "compose_literal_qualification_required")
+        unchanged, updates = lane.sync(provider_env=legacy)
+        self.assertEqual(updates, [])
+        assert isinstance(unchanged["apply"], dict)
+        self.assertFalse(unchanged["apply"]["env_updated"])
         report, updates = lane.sync(provider_env=legacy, requalify_literal_keys=("APP_MODE",))
         apply_result = report["apply"]
         assert isinstance(apply_result, dict)
         self.assertTrue(apply_result["env_updated"])
         self.assertEqual(apply_result["verification"]["status"], "pass")
+        transport = report["compose_transport"]
+        assert isinstance(transport, dict)
+        self.assertEqual(transport["unqualified_keys"], [])
+        self.assertTrue(transport["restart_pending"])
         self.assertEqual(len(updates), 1)
+        unchanged, no_updates = lane.sync(
+            provider_env=str(updates[0]["env_text"]), requalify_literal_keys=("APP_MODE",)
+        )
+        self.assertEqual(no_updates, [])
+        assert isinstance(unchanged["apply"], dict)
+        self.assertFalse(unchanged["apply"]["env_updated"])
         self.assertEqual(
             dokploy_api.parse_dokploy_env_text(str(updates[0]["env_text"])), {"APP_MODE": value}
         )

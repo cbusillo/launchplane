@@ -37,6 +37,11 @@ on:
         description: Optional deploy wait timeout in seconds
         required: false
         type: string
+      requalify_literal_keys:
+        description: Optional JSON array of managed key names to qualify as literals
+        required: false
+        default: '[]'
+        type: string
 
 permissions:
   id-token: write
@@ -57,6 +62,7 @@ jobs:
           DEPLOY: ${{ inputs.deploy }}
           NO_CACHE: ${{ inputs.no_cache }}
           DEPLOY_TIMEOUT_SECONDS: ${{ inputs.deploy_timeout_seconds }}
+          REQUALIFY_LITERAL_KEYS: ${{ inputs.requalify_literal_keys }}
         run: |
           set -euo pipefail
 
@@ -74,6 +80,7 @@ jobs:
             --arg mode "$MODE" \
             --argjson deploy "$DEPLOY" \
             --argjson no_cache "$NO_CACHE" \
+            --argjson requalify_literal_keys "${REQUALIFY_LITERAL_KEYS:-[]}" \
             --arg deploy_timeout_seconds "$DEPLOY_TIMEOUT_SECONDS" \
             '{
               schema_version: 1,
@@ -82,7 +89,8 @@ jobs:
               instance: $instance,
               mode: $mode,
               deploy: $deploy,
-              no_cache: $no_cache
+              no_cache: $no_cache,
+              requalify_literal_keys: $requalify_literal_keys
             }
             | if $deploy_timeout_seconds != "" then
                 . + {deploy_timeout_seconds: ($deploy_timeout_seconds | tonumber)}
@@ -133,6 +141,9 @@ jobs:
               | "- Context: \($result.context)/\($result.instance)",
                 "- Target: \($result.tracked_target.target_name) (\($result.tracked_target.target_type))",
                 "- Changed keys: \(($result.runtime_environment.changed_keys // []) | join(", "))",
+                "- Literal qualification keys: \(($result.compose_transport.qualification_keys // []) | join(", "))",
+                "- Unqualified legacy keys: \(($result.compose_transport.unqualified_keys // []) | join(", "))",
+                "- Restart pending: \($result.compose_transport.restart_pending // false)",
                 "- Env updated: \($result.apply.env_updated)",
                 "- Deploy triggered: \($result.deploy.triggered)"
             ' "$RESPONSE_FILE"

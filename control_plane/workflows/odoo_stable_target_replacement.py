@@ -2544,26 +2544,11 @@ def execute_odoo_stable_target_replacement_apply(
                 instance_name=plan.instance,
                 desired_env=application_env,
                 live_env=current_env_map,
-                live_env_text=str(target_payload.get("env") or ""),
-                literal_keys=("ODOO_DB_PASSWORD",),
             )
         ):
             code = deploy_blocked_code("retained_database_credential_changed")
             raise OdooTargetReplacementStageError(
                 code, deploy_failure_description(code), ("ODOO_DB_PASSWORD",)
-            )
-        preserved_unqualified = tuple(
-            key
-            for key in dokploy_api.compose_unqualified_keys(
-                str(target_payload.get("env") or ""), application_env
-            )
-            if application_env[key] == current_env_map.get(key)
-        )
-        if preserved_unqualified:
-            raise OdooTargetReplacementStageError(
-                deploy_blocked_code("unportable_values"),
-                "Legacy Compose inputs need explicit runtime apply literal qualification before replacement; retained database credentials require a fresh testing generation.",
-                preserved_unqualified,
             )
         if request.data_source_mode == "upstream_restore" and not (
             generation is not None and generation.source_mode == "container-export"
@@ -2831,18 +2816,19 @@ def execute_odoo_stable_target_replacement_apply(
         desired_env_map["PLATFORM_INSTANCE"] = plan.instance
         desired_env_map.update(dict.fromkeys(COMPOSE_IMAGE_REFERENCE_ENV_KEYS, image_reference))
         desired_env_map.update(runtime_identity_env(runtime_identity))
+        prepared_env_text = dokploy_api.serialize_dokploy_env_text(
+            desired_env_map,
+            target_type="compose",
+            compose_type=str(target_payload.get("composeType") or "docker-compose"),
+            current_env_text=str(target_payload.get("env") or ""),
+        )
         dokploy_api.update_dokploy_target_env(
             host=host,
             token=token,
             target_type="compose",
             target_id=target_id_record.target_id,
             target_payload=target_payload,
-            env_text=dokploy_api.serialize_dokploy_env_text(
-                desired_env_map,
-                target_type="compose",
-                compose_type=str(target_payload.get("composeType") or "docker-compose"),
-                current_env_text=str(target_payload.get("env") or ""),
-            ),
+            env_text=prepared_env_text,
         )
         refreshed_payload = dokploy_api.fetch_dokploy_target_payload(
             host=host,
@@ -2882,7 +2868,8 @@ def execute_odoo_stable_target_replacement_apply(
             set(missing_keys)
             | set(
                 dokploy_api.compose_unqualified_keys(
-                    str(refreshed_payload.get("env") or ""), desired_env_map
+                    str(refreshed_payload.get("env") or ""),
+                    dokploy_api.compose_literal_keys(prepared_env_text),
                 )
             )
         )

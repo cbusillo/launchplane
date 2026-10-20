@@ -949,9 +949,12 @@ class ArtifactImageOverrideTests(unittest.TestCase):
                 patch(
                     "control_plane.dokploy.api.fetch_dokploy_target_payload",
                     side_effect=[
-                        {"env": "DOCKER_IMAGE=odoo-runtime\nDOCKER_IMAGE_TAG=latest"},
+                        {
+                            "env": 'DOCKER_IMAGE=odoo-runtime\nDOCKER_IMAGE_TAG=latest\nLAUNCHPLANE_RUNTIME_IDENTITY_JSON=\'{"legacy": "value"}\'\nPROVIDER_ONLY=hello world'
+                        },
                         {
                             "env": (
+                                'LAUNCHPLANE_RUNTIME_IDENTITY_JSON=\'{"legacy": "value"}\'\nPROVIDER_ONLY=hello world\n'
                                 "DOCKER_IMAGE=odoo-runtime\n"
                                 "DOCKER_IMAGE_TAG=latest\n"
                                 "DOCKER_IMAGE_REFERENCE=ghcr.io/cbusillo/odoo-private@sha256:image456\n"

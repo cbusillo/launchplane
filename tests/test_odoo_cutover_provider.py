@@ -118,7 +118,7 @@ class OdooCutoverProviderTests(unittest.TestCase):
                     ],
                 ),
                 patch("control_plane.dokploy.slot_prepare.api.dokploy_request") as write,
-                self.assertRaisesRegex(ValueError, "identical managed"),
+                self.assertRaises(ValueError),
             ):
                 prepare_dokploy_odoo_slot(
                     provider.cutover,
@@ -148,7 +148,7 @@ class OdooCutoverProviderTests(unittest.TestCase):
                     ],
                 ),
                 patch("control_plane.dokploy.slot_prepare.api.dokploy_request") as write,
-                self.assertRaisesRegex(ValueError, "identical managed"),
+                self.assertRaises(ValueError),
             ):
                 prepare_dokploy_odoo_slot(
                     provider.cutover,

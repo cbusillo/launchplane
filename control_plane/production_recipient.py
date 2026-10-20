@@ -686,11 +686,7 @@ class ProductionRecipientAdapter:
             allowed_environments = (
                 [values] if not record.execution.get("trigger_requested_at") else []
             ) + [deployed_values]
-        if api.parse_dokploy_env_text(
-            str(payload.get("env") or "")
-        ) not in allowed_environments or api.compose_unqualified_keys(
-            str(payload.get("env") or ""), api.parse_dokploy_env_text(str(payload.get("env") or ""))
-        ):
+        if api.parse_dokploy_env_text(str(payload.get("env") or "")) not in allowed_environments:
             raise RecipientAuthorityChanged(
                 "The provider environment differs from managed production inputs."
             )

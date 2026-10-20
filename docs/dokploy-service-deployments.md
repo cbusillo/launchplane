@@ -85,21 +85,24 @@ Review those names and the desired runtime records, then use `mode: "apply"`
 with the same names and the API's existing authorization and idempotency headers.
 Only managed keys may be named. This encoding-only operation writes even when
 the value delta is empty; the response reports transport work separately from
-value changes. Persistence verification checks both values and literal transport.
+value changes. Persistence verification checks values and the literal transport written by that operation.
 It does not prove that running containers restarted; deployment remains an
-explicit existing operation. Unqualified unchanged inputs block operations that
-claim literal delivery until this step is complete. Ordinary image-only writes
-continue preserving their existing consumer semantics.
+explicit existing operation. Unchanged legacy inputs remain explicitly unqualified in the names-only report.
+Ordinary writes and deploy-only calls preserve their existing consumer semantics;
+that report does not claim retroactive literal delivery.
 
-Requalifying an uncertain `ODOO_DB_PASSWORD` on a retained testing database is
-refused before effects. Use the existing fresh testing generation, which creates
+Requalifying an uncertain `ODOO_DB_PASSWORD` on any retained database is refused before effects, including production.
+For testing, use the existing fresh testing generation, which creates
 its own database, rather than toggling or rotating a retained credential.
-Compatible slots also refuse uncertain shared settings. Historical candidate
+Compatible slots refuse a legacy/literal transport mismatch for shared settings. Historical candidate
 custody and recovery receipts remain intact when exact configuration fails.
 This API field changes no authorization: terminal agents remain unable to apply,
-and Director-agent disposable-lane restrictions still apply. The installed
-runtime-sync helper and legacy workflow do not expose this new optional input;
-use the existing authorized service API surface for it.
+and Director-agent disposable-lane restrictions still apply. The Live Target Runtime workflow exposes the same optional JSON array of names
+through its existing authorization. Its summary separates value changes, transport
+qualification and restart status. The installed runtime-sync helper does not expose
+this optional input; use the workflow or the existing authorized service API.
+Historical recipient and activation recovery retains its original parsed-value
+contract, including previously stored runtime identity.
 
 The wire quotes and Compose-supported escapes are transport data, not a product
 storage convention. Metadata survives comment movement and CRLF normalization;

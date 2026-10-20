@@ -39,6 +39,7 @@ class RetainedDatabasePasswordSyncTests(unittest.TestCase):
         live_password: str,
         desired_password: str = "generated-local-password",
         literal_keys: tuple[str, ...] = (),
+        instance_name: str = "testing",
     ) -> tuple[list[object], Mock]:
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -50,7 +51,7 @@ class RetainedDatabasePasswordSyncTests(unittest.TestCase):
                 RuntimeEnvironmentRecord(
                     scope="instance",
                     context="example-site",
-                    instance="testing",
+                    instance=instance_name,
                     env={"ODOO_DB_PASSWORD": desired_password},
                     updated_at="2026-10-17T00:00:00Z",
                     source_label="test",
@@ -59,7 +60,7 @@ class RetainedDatabasePasswordSyncTests(unittest.TestCase):
             _seed_tracked_target_records(
                 database_url=database_url,
                 context="example-site",
-                instance="testing",
+                instance=instance_name,
                 target_id="test-compose",
                 target_type="compose",
                 target_name="example-site-testing",
@@ -87,7 +88,7 @@ class RetainedDatabasePasswordSyncTests(unittest.TestCase):
                     control_plane_root=root,
                     database_url=database_url,
                     context_name="example-site",
-                    instance_name="testing",
+                    instance_name=instance_name,
                     apply_changes=True,
                     deploy=True,
                     no_cache=False,
@@ -117,6 +118,16 @@ class RetainedDatabasePasswordSyncTests(unittest.TestCase):
                 live_password="password$NAME",
                 desired_password="password$NAME",
                 literal_keys=("ODOO_DB_PASSWORD",),
+            )
+        self.assertEqual(refusal.exception.code, "retained_database_credential_changed")
+
+    def test_production_retained_password_cannot_be_reinterpreted(self) -> None:
+        with self.assertRaises(LiveTargetRuntimeError) as refusal:
+            self._sync(
+                live_password="password$NAME",
+                desired_password="password$NAME",
+                literal_keys=("ODOO_DB_PASSWORD",),
+                instance_name="prod",
             )
         self.assertEqual(refusal.exception.code, "retained_database_credential_changed")
 

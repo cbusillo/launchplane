@@ -21,6 +21,7 @@ from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_COPY_CHUN
 from control_plane.dokploy.environment import (
     compose_environment_is_encoded as compose_environment_is_encoded,
     compose_unqualified_keys as compose_unqualified_keys,
+    compose_literal_keys as compose_literal_keys,
     DokployEnvironmentEncodingError as DokployEnvironmentEncodingError,
     parse_dokploy_env_text as parse_dokploy_env_text,
     serialize_dokploy_env_text as serialize_dokploy_env_text,

@@ -189,23 +189,22 @@ def retained_database_password_changed(
     live_env_text: str | None = None,
     literal_keys: Iterable[str] = (),
 ) -> bool:
-    """Whether a testing write would hand the running database a different password.
+    """Protect testing password changes and all retained credential reinterpretation.
 
     Postgres sets the role password only when it creates its volume, so the running
     target's ``ODOO_DB_PASSWORD`` is the one its retained database still accepts; a
     fresh testing generation brings its own database instead.
     """
     live_value = live_env.get("ODOO_DB_PASSWORD", "")
-    return (
-        instance_name == "testing"
-        and bool(live_value)
-        and (
-            desired_env.get("ODOO_DB_PASSWORD", live_value) != live_value
-            or (
-                "ODOO_DB_PASSWORD" in literal_keys
-                and live_env_text is not None
-                and bool(dokploy_api.compose_unqualified_keys(live_env_text, ("ODOO_DB_PASSWORD",)))
-            )
+    return bool(live_value) and (
+        (
+            instance_name == "testing"
+            and desired_env.get("ODOO_DB_PASSWORD", live_value) != live_value
+        )
+        or (
+            "ODOO_DB_PASSWORD" in literal_keys
+            and live_env_text is not None
+            and bool(dokploy_api.compose_unqualified_keys(live_env_text, ("ODOO_DB_PASSWORD",)))
         )
     )
 
@@ -964,8 +963,8 @@ def apply_live_target_runtime_environment(
         literal_keys=literal_keys,
     ):
         raise LiveTargetRuntimeError(
-            "The stored ODOO_DB_PASSWORD differs from the one the running testing database "
-            "was created with; replace the lane through a fresh testing generation.",
+            "ODOO_DB_PASSWORD would change the retained database credential's meaning. "
+            "For testing, replace the lane through a fresh testing generation.",
             code="retained_database_credential_changed",
         )
     provider_env_platform_credentials = provider_env_platform_credential_report(
@@ -977,19 +976,11 @@ def apply_live_target_runtime_environment(
         retired_keys=retired_keys,
     )
     changed_keys = initial_delta["changed_keys"]
+    qualification_keys = literal_keys & set(unqualified_keys)
+    remaining_unqualified_keys = unqualified_keys
     changed_key_count = (len(changed_keys) if isinstance(changed_keys, list) else 0) + len(
-        literal_keys
+        qualification_keys
     )
-    # An equal first-stage parse does not prove equal container inputs. Require
-    # explicit intent before reinterpreting existing non-plain legacy values.
-    if apply_changes and any(
-        key not in literal_keys and live_env_map.get(key) == desired_env_map[key]
-        for key in unqualified_keys
-    ):
-        raise LiveTargetRuntimeError(
-            "Compose literal delivery is unqualified; review the dry-run key names and request requalify_literal_keys, or use a fresh testing generation for retained database credentials.",
-            code="compose_literal_qualification_required",
-        )
     deploy_result: dict[str, str] | None = None
     verification: dict[str, object] = {
         "status": "skipped",
@@ -1068,7 +1059,7 @@ def apply_live_target_runtime_environment(
                 literal_keys=literal_keys,
             ):
                 raise LiveTargetRuntimeError(
-                    "Retained database credentials changed; use a fresh testing generation.",
+                    "Retained database credentials changed; for testing, use a fresh generation.",
                     code="retained_database_credential_changed",
                 )
             updated_env_map = control_plane_runtime_environments.merge_provider_environment(
@@ -1083,11 +1074,6 @@ def apply_live_target_runtime_environment(
                 current_env_text=str(refreshed_payload.get("env") or ""),
                 literal_keys=literal_keys,
             )
-            if is_compose and dokploy_api.compose_unqualified_keys(env_text, desired_env_map):
-                raise LiveTargetRuntimeError(
-                    "Compose literal delivery changed during apply; review a new dry-run.",
-                    code="compose_literal_qualification_required",
-                )
             dokploy_api.refuse_app_runtime_env_write(
                 env_text=env_text,
                 current_env_text=str(refreshed_payload.get("env") or ""),
@@ -1121,9 +1107,16 @@ def apply_live_target_runtime_environment(
             retired_keys=retired_keys,
         )
         verification_changed_keys = verification_delta["changed_keys"]
-        unqualified_persisted = (
+        remaining_unqualified_keys = (
             dokploy_api.compose_unqualified_keys(
                 str(persisted_payload.get("env") or ""), desired_env_map
+            )
+            if is_compose
+            else []
+        )
+        unqualified_persisted = (
+            dokploy_api.compose_unqualified_keys(
+                str(persisted_payload.get("env") or ""), dokploy_api.compose_literal_keys(env_text)
             )
             if is_compose
             else []
@@ -1177,7 +1170,9 @@ def apply_live_target_runtime_environment(
         "runtime_environment": initial_delta,
         "compose_transport": {
             "requested_literal_keys": sorted(literal_keys),
-            "unqualified_keys": unqualified_keys,
+            "qualification_keys": sorted(qualification_keys),
+            "unqualified_keys": remaining_unqualified_keys,
+            "restart_pending": bool(apply_changes and changed_key_count and not deploy),
         },
         "provider_env_platform_credentials": provider_env_platform_credentials,
         "apply": {

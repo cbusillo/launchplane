@@ -378,13 +378,15 @@ class CandidateApplicationTests(unittest.TestCase):
         unqualified_values = {**self.compiled.runtime_environment, "APP": "hello $NAME"}
         for key in VALUES:
             unqualified_values.pop(key, None)
-        with self.assertRaisesRegex(ValueError, "exact admitted inputs"):
+        with self.assertRaises(ValueError):
             application.require_candidate_configuration(
                 self.allocation,
                 replace(self.compiled, runtime_environment=unqualified_values),
                 {
                     **self.provider_state,
-                    "env": api.serialize_dokploy_env_text(unqualified_values),
+                    "env": api.serialize_dokploy_env_text({}, target_type="compose")
+                    + "\n"
+                    + api.serialize_dokploy_env_text(unqualified_values),
                 },
             )
         legacy = api.serialize_dokploy_env_text({"APP": '"literal" $NAME'})

@@ -35,10 +35,13 @@ def prepare_dokploy_odoo_slot(
         candidate_env = api.parse_dokploy_env_text(str(candidate.get("env") or ""))
         for environment in (old_env, candidate_env):
             environment.pop("LAUNCHPLANE_RUNTIME_IDENTITY_JSON", None)
-        if old_env != candidate_env or any(
-            api.compose_unqualified_keys(str(payload.get("env") or ""), old_env)
-            for payload in (old, candidate)
-        ):
+        uncertain_keys = set(
+            api.compose_unqualified_keys(str(old.get("env") or ""), old_env)
+        ) | set(api.compose_unqualified_keys(str(candidate.get("env") or ""), candidate_env))
+        different_transport = api.compose_literal_keys(
+            str(old.get("env") or "")
+        ) ^ api.compose_literal_keys(str(candidate.get("env") or ""))
+        if old_env != candidate_env or uncertain_keys & different_transport:
             raise ValueError("compatible slots require identical managed runtime settings")
     title = "launchplane-cutover-" + payload_digest(maintenance_payload(plan))
     rendered = render_odoo_app_slot_compose(

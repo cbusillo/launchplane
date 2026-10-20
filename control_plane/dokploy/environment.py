@@ -145,6 +145,11 @@ def compose_unqualified_keys(raw_env_text: str, keys: Iterable[str]) -> list[str
     )
 
 
+def compose_literal_keys(raw_env_text: str) -> set[str]:
+    """Keys with validated literal transport, for a writer's readback contract."""
+    return _provider_environment(raw_env_text)[1]
+
+
 def serialize_dokploy_env_text(
     env_map: dict[str, str],
     *,

@@ -82,7 +82,14 @@ def consume_compose_environment(
         def run(arguments: list[str]) -> subprocess.CompletedProcess[str]:
             return subprocess.run(
                 [*command, *arguments],
-                env={"PATH": os.environ["PATH"]},
+                env={
+                    "PATH": os.environ["PATH"],
+                    **(
+                        {"DOCKER_CONFIG": os.environ["DOCKER_CONFIG"]}
+                        if "DOCKER_CONFIG" in os.environ
+                        else {}
+                    ),
+                },
                 text=True,
                 capture_output=True,
                 check=True,
