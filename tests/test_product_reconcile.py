@@ -1892,6 +1892,103 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
             self.assertEqual(len(triggered), count)
         self.assertEqual(legacy["desired_image_digest"], repaired["desired_image_digest"])
 
+    def test_application_testing_delivers_multiline_literal_inputs_then_converges(self) -> None:
+        from control_plane.generic_web_testing_inputs import DELIVERY_RECEIPT_KEY
+        from control_plane.dokploy.api import parse_dokploy_env_text
+
+        payload, triggered = self.application_input_provider()
+        payload["env"] = "PROVIDER_ONLY='keep#literal\nsecond line'"
+        toml = "\n".join(
+            (
+                "[server]",
+                'host = "127.0.0.1"',
+                "port = 8099",
+                "",
+                "[display]",
+                'label = "Synthetic fixture"',
+                'theme = "plain"',
+                "",
+                "[features]",
+                "enabled = true",
+                "count = 2",
+                'mode = "testing"',
+            )
+        )
+        desired = {
+            "APP_RUNTIME_CONFIG": toml,
+            "APP_SETTING": "first#second",
+            "APP_QUOTED": '"literal"',
+            "APP_DOLLARS": "$NAME ${NAME} $$ $(literal)",
+        }
+        self.store.write_runtime_environment_record(
+            RuntimeEnvironmentRecord(
+                scope="instance",
+                context="cm",
+                instance="testing",
+                env={key: value for key, value in desired.items()},
+                updated_at="2026-10-19T00:00:00Z",
+            )
+        )
+        self.github.add_run(20, DEPLOYABLE)
+        self.request()
+        deployed = self.reconcile()
+        delivered = parse_dokploy_env_text(str(payload["env"]))
+        for key, value in desired.items():
+            self.assertEqual(delivered[key], value)
+        self.assertEqual(delivered["PROVIDER_ONLY"], "keep#literal\nsecond line")
+        self.assertNotIn("host", delivered)
+        record = self.store.read_deployment_record(str(deployed["deployment_record_id"]))
+        self.assertTrue(record.runtime_source[DELIVERY_RECEIPT_KEY])
+        self.assertEqual(len(triggered), 1)
+        self.request()
+        self.assertEqual(self.reconcile()["reason"], "already_deployed")
+        self.assertEqual(len(triggered), 1)
+
+    def test_unsupported_literal_input_refuses_before_effects_and_unchanged_retry_runs(
+        self,
+    ) -> None:
+        from control_plane.workflows.dokploy_deploy import (
+            require_dokploy_testing_environment_representable,
+        )
+
+        payload, triggered = self.application_input_provider()
+        original_schedule = self.application_input_schedule()
+        self.store.write_runtime_environment_record(
+            RuntimeEnvironmentRecord(
+                scope="instance",
+                context="cm",
+                instance="testing",
+                env={"APP_SETTING": "${{PROVIDER_ONLY}}"},
+                updated_at="2026-10-19T00:00:00Z",
+            )
+        )
+        self.github.add_run(20, DEPLOYABLE)
+        keys = []
+        for _ in range(2):
+            self.request()
+            with (
+                patch(
+                    "control_plane.workflows.generic_web_deploy_provider."
+                    "require_dokploy_testing_environment_representable",
+                    wraps=require_dokploy_testing_environment_representable,
+                ) as prepare,
+                patch("control_plane.dokploy.api.update_dokploy_target_env") as env_write,
+                patch("control_plane.dokploy.api.dokploy_request") as image_write,
+                patch("control_plane.dokploy.api.upsert_dokploy_application_schedule") as schedule,
+            ):
+                result = self.run_once()
+            self.assertEqual(result.state, "failed")
+            self.assertTrue(prepare.called)
+            env_write.assert_not_called()
+            image_write.assert_not_called()
+            schedule.assert_not_called()
+            keys.append(result.last_plan["deploy_idempotency_key"])
+        self.assertEqual(keys[0], keys[1])
+        self.assertFalse(triggered)
+        self.assertFalse(self.store.list_held_provider_target_reservations())
+        self.assertEqual(self.input_schedule, original_schedule)
+        self.assertEqual(payload["env"], "PROVIDER_ONLY=keep")
+
     def test_same_image_input_repair_obeys_testing_hold(self) -> None:
         _payload, triggered = self.application_input_provider()
         self.github.add_run(20, DEPLOYABLE)

@@ -239,7 +239,7 @@ class GenericWebTestingInputsTests(unittest.TestCase):
         self.assertFalse(target.testing_runtime_verified_digest)
 
     def test_unrepresentable_inputs_refuse_before_provider_effects(self) -> None:
-        for value in ("fixture token\n", "fixture token ", "fixture\nOTHER=injected"):
+        for value in ("fixture\x00token", "'\"`#\nfixture"):
             with self.subTest(value=value):
                 store = self.store()
                 store.secret_versions = (
@@ -252,6 +252,41 @@ class GenericWebTestingInputsTests(unittest.TestCase):
                 self.assertNotIn("env", self.events)
                 self.assertNotIn("image", self.events)
                 self.assertNotIn("target_update", self.events)
+
+    def test_literal_secret_whitespace_and_line_breaks_are_delivered_intact(self) -> None:
+        for value in ("fixture token\n", "fixture token ", "fixture\nOTHER=literal"):
+            with self.subTest(value=value):
+                store = self.store()
+                store.secret_versions = (
+                    _runtime_secret_version(
+                        secret_id="site-secret", version_id="site-version", plaintext_value=value
+                    ),
+                )
+                delivered, events = self.execute(self.resolve(store))
+                self.assertEqual(delivered["APP_TOKEN"], value)
+                self.assertNotIn("OTHER", delivered)
+                self.assertIn("deploy", events)
+
+    def test_provider_substitutions_refuse_before_provider_effects(self) -> None:
+        for value in ("${{OTHER}}", "${{project.OTHER}}", "${{environment.OTHER}}"):
+            with self.subTest(value=value):
+                store = self.store()
+                store.runtime_environment_records = (
+                    store.runtime_environment_records[0].model_copy(
+                        update={"env": {"APP_SETTING": value}}
+                    ),
+                )
+                with self.assertRaisesRegex(TestingInputSafetyRefused, "substitutions"):
+                    self.execute(self.resolve(store))
+                self.assertFalse(self.events)
+
+    def test_quoted_provider_only_values_survive_the_managed_input_merge(self) -> None:
+        delivered, _events = self.execute(
+            self.resolve(self.store()),
+            provider_env="PROVIDER_ONLY='keep#literal\nsecond line'\nQUOTED='\"keep\"'",
+        )
+        self.assertEqual(delivered["PROVIDER_ONLY"], "keep#literal\nsecond line")
+        self.assertEqual(delivered["QUOTED"], '"keep"')
 
     def test_missing_managed_secret_refuses_before_lifecycle_preparation(self) -> None:
         from control_plane.contracts.generic_web_extensions import (

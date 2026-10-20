@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import re
 from urllib.parse import urlsplit
 
 import click
@@ -23,12 +24,18 @@ from control_plane.generic_web_testing_inputs import TestingInputSafetyRefused
 
 
 def require_dokploy_testing_environment_representable(values: dict[str, str]) -> str:
-    env_text = dokploy_api.serialize_dokploy_env_text(values)
-    if dokploy_api.parse_dokploy_env_text(env_text) != values:
+    # Dokploy resolves these after dotenv parsing, regardless of quote style.
+    # They cannot be represented as literal managed inputs by this provider.
+    if any(re.search(r"\$\{\{[^\n\r\u2028\u2029]*?\}\}", value) for value in values.values()):
+        raise TestingInputSafetyRefused(
+            "Application testing runtime inputs contain unsupported provider substitutions."
+        )
+    try:
+        return dokploy_api.serialize_dokploy_env_text(values)
+    except dokploy_api.DokployEnvironmentEncodingError:
         raise TestingInputSafetyRefused(
             "Application testing runtime inputs cannot be represented by the provider environment format."
-        )
-    return env_text
+        ) from None
 
 
 def prepare_dokploy_testing_environment(

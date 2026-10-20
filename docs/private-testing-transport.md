@@ -107,9 +107,27 @@ must be explicitly retired through product configuration before delivery.
 Input preparation reads the provider environment and checks the complete merged
 environment for platform credentials and provider-format fidelity before
 schedules are quiesced. The same checks run again immediately before writing.
-Values containing line breaks or
-trailing whitespace that the provider cannot preserve are refused without a
-write. A later refusal restores or holds schedules using the original lifecycle
+Dokploy environment text uses its consumer's dotenv grammar. Quoted multiline
+values, literal hashes and quotes, surrounding whitespace, backslashes and
+ordinary dollar signs are preserved, including provider-only keys retained by
+the merge. Quoting does not disable Dokploy's own `${{...}}` substitutions;
+literal managed inputs containing those references are refused before effects.
+Supply the effective value through the site's managed inputs instead of a
+provider template reference, or explicitly retire an unused provider key.
+NUL and values with no lossless dotenv representation are also refused without
+a write or a value in the error. For example, dotenv does not unescape quote
+delimiters, so a multiline value containing all three quote delimiters may not
+be representable. This is the shared provider storage codec. It qualifies
+application delivery, where Dokploy passes the parsed values to the container.
+It does not qualify Compose's later environment-file processing: provider
+versions that write parsed values as raw assignments can change them again.
+Odoo Compose target replacement retains its single-line, no-trailing-whitespace
+preflight; the application codec fix does not widen that boundary. Compose
+consumer compatibility is tracked separately in [#4174](https://github.com/cbusillo/launchplane/issues/4174).
+The application consumer follows Dokploy's
+[dotenv parsing and service substitution](https://github.com/Dokploy/dokploy/blob/1c4414165d4aedbf6e28afab7a94c8fb7c053373/packages/server/src/utils/docker/utils.ts)
+and the [dotenv value grammar](https://github.com/motdotla/dotenv/blob/v16.4.5/lib/main.js).
+A later refusal restores or holds schedules using the original lifecycle
 receipt and records the failed attempt. Failure publication retains the last
 provider-effect phase. An interruption after input readback remains retryable
 under the original operation once provider observation proves no deployment.
