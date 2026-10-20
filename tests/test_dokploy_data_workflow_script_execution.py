@@ -400,6 +400,7 @@ def _render_script(
         policies=policies or _policies(),
     )
     with (
+        patch("control_plane.dokploy.api._read_schedule_deployments", return_value=[]),
         patch(
             "control_plane.dokploy.api.fetch_dokploy_target_payload",
             return_value={
@@ -485,6 +486,7 @@ def _render_post_deploy_script(
         policies=policies or _policies(),
     )
     with (
+        patch("control_plane.dokploy.api._read_schedule_deployments", return_value=[]),
         patch(
             "control_plane.dokploy.api.fetch_dokploy_target_payload",
             return_value={
