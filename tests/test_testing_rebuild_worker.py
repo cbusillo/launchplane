@@ -355,6 +355,60 @@ class NativeTestingWorkerTests(unittest.TestCase):
             lease_owner="native-worker-fixture",
         )
 
+    def test_capacity_refusal_releases_fresh_reservation_and_preserves_serving_copy(self) -> None:
+        from control_plane.dokploy import native_copy_stream, network_capacity
+        from control_plane.dokploy.network_capacity import (
+            BridgeNetworkCapacity,
+            BridgeNetworkCapacityRefused,
+        )
+        from control_plane import testing_candidate_allocation as allocation_service
+
+        self.operation = self.operation.model_copy(
+            update={"operation_id": self.operation.operation_id + "-capacity"}
+        )
+        self.intent = self.intent.model_copy(update={"operation_id": self.operation.operation_id})
+        self.capture.return_value = self.intent
+        namespace = testing_candidate_namespace(
+            self.operation.product, self.operation.context, self.operation.operation_id
+        )
+        denial = native_copy_stream.NativeSourceAuthorizationDenied("fixture capacity denial")
+        for observation in (BridgeNetworkCapacity(total_slots=0, free_slots=0), denial):
+            with self.subTest(observation=observation):
+                with (
+                    patch.object(
+                        allocation_service, "created_placement", return_value=("", "", "")
+                    ),
+                    patch.object(
+                        network_capacity,
+                        "read_bridge_network_capacity",
+                        return_value=observation,
+                        side_effect=denial if observation is denial else None,
+                    ) as read,
+                    patch.object(allocation_service, "create_isolated_placement") as create,
+                    patch.object(allocation_service, "run_resource_schedule") as storage,
+                    self.assertRaises(
+                        native_copy_stream.NativeSourceAuthorizationDenied
+                        if observation is denial
+                        else BridgeNetworkCapacityRefused
+                    ),
+                ):
+                    self.execute()
+                create.assert_not_called()
+                storage.assert_not_called()
+                self.assertEqual(read.call_args.kwargs["server_id"], self.intent.server_id)
+                self.assertIsNone(self.store.read_testing_candidate(namespace))
+                self.assertFalse(service.native_rebuild_effects_started(self.store, self.operation))
+                self.assertEqual(
+                    self.store.lookup_existing_mutation_reservation(
+                        route_path=REBUILD_ROUTE,
+                        idempotency_key=self.operation.operation_id,
+                        request_fingerprint=self.operation.request_fingerprint,
+                    ).status,
+                    "missing",
+                )
+                self.assertEqual(self.current(), self.fixture.before)
+                self.assertEqual(self.effects, [])
+
     def assert_failed_checkpoint(self, result: Any) -> None:
         from control_plane.testing_rebuild_storage import RecordTestingRebuildStore
 
