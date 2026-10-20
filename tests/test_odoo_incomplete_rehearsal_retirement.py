@@ -68,7 +68,7 @@ class IncompleteRehearsalRetirementTests(unittest.TestCase):
             store=self.store,
             scope=self.fixture.principal + "|incomplete-retirement",
             route_path=ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=self.fixture.product),
-            idempotency_key=self.key,
+            idempotency_key=operation.original_key,
             request_fingerprint=request_fingerprint(
                 {
                     "product": self.fixture.product,
@@ -128,6 +128,8 @@ class IncompleteRehearsalRetirementTests(unittest.TestCase):
             replay = self.run_retirement(operation)
             self.assertEqual(replay.status, "replayed")
             self.assertEqual(replay.response_payload["result"], result)
+            with self.assertRaises(RehearsalRefused):
+                self.run_retirement(self.retirement("different-key-after-retirement"))
             self.assertEqual(host.call_count, count)
         original = self.store.read_idempotency_record(
             scope=self.fixture.principal,

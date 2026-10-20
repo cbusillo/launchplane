@@ -320,7 +320,10 @@ class IncompleteRehearsalRetirement:
         adapter = self.adapter
         record = adapter.store.read_odoo_upgrade_rehearsal(adapter.request.rehearsal_id)
         if record is not None and record.state == "retired":
-            return self.readback()
+            try:
+                return self.readback()
+            except (RehearsalRefused, ValueError) as error:
+                raise ProviderMutationRejectedError(error) from None
         with adapter.store.testing_replacement_execution_lock(
             adapter.request.rehearsal_id
         ) as check:
