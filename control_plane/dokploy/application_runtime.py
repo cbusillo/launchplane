@@ -43,32 +43,40 @@ _DEPLOYMENT_PREFIX = "LAUNCHPLANE_DEPLOYMENT_RECORD_ID="
 
 
 @dataclass(frozen=True)
+class ApplicationTaskObservation:
+    image: str
+    deployment_record_id: str
+    state: str
+
+
+@dataclass(frozen=True)
 class ApplicationRuntimeObservation:
     application_id: str
     app_name: str
-    server_id: str
     service_id: str
-    service_version: int
     service_image: str
     service_deployment_record_id: str
-    service_environment_keys: tuple[str, ...]
     desired_replicas: int
     rollout_state: str
     rollout_started_at: str
-    rollout_completed_at: str
-    running_container_images: tuple[str, ...]
+    running_container_images: tuple[tuple[str, ...], ...]
     running_container_deployment_record_ids: tuple[str, ...]
     running_container_health: tuple[str, ...]
     pending_task_count: int
+    task_evidence_complete: bool = True
+    tasks: tuple[ApplicationTaskObservation, ...] = ()
 
     @property
     def ready(self) -> bool:
         """Process convergence only; callers still prove their expected artifact and health."""
         return (
-            self.desired_replicas > 0
-            and self.rollout_state in {"", "completed"}
+            self.task_evidence_complete
+            and self.desired_replicas > 0
+            and self.rollout_state in {"", "completed", "rollback_completed"}
             and self.pending_task_count == 0
             and len(self.running_container_images) == self.desired_replicas
+            and len(self.running_container_deployment_record_ids) == self.desired_replicas
+            and len(self.running_container_health) == self.desired_replicas
             and all(state in {"", "healthy"} for state in self.running_container_health)
             and bool(self.service_deployment_record_id)
             and all(
@@ -89,7 +97,7 @@ def application_runtime_matches(
         observed.ready
         and _service_image_matches(observed.service_image, artifact_reference, provider_reference)
         and observed.service_deployment_record_id == deployment_record_id
-        and all(image == artifact_reference for image in observed.running_container_images)
+        and all(artifact_reference in images for images in observed.running_container_images)
         and all(
             record_id == deployment_record_id
             for record_id in observed.running_container_deployment_record_ids
@@ -103,6 +111,37 @@ def _service_image_matches(image: str, artifact_reference: str, provider_referen
             image
         ) == docker_image_digest(artifact_reference)
     return image == provider_reference
+
+
+def application_runtime_tasks_failed(
+    observed: ApplicationRuntimeObservation,
+    *,
+    artifact_reference: str,
+    provider_reference: str,
+    deployment_record_id: str,
+) -> bool:
+    """Positive current-attempt task failure; a caller must also prove deadline expiry."""
+    current = [task for task in observed.tasks if task.deployment_record_id == deployment_record_id]
+    return (
+        observed.task_evidence_complete
+        and observed.desired_replicas > 0
+        and observed.rollout_state in {"", "completed"}
+        and observed.service_deployment_record_id == deployment_record_id
+        and _service_image_matches(observed.service_image, artifact_reference, provider_reference)
+        and not observed.running_container_images
+        and bool(current)
+        and all(
+            task.state in {"failed", "rejected"}
+            and _service_image_matches(task.image, artifact_reference, provider_reference)
+            for task in current
+        )
+        and all(
+            task.deployment_record_id
+            and task.image
+            and task.state in {"complete", "shutdown", "failed", "rejected", "remove", "orphaned"}
+            for task in observed.tasks
+        )
+    )
 
 
 def application_runtime_drift_fingerprint(
@@ -146,24 +185,20 @@ def _identifier(value: object) -> str:
     return value
 
 
-def _environment(value: object) -> tuple[tuple[str, ...], str]:
-    if not isinstance(value, list) or any(
-        not isinstance(item, str) or "=" not in item for item in value
-    ):
-        raise DokployEvidenceProviderError("container-config")
-    entries = [item for item in value if isinstance(item, str)]
-    keys = [item.split("=", 1)[0] for item in entries]
-    if len(keys) != len(set(keys)) or any(
-        not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) for key in keys
-    ):
+def _deployment_identity(value: object) -> str:
+    if not isinstance(value, list):
         raise DokployEvidenceProviderError("container-config")
     deployment_ids = [
-        item[len(_DEPLOYMENT_PREFIX) :] for item in entries if item.startswith(_DEPLOYMENT_PREFIX)
+        item[len(_DEPLOYMENT_PREFIX) :]
+        for item in value
+        if isinstance(item, str) and item.startswith(_DEPLOYMENT_PREFIX)
     ]
+    if len(deployment_ids) > 1:
+        raise DokployEvidenceProviderError("container-identity")
     deployment_id = deployment_ids[0] if deployment_ids else ""
     if len(deployment_id) > 500 or any(character.isspace() for character in deployment_id):
         raise DokployEvidenceProviderError("container-identity")
-    return tuple(sorted(keys)), deployment_id
+    return deployment_id
 
 
 def _repository(reference: str) -> str:
@@ -221,14 +256,21 @@ def _fetch_application_runtime(
     query: dict[str, str | int] = {"serverId": server_id} if server_id else {}
 
     def inspect(identifier: str) -> dict[str, object]:
-        return _object(
-            api.dokploy_request(
-                host=host,
-                token=token,
-                path="/api/docker.getConfig",
-                query={**query, "containerId": identifier},
-            )
+        raw = api.dokploy_request(
+            host=host,
+            token=token,
+            path="/api/docker.getConfig",
+            query={**query, "containerId": identifier},
         )
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except ValueError:
+                raise DokployEvidenceProviderError("container-config") from None
+        normalized = api.as_json_object(raw)
+        if normalized is None and isinstance(raw, list) and len(raw) == 1:
+            normalized = api.as_json_object(raw[0])
+        return _object(normalized)
 
     service = inspect(app_name)
     service_id = _identifier(service.get("ID"))
@@ -240,7 +282,7 @@ def _fetch_application_runtime(
         raise DokployEvidenceProviderError("container-identity")
     container_spec = _object(_object(spec.get("TaskTemplate")).get("ContainerSpec"))
     service_image = _image(container_spec.get("Image"))
-    environment_keys, deployment_id = _environment(container_spec.get("Env"))
+    deployment_id = _deployment_identity(container_spec.get("Env"))
     replicas = _object(_object(spec.get("Mode")).get("Replicated")).get("Replicas")
     if type(replicas) is not int or replicas < 0:
         raise DokployEvidenceProviderError("container-config")
@@ -269,111 +311,127 @@ def _fetch_application_runtime(
                     raise ValueError("Rollout timestamps are out of order.")
         except ValueError:
             raise DokployEvidenceProviderError("container-config") from None
-    tasks = api.dokploy_request(
-        host=host,
-        token=token,
-        path="/api/docker.getServiceContainersByAppName",
-        query={**query, "appName": app_name},
-    )
-    if not isinstance(tasks, list) or not tasks:
-        raise DokployEvidenceProviderError("container-list")
-    task_ids = [_identifier(_object(row).get("containerId")) for row in tasks]
-    if len(task_ids) != len(set(task_ids)):
-        raise DokployEvidenceProviderError("container-identity")
-    images: list[str] = []
+    images: list[tuple[str, ...]] = []
     record_ids: list[str] = []
     health: list[str] = []
     pending = 0
     containers: set[str] = set()
-    for task_id in task_ids:
-        task = inspect(task_id)
-        if task.get("ID") != task_id or task.get("ServiceID") != service_id:
-            raise DokployEvidenceProviderError("container-identity")
-        desired = task.get("DesiredState")
-        status = _object(task.get("Status"))
-        state = status.get("State")
-        if (
-            not isinstance(desired, str)
-            or desired not in _TASK_STATES
-            or not isinstance(state, str)
-            or state not in _TASK_STATES
-        ):
-            raise DokployEvidenceProviderError("container-config")
-        if state != "running":
-            pending += desired == "running"
-            continue
-        node_id = _identifier(task.get("NodeID"))
-        container_id = _object(status.get("ContainerStatus")).get("ContainerID")
-        if (
-            not isinstance(container_id, str)
-            or not _CONTAINER_ID.fullmatch(container_id)
-            or container_id in containers
-        ):
-            raise DokployEvidenceProviderError("container-identity")
-        containers.add(container_id)
-        container = inspect(container_id)
-        config = _object(container.get("Config"))
-        labels = _object(config.get("Labels"))
-        expected_labels = {
-            "com.docker.swarm.service.id": service_id,
-            "com.docker.swarm.service.name": app_name,
-            "com.docker.swarm.task.id": task_id,
-            "com.docker.swarm.node.id": node_id,
-        }
-        if container.get("Id") != container_id or any(
-            labels.get(key) != value for key, value in expected_labels.items()
-        ):
-            raise DokployEvidenceProviderError("container-identity")
-        container_state = _object(container.get("State"))
-        if type(container_state.get("Running")) is not bool:
-            raise DokployEvidenceProviderError("container-config")
-        if (
-            not container_state["Running"]
-            or container_state.get("Paused")
-            or container_state.get("Restarting")
-        ):
-            pending += 1
-            continue
-        task_image = _image(_object(_object(task.get("Spec")).get("ContainerSpec")).get("Image"))
-        configured_image = _image(config.get("Image"))
-        if _repository(task_image) != _repository(configured_image):
-            raise DokployEvidenceProviderError("image-identity")
-        image_id = container.get("Image")
-        if not isinstance(image_id, str) or not _IMAGE_ID.fullmatch(image_id):
-            raise DokployEvidenceProviderError("image-identity")
-        image = inspect(image_id.removeprefix("sha256:"))
-        digests = image.get("RepoDigests")
-        if image.get("Id") != image_id or not isinstance(digests, list):
-            raise DokployEvidenceProviderError("image-identity")
-        matching = {
-            value
-            for value in digests
-            if isinstance(value, str)
-            and _repository(value) == _repository(configured_image)
-            and docker_image_digest(value)
-        }
-        if len(matching) != 1:
-            raise DokployEvidenceProviderError("image-identity")
-        immutable_image = matching.pop()
-        for reference in (task_image, configured_image):
-            if "@" in reference and docker_image_digest(reference) != docker_image_digest(
-                immutable_image
-            ):
-                raise DokployEvidenceProviderError("image-identity")
-        _, record_id = _environment(config.get("Env"))
-        health_status = (
-            _object(container_state["Health"]).get("Status") if "Health" in container_state else ""
+    task_observations: list[ApplicationTaskObservation] = []
+    task_evidence_complete = True
+    try:
+        tasks = api.dokploy_request(
+            host=host,
+            token=token,
+            path="/api/docker.getServiceContainersByAppName",
+            query={**query, "appName": app_name},
         )
-        if not isinstance(health_status, str) or health_status not in {
-            "",
-            "starting",
-            "healthy",
-            "unhealthy",
-        }:
-            raise DokployEvidenceProviderError("container-config")
-        images.append(immutable_image)
-        record_ids.append(record_id)
-        health.append(str(health_status))
+        if not isinstance(tasks, list) or not tasks:
+            raise DokployEvidenceProviderError("container-list")
+        task_ids = [_identifier(_object(row).get("containerId")) for row in tasks]
+        if len(task_ids) != len(set(task_ids)):
+            raise DokployEvidenceProviderError("container-identity")
+        for task_id in task_ids:
+            task = inspect(task_id)
+            if task.get("ID") != task_id or task.get("ServiceID") != service_id:
+                raise DokployEvidenceProviderError("container-identity")
+            desired = task.get("DesiredState")
+            status = _object(task.get("Status"))
+            state = status.get("State")
+            if (
+                not isinstance(desired, str)
+                or desired not in _TASK_STATES
+                or not isinstance(state, str)
+                or state not in _TASK_STATES
+            ):
+                raise DokployEvidenceProviderError("container-config")
+            try:
+                task_spec = _object(_object(task.get("Spec")).get("ContainerSpec"))
+                task_image = _image(task_spec.get("Image"))
+                task_record_id = _deployment_identity(task_spec.get("Env"))
+            except DokployEvidenceProviderError:
+                task_image, task_record_id = "", ""
+            task_observations.append(ApplicationTaskObservation(task_image, task_record_id, state))
+            if state != "running":
+                pending += desired == "running"
+                continue
+            node_id = _identifier(task.get("NodeID"))
+            container_id = _object(status.get("ContainerStatus")).get("ContainerID")
+            if (
+                not isinstance(container_id, str)
+                or not _CONTAINER_ID.fullmatch(container_id)
+                or container_id in containers
+            ):
+                raise DokployEvidenceProviderError("container-identity")
+            containers.add(container_id)
+            container = inspect(container_id)
+            config = _object(container.get("Config"))
+            labels = _object(config.get("Labels"))
+            expected_labels = {
+                "com.docker.swarm.service.id": service_id,
+                "com.docker.swarm.service.name": app_name,
+                "com.docker.swarm.task.id": task_id,
+                "com.docker.swarm.node.id": node_id,
+            }
+            if container.get("Id") != container_id or any(
+                labels.get(key) != value for key, value in expected_labels.items()
+            ):
+                raise DokployEvidenceProviderError("container-identity")
+            container_state = _object(container.get("State"))
+            if type(container_state.get("Running")) is not bool:
+                raise DokployEvidenceProviderError("container-config")
+            if (
+                not container_state["Running"]
+                or container_state.get("Paused")
+                or container_state.get("Restarting")
+            ):
+                pending += 1
+                continue
+            task_image = _image(
+                _object(_object(task.get("Spec")).get("ContainerSpec")).get("Image")
+            )
+            configured_image = _image(config.get("Image"))
+            if _repository(task_image) != _repository(configured_image):
+                raise DokployEvidenceProviderError("image-identity")
+            image_id = container.get("Image")
+            if not isinstance(image_id, str) or not _IMAGE_ID.fullmatch(image_id):
+                raise DokployEvidenceProviderError("image-identity")
+            image = inspect(image_id.removeprefix("sha256:"))
+            digests = image.get("RepoDigests")
+            if image.get("Id") != image_id or not isinstance(digests, list):
+                raise DokployEvidenceProviderError("image-identity")
+            matching = {
+                f"{_repository(value)}@{docker_image_digest(value)}"
+                for value in digests
+                if isinstance(value, str)
+                and _repository(value) == _repository(configured_image)
+                and docker_image_digest(value)
+            }
+            if not matching:
+                raise DokployEvidenceProviderError("image-identity")
+            for reference in (task_image, configured_image):
+                if "@" in reference and not any(
+                    docker_image_digest(reference) == docker_image_digest(candidate)
+                    for candidate in matching
+                ):
+                    raise DokployEvidenceProviderError("image-identity")
+            record_id = _deployment_identity(config.get("Env"))
+            health_status = (
+                _object(container_state["Health"]).get("Status")
+                if "Health" in container_state
+                else ""
+            )
+            if not isinstance(health_status, str) or health_status not in {
+                "",
+                "starting",
+                "healthy",
+                "unhealthy",
+            }:
+                raise DokployEvidenceProviderError("container-config")
+            images.append(tuple(sorted(matching)))
+            record_ids.append(record_id)
+            health.append(str(health_status))
+    except (DokployEvidenceProviderError, click.ClickException, ValueError):
+        task_evidence_complete = False
     if inspect(app_name) != service:
         raise DokployEvidenceProviderError("target-inspect")
     current_target = api.fetch_dokploy_target_payload(
@@ -390,18 +448,16 @@ def _fetch_application_runtime(
     return ApplicationRuntimeObservation(
         application_id=application_id,
         app_name=app_name,
-        server_id=server_id,
         service_id=service_id,
-        service_version=version,
         service_image=service_image,
         service_deployment_record_id=deployment_id,
-        service_environment_keys=environment_keys,
         desired_replicas=replicas,
         rollout_state=rollout_state,
         rollout_started_at=started_at,
-        rollout_completed_at=completed_at,
         running_container_images=tuple(images),
         running_container_deployment_record_ids=tuple(record_ids),
         running_container_health=tuple(health),
         pending_task_count=pending,
+        task_evidence_complete=task_evidence_complete,
+        tasks=tuple(task_observations),
     )

@@ -50,6 +50,7 @@ from control_plane.dokploy import source as dokploy_source
 from control_plane.dokploy.application_runtime import (
     ApplicationRuntimeObservation,
     application_runtime_matches,
+    application_runtime_tasks_failed,
     fetch_application_runtime,
 )
 
@@ -632,26 +633,32 @@ def qualify_testing_application_observation(
     observation: GenericWebProviderDeploymentObservation,
     deployment_record_id: str,
     wait: bool = False,
+    deadline: float | None = None,
 ) -> GenericWebProviderDeploymentObservation:
     """A provider job is insufficient proof of application testing convergence."""
     if (
         target.ship_request.instance != "testing"
         or target.resolved_target.target_type != "application"
-        or not target.testing_runtime_digest
         or observation.outcome != "present"
         or not generic_web_provider_deployment_succeeded(observation.deployment_status)
     ):
         return observation
     if not isinstance(provider, GenericWebTestingApplicationRuntimeProvider):
         return GenericWebProviderDeploymentObservation(outcome="unknown")
-    deadline = monotonic() + (target.deploy_timeout_seconds if wait else 0)
+    if wait and deadline is None:
+        deadline = monotonic() + target.deploy_timeout_seconds
     while True:
+        runtime = None
         try:
             runtime = provider.observe_testing_application_runtime(
                 control_plane_root=control_plane_root,
                 target_id=target.resolved_target.target_id,
             )
-            if application_runtime_matches(
+            if runtime.application_id != target.resolved_target.target_id:
+                raise ValueError("Runtime observation belongs to another target.")
+            if (
+                not wait or deadline is None or monotonic() < deadline
+            ) and application_runtime_matches(
                 runtime,
                 artifact_reference=target.ship_request.artifact_id,
                 provider_reference=dokploy_deploy_artifact_reference(
@@ -682,9 +689,30 @@ def qualify_testing_application_observation(
                         }
                     )
         except (ValueError, RuntimeError, click.ClickException):
-            return GenericWebProviderDeploymentObservation(outcome="unknown")
-        remaining = deadline - monotonic()
+            runtime = None
+        remaining = deadline - monotonic() if deadline is not None else 0
         if not wait or remaining <= 0:
+            if (
+                wait
+                and runtime is not None
+                and application_runtime_tasks_failed(
+                    runtime,
+                    artifact_reference=target.ship_request.artifact_id,
+                    provider_reference=dokploy_deploy_artifact_reference(
+                        ship_request=target.ship_request, target_type="application"
+                    ),
+                    deployment_record_id=deployment_record_id,
+                )
+            ):
+                return observation.model_copy(
+                    update={
+                        "deployment_status": "unhealthy",
+                        "error_message": (
+                            "Application testing current-attempt tasks failed at the original "
+                            f"deployment deadline; provider job status={observation.deployment_status}."
+                        ),
+                    }
+                )
             return GenericWebProviderDeploymentObservation(outcome="unknown")
         sleep(min(1.0, remaining))
 

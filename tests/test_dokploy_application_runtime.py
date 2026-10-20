@@ -1,6 +1,7 @@
 from copy import deepcopy
 from dataclasses import asdict, replace
 from pathlib import Path
+import json
 import unittest
 from unittest.mock import patch
 
@@ -9,9 +10,17 @@ import click
 from control_plane.dokploy.application_runtime import (
     ApplicationRuntimeObservation,
     application_runtime_drift_fingerprint,
+    application_runtime_matches,
     fetch_application_runtime,
 )
 from control_plane.dokploy.runtime_evidence import DokployEvidenceProviderError
+
+
+from control_plane.contracts.ship_request import ShipRequest
+from control_plane.contracts.deployment_record import ResolvedTargetEvidence
+from control_plane.workflows.generic_web_deploy_provider import (
+    GenericWebResolvedDeployTarget,
+)
 
 
 _IMAGE_ID = "sha256:" + "b" * 64
@@ -20,6 +29,30 @@ _DIGEST = "sha256:" + "d" * 64
 _REPOSITORY = "ghcr.io/example/application"
 _IMAGE = f"{_REPOSITORY}@{_DIGEST}"
 _TAG = f"{_REPOSITORY}:sha-{'a' * 40}"
+
+
+def _application_target() -> GenericWebResolvedDeployTarget:
+    return GenericWebResolvedDeployTarget(
+        ship_request=ShipRequest(
+            artifact_id=_IMAGE,
+            deploy_reference=_TAG,
+            context="fixture",
+            instance="testing",
+            source_git_ref="a" * 40,
+            target_name="fixture-app",
+            target_type="application",
+            provider_id="dokploy",
+            target_category="application",
+            provider_target_type="application",
+            deploy_mode="application",
+        ),
+        resolved_target=ResolvedTargetEvidence(
+            target_type="application",
+            target_id="application-1",
+            target_name="fixture-app",
+        ),
+        deploy_timeout_seconds=10,
+    )
 
 
 class DokployApplicationRuntimeTests(unittest.TestCase):
@@ -83,6 +116,9 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
         self.image: dict[str, object] = {"Id": _IMAGE_ID, "RepoDigests": [_IMAGE]}
         self.extra_inspections: dict[str, dict[str, object]] = {}
         self.requests: list[dict[str, object]] = []
+        self.inspect_shape = "object"
+        self.final_target: dict[str, object] | None = None
+        self.vanished_tasks: set[str] = set()
 
     def read(self) -> ApplicationRuntimeObservation:
         def request(**kwargs: object) -> object:
@@ -95,7 +131,9 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
                 return deepcopy(self.tasks)
             self.assertEqual(kwargs["path"], "/api/docker.getConfig")
             identifier = query["containerId"]
-            return deepcopy(
+            if identifier in self.vanished_tasks:
+                raise click.ClickException("fixture task reaped")
+            result = deepcopy(
                 {
                     "fixture-app": self.service,
                     "task-1": self.task,
@@ -104,10 +142,16 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
                     **self.extra_inspections,
                 }[identifier]
             )
+            if self.inspect_shape == "json":
+                return json.dumps(result)
+            if self.inspect_shape == "list":
+                return [result]
+            return result
 
         with (
             patch(
-                "control_plane.dokploy.api.fetch_dokploy_target_payload", return_value=self.target
+                "control_plane.dokploy.api.fetch_dokploy_target_payload",
+                side_effect=[self.target, self.final_target or self.target],
             ),
             patch("control_plane.dokploy.api.dokploy_request", side_effect=request),
         ):
@@ -121,9 +165,8 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
         observed = self.read()
         assert isinstance(observed, ApplicationRuntimeObservation)
         self.assertTrue(observed.ready)
-        self.assertEqual(observed.running_container_images, (_IMAGE,))
+        self.assertEqual(observed.running_container_images, ((_IMAGE,),))
         self.assertEqual(observed.running_container_deployment_record_ids, ("deployment-1",))
-        self.assertIn("APP_TOKEN", observed.service_environment_keys)
         self.assertNotIn("do-not-expose", repr(observed))
         self.assertNotIn("do-not-expose", str(asdict(observed)))
         self.assertEqual(
@@ -139,6 +182,101 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
         self.assertEqual(
             getattr(observed, "running_container_deployment_record_ids"), ("old-deployment",)
         )
+
+    def test_provider_inspect_response_shapes_share_the_supported_contract(self) -> None:
+        for shape in ("object", "json", "list"):
+            with self.subTest(shape=shape):
+                self.inspect_shape = shape
+                self.assertTrue(self.read().ready)
+
+    def test_target_placement_must_still_match_after_runtime_inspection(self) -> None:
+        for key in ("applicationId", "appName", "serverId"):
+            with self.subTest(key=key):
+                self.final_target = {**self.target, key: "other-target"}
+                with self.assertRaises(DokployEvidenceProviderError):
+                    self.read()
+
+    def test_reaped_history_preserves_stable_drift_without_proving_convergence(self) -> None:
+        self.tasks.append({"containerId": "old-task"})
+        self.vanished_tasks.add("old-task")
+        observed = self.read()
+        self.assertFalse(observed.task_evidence_complete)
+        self.assertFalse(observed.ready)
+        self.assertTrue(
+            application_runtime_drift_fingerprint(
+                observed,
+                artifact_reference=_IMAGE,
+                provider_reference=_TAG,
+                deployment_record_id="next-deployment",
+            )
+        )
+        self.assertFalse(
+            application_runtime_matches(
+                observed,
+                artifact_reference=_IMAGE,
+                provider_reference=_TAG,
+                deployment_record_id="deployment-1",
+            )
+        )
+
+    def test_completed_rollback_can_match_its_healthy_original_baseline(self) -> None:
+        rollout = self.service["UpdateStatus"]
+        assert isinstance(rollout, dict)
+        rollout["State"] = "rollback_completed"
+        observed = self.read()
+        self.assertTrue(
+            application_runtime_matches(
+                observed,
+                artifact_reference=_IMAGE,
+                provider_reference=_TAG,
+                deployment_record_id="deployment-1",
+            )
+        )
+        self.assertFalse(
+            application_runtime_matches(
+                observed,
+                artifact_reference=_IMAGE,
+                provider_reference=_TAG,
+                deployment_record_id="failed-new-deployment",
+            )
+        )
+
+    def test_multiple_repository_digests_qualify_only_expected_members(self) -> None:
+        other = f"{_REPOSITORY}@sha256:{'e' * 64}"
+        self.image["RepoDigests"] = [other, _IMAGE]
+        observed = self.read()
+        self.assertTrue(
+            application_runtime_matches(
+                observed,
+                artifact_reference=_IMAGE,
+                provider_reference=_TAG,
+                deployment_record_id="deployment-1",
+            )
+        )
+        self.image["RepoDigests"] = [other]
+        self.assertFalse(
+            application_runtime_matches(
+                self.read(),
+                artifact_reference=_IMAGE,
+                provider_reference=_TAG,
+                deployment_record_id="deployment-1",
+            )
+        )
+
+    def test_only_reserved_environment_identity_is_validated(self) -> None:
+        config = self.container["Config"]
+        assert isinstance(config, dict)
+        environment = [
+            "LAUNCHPLANE_DEPLOYMENT_RECORD_ID=deployment-1",
+            "dotted.key=fixture",
+            "dotted.key=other",
+            "no-value",
+            None,
+        ]
+        config["Env"] = environment
+        self.assertTrue(self.read().ready)
+        environment.append("LAUNCHPLANE_DEPLOYMENT_RECORD_ID=deployment-1")
+        self.assertFalse(self.read().task_evidence_complete)
 
     def test_shutdown_desired_task_still_running_keeps_rollout_unready(self) -> None:
         old_id = "e" * 64
@@ -166,7 +304,6 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
             "paused",
             "rollback_started",
             "rollback_paused",
-            "rollback_completed",
         ):
             with self.subTest(state=state):
                 rollout["State"] = state
@@ -207,7 +344,6 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
             ("container", "Image", "not-image-id"),
             ("image", "Id", "sha256:" + "e" * 64),
             ("image", "RepoDigests", ["ghcr.io/other/application@" + _DIGEST]),
-            ("image", "RepoDigests", [_IMAGE, f"{_REPOSITORY}@sha256:{'e' * 64}"]),
         )
         for name, key, value in cases:
             with self.subTest(name=name, key=key, value=value):
@@ -215,16 +351,20 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
                 original = deepcopy(mapping)
                 mapping[key] = value
                 try:
-                    with self.assertRaises(DokployEvidenceProviderError):
-                        self.read()
+                    if name in {"task", "container", "image"}:
+                        observation = self.read()
+                        self.assertFalse(observation.task_evidence_complete)
+                        self.assertFalse(observation.ready)
+                    else:
+                        with self.assertRaises(DokployEvidenceProviderError):
+                            self.read()
                 finally:
                     mapping.clear()
                     mapping.update(original)
 
     def test_pinned_task_image_must_agree_with_inspected_image(self) -> None:
         self.task["Spec"] = {"ContainerSpec": {"Image": f"{_REPOSITORY}@sha256:{'f' * 64}"}}
-        with self.assertRaises(DokployEvidenceProviderError):
-            self.read()
+        self.assertFalse(self.read().task_evidence_complete)
 
     def test_all_container_membership_labels_must_match(self) -> None:
         config = self.container["Config"]
@@ -235,8 +375,8 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
             old = labels[key]
             labels[key] = "foreign"
             try:
-                with self.subTest(label=key), self.assertRaises(DokployEvidenceProviderError):
-                    self.read()
+                with self.subTest(label=key):
+                    self.assertFalse(self.read().task_evidence_complete)
             finally:
                 labels[key] = old
 
@@ -245,8 +385,7 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
         for tasks in cases:
             with self.subTest(tasks=tasks):
                 self.tasks = tasks
-                with self.assertRaises(DokployEvidenceProviderError):
-                    self.read()
+                self.assertFalse(self.read().task_evidence_complete)
 
     def test_provider_errors_are_bounded(self) -> None:
         with (
@@ -274,9 +413,7 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
 
         first = fingerprint(observed)
         self.assertTrue(first)
-        churned = replace(
-            observed, service_version=9, running_container_images=(), pending_task_count=1
-        )
+        churned = replace(observed, running_container_images=(), pending_task_count=1)
         self.assertEqual(fingerprint(churned), first)
         self.assertFalse(fingerprint(replace(observed, rollout_state="updating")))
 
@@ -286,14 +423,9 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
             GenericWebProviderDeploymentObservation,
             qualify_testing_application_observation,
         )
-        from tests.test_generic_web_deploy_recovery import _generic_web_recovery_target
 
         observed = self.read()
-        target = _generic_web_recovery_target().model_copy(
-            update={"testing_runtime_digest": "fixture-digest"}
-        )
-        target.ship_request.artifact_id = _IMAGE
-        target.ship_request.deploy_reference = _TAG
+        target = _application_target()
         provider = DokployGenericWebDeployProvider()
         job = GenericWebProviderDeploymentObservation(
             outcome="present",
@@ -303,7 +435,9 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
             finished_at="2026-10-20T03:08:25Z",
         )
 
-        def qualify(*, wait: bool = False) -> GenericWebProviderDeploymentObservation:
+        def qualify(
+            *, wait: bool = False, deadline: float | None = None
+        ) -> GenericWebProviderDeploymentObservation:
             return qualify_testing_application_observation(
                 provider=provider,
                 control_plane_root=Path("."),
@@ -311,9 +445,10 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
                 observation=job,
                 deployment_record_id="deployment-1",
                 wait=wait,
+                deadline=deadline,
             )
 
-        pending = replace(observed, rollout_state="updating", rollout_completed_at="")
+        pending = replace(observed, rollout_state="updating")
         with patch.object(provider, "observe_testing_application_runtime", return_value=pending):
             self.assertEqual(qualify().outcome, "unknown")
         with (
@@ -323,7 +458,48 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
             patch("control_plane.workflows.generic_web_deploy_provider.sleep"),
         ):
             self.assertEqual(qualify(wait=True), job)
-        rollback = replace(observed, rollout_state="rollback_completed")
+        with (
+            patch.object(
+                provider,
+                "observe_testing_application_runtime",
+                side_effect=[DokployEvidenceProviderError("target-inspect"), observed],
+            ) as reader,
+            patch("control_plane.workflows.generic_web_deploy_provider.sleep"),
+        ):
+            self.assertEqual(qualify(wait=True), job)
+            self.assertEqual(reader.call_count, 2)
+        with patch.object(
+            provider,
+            "observe_testing_application_runtime",
+            side_effect=DokployEvidenceProviderError("target-inspect"),
+        ) as reader:
+            self.assertEqual(qualify().outcome, "unknown")
+            reader.assert_called_once()
+        with (
+            patch.object(
+                provider, "observe_testing_application_runtime", return_value=pending
+            ) as reader,
+            patch(
+                "control_plane.workflows.generic_web_deploy_provider.monotonic", return_value=10.0
+            ),
+            patch("control_plane.workflows.generic_web_deploy_provider.sleep") as sleeper,
+        ):
+            self.assertEqual(qualify(wait=True, deadline=10.0).outcome, "unknown")
+            reader.assert_called_once()
+            sleeper.assert_not_called()
+        with patch.object(
+            provider,
+            "observe_testing_application_runtime",
+            return_value=replace(observed, application_id="foreign"),
+        ):
+            self.assertEqual(qualify().outcome, "unknown")
+        rollback = replace(
+            observed,
+            rollout_state="rollback_completed",
+            service_deployment_record_id="prior-deployment",
+            running_container_deployment_record_ids=("prior-deployment",),
+        )
+        target.testing_runtime_digest = ""
         with patch.object(provider, "observe_testing_application_runtime", return_value=rollback):
             failed = qualify()
         self.assertEqual(failed.deployment_status, "unhealthy")
@@ -337,3 +513,75 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
             ),
         ):
             self.assertEqual(qualify().outcome, "unknown")
+
+    def test_initial_service_terminal_tasks_prove_failure_only_at_original_deadline(self) -> None:
+        from control_plane.workflows.generic_web_deploy_provider import (
+            DokployGenericWebDeployProvider,
+            GenericWebProviderDeploymentObservation,
+            qualify_testing_application_observation,
+        )
+
+        self.service.pop("UpdateStatus")
+        self.task["Status"] = {"State": "failed"}
+        self.task["DesiredState"] = "shutdown"
+        self.task["Spec"] = {
+            "ContainerSpec": {
+                "Image": _IMAGE,
+                "Env": ["LAUNCHPLANE_DEPLOYMENT_RECORD_ID=deployment-1"],
+            }
+        }
+        target = _application_target()
+        provider = DokployGenericWebDeployProvider()
+        job = GenericWebProviderDeploymentObservation(
+            outcome="present",
+            deployment_status="done",
+            deployment_id="job-1",
+            started_at="2026-10-20T03:08:20Z",
+            finished_at="2026-10-20T03:08:25Z",
+        )
+
+        def qualify(*, wait: bool) -> GenericWebProviderDeploymentObservation:
+            with (
+                patch.object(
+                    provider, "observe_testing_application_runtime", return_value=self.read()
+                ),
+                patch(
+                    "control_plane.workflows.generic_web_deploy_provider.monotonic",
+                    return_value=10.0,
+                ),
+                patch("control_plane.workflows.generic_web_deploy_provider.sleep") as sleeper,
+            ):
+                result = qualify_testing_application_observation(
+                    provider=provider,
+                    control_plane_root=Path("."),
+                    target=target,
+                    observation=job,
+                    deployment_record_id="deployment-1",
+                    wait=wait,
+                    deadline=10.0 if wait else None,
+                )
+                sleeper.assert_not_called()
+                return result
+
+        self.assertEqual(qualify(wait=True).deployment_status, "unhealthy")
+        self.assertEqual(qualify(wait=False).outcome, "unknown")
+        original_spec = deepcopy(self.task["Spec"])
+        for state in ("rejected",):
+            self.task["Status"] = {"State": state}
+            self.assertEqual(qualify(wait=True).deployment_status, "unhealthy")
+        for state in ("starting", "shutdown"):
+            self.task["Status"] = {"State": state}
+            self.assertEqual(qualify(wait=True).outcome, "unknown")
+        self.task["Status"] = {"State": "failed"}
+        for spec in (
+            {},
+            {"Image": _IMAGE},
+            {"Image": _IMAGE, "Env": ["LAUNCHPLANE_DEPLOYMENT_RECORD_ID=older"]},
+        ):
+            with self.subTest(spec=spec):
+                self.task["Spec"] = {"ContainerSpec": spec}
+                self.assertEqual(qualify(wait=True).outcome, "unknown")
+        self.task["Spec"] = original_spec
+        self.tasks.append({"containerId": "old-task"})
+        self.vanished_tasks.add("old-task")
+        self.assertEqual(qualify(wait=True).outcome, "unknown")

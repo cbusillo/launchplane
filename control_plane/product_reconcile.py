@@ -13,6 +13,7 @@ from __future__ import annotations
 from control_plane.workflows.generic_web_post_deploy import declares_verireel_testing_extension
 
 from control_plane.event_testing_deploy import event_testing_deploy_request
+from control_plane.drivers.generic_web_dispatch import GenericWebDeployEnvelope
 from control_plane.testing_event_deploy_recovery import testing_event_execution_lock_name
 from control_plane.lane_movement import (
     LANE_MOVEMENT_REFUSALS,
@@ -523,7 +524,24 @@ def reconcile_testing_target(
 
         lane = next(lane for lane in profile.lanes if lane.instance == TESTING_INSTANCE)
         delivery_digest = testing_input_authority(record_store, profile, lane)
-        if delivery_digest:
+        try:
+            target = record_store.read_dokploy_target_record(
+                context_name=lane.context, instance_name=lane.instance
+            )
+        except FileNotFoundError:
+            target = None
+        if target is not None and target.target_type == "application":
+            hold = read_staff_testing_hold(record_store=record_store, context=lane.context)
+            if hold is not None:
+                plan.update(
+                    action="wait",
+                    held=True,
+                    reason=STAFF_TESTING_HOLD_REASON,
+                    hold_reason=hold.reason,
+                    hold_recorded_by=hold.recorded_by,
+                    hold_recorded_at=hold.recorded_at,
+                )
+                return ReconcileOutcome(plan)
             try:
                 deployed = cast(GenericWebDeployStore, record_store).read_deployment_record(
                     _current_testing_deployment_id(record_store=record_store, lane=lane)
@@ -533,63 +551,72 @@ def reconcile_testing_target(
             if (
                 deployed is None
                 or deployed.deploy.status != "pass"
-                or deployed.runtime_source.get(DELIVERY_RECEIPT_KEY) != delivery_digest
+                or (
+                    delivery_digest
+                    and deployed.runtime_source.get(DELIVERY_RECEIPT_KEY) != delivery_digest
+                )
             ):
                 plan.update(action="deploy", reason="testing_runtime_inputs_missing")
-            elif control_plane_root is not None:
+            else:
                 from control_plane.dokploy.application_runtime import (
                     application_runtime_drift_fingerprint,
                     application_runtime_matches,
                 )
+                from control_plane.contracts.deploy_reference import provider_image_reference
                 from control_plane.workflows.generic_web_deploy_provider import (
                     GenericWebTestingApplicationRuntimeProvider,
                 )
 
-                provider = (
-                    default_generic_web_deploy_provider(
-                        record_store=record_store, control_plane_root=control_plane_root
+                matches, drift = False, ""
+                if control_plane_root is not None:
+                    provider = (
+                        default_generic_web_deploy_provider(
+                            record_store=record_store, control_plane_root=control_plane_root
+                        )
+                        if testing_hooks.generic_web_deploy_provider is None
+                        else testing_hooks.generic_web_deploy_provider()
                     )
-                    if testing_hooks.generic_web_deploy_provider is None
-                    else testing_hooks.generic_web_deploy_provider()
-                )
-                if isinstance(provider, GenericWebTestingApplicationRuntimeProvider):
-                    try:
-                        binding = cast(
-                            _TestingLaneAuthorityStore, record_store
-                        ).read_dokploy_target_id_record(
-                            context_name=lane.context, instance_name=lane.instance
-                        )
-                        runtime = provider.observe_testing_application_runtime(
-                            control_plane_root=control_plane_root,
-                            target_id=binding.target_id,
-                        )
-                        provider_reference = f"{desired.manifest.image.repository}:sha-{desired.manifest.source_commit}"
-                        matches = application_runtime_matches(
-                            runtime,
-                            artifact_reference=desired.image_reference,
-                            provider_reference=provider_reference,
-                            deployment_record_id=deployed.record_id,
-                        )
-                        drift = application_runtime_drift_fingerprint(
-                            runtime,
-                            artifact_reference=desired.image_reference,
-                            provider_reference=provider_reference,
-                            deployment_record_id=deployed.record_id,
-                        )
-                    except (ValueError, RuntimeError, FileNotFoundError, click.ClickException):
-                        matches, drift = False, ""
-                    if not matches:
-                        if not drift:
-                            plan.update(action="wait", reason="testing_runtime_unverified")
-                            return ReconcileOutcome(plan, deferred=True)
-                        plan.update(
-                            action="deploy",
-                            reason="testing_runtime_drift",
-                            testing_runtime_drift_sha256=drift,
-                        )
-                else:
-                    plan.update(action="wait", reason="testing_runtime_unverified")
-                    return ReconcileOutcome(plan, deferred=True)
+                    if isinstance(provider, GenericWebTestingApplicationRuntimeProvider):
+                        try:
+                            binding = cast(
+                                _TestingLaneAuthorityStore, record_store
+                            ).read_dokploy_target_id_record(
+                                context_name=lane.context, instance_name=lane.instance
+                            )
+                            runtime = provider.observe_testing_application_runtime(
+                                control_plane_root=control_plane_root,
+                                target_id=binding.target_id,
+                            )
+                            testing_envelope = _generic_web_testing_deploy_request(profile, desired)
+                            provider_reference = provider_image_reference(
+                                artifact_id=testing_envelope.deploy.artifact_id,
+                                deploy_reference=testing_envelope.deploy.deploy_reference,
+                            )
+                            if runtime.application_id != binding.target_id:
+                                raise ValueError("Runtime observation belongs to another target.")
+                            matches = application_runtime_matches(
+                                runtime,
+                                artifact_reference=desired.image_reference,
+                                provider_reference=provider_reference,
+                                deployment_record_id=deployed.record_id,
+                            )
+                            drift = application_runtime_drift_fingerprint(
+                                runtime,
+                                artifact_reference=desired.image_reference,
+                                provider_reference=provider_reference,
+                                deployment_record_id=deployed.record_id,
+                            )
+                        except (ValueError, RuntimeError, FileNotFoundError, click.ClickException):
+                            matches, drift = False, ""
+                if not matches:
+                    if not drift:
+                        plan.update(action="wait", reason="testing_runtime_unverified")
+                        return ReconcileOutcome(plan, deferred=True)
+                    plan.update(
+                        action="deploy",
+                        reason="testing_runtime_drift",
+                        testing_runtime_drift_sha256=drift,
+                    )
     if (
         isinstance(desired, VerifiedGenericWebBuild)
         and declares_verireel_testing_extension(profile, instance=TESTING_INSTANCE)
@@ -814,6 +841,17 @@ def reconcile_testing_target(
     return ReconcileOutcome(plan)
 
 
+def _generic_web_testing_deploy_request(
+    profile: LaunchplaneProductProfileRecord, desired: VerifiedGenericWebBuild
+) -> GenericWebDeployEnvelope:
+    return event_testing_deploy_request(
+        product=profile.product,
+        image_reference=desired.image_reference,
+        source_commit=desired.manifest.source_commit,
+        deploy_reference=f"{desired.manifest.image.repository}:sha-{desired.manifest.source_commit}",
+    )
+
+
 def _deploy_generic_web_testing(
     *,
     record_store: ProductReconcileStore,
@@ -858,12 +896,7 @@ def _deploy_generic_web_testing(
             hold_recorded_at=hold.recorded_at,
         )
         return ReconcileOutcome(plan)
-    envelope = event_testing_deploy_request(
-        product=profile.product,
-        image_reference=desired.image_reference,
-        source_commit=desired.manifest.source_commit,
-        deploy_reference=f"{desired.manifest.image.repository}:sha-{desired.manifest.source_commit}",
-    )
+    envelope = _generic_web_testing_deploy_request(profile, desired)
     # The deployment testing ran when this deploy was decided is part of its key:
     # every deploy and rollback records a new one, so a lane changed since gets the
     # desired image again instead of a replay of an earlier success.

@@ -1839,17 +1839,13 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
             return ApplicationRuntimeObservation(
                 application_id="target-123",
                 app_name="site-testing-app",
-                server_id="fixture-server",
                 service_id="fixture-service",
-                service_version=1,
                 service_image=f"{IMAGE_REPOSITORY}:sha-{source}",
                 service_deployment_record_id=record_id,
-                service_environment_keys=tuple(sorted(values)),
                 desired_replicas=1,
                 rollout_state="completed",
                 rollout_started_at="2026-10-19T00:00:30Z",
-                rollout_completed_at="2026-10-19T00:00:45Z",
-                running_container_images=(artifact,),
+                running_container_images=((artifact,),),
                 running_container_deployment_record_ids=(record_id,),
                 running_container_health=("",),
                 pending_task_count=0,
@@ -1938,6 +1934,37 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         )
         with self.assertRaises(FileNotFoundError):
             self.store.read_environment_inventory(context_name="cm", instance_name="testing")
+
+    def test_application_without_managed_inputs_repairs_runtime_drift_once(self) -> None:
+        from control_plane.generic_web_testing_inputs import testing_input_authority
+
+        _payload, triggered = self.application_input_provider()
+        profile = self.store.read_product_profile_record("site")
+        lane = next(lane for lane in profile.lanes if lane.instance == "testing")
+        self.assertFalse(testing_input_authority(self.store, profile, lane))
+        self.github.add_run(20, DEPLOYABLE)
+        self.request()
+        self.reconcile()
+
+        def runtime(**_kwargs: object) -> ApplicationRuntimeObservation:
+            return (
+                replace(self.rolled_back_application_runtime(), task_evidence_complete=False)
+                if len(triggered) == 1
+                else self.application_runtime()
+            )
+
+        with patch.object(
+            self.application_inputs_provider,
+            "observe_testing_application_runtime",
+            side_effect=runtime,
+        ):
+            self.request()
+            repaired = self.reconcile()
+            self.request()
+            unchanged = self.reconcile()
+        self.assertEqual(repaired["reason"], "testing_runtime_drift")
+        self.assertEqual(unchanged["reason"], "already_deployed")
+        self.assertEqual(len(triggered), 2)
 
     def test_actual_runtime_drift_repairs_once_without_inventory_rewrite(self) -> None:
         triggered = self.prepare_application_runtime_test()

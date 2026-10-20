@@ -165,8 +165,12 @@ image eligible for one normal testing deployment; an unchanged receipt settles
 without another deployment only when the actual application runtime also agrees.
 Dokploy job completion and saved environment readback do not prove Swarm rollout:
 the service may still be updating or may have rolled back. Application testing
-completion waits within its deployment timeout for completed rollout, the desired
-running replicas, and independently inspected image digests and deployment identities.
+completion, including lanes without managed inputs, uses the remaining deployment
+timeout after the provider job to wait for completed rollout, desired running
+replicas, and independently inspected image digests and deployment identities.
+Transient inspect errors retry within that same budget; recovery reads once and
+keeps unreadable effects fenced. Each container's inspected image can carry
+multiple repository digests; its candidates must include the expected artifact.
 Container health, when configured, must also pass; private health and authenticated
 WSS retain their separate qualification. The reader binds the exact application
 and recorded server to its service, tasks and inspected containers, retaining no
@@ -174,8 +178,14 @@ environment values. A terminal rollback or paused rollout is reported as failure
 only when its start belongs to the exact provider job; ambiguous or pending effects
 retain the original operation's recovery fence. Recovery uses the same runtime
 qualification before crediting a provider job, without enabling production adoption.
+At the original normal-deploy deadline, an unchanged current service with only
+failed or rejected tasks bound to that attempt's image and deployment identity
+proves unsuccessful qualification, even on initial creation without rollout status.
+Missing lineage, task reads, or progressing tasks remain unknown. Recovery without
+proof of the original deadline does not infer that failure or release lifecycle holds.
 
-An ordinary sweep also checks runtime before skipping a matching saved receipt.
+An ordinary sweep also checks every application testing runtime before skipping
+saved deployment evidence, including legacy false inventory and lanes without inputs.
 Proved stable drift in service image or deployment identity permits one normal
 same-artifact repair under a deterministic service-state identity. Changing task
 IDs, timestamps or replica churn never mint another repair. Unavailable or pending
@@ -186,6 +196,10 @@ that receipt can settle, then the next normal sweep repairs its inputs. Removing
 a declaration or binding alone does not delete provider-only values; explicit
 retirement remains the deletion contract. Production, preview and Compose
 delivery paths are unchanged.
+Reaped task history cannot prove convergence or task failure, but stable exact
+service and application placement reads can still prove drift and permit the
+normal repair. A completed historical rollback can match its healthy original
+baseline only through that baseline's expected artifact and deployment identity.
 Rotating Launchplane's active master encryption key changes the delivery
 fingerprint, so each managed-input testing lane receives one normal repair
 deployment. Before image save, an in-flight attempt refuses changed input

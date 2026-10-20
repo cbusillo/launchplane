@@ -42,6 +42,8 @@ from tests.support.auth import StubVerifier, identity, local_operator_policy
 from tests.support.profiles import product_profile_payload as _product_profile_payload
 from tests.support.stores import sqlite_database_url as _sqlite_database_url
 from tests.test_service import _invoke_app, create_launchplane_fastapi_test_app
+from control_plane.dokploy.application_runtime import ApplicationRuntimeObservation
+from tests.support.application_runtime import recovered_application_runtime
 
 
 _RECOVERY_ROUTE = "/v1/admin/generic-web/deploy-recovery/dry-run"
@@ -320,10 +322,24 @@ class _RecoveryObservationProvider:
     def __init__(self, observation: GenericWebProviderDeploymentObservation) -> None:
         self.observation = observation
         self.observation_calls = 0
+        self.application_runtime: ApplicationRuntimeObservation | None = None
 
     def observe_artifact_deploy(self, **_kwargs: object) -> GenericWebProviderDeploymentObservation:
         self.observation_calls += 1
+        target = _kwargs["resolved_deploy_target"]
+        assert isinstance(target, GenericWebResolvedDeployTarget)
+        self.application_runtime = recovered_application_runtime(
+            target, str(_kwargs["deployment_title"])
+        )
         return self.observation
+
+    def observe_testing_application_runtime(
+        self, *, control_plane_root: Path, target_id: str
+    ) -> ApplicationRuntimeObservation:
+        del control_plane_root
+        assert self.application_runtime is not None
+        assert self.application_runtime.application_id == target_id
+        return self.application_runtime
 
 
 class _FailingRecoveryObservationProvider(_RecoveryObservationProvider):

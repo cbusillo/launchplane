@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
+from time import monotonic
 from typing import Callable, Literal, Protocol, cast
 
 import click
@@ -964,6 +965,15 @@ def _execute_generic_web_deploy_unserialized(
             if provider_effect_checkpoint is not None:
                 provider_effect_checkpoint("application_lifecycle_prepared")
             application_lifecycle.prepare()
+        testing_application = (
+            resolved_lane.instance == "testing"
+            and prepared_deploy_target.resolved_target.target_type == "application"
+        )
+        runtime_deadline = (
+            monotonic() + prepared_deploy_target.deploy_timeout_seconds
+            if testing_application
+            else None
+        )
         untitled_deployment_observation = resolved_deploy_provider.execute_artifact_deploy(
             control_plane_root=control_plane_root,
             resolved_deploy_target=prepared_deploy_target,
@@ -1000,11 +1010,7 @@ def _execute_generic_web_deploy_unserialized(
                 raise click.ClickException(
                     "Generic web provider deployment did not return exact successful evidence."
                 )
-        if (
-            resolved_lane.instance == "testing"
-            and prepared_deploy_target.resolved_target.target_type == "application"
-            and prepared_deploy_target.testing_runtime_digest
-        ):
+        if testing_application:
             qualified_observation = qualify_testing_application_observation(
                 provider=resolved_deploy_provider,
                 control_plane_root=control_plane_root,
@@ -1019,6 +1025,7 @@ def _execute_generic_web_deploy_unserialized(
                 ),
                 deployment_record_id=record_id,
                 wait=True,
+                deadline=runtime_deadline,
             )
             if qualified_observation.outcome != "present":
                 raise click.ClickException("Application testing runtime rollout is not qualified.")

@@ -65,6 +65,11 @@ from control_plane.workflows.generic_web_deploy_provider import (
     resolve_generic_web_provider_reconciliation_target,
 )
 from control_plane.workflows.ship import build_deployment_record
+from control_plane.dokploy.application_runtime import ApplicationRuntimeObservation
+from tests.support.application_runtime import (
+    converged_application_runtime,
+    recovered_application_runtime,
+)
 
 
 def _source_of_truth() -> DokploySourceOfTruth:
@@ -448,6 +453,7 @@ class _FakeGenericWebDeployProvider:
         self.runtime_identities: list[RuntimeIdentity] = []
         self.deployment_titles: list[str] = []
         self.observed_target_ids: list[str] = []
+        self.application_runtime: ApplicationRuntimeObservation | None = None
 
     def resolve_deploy_target(
         self,
@@ -511,7 +517,10 @@ class _FakeGenericWebDeployProvider:
         before_provider_mutation: Callable[[str], None],
         effect_started: Callable[[], None],
     ) -> None:
-        del control_plane_root, resolved_deploy_target
+        del control_plane_root
+        self.application_runtime = converged_application_runtime(
+            resolved_deploy_target, runtime_identity
+        )
         self.runtime_identities.append(runtime_identity)
         self.deployment_titles.append(deployment_title)
         before_provider_mutation("deploy_trigger")
@@ -526,9 +535,21 @@ class _FakeGenericWebDeployProvider:
         resolved_deploy_target: GenericWebResolvedDeployTarget,
         deployment_title: str,
     ) -> GenericWebProviderDeploymentObservation:
-        del control_plane_root, deployment_title
+        del control_plane_root
         self.observed_target_ids.append(resolved_deploy_target.resolved_target.target_id)
+        if self.application_runtime is None:
+            self.application_runtime = recovered_application_runtime(
+                resolved_deploy_target, deployment_title
+            )
         return self.observation
+
+    def observe_testing_application_runtime(
+        self, *, control_plane_root: Path, target_id: str
+    ) -> ApplicationRuntimeObservation:
+        del control_plane_root
+        assert self.application_runtime is not None
+        assert self.application_runtime.application_id == target_id
+        return self.application_runtime
 
 
 class _LegacyFakeGenericWebDeployProvider(_FakeGenericWebDeployProvider):
@@ -560,6 +581,49 @@ class _LegacyFakeGenericWebDeployProvider(_FakeGenericWebDeployProvider):
 
 
 class GenericWebDeployTests(unittest.TestCase):
+    def test_application_runtime_wait_uses_only_budget_remaining_after_provider_job(self) -> None:
+        from dataclasses import replace
+
+        store = _GenericWebDeployStore(_profile())
+        provider = _FakeGenericWebDeployProvider()
+        clock = [100.0]
+        execute = provider.execute_artifact_deploy
+
+        def finish_at_deadline(**kwargs: object) -> None:
+            execute(**kwargs)  # type: ignore[arg-type]
+            assert provider.application_runtime is not None
+            provider.application_runtime = replace(
+                provider.application_runtime, rollout_state="updating"
+            )
+            clock[0] = 110.0
+
+        with (
+            patch.object(provider, "execute_artifact_deploy", side_effect=finish_at_deadline),
+            patch.object(
+                provider,
+                "observe_testing_application_runtime",
+                wraps=provider.observe_testing_application_runtime,
+            ) as reader,
+            patch(
+                "control_plane.workflows.generic_web_deploy.monotonic", side_effect=lambda: clock[0]
+            ),
+            patch(
+                "control_plane.workflows.generic_web_deploy_provider.monotonic",
+                side_effect=lambda: clock[0],
+            ),
+            patch("control_plane.workflows.generic_web_deploy_provider.sleep") as sleeper,
+        ):
+            result = execute_generic_web_deploy(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=_request(timeout_seconds=10),
+                deploy_provider=provider,
+            )
+        self.assertEqual(result.deploy_status, "fail")
+        self.assertFalse(store.inventories)
+        reader.assert_called_once()
+        sleeper.assert_not_called()
+
     def test_lost_publication_authority_writes_no_deployment_or_inventory(self) -> None:
         for provider_error in (None, click.ClickException("provider wait failed")):
             with self.subTest(provider_error=provider_error):
@@ -630,12 +694,16 @@ class GenericWebDeployTests(unittest.TestCase):
                         "control_plane.workflows.generic_web_deploy.utc_now_timestamp",
                         side_effect=[
                             "2026-10-01T10:00:00Z",
+                            "2026-10-01T10:00:30Z",
                             "2026-10-01T10:01:00Z",
                             "2026-10-02T10:00:00Z",
+                            "2026-10-02T10:00:30Z",
                             "2026-10-02T10:01:00Z",
                             "2026-10-03T10:00:00Z",
+                            "2026-10-03T10:00:30Z",
                             "2026-10-03T10:01:00Z",
                             "2026-10-04T10:00:00Z",
+                            "2026-10-04T10:00:30Z",
                             "2026-10-04T10:01:00Z",
                         ],
                     ),
