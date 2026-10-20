@@ -204,12 +204,12 @@ class DokployApplicationLifecycle:
         return evidence
 
     def _run_schedule(self, schedule: api.JsonObject, timeout_seconds: int) -> None:
-        self._mutate("application_schedule_canary")
         api.run_dokploy_schedule(
             host=self.host,
             token=self.token,
             schedule_id=api.schedule_key(schedule),
             timeout_seconds=timeout_seconds,
+            before_trigger=lambda: self._mutate("application_schedule_canary"),
         )
 
     def _run_command(self, definition: GenericWebMaintenanceCommand) -> None:
@@ -224,12 +224,12 @@ class DokployApplicationLifecycle:
             schedule_payload(definition, self.application_id, enabled=False),
             "application_maintenance_prepare",
         )
-        self._mutate("application_maintenance_execute")
         api.run_dokploy_schedule(
             host=self.host,
             token=self.token,
             schedule_id=api.schedule_key(schedule),
             timeout_seconds=definition.timeout_seconds,
+            before_trigger=lambda: self._mutate("application_maintenance_execute"),
         )
 
     def restore(self) -> None:

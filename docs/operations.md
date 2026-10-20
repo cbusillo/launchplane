@@ -3504,7 +3504,20 @@ mark-apply` require `--allow-direct-db-mutation` before they persist local DB
   deploy timeout. Other data workflows use the target's deploy timeout. When the trigger times out, fails with an
   unclear outcome, or gets a 5xx, Launchplane reads back the schedule
   deployment created after the trigger and watches that exact deployment ID to
-  a terminal state. It never sends a second trigger. The recorded causes are:
+  a terminal state. Before dispatch, the shared helper reads all visible schedule
+  deployments and retains their IDs. Timeout recovery excludes that entire
+  baseline, including older completed runs inside the clock-skew window.
+  Missing timestamps on unseen runs do not resolve ambiguity; several unseen
+  candidates still refuse. An acknowledged trigger uses the same candidate
+  selection and exact-job observation as a timed-out trigger. Synchronous failure
+  diagnostics never attach a deployment ID when several unseen jobs exist.
+  It never sends a second trigger. The recorded causes are:
+  - `trigger_baseline_unavailable`: the pre-trigger history could not be read
+    or contained malformed entries. This call sent no trigger. Restore the
+    history read before starting a new operation; this does not clear an
+    existing operation's original-key recovery hold. Existing caller retry budgets
+    still recognize a transient pre-dispatch read failure; an uncertain trigger
+    outcome is never made retryable by that rule.
   - `trigger_rejected`: a 4xx refusal with no new deployment. Nothing started.
   - `trigger_outcome_unknown`: the read-back failed, found no new deployment,
     or found several new deployments. Inspect the provider schedule before

@@ -565,7 +565,8 @@ def execute_odoo_post_deploy(
             ),
         ) or (
             isinstance(error, dokploy_api.DokployScheduleExecutionFailed)
-            and error.cause in {"remote_command_exit", "trigger_rejected"}
+            and error.cause
+            in {"remote_command_exit", "trigger_rejected", "trigger_baseline_unavailable"}
         )
         uncertain = hold_uncertain_effects and provider_effect_started and not determinate_failure
         if isinstance(error, OSError) and not uncertain:
