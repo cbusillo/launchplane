@@ -642,8 +642,35 @@ label. Changes to enqueue, token-source or admission settings do not strand the
 old label; current checks and review authority are read again, and the subsequent
 ready/admission path enforces the full current policy.
 
-The same blocked head never qualifies, including after a green rerun. Recovery
-also refuses pending, failing or unreadable current-head evidence, conflicting
+An unchanged blocked head has one narrow recovery: a superseded singleton's
+only failed checks are a GitHub Actions browser shard and its CI aggregate;
+the bound job failed dependency installation before browser execution, its
+bounded provider log proves `ERR_PNPM_ENOENT` copying from the pnpm store into
+frontend dependencies, and independent frontend validation and a browser sibling
+passed in that same candidate/run/attempt. A complete immutable base-to-head
+comparison must show only application/test Python and Markdown documentation
+changes. Install inputs, workflow/runner changes, frontend changes, unknown or
+truncated evidence, other failures and source-file ENOENT do not qualify.
+This recovers the already-applied false culprit block; it does not change
+normal failure classification or fix the store lifecycle.
+
+Before removing the proven label, the fenced controller checkpoints its result
+and persists value-free job/run/attempt identifiers and source/log digests on
+the blocked candidate record. That consumes one recovery per PR head across
+bases and policy revisions. Prior infrastructure, check-recovery or batch-body
+retry lineage for that head also exhausts this path. Dry runs spend nothing.
+Restarted attempts must match the saved proof and original label event; a new
+hold or different failed candidate cannot obtain another allowance. Storage
+failure prevents removal. Provider logs are bounded to 2 MiB, never persisted,
+and fetched from HTTPS storage without forwarding the API credential.
+
+The supported operation remains the ordinary controller dry run, then its
+mutating pass through the deployed service. There is no manual label release,
+caller-supplied causal assertion, rerun-forcing commit, grant or direct merge.
+After release, obtain fresh checked Ready and normal train admission/candidate
+validation. Supervisor owns operational continuation when assigned by the brief.
+
+Both recovery paths refuse pending, failing or unreadable current-head evidence, conflicting
 or unknown mergeability, stale/missing/unweighed review, a renewed review request,
 drafts, a different base, forks and unresolved required review conversations.
 Review request/receipt parsing follows the catalog's producer contract, including

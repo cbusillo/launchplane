@@ -9,7 +9,10 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 from urllib.parse import quote
 
-from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidateRecord
+from control_plane.contracts.merge_train_batch import (
+    MergeTrainBatchCandidateRecord,
+    MergeTrainSetupFailureRecovery,
+)
 from control_plane.contracts.merge_train_policy import MergeTrainRepositoryPolicy
 from control_plane.contracts.merge_train_pr_feedback_record import MergeTrainPrFeedbackRecord
 from control_plane.merge_train_handoff import handoff_actor_allowed, handoff_timestamp
@@ -188,6 +191,7 @@ def recover_candidate_block(
     legacy_writer_app_id: int | None,
     mutate: bool,
     before_remove: Callable[[], None],
+    setup_failure_evidence: MergeTrainSetupFailureRecovery | None = None,
 ) -> bool:
     from control_plane.merge_train_github import (
         GitHubMergeTrainSnapshotReader,
@@ -282,9 +286,19 @@ def recover_candidate_block(
     def qualified() -> bool:
         pr = client.read_pull_request_snapshot(repository=repository, pull_request_number=number)
         reader = GitHubMergeTrainSnapshotReader(transport=client.transport)
+        same_head = pr.head_sha == candidate.candidate.entries[0].head_sha
+        if same_head:
+            if setup_failure_evidence is None:
+                return False
+            from control_plane.merge_train_setup_failure_recovery import read_setup_failure_recovery
+
+            if (
+                read_setup_failure_recovery(client, candidate=candidate.candidate)
+                != setup_failure_evidence
+            ):
+                return False
         return (
             pr.head_sha == expected_head_sha
-            and pr.head_sha != candidate.candidate.entries[0].head_sha
             and pr.state == "open"
             and not pr.is_draft
             and pr.base_repository == repository

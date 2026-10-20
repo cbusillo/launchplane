@@ -28,6 +28,7 @@ from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidate,
     MergeTrainBatchCandidateRecord,
+    MergeTrainSetupFailureRecovery,
 )
 from control_plane.contracts.merge_train_pr_feedback_record import MergeTrainPrFeedbackRecord
 from control_plane.contracts.merge_train_batch import (
@@ -330,6 +331,13 @@ class UrllibMergeTrainGitHubTransport:
             data=request_body,
         )
         try:
+            if method == "GET" and re.fullmatch(
+                r"/repos/[^/]+/[^/]+/actions/jobs/[1-9][0-9]*/logs", path
+            ):
+                from control_plane.merge_train_job_logs import read_job_log
+
+                with timed_github_request(method=method, path=path):
+                    return read_job_log(request)
             with (
                 timed_github_request(method=method, path=path),
                 urlopen(request, timeout=15) as response,
@@ -2456,6 +2464,13 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
 
         return candidate_block_application(self, candidate=candidate, policy=policy)
 
+    def read_setup_failure_recovery(
+        self, *, candidate: MergeTrainBatchCandidate
+    ) -> MergeTrainSetupFailureRecovery | None:
+        from control_plane.merge_train_setup_failure_recovery import read_setup_failure_recovery
+
+        return read_setup_failure_recovery(self, candidate=candidate)
+
     def recover_candidate_block(
         self,
         *,
@@ -2466,6 +2481,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         legacy_writer_app_id: int | None,
         mutate: bool,
         before_remove: Callable[[], None],
+        setup_failure_evidence: MergeTrainSetupFailureRecovery | None = None,
     ) -> bool:
         from control_plane.merge_train_github_block_recovery import recover_candidate_block
 
@@ -2478,6 +2494,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             legacy_writer_app_id=legacy_writer_app_id,
             mutate=mutate,
             before_remove=before_remove,
+            setup_failure_evidence=setup_failure_evidence,
         )
 
     def update_pull_request_branch(

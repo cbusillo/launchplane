@@ -126,6 +126,8 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
 
     def request(self, *, method: str, path: str, body: object = None) -> object:
         del body
+        if path in getattr(self, "setup_responses", {}):
+            return self.setup_responses[path]
         if method == "DELETE":
             self.mutations.append(path)
             self.current = self.current.model_copy(update={"labels": ()})
@@ -143,6 +145,216 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
         if "/pulls/" in path:
             return {"labels": [{"name": label} for label in self.current.labels]}
         raise AssertionError((method, path))
+
+    def setup_missing_store_failure(self) -> None:
+        """The observed singleton failure: install fails, browser never starts."""
+        self.current = self.current.model_copy(update={"head_sha": self.old.head_sha})
+        self.snapshot = self.snapshot.model_copy(update={"pull_requests": (self.current,)})
+        self.comments[0]["body"] = (
+            f"Review result: weighed\nHead: {self.current.head_sha}\n\nFindings addressed."
+        )
+        failed = self.record.candidate.model_copy(update={"candidate_sha": "c" * 40})
+        self.record = self.record.model_copy(update={"candidate": failed})
+        self.store.write_merge_train_batch_candidate_record(self.record)
+        prefix = f"/repos/{self.target.repository}"
+        self.job: dict[str, Any] = {
+            "id": 91,
+            "run_id": 81,
+            "run_attempt": 1,
+            "head_sha": failed.candidate_sha,
+            "name": "frontend_browser_smoke (2)",
+            "status": "completed",
+            "conclusion": "failure",
+            "steps": [
+                {"name": "Checkout", "conclusion": "success"},
+                {"name": "Install frontend dependencies", "conclusion": "failure"},
+                {"name": "Run browser smoke", "conclusion": "skipped"},
+                {"name": "Upload browser evidence", "conclusion": "failure"},
+            ],
+        }
+
+        def check(identifier: int, name: str, conclusion: str) -> dict[str, object]:
+            return {
+                "id": identifier,
+                "name": name,
+                "status": "completed",
+                "conclusion": conclusion,
+                "head_sha": failed.candidate_sha,
+                "app": {"slug": "github-actions"},
+                "details_url": f"https://github.com/{self.target.repository}/actions/runs/81/job/{identifier}",
+            }
+
+        self.setup_responses: dict[str, Any] = {
+            f"{prefix}/commits/{failed.candidate_sha}/check-runs?per_page=100&page=1": {
+                "total_count": 2,
+                "check_runs": [
+                    check(91, self.job["name"], "failure"),
+                    check(92, "ci-gate", "failure"),
+                ],
+            },
+            f"{prefix}/commits/{failed.candidate_sha}/status?per_page=100&page=1": {
+                "total_count": 0,
+                "statuses": [],
+            },
+            f"{prefix}/actions/jobs/91": self.job,
+            f"{prefix}/actions/jobs/91/logs": (
+                "ERR_PNPM_ENOENT ENOENT: no such file or directory, copyfile "
+                "'/home/runner/.local/share/pnpm/store/v10/files/71/" + "a" * 126 + "' -> "
+                "'/work/frontend/node_modules/.pnpm/lightningcss/node_modules/file.node'\n"
+            ),
+            f"{prefix}/actions/runs/81/jobs?per_page=100&page=1": {
+                "total_count": 3,
+                "jobs": [
+                    self.job,
+                    {
+                        "id": 93,
+                        "run_id": 81,
+                        "run_attempt": 1,
+                        "head_sha": failed.candidate_sha,
+                        "name": "frontend_browser_smoke (1)",
+                        "status": "completed",
+                        "conclusion": "success",
+                    },
+                    {
+                        "id": 94,
+                        "run_id": 81,
+                        "run_attempt": 1,
+                        "head_sha": failed.candidate_sha,
+                        "name": "frontend_validate",
+                        "status": "completed",
+                        "conclusion": "success",
+                    },
+                ],
+            },
+            f"{prefix}/compare/{failed.base_sha}...{self.old.head_sha}": {
+                "base_commit": {"sha": failed.base_sha},
+                "total_commits": 1,
+                "commits": [{"sha": self.old.head_sha}],
+                "files": [{"filename": "control_plane/testing_retry.py", "status": "modified"}],
+            },
+        }
+
+    def test_same_head_missing_store_block_recovers_once_with_durable_proof(self) -> None:
+        self.setup_missing_store_failure()
+        result = self.advance(mutate=True)
+        self.assertEqual(result["controller_action"], "recover_candidate_block")
+        self.assertEqual(result["reason_code"], "candidate_block_unrelated_setup_reviewed")
+        saved = self.store.list_merge_train_batch_candidate_records()[0]
+        self.assertIsNotNone(saved.setup_failure_recovery)
+        self.assertEqual(len(self.mutations), 1)
+        self.current = self.current.model_copy(update={"labels": (self.target.blocked_label,)})
+        self.events = [
+            self.label_event,
+            {**self.label_event, "id": 51, "event": "unlabeled"},
+            {**self.label_event, "id": 52},
+        ]
+        assert self.record.block_intent is not None
+        self.store.write_merge_train_batch_candidate_record(
+            self.record.model_copy(
+                update={
+                    "record_id": "another-failed-candidate",
+                    "block_intent": self.record.block_intent.model_copy(
+                        update={
+                            "prior_label_event_id": 51,
+                            "applied_label_event_id": 52,
+                        }
+                    ),
+                }
+            )
+        )
+        self.assertNotEqual(
+            self.advance(mutate=True)["controller_action"], "recover_candidate_block"
+        )
+        self.assertEqual(len(self.mutations), 1)
+
+    def test_setup_recovery_dry_run_and_exhausted_retry_budget(self) -> None:
+        self.setup_missing_store_failure()
+        self.assertEqual(self.advance()["controller_action"], "recover_candidate_block")
+        self.assertIsNone(
+            self.store.list_merge_train_batch_candidate_records()[0].setup_failure_recovery
+        )
+        self.assertEqual(self.mutations, [])
+        for field in ("infrastructure_retry_of", "check_retry_of", "batch_body_retry_of"):
+            with self.subTest(field=field):
+                self.store.write_merge_train_batch_candidate_record(
+                    self.record.model_copy(
+                        update={
+                            "candidate": self.record.candidate.model_copy(
+                                update={field: "already-spent"}
+                            )
+                        }
+                    )
+                )
+                self.assertNotEqual(
+                    self.advance(mutate=True)["controller_action"], "recover_candidate_block"
+                )
+                self.assertEqual(self.mutations, [])
+
+    def test_setup_recovery_rechecks_current_head_and_persists_before_delete(self) -> None:
+        self.setup_missing_store_failure()
+        original = self.current
+        for changes in (
+            {"required_checks_status": "pending"},
+            {"required_checks_status": "fail"},
+            {"required_checks_status": "unknown"},
+            {"is_draft": True},
+        ):
+            with self.subTest(changes=changes):
+                self.current = original.model_copy(update=changes)
+                self.assertNotEqual(
+                    self.advance(mutate=True)["controller_action"], "recover_candidate_block"
+                )
+        self.current = original
+        with patch.object(
+            self.store,
+            "write_merge_train_batch_candidate_record",
+            side_effect=OSError("disk unavailable"),
+        ):
+            self.assertNotEqual(
+                self.advance(mutate=True)["controller_action"], "recover_candidate_block"
+            )
+        self.assertEqual(self.mutations, [])
+
+    def test_same_head_setup_recovery_keeps_code_unknown_and_admin_holds(self) -> None:
+        self.setup_missing_store_failure()
+        prefix = f"/repos/{self.target.repository}"
+        compare = f"{prefix}/compare/{self.record.candidate.base_sha}...{self.old.head_sha}"
+        originals = self.setup_responses.copy()
+        for path, replacement in (
+            (f"{prefix}/actions/jobs/91/logs", "ERR_PNPM_OUTDATED_LOCKFILE"),
+            (
+                f"{prefix}/actions/jobs/91/logs",
+                "ERR_PNPM_ENOENT copyfile '/work/source.js' -> '/work/node_modules/file'",
+            ),
+            (compare, {**originals[compare], "files": [{"filename": "frontend/pnpm-lock.yaml"}]}),
+            (
+                compare,
+                {
+                    **originals[compare],
+                    "files": [
+                        {"filename": "tests/a.py", "previous_filename": "frontend/package.json"}
+                    ],
+                },
+            ),
+            (compare, {**originals[compare], "files": []}),
+            (f"{prefix}/actions/jobs/91", {**self.job, "head_sha": "d" * 40}),
+            (
+                f"{prefix}/actions/jobs/91",
+                {**self.job, "steps": [{"name": "Run browser smoke", "conclusion": "failure"}]},
+            ),
+        ):
+            with self.subTest(path=path, replacement=replacement):
+                self.setup_responses = {**originals, path: replacement}
+                self.assertNotEqual(
+                    self.advance(mutate=True)["controller_action"], "recover_candidate_block"
+                )
+                self.assertEqual(self.mutations, [])
+        self.setup_responses = originals
+        self.events = [self.label_event, {**self.label_event, "id": 51, "actor": {"id": 7}}]
+        self.assertNotEqual(
+            self.advance(mutate=True)["controller_action"], "recover_candidate_block"
+        )
+        self.assertEqual(self.mutations, [])
 
     def advance(self, *, mutate: bool = False) -> dict[str, Any]:
         return _advance_from_live_snapshot(

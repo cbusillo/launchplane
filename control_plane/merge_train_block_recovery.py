@@ -5,7 +5,11 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Protocol, cast
 
-from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidateRecord
+from control_plane.contracts.merge_train_batch import (
+    MergeTrainBatchCandidate,
+    MergeTrainBatchCandidateRecord,
+    MergeTrainSetupFailureRecovery,
+)
 from control_plane.contracts.merge_train_policy import (
     MergeTrainPolicyRecord,
     MergeTrainRepositoryPolicy,
@@ -17,6 +21,10 @@ from control_plane.merge_train_pr_feedback import MergeTrainPrFeedbackRecordStor
 
 
 class CandidateBlockRecoveryClient(Protocol):
+    def read_setup_failure_recovery(
+        self, *, candidate: MergeTrainBatchCandidate
+    ) -> MergeTrainSetupFailureRecovery | None: ...
+
     def recover_candidate_block(
         self,
         *,
@@ -27,6 +35,7 @@ class CandidateBlockRecoveryClient(Protocol):
         legacy_writer_app_id: int | None,
         mutate: bool,
         before_remove: Callable[[], None],
+        setup_failure_evidence: MergeTrainSetupFailureRecovery | None = None,
     ) -> bool: ...
 
 
@@ -106,8 +115,46 @@ def recover_candidate_block(
         ):
             continue
         current = blocked[entry.pull_request_number]
+        setup_failure_evidence = None
         if current.head_sha == entry.head_sha:
-            continue
+            history = store.list_merge_train_batch_candidate_records(
+                repository=snapshot.repository, base_branch=snapshot.base_branch
+            )
+            # This budget follows the PR head across bases, policy revisions,
+            # feedback delivery and restarts. Existing retry budgets stay spent.
+            if any(
+                any(
+                    item.pull_request_number == entry.pull_request_number
+                    and item.head_sha == entry.head_sha
+                    for item in record.candidate.entries
+                )
+                and (
+                    record.candidate.infrastructure_retry_of
+                    or record.candidate.check_retry_of
+                    or record.candidate.batch_body_retry_of
+                    or (
+                        record.setup_failure_recovery is not None
+                        and record.record_id != candidate.record_id
+                    )
+                )
+                for record in history
+            ):
+                continue
+            from control_plane.merge_train_github import MergeTrainGitHubError
+
+            try:
+                setup_failure_evidence = client.read_setup_failure_recovery(candidate=failed)
+            except MergeTrainGitHubError as error:
+                if error.rate_limited or error.status_code in {401, 403}:
+                    raise
+                continue
+            except (OSError, ValueError, TypeError, KeyError):
+                continue
+            if setup_failure_evidence is None or (
+                candidate.setup_failure_recovery is not None
+                and candidate.setup_failure_recovery != setup_failure_evidence
+            ):
+                continue
         legacy_writer_app_id = None
         if candidate.block_intent is None:
             # A legacy failure did not save its label name or writer App. Read
@@ -141,7 +188,11 @@ def recover_candidate_block(
             "base_branch": snapshot.base_branch,
             "mode": "recover_candidate_block" if mutate else "dry-run",
             "controller_action": "recover_candidate_block",
-            "reason_code": "candidate_block_new_head_reviewed",
+            "reason_code": (
+                "candidate_block_unrelated_setup_reviewed"
+                if setup_failure_evidence
+                else "candidate_block_new_head_reviewed"
+            ),
             "merge_train_batch_candidate_record_id": candidate.record_id,
             "details": {
                 "status": "block_removed" if mutate else "recovery_available",
@@ -155,9 +206,22 @@ def recover_candidate_block(
                 ),
                 "block_feedback_id": feedback.feedback_id if feedback is not None else "",
                 "block_removed": mutate,
+                **(
+                    {"setup_failure_evidence": setup_failure_evidence.model_dump(mode="json")}
+                    if setup_failure_evidence
+                    else {}
+                ),
                 "next_action": "Post a fresh checked gh-pr.py ready handoff for the current head.",
             },
         }
+
+        def checkpoint() -> None:
+            before_remove(result)
+            if setup_failure_evidence is not None:
+                store.write_merge_train_batch_candidate_record(
+                    candidate.model_copy(update={"setup_failure_recovery": setup_failure_evidence})
+                )
+
         if client.recover_candidate_block(
             candidate=candidate,
             feedback=feedback,
@@ -165,7 +229,8 @@ def recover_candidate_block(
             expected_head_sha=current.head_sha,
             legacy_writer_app_id=legacy_writer_app_id,
             mutate=mutate,
-            before_remove=lambda: before_remove(result),
+            before_remove=checkpoint,
+            setup_failure_evidence=setup_failure_evidence,
         ):
             return result
     return None

@@ -431,6 +431,20 @@ class MergeTrainCandidateBlockIntent(BaseModel):
     source_failed_record_id: str = Field(min_length=1)
 
 
+class MergeTrainSetupFailureRecovery(BaseModel):
+    """Value-free evidence and consumed budget for one unchanged-head release."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    candidate_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
+    head_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
+    job_id: int = Field(gt=0)
+    run_id: int = Field(gt=0)
+    run_attempt: int = Field(gt=0)
+    log_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    changed_files_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class MergeTrainBatchCandidateRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -444,6 +458,9 @@ class MergeTrainBatchCandidateRecord(BaseModel):
     candidate: MergeTrainBatchCandidate
 
     block_intent: MergeTrainCandidateBlockIntent | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    setup_failure_recovery: MergeTrainSetupFailureRecovery | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
 
