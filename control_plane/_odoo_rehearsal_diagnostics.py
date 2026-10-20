@@ -109,8 +109,13 @@ def command_diagnostic(arguments,result,environment):
     stdout=diagnostic_text(result.stdout or b'',secrets)
     stderr=diagnostic_text(result.stderr or b'',secrets)
     if stdout and stderr:
-        bound=(DIAGNOSTIC_TEXT_LIMIT-32)//2
-        text='stdout:\n'+stdout[-bound:]+'\nstderr:\n'+stderr[-bound:]
+        stdout=stdout.encode('utf-8')
+        stderr=stderr.encode('utf-8')
+        available=DIAGNOSTIC_TEXT_LIMIT-len(b'stdout:\n\nstderr:\n')
+        stdout_bound=min(len(stdout),available//2)
+        stderr_bound=min(len(stderr),available-stdout_bound)
+        stdout_bound=min(len(stdout),available-stderr_bound)
+        text='stdout:\n'+stdout[-stdout_bound:].decode('utf-8',errors='ignore')+'\nstderr:\n'+stderr[-stderr_bound:].decode('utf-8',errors='ignore')
     else:
         text=stdout or stderr
     caller=sys._getframe(2)

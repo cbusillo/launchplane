@@ -835,8 +835,9 @@ an ORM column/table or remains only in the evidence payload.
   overwrite.
   Native FastAPI
   `POST /v1/route-bindings/odoo-testing/controller/run-once` performs bounded
-  testing-only discovery from product profiles and invokes this same planner for
-  each active service-owned binding. Its contract contains no target selectors,
+  testing-only discovery from product profiles. Legacy service-owned bindings use
+  the reconcile planner; published native testing bindings use fresh managed-route
+  observation joined to their original publication custody. Its contract contains no target selectors,
   caps discovery at 25 records, pre-authorizes every exact instance, and applies
   due refreshes sequentially. Absent, disabled, admin-owned, non-Odoo, and
   production records are not candidates. No schema migration is required.

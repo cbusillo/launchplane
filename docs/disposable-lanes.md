@@ -922,6 +922,49 @@ The parent integration still wires the controller/provider lifecycle, preserves
 the private backend alias during later ordinary deploys, and qualifies live CM.
 No production mutation or new authorization grant is part of this stage.
 
+### Continuing native route authority
+
+The existing Odoo testing route-binding refresh controller renews a published
+native copy from its original publication and route custody. It does not require
+or create provider-owned domains or a legacy ingress audit. Each run reads the
+actual owned file and applied managed-proxy routing, including runs before the
+attestation is due. The route must still select the published copy at the same
+address with unchanged ingress/TLS ownership and canonical target. The runtime
+identity comes from the current inventory, so an ordinary deployment can update
+the build without replacing the original route provenance. A stopped or missing
+web process, a mismatched runtime identity or an absent private alias cannot renew
+the attestation even if the proxy still contains the expected route file.
+
+A successful due refresh retains the publication key and route digest and records
+a new observation digest and expiry under the shared freshness policy. Historical publication/readiness
+timestamps alone cannot renew routing evidence. Missing custody, a foreign target
+alias, unavailable observation or routing drift returns the existing controller's
+attention outcome without restamping the binding. Provider authorization denials
+remain explicit denials; there is no alternate caller or transport.
+
+The existing exact-lane authorization is checked before observation. The final
+CAS write locks product authority and the binding and rechecks the observed source
+records and target aliases. An authority change can make a refresh conflict for a
+later fresh run. Freshness-only changes preserve publication, rebuild guards and
+the original inverse: their comparisons retain the publication key, route digest
+and all serving authority, while excluding the observation clock and digest.
+Publication and inverse retain the current ingress and TLS evidence when that
+authority agrees, so a renewed ingress audit is not replaced with its preimage.
+
+Native observations run in the service thread pool, one lane immediately before
+its own write. They do not block the HTTP event loop or expire earlier lanes'
+observations while planning a batch. The existing shared half-life/expiry policy
+owns renewal timing. The batch renews its existing reservation before each lane
+and before writes; loss of ownership stops further work. Failure or denial releases
+only the owned parent reservation, preserving committed child receipts. Completed-key
+replay returns its receipt before remote IO. During a rebuild switch or restart, an
+observation can truthfully report attention; a later healthy observation clears it.
+Dry-run observes without writing. A provider authorization denial ends the batch
+with its trace; any earlier per-lane writes retain their original child receipts.
+Legacy managed and external bindings keep their existing paths and bounded failure
+reporting. Manual/browser single-binding reconcile identifies the native controller
+as the supported renewal path rather than returning a provider-domain error.
+
 ## Native testing worker integration
 
 The existing durable target-replacement action accepts testing-only
@@ -2854,6 +2897,17 @@ before launching the observation schedule. They are diagnostic candidates, not p
 that an event belongs to the original apply. The event projection withholds
 provider prose. A failed rehearsal child preserves `child_failure` in private host
 custody: the failing step, nonzero exit status and bounded redacted child output.
+The rehearsal copy runner sends each Odoo CLI command's error logging to its own
+stderr, overriding config-directed files and log levels. This includes registry
+startup in post-upgrade Odoo shell steps. Only errors are requested, and failed
+command wrappers are terse so repeated arguments cannot displace the Odoo tail.
+Captured CLI-preflight failures retain their artifact's explanation, since their
+child output did not reach stderr. When both streams contain output, either can
+use the other's unused byte allowance within the same combined text limit.
+This makes the upgrade process's exception available to that same bounded receipt; container endpoint
+logs alone do not retain a separate exec process's output. Ordinary testing copy
+commands keep their artifact's logging behavior. This cannot reconstruct output
+discarded by a historical execution, and absence of an exception remains unknown.
 Only the failure escaping the effect is saved; a recovered startup error cannot
 replace it. Original-key readback checks its intent, attempt and record
 binding before returning it. Arguments, input and environment are never exported.
