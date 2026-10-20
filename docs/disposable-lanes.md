@@ -103,6 +103,12 @@ or absent evidence is sufficient; pruning stopped containers does not undo a
 verified independent candidate. A bound normal retirement-success receipt and
 its completed disable receipt resume without requalifying later old-side work,
 while the candidate's current ingress and public health are still verified.
+Removing or dead members have an uncertain lifecycle and keep forward work
+pending until complete current evidence proves stopped or absent. Original-file
+readback may report those positively inventoried members as present, without
+claiming health or allowing an incomplete inventory to count as absence.
+Undispatched retirement exclusions retain the actual latched admission or health
+failure cause.
 A changed predecessor before cutover can
 end admission once original artifact custody, no metadata adoption and terminal
 candidate custody are proved. After possible cutover and current recovery-custody

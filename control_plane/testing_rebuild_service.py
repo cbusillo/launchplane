@@ -871,7 +871,7 @@ class NativeTestingRebuildExecution:
         )
         if checkpoint.step != "rolling_back":
             exclusion = (
-                self.unstarted_retirement(checkpoint.plan)
+                self.unstarted_retirement(checkpoint.plan, cause=checkpoint.error)
                 if checkpoint.retirement_started
                 else None
             )
@@ -1648,7 +1648,7 @@ class NativeTestingRebuildExecution:
         if preimage is None or frame["owned_file"] != preimage.file_content:
             raise NativeTestingRebuildPending("The original testing ingress file is not restored.")
         state = frame.get("old_availability")
-        if state not in {"stopped", "absent", "available"}:
+        if state not in {"stopped", "absent", "available", "unknown"}:
             raise NativeTestingRebuildPending("The current predecessor state is unavailable.")
         return TestingOriginalIngressReadback(
             route_id=plan.route_id,
@@ -1658,7 +1658,9 @@ class NativeTestingRebuildExecution:
             plan_digest=plan.digest,
             observation_sha256=preimage.observation_sha256,
             preimage_sha256=route_document_digest(self.route, None),
-            predecessor_state="present" if state == "available" else state,
+            # The fixed host emits unknown only for positively inventoried
+            # members with an uncertain lifecycle, never incomplete inventory.
+            predecessor_state="present" if state in {"available", "unknown"} else state,
         )
 
     def require_unavailable_forward_frame(self, frame: dict[str, Any]) -> None:
@@ -2058,7 +2060,9 @@ class NativeTestingRebuildExecution:
             evidence_id=stop.record_id + ":private-health:" + str(proof["web_id"]),
         )
 
-    def unstarted_retirement(self, plan: TestingRebuildPlan) -> TestingRetirementRecovery | None:
+    def unstarted_retirement(
+        self, plan: TestingRebuildPlan, *, cause: str = "candidate_public_health_failed"
+    ) -> TestingRetirementRecovery | None:
         # Exclude all outstanding retirement writes before releasing the lane's
         # original fence. Unknown dispatched effects are observed, never retried.
         for phase in ("disable-old-auto-deploy", "retire-old"):
@@ -2083,6 +2087,7 @@ class NativeTestingRebuildExecution:
                     lambda: False,
                     lambda dispatch: None,
                     exclude_undispatched=True,
+                    exclude_cause=cause,
                     recovery=True,
                 )
         return self.retirement_exclusion(plan, after_health_failure=True)

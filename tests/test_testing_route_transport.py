@@ -1028,6 +1028,15 @@ class TestingRouteTransportTests(unittest.TestCase):
         self.publish(self.plan.new_backend, None)
         self.assertTrue(self.route_file.exists())
 
+    def test_present_nonserving_lifecycle_is_not_reported_as_a_running_predecessor(self) -> None:
+        self.unavailable_route(preserve_file=True)
+        for state in ("removing", "dead"):
+            with self.subTest(state=state):
+                self.containers["old"]["State"]["Status"] = state
+                frame = self.client.read()
+                self.assertEqual(frame["old_availability"], "unknown")
+                self.assertFalse(self.client.unavailable_predecessor_matches(frame))
+
     def test_changed_unavailable_listener_excludes_forward_before_writer_dispatch(self) -> None:
         self.unavailable_route()
         attempt = self.fenced_attempt(self.plan.new_backend)

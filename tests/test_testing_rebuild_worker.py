@@ -807,6 +807,15 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertIsNone(self.owned)
         self.assertTrue(self.old_provider["autoDeploy"])
 
+        for phase in ("disable-old-auto-deploy", "retire-old"):
+            child = self.store.read_idempotency_record(
+                scope=REBUILD_SCOPE,
+                route_path=REBUILD_ROUTE + ":effect",
+                idempotency_key=self.operation.operation_id + ":" + phase,
+            )
+            assert child is not None
+            self.assertEqual(child.response_payload["cause"], result.error_code)
+
     def test_unavailable_provider_move_to_local_host_ends_admission(self) -> None:
         self.admit_unavailable("stopped")
         self.hold_after_private_candidate_effects()
@@ -1124,6 +1133,46 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertEqual(result.deploy_status, "pass", result.error_code)
         self.assertEqual(self.effects, ["switch-new"])
         self.assertEqual(self.current().target_id.target_id, self.fixture.candidate.compose_id)
+
+    def test_prune_in_progress_waits_without_reversing_the_verified_candidate(self) -> None:
+        self.admit_unavailable("stopped")
+        switch = self.switch
+
+        def removing(*args: Any, **kwargs: Any) -> str:
+            outcome = switch(*args, **kwargs)
+            if args[1] is not None:
+                self.retained["availability"] = "unknown"
+            return outcome
+
+        with patch.object(DokployTestingRouteTransport, "publish", side_effect=removing):
+            with self.assertRaises(service.NativeTestingRebuildPending):
+                self.execute()
+        self.assertEqual(self.effects, ["switch-new"])
+        self.retained.update(availability="absent", inventory_sha256="e" * 64)
+        self.assertEqual(self.execute().deploy_status, "pass")
+        self.assertEqual(self.effects, ["switch-new"])
+
+    def test_inverse_reports_present_members_with_uncertain_lifecycle_without_old_health(
+        self,
+    ) -> None:
+        self.admit_unavailable("stopped")
+        self.fail_public = True
+        switch = self.switch
+
+        def removing(*args: Any, **kwargs: Any) -> str:
+            if args[1] is None:
+                self.retained["availability"] = "unknown"
+            return switch(*args, **kwargs)
+
+        with patch.object(DokployTestingRouteTransport, "publish", side_effect=removing):
+            result = self.execute()
+        self.assertEqual(result.error_code, "candidate_public_health_failed")
+        self.assertEqual(self.current(), self.fixture.before)
+        self.assertIsNone(self.owned)
+        readback = self.checkpoint().route
+        assert isinstance(readback, TestingOriginalIngressReadback)
+        self.assertEqual(readback.predecessor_state, "present")
+        self.assertNotIn("public_health", readback.model_dump())
 
     def test_finished_unavailable_retirement_replays_without_requalifying_old_work(self) -> None:
         self.admit_unavailable("stopped")

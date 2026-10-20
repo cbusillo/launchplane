@@ -240,7 +240,8 @@ def main(spec):
     digest=hashlib.sha256(observed.encode()).hexdigest() if observed is not None else 'absent'
     old_project=spec['old_project']
     members=[item for item in containers if (item.get('Config',{}).get('Labels') or {}).get('com.docker.compose.project')==old_project]
-    old_availability='absent' if not members else 'stopped' if all(item.get('State',{}).get('Status') in {'exited','created'} for item in members) else 'available'
+    states={item['State']['Status'] for item in members}
+    old_availability='absent' if not members else 'stopped' if states<={'exited','created'} else 'available' if states&{'running','restarting','paused'} else 'unknown'
     old_inventory_sha256=retained_inventory_sha256(containers,{'project':old_project})
     unavailable=spec.get('unavailable_predecessor')
     old=[item for item in containers if (item.get('Config',{}).get('Labels') or {}).get('com.docker.compose.project')==old_project and (item.get('Config',{}).get('Labels') or {}).get('com.docker.compose.service')=='web']
