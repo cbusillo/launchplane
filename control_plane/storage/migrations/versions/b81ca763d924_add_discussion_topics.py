@@ -14,6 +14,10 @@ depends_on: str | None = None
 
 
 def upgrade() -> None:
+    # Supported schema repair may replay after stamping a newer physical schema
+    # to an older revision. Preserve its existing discussion history.
+    if "launchplane_discussion_topics" in sa.inspect(op.get_bind()).get_table_names():
+        return
     op.create_table(
         "launchplane_discussion_topics",
         sa.Column("product", sa.String(), primary_key=True),
