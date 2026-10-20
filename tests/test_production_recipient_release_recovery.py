@@ -17,7 +17,10 @@ from control_plane.production_recipient_release_recovery import (
 from control_plane.generic_web_promotion_http import GENERIC_WEB_PROD_PROMOTION_ROUTE
 from tests import test_production_recipient_cutover as fixtures
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
-from control_plane.contracts.product_profile_record import ProductOwnerProfile
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    ProductOwnerProfile,
+)
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
     DeploymentEvidence,
@@ -150,7 +153,7 @@ class RecipientReleaseRecoveryTests(unittest.TestCase):
         self.assertEqual(f.actions, [])
         self.assertEqual(f.deploys, 0)
 
-    def test_resumed_recipient_rechecks_testing_before_forward_bootstrap(self) -> None:
+    def qualified_testing_source(self) -> tuple[LaunchplaneProductProfileRecord, DeploymentRecord]:
         f = self.fixture
         profile = f.fixture.profile.model_copy(
             update={
@@ -188,6 +191,38 @@ class RecipientReleaseRecoveryTests(unittest.TestCase):
         f.store.write_environment_inventory(
             build_environment_inventory(deployment_record=testing, updated_at=profile.updated_at)
         )
+        return profile, testing
+
+    def advance_testing(self, testing: DeploymentRecord) -> None:
+        assert testing.runtime_identity is not None and testing.artifact_identity is not None
+        record_id = testing.record_id + "-next"
+        artifact_id = self.fixture.fixture.profile.image.repository + "@sha256:" + "e" * 64
+        later = testing.model_copy(
+            update={
+                "record_id": record_id,
+                "source_git_ref": "e" * 40,
+                "artifact_identity": testing.artifact_identity.model_copy(
+                    update={"artifact_id": artifact_id}
+                ),
+                "runtime_identity": testing.runtime_identity.model_copy(
+                    update={
+                        "deployment_record_id": record_id,
+                        "artifact_id": artifact_id,
+                        "source_git_ref": "e" * 40,
+                    }
+                ),
+            }
+        )
+        self.fixture.store.write_deployment_record(later)
+        self.fixture.store.write_environment_inventory(
+            build_environment_inventory(
+                deployment_record=later, updated_at=self.fixture.fixture.profile.updated_at
+            )
+        )
+
+    def test_resumed_recipient_rechecks_testing_before_forward_bootstrap(self) -> None:
+        f = self.fixture
+        profile, testing = self.qualified_testing_source()
 
         def run() -> None:
             releases._run_generic_web_promotion(
@@ -243,3 +278,77 @@ class RecipientReleaseRecoveryTests(unittest.TestCase):
             upstreams.assert_called_once()
         self.assertEqual(f.actions, [])
         self.assertEqual(f.deploys, 0)
+
+    def test_started_recipient_finishes_accepted_artifact_after_testing_advances(self) -> None:
+        self.started_recipient_with_new_testing(resume=False)
+
+    def test_resumed_started_recipient_keeps_original_source_admission(self) -> None:
+        self.started_recipient_with_new_testing(resume=True)
+
+    def started_recipient_with_new_testing(self, *, resume: bool) -> None:
+        f = self.fixture
+        profile, testing = self.qualified_testing_source()
+
+        def writer(*args: Any, **kwargs: Any) -> None:
+            f.writer(*args, **kwargs)
+            if kwargs.get("old") and kwargs.get("action") == "pause":
+                self.advance_testing(testing)
+
+        def deploy(**kwargs: Any) -> None:
+            f.deploy(**kwargs)
+            if resume:
+                raise TimeoutError("original provider reply lost")
+
+        def run() -> None:
+            releases._run_generic_web_promotion(
+                f.store,
+                f.fixture.root,
+                profile,
+                self.decision,
+                releases.ClientReleaseStep("promote", 1),
+                f.old_backup,
+            )
+
+        with (
+            patch("control_plane.client_release._require_current_release"),
+            patch("control_plane.client_release.client_release_grant_allows", return_value=True),
+            patch.object(RecipientCutoverAdapter, "verify_runtime"),
+            patch("control_plane.production_recipient_cutover.writer_action", side_effect=writer),
+            patch(
+                "control_plane.production_recipient_cutover.execute_dokploy_artifact_deploy",
+                side_effect=deploy,
+            ),
+            patch.object(
+                RecipientCutoverAdapter,
+                "terminal_deployment",
+                return_value=None,
+            ) as terminal,
+        ):
+            run()
+            if resume:
+                saved = custody(f.store, f.record.product, f.record.context)
+                assert saved is not None
+                self.assertNotEqual(saved.phase, "published")
+                terminal.return_value = {
+                    "title": saved.execution["runtime_identity"]["deployment_record_id"],
+                    "status": "done",
+                }
+                with patch(
+                    "control_plane.client_release._require_current_release",
+                    side_effect=AssertionError("Started cutover cannot chase latest testing"),
+                ):
+                    run()
+        saved = custody(f.store, f.record.product, f.record.context)
+        assert saved is not None
+        self.assertEqual(saved.phase, "published")
+        self.assertEqual(f.deploys, 1)
+        self.assertTrue(f.new_running)
+        self.assertFalse(f.old_running)
+        production = f.store.read_environment_inventory(
+            context_name=f.record.context, instance_name="prod"
+        )
+        assert production.artifact_identity is not None
+        self.assertEqual(
+            production.artifact_identity.artifact_id, self.decision.checklist.candidate.artifact_id
+        )
+        self.assertNotIn(("resume", True), f.actions)

@@ -70,9 +70,13 @@ deployment, post-deploy and destination-health qualification and match the
 lane, artifact, source revision, runtime identity and provider target evidence.
 A copied passing inventory cannot qualify a missing, mismatched or failed
 deployment. The accepted-release worker and direct promotion path recheck this
-source evidence after backup waits and before forward production effects,
-including resumed recipient cutover. An already started gated rollback keeps
-its existing recovery authority.
+source evidence after backup waits and before admitting the first forward
+production effect, including a recipient cutover resumed before dispatch.
+Once that accepted production attempt starts, testing may advance to a newer
+qualified build without aborting it. Acceptance and backup checks continue;
+an already started gated rollback keeps its existing recovery authority.
+Recipient resumption uses that original attempt's dispatch evidence. A new
+repromotion must qualify its source again, regardless of older dispatch facts.
 The testing lane must still name the current stored context and instance under
 an applicable generic-web driver; a removed or rebound source cannot keep
 using a cached inventory from its former lane.

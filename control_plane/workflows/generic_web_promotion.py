@@ -407,16 +407,23 @@ def execute_generic_web_prod_promotion(
             }
         ),
     ) as backup_checkpoint:
+        source_admitted = False
 
         def promotion_checkpoint(phase: str) -> None:
-            # Fresh qualification at each forward effect, including after health
-            # and backup waits. Automatic rollback has its own recovery checkpoint.
-            _resolve_source_inventory_inputs(
-                record_store=record_store, profile=profile, request=request, source_lane=source_lane
-            )
+            nonlocal source_admitted
+            # Admit this accepted artifact after health/backup waits. Once its
+            # production attempt starts, testing may advance to another build.
+            if not source_admitted:
+                _resolve_source_inventory_inputs(
+                    record_store=record_store,
+                    profile=profile,
+                    request=request,
+                    source_lane=source_lane,
+                )
             backup_checkpoint(phase)
             if provider_effect_checkpoint is not None:
                 provider_effect_checkpoint(phase)
+            source_admitted = True
 
         try:
             deploy_result = execute_generic_web_deploy(

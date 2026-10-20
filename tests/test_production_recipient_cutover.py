@@ -510,6 +510,19 @@ class RecipientCutoverTests(unittest.TestCase):
             backup,
             self.validate_release,
         )
+        source_qualified = False
+
+        def admit_source() -> None:
+            if not source_qualified:
+                raise ValueError("Testing is not qualified for this repromotion.")
+
+        adapter.validate_source = admit_source
+
+        def advance_after_pause(*args: Any, **kwargs: Any) -> None:
+            nonlocal source_qualified
+            self.writer(*args, **kwargs)
+            if kwargs.get("old") and kwargs.get("action") == "pause":
+                source_qualified = False
 
         def run_second() -> Any:
             return run_durable_provider_operation(
@@ -530,7 +543,16 @@ class RecipientCutoverTests(unittest.TestCase):
             self.assertTrue(self.old_running)
             self.assertFalse(self.new_running)
             self.accepted = True
-            result = run_second()
+            # Generic pause/trigger facts from the original release cannot
+            # admit this new attempt. Its own dispatch marker then survives B.
+            with self.assertRaises(ValueError):
+                run_second()
+            source_qualified = True
+            with patch(
+                "control_plane.production_recipient_cutover.writer_action",
+                side_effect=advance_after_pause,
+            ):
+                result = run_second()
         self.assertEqual(result.response_status_code, 202, result.response_payload)
         payload = result.response_payload["result"]
         assert isinstance(payload, dict)

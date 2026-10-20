@@ -83,7 +83,6 @@ def qualified_generic_web_source_inventory(
         or identity.source_git_ref != record.source_git_ref
         or target is None
         or target.provider_id != record.deploy.provider_id
-        or target.display_name != record.deploy.target_name
         or target.target_category != record.deploy.target_category
         or target.provider_target_type != record.deploy.provider_target_type
         or any(
@@ -101,7 +100,7 @@ def qualified_generic_web_source_inventory(
             record.resolved_target is not None
             and (
                 record.resolved_target.target_id != target.target_id
-                or record.resolved_target.target_name != target.display_name
+                or record.resolved_target.target_name != record.deploy.target_name
                 or record.resolved_target.target_type != record.deploy.target_type
             )
         )

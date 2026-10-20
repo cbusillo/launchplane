@@ -708,6 +708,7 @@ class RecipientCutoverAdapter:
     validate_release: Callable[[], None]
     rollback_observed: bool = False
     rollback_resume_pending: bool = False
+    validate_source: Callable[[], None] | None = None
 
     def target_key(self) -> str:
         return generic_web_provider_target_key(
@@ -951,6 +952,21 @@ class RecipientCutoverAdapter:
 
         def check_local() -> None:
             self.validate_release()
+            # Historical generic markers can belong to an earlier release or
+            # repromotion. Only this attempt's pause dispatch or its original
+            # trigger-bound deployment proves source admission already happened.
+            identity = record.execution.get("runtime_identity")
+            attempt_started = bool(
+                record.execution.get(attempt_prefix + "old_pause_dispatched_at")
+            ) or bool(
+                not repromote
+                and record.execution.get("trigger_requested_at")
+                and isinstance(identity, dict)
+                and identity.get("deployment_record_id")
+                == "recipient-release-" + canonical_sha256(provider_operation_key)[:24]
+            )
+            if self.validate_source is not None and not attempt_started:
+                self.validate_source()
             require_writer_exclusive(self.store, record)
             backup_check()
 

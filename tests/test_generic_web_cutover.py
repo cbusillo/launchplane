@@ -345,7 +345,9 @@ class WebCutoverTests(unittest.TestCase):
 
 
 class WebCutoverDeploymentTests(unittest.TestCase):
-    def seed(self, root: Path, target: str) -> tuple[Any, Any, Any]:
+    def seed(
+        self, root: Path, target: str
+    ) -> tuple[FilesystemRecordStore, GenericWebCutoverPlan, Provider]:
         intent = plan(target)
         production_manifest, candidate_manifest = (
             intent.production.model_copy(deep=True),
@@ -447,10 +449,11 @@ class WebCutoverDeploymentTests(unittest.TestCase):
                 current = store.read_environment_inventory(
                     context_name="fixture", instance_name="prod"
                 )
+                assert current.runtime_identity is not None
                 self.assertEqual(current.runtime_identity.slot, "new")
-                self.assertEqual(
-                    store.read_deployment_record("release").generic_web_cutover.step, "complete"
-                )
+                completed = store.read_deployment_record("release").generic_web_cutover
+                assert completed is not None
+                self.assertEqual(completed.step, "complete")
                 rolled = execute_generic_web_deploy(
                     control_plane_root=Path(folder),
                     record_store=store,
@@ -465,10 +468,12 @@ class WebCutoverDeploymentTests(unittest.TestCase):
                     deployment_record_id="rollback",
                 )
                 self.assertEqual(rolled.deploy_status, "pass")
+                current = store.read_environment_inventory(
+                    context_name="fixture", instance_name="prod"
+                )
+                assert current.runtime_identity is not None
                 self.assertEqual(
-                    store.read_environment_inventory(
-                        context_name="fixture", instance_name="prod"
-                    ).runtime_identity.slot,
+                    current.runtime_identity.slot,
                     "old",
                 )
 
@@ -704,9 +709,9 @@ class WebCutoverCallerRegressionTests(unittest.TestCase):
             self.assertEqual(rolled.deploy_status, "pass")
             self.assertEqual(store.read_deployment_record("failed").deploy.status, "fail")
             self.assertNotIn("switch-old", provider.actions)
-            self.assertEqual(
-                store.read_deployment_record("failed").generic_web_cutover.step, "rolled_back"
-            )
+            failed = store.read_deployment_record("failed").generic_web_cutover
+            assert failed is not None
+            self.assertEqual(failed.step, "rolled_back")
 
     def test_unknown_release_finalizes_failure_without_provider_or_legacy_effects(self) -> None:
         with TemporaryDirectory() as folder:
@@ -729,6 +734,7 @@ class WebCutoverCallerRegressionTests(unittest.TestCase):
                     )
             blocked = store.read_deployment_record("unknown")
             self.assertEqual(blocked.deploy.status, "fail")
+            assert blocked.generic_web_cutover is not None
             self.assertEqual(blocked.generic_web_cutover.step, "blocked")
             self.assertTrue(blocked.deploy.finished_at)
 
@@ -985,15 +991,18 @@ class WebCutoverReviewRecoveryTests(unittest.TestCase):
                 self.assertEqual(provider.slot.slot_id, intent.old.slot_id)
                 self.assertEqual(provider.writer_slot.slot_id, intent.old.slot_id)
                 attempt = store.read_deployment_record("promotion-attempt")
+                assert attempt.generic_web_cutover is not None
                 self.assertEqual(attempt.generic_web_cutover.step, "rolled_back")
                 self.assertEqual(attempt.deploy.status, "fail")
                 self.assertEqual(
                     store.read_promotion_record(result.promotion_record_id).deploy.status, "fail"
                 )
+                restored = store.read_environment_inventory(
+                    context_name="fixture", instance_name="prod"
+                )
+                assert restored.runtime_identity is not None
                 self.assertEqual(
-                    store.read_environment_inventory(
-                        context_name="fixture", instance_name="prod"
-                    ).runtime_identity.slot,
+                    restored.runtime_identity.slot,
                     intent.old.slot_id,
                 )
 
@@ -1122,6 +1131,7 @@ class WebCutoverRecordsCommitTests(unittest.TestCase):
                             with self.assertRaises(TimeoutError):
                                 run(reverse=reverse, record_id=result_id)
                     held = store.read_deployment_record("release").generic_web_cutover
+                    assert held is not None
                     self.assertEqual(held.step, "rolled_back" if reverse else "complete")
                     self.assertFalse(held.records_committed)
                     actions = tuple(provider.actions)
@@ -1161,15 +1171,16 @@ class WebCutoverRecordsCommitTests(unittest.TestCase):
         with TemporaryDirectory() as folder:
             store, intent, provider = WebCutoverDeploymentTests().seed(Path(folder), "application")
             profile = store.read_product_profile_record("fixture")
-            args = dict(
-                lane=profile.lanes[0],
-                artifact_id=intent.candidate.artifact_id,
-                source_git_ref=intent.candidate.source_commit,
-                deploy_reference="",
-            )
             with self.assertRaises(ValueError):
                 resolve_web_cutover_target(
-                    store, profile=profile, provider_id="dokploy", timeout_seconds=10, **args
+                    store,
+                    profile=profile,
+                    provider_id="dokploy",
+                    timeout_seconds=10,
+                    lane=profile.lanes[0],
+                    artifact_id=intent.candidate.artifact_id,
+                    source_git_ref=intent.candidate.source_commit,
+                    deploy_reference="",
                 )
             with self.assertRaises(ValueError):
                 execute_web_cutover_deployment(
@@ -1177,7 +1188,10 @@ class WebCutoverRecordsCommitTests(unittest.TestCase):
                     product=profile.product,
                     record_id="release",
                     factory=lambda _p: provider,
-                    **args,
+                    lane=profile.lanes[0],
+                    artifact_id=intent.candidate.artifact_id,
+                    source_git_ref=intent.candidate.source_commit,
+                    deploy_reference="",
                 )
             with self.assertRaises(FileNotFoundError):
                 store.read_deployment_record("release")

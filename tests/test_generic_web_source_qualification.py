@@ -21,6 +21,8 @@ from control_plane.workflows.generic_web_promotion import execute_generic_web_pr
 from tests.test_generic_web_promotion import _request, _store_with_production
 
 
+# This branch-only fake supplies profile/inventory/deployment reads, not the
+# unrelated Odoo and decision-publication methods of the full review protocol.
 class GenericWebSourceQualificationTests(unittest.TestCase):
     def test_cached_candidate_profile_cannot_reuse_a_removed_rebound_or_replaced_source(
         self,
@@ -46,7 +48,9 @@ class GenericWebSourceQualificationTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     release_version(
-                        store=cast(ReleaseReviewStore, store), profile=profile, instance="testing"
+                        store=cast(ReleaseReviewStore, cast(object, store)),
+                        profile=profile,
+                        instance="testing",
                     ).source_commit,
                     "b" * 40,
                 )
@@ -58,7 +62,7 @@ class GenericWebSourceQualificationTests(unittest.TestCase):
                     ):
                         with self.assertRaises(ReleaseEvidenceUnavailable):
                             release_version(
-                                store=cast(ReleaseReviewStore, store),
+                                store=cast(ReleaseReviewStore, cast(object, store)),
                                 profile=profile,
                                 instance="testing",
                             )
@@ -79,7 +83,9 @@ class GenericWebSourceQualificationTests(unittest.TestCase):
                 )
                 with self.assertRaises(ReleaseEvidenceUnavailable):
                     release_version(
-                        store=cast(ReleaseReviewStore, store), profile=profile, instance="testing"
+                        store=cast(ReleaseReviewStore, cast(object, store)),
+                        profile=profile,
+                        instance="testing",
                     )
 
     def test_candidates_and_direct_promotions_reject_unqualified_referenced_evidence(self) -> None:
@@ -129,7 +135,7 @@ class GenericWebSourceQualificationTests(unittest.TestCase):
                 store.write_qualified_testing_inventory(inventory)
                 self.assertEqual(
                     release_version(
-                        store=cast(ReleaseReviewStore, store),
+                        store=cast(ReleaseReviewStore, cast(object, store)),
                         profile=store.profile,
                         instance="testing",
                     ).source_commit,
@@ -252,7 +258,7 @@ class GenericWebSourceQualificationTests(unittest.TestCase):
                     self.fail(case)
                 with self.assertRaises(ReleaseEvidenceUnavailable):
                     release_version(
-                        store=cast(ReleaseReviewStore, store),
+                        store=cast(ReleaseReviewStore, cast(object, store)),
                         profile=store.profile,
                         instance="testing",
                     )
@@ -283,7 +289,9 @@ class GenericWebSourceQualificationTests(unittest.TestCase):
         store.write_environment_inventory(production)
         store.deployments.clear()
         version = release_version(
-            store=cast(ReleaseReviewStore, store), profile=store.profile, instance="prod"
+            store=cast(ReleaseReviewStore, cast(object, store)),
+            profile=store.profile,
+            instance="prod",
         )
         assert production.runtime_identity is not None
         self.assertEqual(version.artifact_id, production.runtime_identity.artifact_id)
@@ -301,6 +309,7 @@ class GenericWebSourceQualificationTests(unittest.TestCase):
                 "provider_id": "fake-cloud",
                 "target_category": "service",
                 "provider_target_type": "managed-service",
+                "display_name": "Friendly managed service label",
             }
         )
         deploy = record.deploy.model_copy(

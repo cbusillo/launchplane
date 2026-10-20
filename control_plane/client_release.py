@@ -503,9 +503,12 @@ def accepted_release_can_start(store: object, decision: ReleaseReviewDecisionRec
 
 
 def client_release_grant_allows(
-    store: object, authorization: DurableOperationAuthorization
+    store: object,
+    authorization: DurableOperationAuthorization,
+    *,
+    require_testing_source: bool = True,
 ) -> bool:
-    """The worker's re-check of a release decision grant before each provider effect."""
+    """Recheck authority, and testing eligibility unless the attempt admits it separately."""
 
     if authorization.grant not in RELEASE_DECISION_GRANTS or authorization.instances != ("prod",):
         return False
@@ -522,7 +525,6 @@ def client_release_grant_allows(
     expected = _decision_caller(decision)
     try:
         record_store = cast(PostgresRecordStore, store)
-        testing = release_version(store=record_store, profile=profile, instance="testing")
         production = release_version(store=record_store, profile=profile, instance="prod")
     except (FileNotFoundError, ValueError):
         return False
@@ -542,9 +544,16 @@ def client_release_grant_allows(
             checklist.candidate.artifact_id,
             target.artifact_identity.artifact_id if target.artifact_identity else "",
         )
-    # Every step happens while testing carries the accepted candidate, and production
-    # runs either the checklist's production version or that candidate.
-    return testing == checklist.candidate and production in (
+    if require_testing_source:
+        try:
+            testing = release_version(store=record_store, profile=profile, instance="testing")
+        except (FileNotFoundError, ValueError):
+            return False
+        if testing != checklist.candidate:
+            return False
+    # Only generic-web attempt checkpoints omit testing after separately admitting
+    # the exact source. They still retain the accepted production-version boundary.
+    return production in (
         checklist.production,
         checklist.candidate,
     )
@@ -963,7 +972,7 @@ def _run_generic_web_promotion(
     )
 
     def validate_checkpoint() -> None:
-        if not client_release_grant_allows(store, grant):
+        if not client_release_grant_allows(store, grant, require_testing_source=False):
             raise click.ClickException("The release is no longer accepted.")
 
     def validate_before_effect(target: GenericWebResolvedDeployTarget) -> None:
@@ -1014,9 +1023,10 @@ def _run_generic_web_promotion(
             )
             if covered is None:
                 raise click.ClickException("The release is no longer accepted.")
-            # A persisted execution is resumable, but it cannot start another
-            # forward effect after testing loses qualification. Recipient rollback
-            # uses a separate checkpoint and retains its recovery authority.
+
+        def validate_recipient_source() -> None:
+            # The adapter admits the source before this attempt starts production;
+            # its later acceptance and recovery checks do not chase testing.
             try:
                 candidate = release_version(store=store, profile=profile, instance="testing")
             except (FileNotFoundError, ValueError) as error:
@@ -1034,6 +1044,7 @@ def _run_generic_web_promotion(
             f"client-release-{decision.record_id}",
             backup_record_id,
             validate_recipient_release,
+            validate_source=validate_recipient_source,
         )
         recipient_result = run_durable_provider_operation(
             store=store,

@@ -14,6 +14,8 @@ from control_plane.client_release import (
     StandingReleaseReviewBackoff,
     read_client_release_run,
     release_start_for_acceptance,
+    client_release_grant,
+    client_release_grant_allows,
 )
 from control_plane.contracts.product_profile_record import ProductOwnerProfile
 from control_plane.contracts.production_backup_authority import ProductionBackupPolicyRecord
@@ -33,7 +35,9 @@ from datetime import timedelta
 from control_plane.product_owner_setting import ProductOwnerIdentity, updated_product_owner_profile
 from control_plane.release_review import build_release_review
 from control_plane.release_review import ReleaseEvidenceUnavailable
+from control_plane.release_review import checklist_digest
 from control_plane.contracts.promotion_record import PostDeployUpdateEvidence
+from control_plane.workflows.inventory import build_environment_inventory
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.production_promotion_backup import GENERIC_WEB_PROMOTION_BACKUP_ACTION
 from control_plane.workflows.production_backup_gate_operation_worker import (
@@ -375,6 +379,230 @@ class GenericWebClientReleaseTests(unittest.TestCase):
 
     def test_testing_lane_removed_during_source_health_wait_never_dispatches(self) -> None:
         self._source_changed_during_health_wait("lane_removed")
+
+    def test_accepted_release_finishes_after_new_qualified_testing_arrives(self) -> None:
+        decision = self.accept()
+        self.advance()
+        self.capture()
+        execute = self.provider.execute_artifact_deploy
+
+        def advance_testing_after_image(**kwargs: Any) -> None:
+            execute(**kwargs)
+            inventory = self.store.read_environment_inventory(
+                context_name=self.context, instance_name="testing"
+            )
+            record = self.store.read_deployment_record(inventory.deployment_record_id)
+            assert (
+                inventory.runtime_identity is not None and inventory.artifact_identity is not None
+            )
+            next_id = record.record_id + "-next"
+            artifact = inventory.artifact_identity.model_copy(
+                update={"artifact_id": self.profile.image.repository + "@sha256:" + "d" * 64}
+            )
+            identity = inventory.runtime_identity.model_copy(
+                update={
+                    "artifact_id": artifact.artifact_id,
+                    "source_git_ref": "d" * 40,
+                    "deployment_record_id": next_id,
+                }
+            )
+            self.store.write_deployment_record(
+                record.model_copy(
+                    update={
+                        "record_id": next_id,
+                        "artifact_identity": artifact,
+                        "source_git_ref": identity.source_git_ref,
+                        "runtime_identity": identity,
+                    }
+                )
+            )
+            self.store.write_environment_inventory(
+                inventory.model_copy(
+                    update={
+                        "deployment_record_id": next_id,
+                        "artifact_identity": artifact,
+                        "source_git_ref": identity.source_git_ref,
+                        "runtime_identity": identity,
+                    }
+                )
+            )
+            kwargs["before_provider_mutation"]("post_image_maintenance")
+
+        with patch.object(
+            self.provider, "execute_artifact_deploy", side_effect=advance_testing_after_image
+        ):
+            self.advance()
+        self.assertEqual(
+            self.provider.deployed_artifacts, [decision.checklist.candidate.artifact_id]
+        )
+        promotion = self.store.list_promotion_records()[0]
+        self.assertEqual(promotion.deploy.status, "pass")
+        self.assertEqual(promotion.rollback.status, "skipped")
+        self.assertEqual(
+            self.store.read_release_review_decision_record(
+                product=self.profile.product, record_id=decision.record_id
+            ),
+            decision,
+        )
+
+    def test_default_forward_grant_still_requires_testing_but_attempt_authority_is_separate(
+        self,
+    ) -> None:
+        decision = self.accept()
+        grant = client_release_grant(
+            decision=decision,
+            action="generic_web_prod_promotion.execute",
+            context=self.context,
+            authorized_at=decision.decided_at,
+        )
+        self.assertTrue(client_release_grant_allows(self.store, grant))
+        inventory = self.store.read_environment_inventory(
+            context_name=self.context, instance_name="testing"
+        )
+        record = self.store.read_deployment_record(inventory.deployment_record_id)
+        self.store.write_deployment_record(
+            record.model_copy(
+                update={"deploy": record.deploy.model_copy(update={"status": "fail"})}
+            )
+        )
+        self.assertFalse(client_release_grant_allows(self.store, grant))
+        self.assertTrue(
+            client_release_grant_allows(self.store, grant, require_testing_source=False)
+        )
+        self.store.write_deployment_record(record)
+        assert inventory.runtime_identity is not None
+        self.write_qualified_testing_inventory(
+            inventory.model_copy(
+                update={
+                    "runtime_identity": inventory.runtime_identity.model_copy(
+                        update={"source_git_ref": "d" * 40}
+                    )
+                }
+            )
+        )
+        self.assertFalse(client_release_grant_allows(self.store, grant))
+        self.assertTrue(
+            client_release_grant_allows(self.store, grant, require_testing_source=False)
+        )
+        for changed in (
+            grant.model_copy(update={"context": "another-context"}),
+            grant.model_copy(update={"release_decision_record_id": "another-decision"}),
+            grant.model_copy(
+                update={"caller": grant.caller.model_copy(update={"github_id": 12345})}
+            ),
+        ):
+            self.assertFalse(
+                client_release_grant_allows(self.store, changed, require_testing_source=False)
+            )
+        self.switch("held")
+        self.assertFalse(
+            client_release_grant_allows(self.store, grant, require_testing_source=False)
+        )
+
+    def test_rejection_rollback_ignores_failed_testing_qualification(self) -> None:
+        self.rejection_rollback_without_testing(missing=False)
+
+    def test_rejection_rollback_ignores_missing_testing_record(self) -> None:
+        self.rejection_rollback_without_testing(missing=True)
+
+    def rejection_rollback_without_testing(self, *, missing: bool) -> None:
+        candidate = self.accept()
+        baseline_checklist = candidate.checklist.model_copy(
+            update={"candidate": candidate.checklist.production, "database_compatibility": None}
+        )
+        self.store.write_release_review_decision_record(
+            candidate.model_copy(
+                update={
+                    "checklist": baseline_checklist,
+                    "checklist_digest": checklist_digest(baseline_checklist),
+                    "release_start": "",
+                    "decided_at": (datetime.now(UTC) - timedelta(seconds=2)).isoformat(),
+                }
+            )
+        )
+        hotfix = candidate.model_copy(
+            update={
+                "record_id": "director-hotfix",
+                "decision": "temporary_hotfix",
+                "actor_github_id": "123",
+                "actor_github_login": "director",
+                "release_start": "promote",
+                "decided_at": (datetime.now(UTC) - timedelta(seconds=1)).isoformat(),
+            }
+        )
+        rejection = candidate.model_copy(
+            update={
+                "record_id": "client-hotfix-rejection",
+                "decision": "changes_requested",
+                "release_start": "rollback",
+                "decided_at": datetime.now(UTC).isoformat(),
+            }
+        )
+        self.store.write_release_review_decision_record(hotfix)
+        self.store.write_release_review_decision_record(rejection)
+        testing = self.store.read_environment_inventory(
+            context_name=self.context, instance_name="testing"
+        )
+        original = self.store.read_deployment_record(testing.deployment_record_id)
+        previous = self.store.read_deployment_record(
+            self.store.read_environment_inventory(
+                context_name=self.context, instance_name="prod"
+            ).deployment_record_id
+        )
+        assert original.runtime_identity is not None
+        identity = original.runtime_identity.model_copy(
+            update={"instance": "prod", "deployment_record_id": "live-hotfix"}
+        )
+        hotfix_deployment = original.model_copy(
+            update={
+                "record_id": "live-hotfix",
+                "instance": "prod",
+                "runtime_identity": identity,
+                "deploy": previous.deploy,
+                "resolved_target": previous.resolved_target,
+                "deployed_target": previous.deployed_target,
+            }
+        )
+        self.store.write_deployment_record(hotfix_deployment)
+        self.store.write_environment_inventory(
+            build_environment_inventory(
+                deployment_record=hotfix_deployment, updated_at=rejection.decided_at
+            )
+        )
+        self.provider.running = identity
+        if not missing:
+            self.store.write_deployment_record(
+                original.model_copy(
+                    update={"deploy": original.deploy.model_copy(update={"status": "fail"})}
+                )
+            )
+        read = self.store.read_deployment_record
+
+        def read_record(record_id: str) -> Any:
+            if missing and record_id == testing.deployment_record_id:
+                raise FileNotFoundError(record_id)
+            return read(record_id)
+
+        grant = client_release_grant(
+            decision=rejection,
+            action="generic_web_rollback.execute",
+            context=self.context,
+            authorized_at=rejection.decided_at,
+        )
+        with patch.object(self.store, "read_deployment_record", side_effect=read_record):
+            self.assertTrue(client_release_grant_allows(self.store, grant))
+            self.assertTrue(self.advance())
+        self.assertEqual(
+            self.provider.deployed_artifacts, [candidate.checklist.production.artifact_id]
+        )
+        production = self.store.read_environment_inventory(
+            context_name=self.context, instance_name="prod"
+        )
+        assert production.runtime_identity is not None
+        self.assertEqual(
+            production.runtime_identity.artifact_id,
+            candidate.checklist.production.artifact_id,
+        )
 
     def _source_changed_during_health_wait(self, change: str) -> None:
         self.accept()

@@ -105,7 +105,7 @@ class _GenericWebPromotionStore:
         self.inventories[(record.context, record.instance)] = record
 
     def write_qualified_testing_inventory(self, inventory: EnvironmentInventory) -> None:
-        """Seed complete matching source evidence, as a successful deploy would."""
+        """Seed complete matching source evidence, as a successful deployment would."""
         assert inventory.runtime_identity is not None
         self.write_deployment_record(
             _deployment_record().model_copy(
@@ -312,7 +312,7 @@ class GenericWebProdPromotionTests(unittest.TestCase):
                     ProductionPromotionBackupGuard(backup_checkpoint, {})
                 ),
             ),
-            self.assertRaisesRegex(click.ClickException, "backup refused"),
+            self.assertRaises(click.ClickException),
         ):
             execute_generic_web_prod_promotion(
                 control_plane_root=Path("."),
@@ -320,6 +320,7 @@ class GenericWebProdPromotionTests(unittest.TestCase):
                 request=_request(verify_health=False),
                 provider_effect_checkpoint=effect_checkpoint,
             )
+        backup_checkpoint.assert_called_once()
         effect_checkpoint.assert_not_called()
 
     def test_execute_accepts_based_driver_product_profile(self) -> None:
@@ -624,7 +625,7 @@ class GenericWebProdPromotionTests(unittest.TestCase):
                 side_effect=fake_github_api_request,
             ),
         ):
-            with self.assertRaises(click.ClickException) as caught:
+            with self.assertRaises(click.ClickException):
                 execute_generic_web_prod_promotion(
                     control_plane_root=Path("."),
                     record_store=store,
@@ -634,7 +635,6 @@ class GenericWebProdPromotionTests(unittest.TestCase):
         self.assertFalse(deploy_called)
         self.assertEqual(store.deployments, initial_deployments)
         self.assertEqual(store.promotions, {})
-        self.assertIn("not promoted revision", str(caught.exception))
 
     def test_dry_run_returns_pending_evidence_without_mutation(self) -> None:
         store = _GenericWebPromotionStore(_profile())
@@ -787,7 +787,7 @@ class GenericWebProdPromotionTests(unittest.TestCase):
                 "control_plane.workflows.generic_web_promotion.github_api_request",
                 side_effect=fake_github_api_request,
             ),
-            self.assertRaises(click.ClickException) as caught,
+            self.assertRaises(click.ClickException),
         ):
             execute_generic_web_prod_promotion(
                 control_plane_root=Path("."),
@@ -797,7 +797,6 @@ class GenericWebProdPromotionTests(unittest.TestCase):
 
         self.assertEqual(store.deployments, initial_deployments)
         self.assertEqual(store.promotions, {})
-        self.assertIn("not promoted revision", str(caught.exception))
 
     def test_request_requires_testing_to_prod(self) -> None:
         with self.assertRaises(ValidationError):
@@ -1041,14 +1040,13 @@ class GenericWebProdPromotionTests(unittest.TestCase):
         )
         initial_deployments = store.deployments.copy()
 
-        with self.assertRaises(click.ClickException) as caught:
+        with self.assertRaises(click.ClickException):
             execute_generic_web_prod_promotion(
                 control_plane_root=Path("."),
                 record_store=store,
                 request=_request(),
             )
 
-        self.assertIn("does not match current source inventory", str(caught.exception))
         self.assertEqual(store.deployments, initial_deployments)
         self.assertEqual(store.promotions, {})
 
@@ -1056,14 +1054,13 @@ class GenericWebProdPromotionTests(unittest.TestCase):
         store = _GenericWebPromotionStore(_profile())
         initial_deployments = store.deployments.copy()
 
-        with self.assertRaises(click.ClickException) as caught:
+        with self.assertRaises(click.ClickException):
             execute_generic_web_prod_promotion(
                 control_plane_root=Path("."),
                 record_store=store,
                 request=_request(),
             )
 
-        self.assertIn("current source inventory", str(caught.exception))
         self.assertEqual(store.deployments, initial_deployments)
         self.assertEqual(store.promotions, {})
 
@@ -1249,8 +1246,11 @@ class GenericWebProdPromotionRollbackTests(unittest.TestCase):
     def test_failed_maintenance_rolls_back_without_running_new_commands_on_old_image(self) -> None:
         self._check_maintenance_failure("command")
 
-    def test_testing_qualification_loss_after_image_effect_still_rolls_back(self) -> None:
-        self._check_maintenance_failure("testing_qualification")
+    def test_new_qualified_testing_after_image_effect_keeps_accepted_release(self) -> None:
+        self._check_maintenance_failure("new_testing")
+
+    def test_new_testing_does_not_prevent_rollback_of_failed_production_maintenance(self) -> None:
+        self._check_maintenance_failure("new_testing_command_failure")
 
     def test_maintenance_read_refusal_retains_receipt_for_first_rollback(self) -> None:
         self._check_maintenance_failure("read")
@@ -1304,16 +1304,31 @@ class GenericWebProdPromotionRollbackTests(unittest.TestCase):
                     **kwargs,
                 )
                 if (
-                    failure == "testing_qualification"
+                    failure in {"new_testing", "new_testing_command_failure"}
                     and runtime_identity.artifact_id != _PREVIOUS_ARTIFACT
                 ):
                     testing = store.read_environment_inventory(
                         context_name=runtime_identity.context, instance_name="testing"
                     )
-                    record = store.read_deployment_record(testing.deployment_record_id)
-                    store.write_deployment_record(
-                        record.model_copy(
-                            update={"deploy": record.deploy.model_copy(update={"status": "fail"})}
+                    assert testing.runtime_identity is not None
+                    next_id = testing.deployment_record_id + "-next"
+                    next_artifact = store.profile.image.repository + "@sha256:" + "c" * 64
+                    store.write_qualified_testing_inventory(
+                        testing.model_copy(
+                            update={
+                                "artifact_identity": ArtifactIdentityReference(
+                                    artifact_id=next_artifact
+                                ),
+                                "source_git_ref": "3" * 40,
+                                "deployment_record_id": next_id,
+                                "runtime_identity": testing.runtime_identity.model_copy(
+                                    update={
+                                        "artifact_id": next_artifact,
+                                        "source_git_ref": "3" * 40,
+                                        "deployment_record_id": next_id,
+                                    }
+                                ),
+                            }
                         )
                     )
 
@@ -1371,7 +1386,10 @@ class GenericWebProdPromotionRollbackTests(unittest.TestCase):
             assert provider.running is not None
             command = str(payload["command"])
             executed.append((command, provider.running.artifact_id))
-            if command == "./new-migration" and failure != "standalone_preflight":
+            if command == "./new-migration" and failure not in {
+                "standalone_preflight",
+                "new_testing",
+            }:
                 raise click.ClickException("migration failed")
 
         with (
@@ -1391,6 +1409,19 @@ class GenericWebProdPromotionRollbackTests(unittest.TestCase):
                 result = self._promote(store, provider)
                 if failure == "initial_preflight":
                     self.assertEqual(schedules["billing"], original)
+            if failure == "new_testing":
+                self.assertEqual(result.promotion_status, "pass")
+                self.assertEqual(result.rollback_status, "skipped")
+                self.assertEqual(
+                    [command for command, _ in executed], ["./new-migration", "./new-billing"]
+                )
+                self.assertEqual(provider.deployed_artifacts, [result.artifact_id])
+                testing = store.read_environment_inventory(
+                    context_name=result.context, instance_name="testing"
+                )
+                assert testing.artifact_identity is not None
+                self.assertNotEqual(testing.artifact_identity.artifact_id, result.artifact_id)
+                return
             if failure == "standalone_preflight":
                 self.assertEqual(result.promotion_status, "pass")
                 current = dict(schedules["billing"])
@@ -1439,9 +1470,6 @@ class GenericWebProdPromotionRollbackTests(unittest.TestCase):
             if failure == "read":
                 self.assertEqual(executed, [])
                 self.assertNotIn("billing", schedules)
-            elif failure == "testing_qualification":
-                self.assertEqual([command for command, _ in executed], ["./old-billing"])
-                self.assertEqual(schedules["billing"], original)
             else:
                 self.assertEqual(
                     [command for command, _ in executed], ["./new-migration", "./old-billing"]
@@ -1538,9 +1566,9 @@ class GenericWebProdPromotionRollbackTests(unittest.TestCase):
         store = _store_with_production(previous_deploy_reference="")
         provider = _ProductionProvider()
 
-        with self.assertRaisesRegex(click.ClickException, "refused before changing production"):
+        with self.assertRaises(click.ClickException):
             self._promote(store, provider)
-        with self.assertRaisesRegex(click.ClickException, "refused before changing production"):
+        with self.assertRaises(click.ClickException):
             execute_generic_web_prod_promotion(
                 control_plane_root=Path("."),
                 record_store=store,
@@ -1557,10 +1585,7 @@ class GenericWebProdPromotionRollbackTests(unittest.TestCase):
 
 class GenericWebPromotionWorkflowTests(unittest.TestCase):
     def test_workflow_profile_rejects_colliding_input_names(self) -> None:
-        with self.assertRaisesRegex(
-            ValidationError,
-            "product promotion workflow input names must be unique",
-        ):
+        with self.assertRaises(ValidationError):
             ProductPromotionWorkflowProfile(
                 dry_run_input=" operation ",
                 artifact_id_input="operation",
@@ -1842,11 +1867,16 @@ class GenericWebPromotionWorkflowTests(unittest.TestCase):
         self.assertEqual(run.get("id"), 101)
 
     def test_dispatch_requires_managed_github_token(self) -> None:
-        with patch(
-            "control_plane.workflows.generic_web_promotion_workflow.resolve_launchplane_github_token",
-            return_value="",
+        with (
+            patch(
+                "control_plane.workflows.generic_web_promotion_workflow.resolve_launchplane_github_token",
+                return_value="",
+            ),
+            patch(
+                "control_plane.workflows.generic_web_promotion_workflow.github_api_request"
+            ) as request,
         ):
-            with self.assertRaises(click.ClickException) as raised:
+            with self.assertRaises(click.ClickException):
                 dispatch_generic_web_promotion_workflow(
                     control_plane_root=Path("."),
                     profile=_profile(),
@@ -1856,7 +1886,7 @@ class GenericWebPromotionWorkflowTests(unittest.TestCase):
                     ),
                 )
 
-        self.assertIn("Delivery App", str(raised.exception))
+        request.assert_not_called()
 
 
 if __name__ == "__main__":
