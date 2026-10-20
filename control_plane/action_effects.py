@@ -68,6 +68,8 @@ ACTION_DECLARATIONS: Mapping[str, ActionDeclaration] = MappingProxyType(
         "backup_gate.write": ActionDeclaration("write"),
         "deployment.read": ActionDeclaration("read"),
         "deployment.write": ActionDeclaration("write"),
+        # Agenda metadata cannot accept a release, change runtime settings or grant access.
+        "discussion_topic.write": ActionDeclaration("write", director_agent_write=True),
         "detached_application_retirement.apply": ActionDeclaration("write"),
         "detached_application_retirement.plan": ActionDeclaration("plan"),
         "dokploy_target.inspect": ActionDeclaration("read"),
