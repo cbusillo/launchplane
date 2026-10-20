@@ -24,6 +24,7 @@ from control_plane.contracts.route_binding_record import (
     RouteBindingTls,
     route_binding_record_sha256,
 )
+from control_plane.contracts.testing_route_refresh import TestingRouteRefreshSources
 
 
 _EVIDENCE_SCAN_LIMIT = 1000
@@ -156,6 +157,7 @@ class RouteBindingReconcilePlan(BaseModel):
     findings: tuple[RouteBindingReconcileFinding, ...] = ()
     review_target_id: str = Field(default="", exclude=True)
     review_sources: RouteBindingReviewSources | None = Field(default=None, exclude=True)
+    native_review_sources: TestingRouteRefreshSources | None = Field(default=None, exclude=True)
     current_record_sha256: str = ""
     candidate_record_sha256: str = ""
     current_record: EnvironmentRouteBindingRecord | None = Field(default=None, exclude=True)

@@ -764,6 +764,8 @@ from control_plane.contracts.preview_pr_feedback_remediation import (
     PreviewPrFeedbackRemediationRequest,
 )
 from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
+from control_plane.contracts.testing_route_refresh import TestingRouteRefreshSources
+from control_plane.native_testing_route_refresh import plan_native_testing_route_refresh
 from control_plane.contracts.route_binding_record import (
     route_binding_record_sha256,
     EnvironmentRouteBindingRecord,
@@ -2968,6 +2970,7 @@ class _RouteBindingMutationStore(_RouteBindingReconcileStore, Protocol):
         expected_record: EnvironmentRouteBindingRecord | None,
         replacement_record: EnvironmentRouteBindingRecord,
         mutation: DbOnlyMutationRequest,
+        native_sources: TestingRouteRefreshSources | None = None,
     ) -> RouteBindingReconcileWriteResult: ...
 
 
@@ -23316,6 +23319,37 @@ def create_launchplane_fastapi_app(
                 message=str(error),
             ) from error
 
+        def refresh_native_binding(
+            current: EnvironmentRouteBindingRecord, evaluated_at: str
+        ) -> control_plane_route_binding_reconcile.RouteBindingReconcilePlan:
+            ensure_route_binding_allowed(
+                identity=identity,
+                trace_id=trace_id,
+                action="route_binding.apply"
+                if refresh_request.mode == "apply"
+                else "route_binding.read",
+                product=current.product,
+                context_name=current.context,
+                instance_name=current.instance,
+                message="Workflow cannot observe a discovered native testing route.",
+            )
+            if not isinstance(record_store, PostgresRecordStore):
+                raise TypeError("Native testing route refresh requires database-backed custody.")
+            try:
+                return plan_native_testing_route_refresh(
+                    record_store,
+                    root=resolved_control_plane_root,
+                    current=current,
+                    evaluated_at=evaluated_at,
+                )
+            except NativeSourceAuthorizationDenied as error:
+                raise _launchplane_http_error(
+                    status_code=403,
+                    trace_id=trace_id,
+                    code="authorization_denied",
+                    message="The managed testing route observation was denied.",
+                ) from error
+
         try:
             if remaining:
                 stable_store = cast(
@@ -23332,6 +23366,7 @@ def create_launchplane_fastapi_app(
                     record_store=controller_store,
                     evaluated_at=utc_now_timestamp(),
                     target_limit=_ODOO_TESTING_ROUTE_BINDING_REFRESH_TARGET_LIMIT,
+                    native_refresh=refresh_native_binding,
                 )
         except (
             control_plane_route_binding_refresh_controller.RouteBindingRefreshTargetLimitExceeded
@@ -23523,6 +23558,11 @@ def create_launchplane_fastapi_app(
             mutation_result = mutation_store.reconcile_route_binding_record(
                 expected_record=reconcile_plan.current_record,
                 replacement_record=reconcile_plan.record,
+                native_sources=reconcile_plan.native_review_sources
+                if isinstance(
+                    reconcile_plan, control_plane_route_binding_reconcile.RouteBindingReconcilePlan
+                )
+                else None,
                 mutation=DbOnlyMutationRequest(
                     scope=idempotency_scope(identity),
                     route_path=route_path,

@@ -1785,6 +1785,21 @@ class NativeTestingWorkerTests(unittest.TestCase):
 
     def test_second_rebuild_uses_published_copy_and_preserves_later_deployment_route(self) -> None:
         self.complete_second_rebuild()
+        from control_plane.native_testing_route_refresh import plan_native_testing_route_refresh
+
+        before = self.current()
+        for _ in range(2):
+            refresh = plan_native_testing_route_refresh(
+                self.store,
+                root=self.root,
+                current=self.current().binding,
+                evaluated_at=datetime.now(UTC).isoformat(),
+            )
+            self.assertIn(refresh.status, {"ready", "unchanged"}, refresh.model_dump())
+            assert refresh.record is not None
+            self.store.write_route_binding_record(refresh.record)
+        self.assertEqual(self.current().binding.domains, before.binding.domains)
+        self.assertEqual(self.current().target_id, before.target_id)
 
     def test_next_rebuild_moves_to_desired_port_without_reverting_the_profile(self) -> None:
         self.complete_second_rebuild(change_port=True)

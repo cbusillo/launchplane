@@ -922,6 +922,30 @@ The parent integration still wires the controller/provider lifecycle, preserves
 the private backend alias during later ordinary deploys, and qualifies live CM.
 No production mutation or new authorization grant is part of this stage.
 
+### Continuing native route authority
+
+The existing Odoo testing route-binding refresh controller renews a published
+native copy from its original publication and route custody. It does not require
+or create provider-owned domains or a legacy ingress audit. Each run reads the
+actual owned file and applied managed-proxy routing, including runs before the
+attestation is due. The route must still select the published copy at the same
+address with unchanged ingress/TLS ownership and canonical target. The runtime
+identity comes from the current inventory, so an ordinary deployment can update
+the build without replacing the original route provenance.
+
+A successful due refresh retains the publication key and route digest and records
+a new observation digest and 24-hour expiry. Historical publication/readiness
+timestamps alone cannot renew routing evidence. Missing custody, a foreign target
+alias, unavailable observation or routing drift returns the existing controller's
+attention outcome without restamping the binding. Provider authorization denials
+remain explicit denials; there is no alternate caller or transport.
+
+The existing exact-lane authorization is checked before observation. The final
+CAS write locks product authority and the binding and rechecks the observed source
+records and target aliases. Concurrent rebuild, deployment or source changes
+produce a conflict for a later fresh run. Legacy managed and external bindings
+keep their existing refresh paths and the same bounded failure reporting.
+
 ## Native testing worker integration
 
 The existing durable target-replacement action accepts testing-only
