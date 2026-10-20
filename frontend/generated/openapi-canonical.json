@@ -25112,7 +25112,8 @@
               "execute",
               "simulate-final",
               "verify",
-              "retire"
+              "retire",
+              "retire-incomplete"
             ],
             "title": "Action",
             "type": "string"

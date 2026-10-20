@@ -11244,9 +11244,9 @@ class PostgresRecordStore(HumanSessionStore):
             row = session.get(
                 LaunchplaneOdooUpgradeRehearsalRow, replacement.rehearsal_id, with_for_update=True
             )
-            if (row.payload if row else None) != (
-                self._payload_dict(expected) if expected is not None else None
-            ):
+            if (
+                OdooUpgradeRehearsalRecord.model_validate(row.payload) if row else None
+            ) != expected:
                 raise ValueError("Rehearsal state changed; preserve its original operation.")
             if replacement.compose_id and (expected is None or not expected.compose_id):
                 # The native physical registry fences aliases without claiming a lane.
@@ -11272,6 +11272,92 @@ class PostgresRecordStore(HumanSessionStore):
                     rehearsal_id=replacement.rehearsal_id, payload=self._payload_dict(replacement)
                 )
             )
+            session.commit()
+
+    def complete_incomplete_rehearsal_retirement(
+        self,
+        *,
+        expected: OdooUpgradeRehearsalRecord,
+        replacement: OdooUpgradeRehearsalRecord,
+        original: LaunchplaneIdempotencyRecord,
+        trace_id: str,
+        result: dict[str, object],
+    ) -> None:
+        """Publish disposal and settle its exact held execute in one transaction."""
+        from control_plane.contracts.odoo_upgrade_rehearsal import ODOO_UPGRADE_REHEARSAL_ROUTE
+        from control_plane.odoo_upgrade_rehearsal import require_unaliased_rehearsal
+        from control_plane.provider_operations import provider_operation_response_payload
+
+        if (
+            expected.state != "prepared"
+            or expected.copies
+            or replacement.state != "retired"
+            or replacement.model_copy(
+                update={"state": expected.state, "updated_at": expected.updated_at}
+            )
+            != expected
+            or original.state != "reconcile_required"
+            or original.provider_effect_phase != "execute"
+            or not original.provider_effect_started_at
+            or original.scope != expected.principal
+            or original.provider_target_key != expected.rehearsal_id
+            or original.route_path != ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=expected.product)
+            or result.get("disposed") is not True
+            or result.get("action") != "retire-incomplete"
+        ):
+            raise ValueError(
+                "Incomplete retirement requires the exact held execute and disposal proof."
+            )
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            self._lock_landing_authority(session, "odoo-upgrade-rehearsal:" + expected.rehearsal_id)
+            row = session.get(
+                LaunchplaneOdooUpgradeRehearsalRow, expected.rehearsal_id, with_for_update=True
+            )
+            operation_row = session.scalar(
+                self._idempotency_statement(
+                    scope=original.scope,
+                    route_path=original.route_path,
+                    idempotency_key=original.idempotency_key,
+                    for_update=True,
+                )
+            )
+            if (
+                row is None
+                or OdooUpgradeRehearsalRecord.model_validate(row.payload) != expected
+                or operation_row is None
+                or operation_row.payload != self._payload_dict(original)
+            ):
+                raise ValueError(
+                    "Original rehearsal custody changed before retirement publication."
+                )
+            require_unaliased_rehearsal(self, expected)
+            now = self._database_mutation_timestamp(session)
+            completed = self._updated_idempotency_record(
+                original,
+                state="completed",
+                updated_at=now,
+                recorded_at=now,
+                response_status_code=202,
+                response_trace_id=trace_id,
+                response_payload=provider_operation_response_payload(
+                    trace_id=trace_id, records={"rehearsal": expected.rehearsal_id}, result=result
+                ),
+            )
+            provider_row = session.scalar(
+                select(LaunchplaneProviderTargetRow)
+                .where(
+                    LaunchplaneProviderTargetRow.context == expected.rehearsal_id,
+                    LaunchplaneProviderTargetRow.instance == "rehearsal",
+                )
+                .with_for_update()
+            )
+            if provider_row is None or provider_row.target_id != expected.compose_id:
+                raise ValueError("Rehearsal placement ownership changed.")
+            session.delete(provider_row)
+            self._sync_idempotency_row(operation_row, completed)
+            row.payload = self._payload_dict(replacement)
             session.commit()
 
     def read_fresh_odoo_testing_generation(
