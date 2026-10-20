@@ -3,6 +3,7 @@ import os
 import stat
 import subprocess
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -12,6 +13,37 @@ class StartLaunchplaneServiceScriptTests(unittest.TestCase):
         self.script_path = (
             Path(__file__).resolve().parents[1] / "scripts" / "start-launchplane-service.sh"
         )
+        temporary_directory = TemporaryDirectory()
+        self.addCleanup(temporary_directory.cleanup)
+        self.root = Path(temporary_directory.name)
+        self.bin_dir = self.root / "bin"
+        self.bin_dir.mkdir()
+        self.capture_file = self.root / "uv-args.txt"
+        self.policy_directory = self.root / "job tmp"
+        self.policy_directory.mkdir()
+        self.environment = {
+            key: value
+            for key, value in os.environ.items()
+            if key
+            not in {
+                "LAUNCHPLANE_POLICY_TOML",
+                "LAUNCHPLANE_POLICY_B64",
+                "LAUNCHPLANE_POLICY_FILE",
+                "UV_SCHEMA_STATUS",
+            }
+        }
+        self.environment.update(
+            {
+                "PATH": f"{self.bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+                "TMPDIR": str(self.policy_directory),
+                "UV_CAPTURE_FILE": str(self.capture_file),
+                "LAUNCHPLANE_APP_ROOT": str(self.root / "app"),
+                "LAUNCHPLANE_STATE_DIR": str(self.root / "state"),
+                "LAUNCHPLANE_DATABASE_URL": "postgresql+psycopg://launchplane:test@db/launchplane",
+                "LAUNCHPLANE_SERVICE_HOST": "127.0.0.1",
+            }
+        )
+        self._write_fake_uv(self.bin_dir)
 
     def _write_fake_uv(self, bin_dir: Path) -> None:
         uv_path = bin_dir / "uv"
@@ -30,216 +62,126 @@ fi
         )
         uv_path.chmod(uv_path.stat().st_mode | stat.S_IXUSR)
 
+    def _run(self, **overrides: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [str(self.script_path)],
+            capture_output=True,
+            text=True,
+            env={**self.environment, **overrides},
+            check=False,
+        )
+
+    def _captured_args(self) -> list[str]:
+        return self.capture_file.read_text(encoding="utf-8").splitlines()
+
     def test_requires_explicit_policy_input(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            temporary_directory = Path(temporary_directory_name)
-            app_root = temporary_directory / "app"
-            app_root.mkdir()
-
-            result = subprocess.run(
-                [str(self.script_path)],
-                capture_output=True,
-                text=True,
-                env={
-                    **os.environ,
-                    "LAUNCHPLANE_APP_ROOT": str(app_root),
-                    "LAUNCHPLANE_STATE_DIR": str(temporary_directory / "state"),
-                },
-                check=False,
-            )
-
+        result = self._run()
         self.assertEqual(result.returncode, 1, msg=result.stderr)
         self.assertIn("requires an explicit policy input", result.stderr)
+        self.assertFalse(self.capture_file.exists())
 
     def test_rejects_example_policy_file_path(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            temporary_directory = Path(temporary_directory_name)
-            app_root = temporary_directory / "app"
-            example_policy = app_root / "config" / "launchplane-authz.toml.example"
-            example_policy.parent.mkdir(parents=True)
-            example_policy.write_text("schema_version = 1\n", encoding="utf-8")
-
-            result = subprocess.run(
-                [str(self.script_path)],
-                capture_output=True,
-                text=True,
-                env={
-                    **os.environ,
-                    "LAUNCHPLANE_APP_ROOT": str(app_root),
-                    "LAUNCHPLANE_STATE_DIR": str(temporary_directory / "state"),
-                    "LAUNCHPLANE_POLICY_FILE": str(example_policy),
-                },
-                check=False,
-            )
-
+        example_policy = self.root / "launchplane-authz.toml.example"
+        example_policy.write_text("schema_version = 1\n", encoding="utf-8")
+        result = self._run(LAUNCHPLANE_POLICY_FILE=str(example_policy))
         self.assertEqual(result.returncode, 1, msg=result.stderr)
         self.assertIn("Refusing to start Launchplane with example policy file", result.stderr)
+        self.assertFalse(self.capture_file.exists())
 
     def test_requires_database_url_for_loopback_startup(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            temporary_directory = Path(temporary_directory_name)
-            app_root = temporary_directory / "app"
-            app_root.mkdir()
-
-            result = subprocess.run(
-                [str(self.script_path)],
-                capture_output=True,
-                text=True,
-                env={
-                    **os.environ,
-                    "LAUNCHPLANE_APP_ROOT": str(app_root),
-                    "LAUNCHPLANE_STATE_DIR": str(temporary_directory / "runtime"),
-                    "LAUNCHPLANE_POLICY_TOML": "schema_version = 1\n",
-                    "LAUNCHPLANE_SERVICE_HOST": "127.0.0.1",
-                    "LAUNCHPLANE_DATABASE_URL": "",
-                },
-                check=False,
-            )
-
+        result = self._run(
+            LAUNCHPLANE_POLICY_TOML="schema_version = 1\n", LAUNCHPLANE_DATABASE_URL=""
+        )
         self.assertEqual(result.returncode, 1, msg=result.stderr)
         self.assertIn("refuses startup without LAUNCHPLANE_DATABASE_URL", result.stderr)
+        self.assertFalse(self.capture_file.exists())
 
     def test_accepts_explicit_base64_policy_input(self) -> None:
-        policy_path = Path("/tmp/launchplane-authz.toml")
-        policy_path.unlink(missing_ok=True)
-
-        try:
-            with TemporaryDirectory() as temporary_directory_name:
-                temporary_directory = Path(temporary_directory_name)
-                app_root = temporary_directory / "app"
-                bin_dir = temporary_directory / "bin"
-                capture_file = temporary_directory / "uv-args.txt"
-                app_root.mkdir()
-                bin_dir.mkdir()
-                self._write_fake_uv(bin_dir)
-
-                result = subprocess.run(
-                    [str(self.script_path)],
-                    capture_output=True,
-                    text=True,
-                    env={
-                        **os.environ,
-                        "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
-                        "UV_CAPTURE_FILE": str(capture_file),
-                        "LAUNCHPLANE_APP_ROOT": str(app_root),
-                        "LAUNCHPLANE_STATE_DIR": str(temporary_directory / "runtime"),
-                        "LAUNCHPLANE_SERVICE_HOST": "127.0.0.1",
-                        "LAUNCHPLANE_DATABASE_URL": "postgresql+psycopg://launchplane:test@db/launchplane",
-                        "LAUNCHPLANE_POLICY_B64": base64.b64encode(b"schema_version = 1\n").decode(
-                            "ascii"
-                        ),
-                    },
-                    check=False,
-                )
-
-                captured_args = capture_file.read_text(encoding="utf-8").splitlines()
-
-            self.assertEqual(result.returncode, 0, msg=result.stderr)
-            self.assertIn("--policy-file", captured_args)
-            self.assertIn(str(policy_path), captured_args)
-            self.assertNotIn("--database-url", captured_args)
-            self.assertEqual(policy_path.read_text(encoding="utf-8"), "schema_version = 1\n")
-        finally:
-            policy_path.unlink(missing_ok=True)
+        policy = "schema_version = 1\n"
+        result = self._run(LAUNCHPLANE_POLICY_B64=base64.b64encode(policy.encode()).decode("ascii"))
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        captured_args = self._captured_args()
+        policy_path = Path(captured_args[captured_args.index("--policy-file") + 1])
+        self.assertEqual(policy_path.parent, self.policy_directory)
+        self.assertEqual(policy_path.read_text(encoding="utf-8"), policy)
+        self.assertNotIn("--database-url", captured_args)
 
     def test_rejects_hosted_filesystem_startup_without_database_url(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            temporary_directory = Path(temporary_directory_name)
-            app_root = temporary_directory / "app"
-            app_root.mkdir()
-
-            result = subprocess.run(
-                [str(self.script_path)],
-                capture_output=True,
-                text=True,
-                env={
-                    **os.environ,
-                    "LAUNCHPLANE_APP_ROOT": str(app_root),
-                    "LAUNCHPLANE_STATE_DIR": str(temporary_directory / "state"),
-                    "LAUNCHPLANE_POLICY_TOML": "schema_version = 1\n",
-                    "LAUNCHPLANE_SERVICE_HOST": "0.0.0.0",
-                    "LAUNCHPLANE_DATABASE_URL": "",
-                },
-                check=False,
-            )
-
+        result = self._run(
+            LAUNCHPLANE_POLICY_TOML="schema_version = 1\n",
+            LAUNCHPLANE_SERVICE_HOST="0.0.0.0",
+            LAUNCHPLANE_DATABASE_URL="",
+        )
         self.assertEqual(result.returncode, 1, msg=result.stderr)
         self.assertIn("refuses startup without LAUNCHPLANE_DATABASE_URL", result.stderr)
+        self.assertFalse(self.capture_file.exists())
 
     def test_keeps_database_url_out_of_hosted_startup_arguments(self) -> None:
-        policy_path = Path("/tmp/launchplane-authz.toml")
-        policy_path.unlink(missing_ok=True)
+        policy = "schema_version = 1\n"
+        result = self._run(LAUNCHPLANE_POLICY_TOML=policy, LAUNCHPLANE_SERVICE_HOST="0.0.0.0")
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        captured_args = self._captured_args()
+        policy_path = Path(captured_args[captured_args.index("--policy-file") + 1])
+        self.assertEqual(policy_path.parent, self.policy_directory)
+        self.assertEqual(policy_path.read_text(encoding="utf-8"), policy + "\n")
+        self.assertLess(
+            captured_args.index("control_plane.storage.schema_migration"),
+            captured_args.index("serve"),
+        )
+        self.assertNotIn("stamp", captured_args)
+        self.assertNotIn("--database-url", captured_args)
+        self.assertNotIn(self.environment["LAUNCHPLANE_DATABASE_URL"], captured_args)
 
-        try:
-            with TemporaryDirectory() as temporary_directory_name:
-                temporary_directory = Path(temporary_directory_name)
-                app_root = temporary_directory / "app"
-                bin_dir = temporary_directory / "bin"
-                capture_file = temporary_directory / "uv-args.txt"
-                app_root.mkdir()
-                bin_dir.mkdir()
-                self._write_fake_uv(bin_dir)
-
-                result = subprocess.run(
-                    [str(self.script_path)],
-                    capture_output=True,
-                    text=True,
-                    env={
-                        **os.environ,
-                        "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
-                        "UV_CAPTURE_FILE": str(capture_file),
-                        "LAUNCHPLANE_APP_ROOT": str(app_root),
-                        "LAUNCHPLANE_STATE_DIR": str(temporary_directory / "state"),
-                        "LAUNCHPLANE_POLICY_TOML": "schema_version = 1\n",
-                        "LAUNCHPLANE_SERVICE_HOST": "0.0.0.0",
-                        "LAUNCHPLANE_DATABASE_URL": "postgresql+psycopg://launchplane:test@db/launchplane",
-                    },
-                    check=False,
-                )
-
-                captured_args = capture_file.read_text(encoding="utf-8").splitlines()
-
-            self.assertEqual(result.returncode, 0, msg=result.stderr)
-            self.assertLess(
-                captured_args.index("control_plane.storage.schema_migration"),
-                captured_args.index("serve"),
-            )
-            self.assertNotIn("stamp", captured_args)
-            self.assertNotIn("--database-url", captured_args)
-            self.assertNotIn("postgresql+psycopg://launchplane:test@db/launchplane", captured_args)
-        finally:
-            policy_path.unlink(missing_ok=True)
+    def test_accepts_existing_policy_file_without_rewriting_it(self) -> None:
+        policy_path = self.root / "existing-policy.toml"
+        policy = "schema_version = 1\n"
+        policy_path.write_text(policy, encoding="utf-8")
+        policy_path.chmod(0o444)
+        result = self._run(LAUNCHPLANE_POLICY_FILE=str(policy_path))
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        captured_args = self._captured_args()
+        self.assertEqual(captured_args[captured_args.index("--policy-file") + 1], str(policy_path))
+        self.assertEqual(policy_path.read_text(encoding="utf-8"), policy)
+        self.assertEqual(list(self.policy_directory.iterdir()), [])
 
     def test_fails_when_schema_probe_errors(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            temporary_directory = Path(temporary_directory_name)
-            app_root = temporary_directory / "app"
-            bin_dir = temporary_directory / "bin"
-            capture_file = temporary_directory / "uv-args.txt"
-            app_root.mkdir()
-            bin_dir.mkdir()
-            self._write_fake_uv(bin_dir)
-
-            result = subprocess.run(
-                [str(self.script_path)],
-                capture_output=True,
-                text=True,
-                env={
-                    **os.environ,
-                    "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
-                    "UV_CAPTURE_FILE": str(capture_file),
-                    "UV_SCHEMA_STATUS": "2",
-                    "LAUNCHPLANE_APP_ROOT": str(app_root),
-                    "LAUNCHPLANE_STATE_DIR": str(temporary_directory / "state"),
-                    "LAUNCHPLANE_POLICY_TOML": "schema_version = 1\n",
-                    "LAUNCHPLANE_SERVICE_HOST": "0.0.0.0",
-                    "LAUNCHPLANE_DATABASE_URL": "postgresql+psycopg://launchplane:test@db/launchplane",
-                },
-                check=False,
-            )
-
+        result = self._run(LAUNCHPLANE_POLICY_TOML="schema_version = 1\n", UV_SCHEMA_STATUS="2")
         self.assertEqual(result.returncode, 1, msg=result.stdout)
         self.assertIn("schema migration failed before service startup", result.stderr)
+        self.assertNotIn("serve", self._captured_args())
+
+    def test_concurrent_jobs_keep_their_policies_separate(self) -> None:
+        unrelated_policy = self.policy_directory / "launchplane-authz.toml"
+        unrelated_contents = "# An unrelated job owns this file.\n"
+        unrelated_policy.write_text(unrelated_contents, encoding="utf-8")
+        unrelated_policy.chmod(0o444)
+
+        def start_job(mode: str) -> tuple[Path, str]:
+            job_directory = self.root / mode
+            job_directory.mkdir()
+            capture_file = job_directory / "uv-args.txt"
+            policy = f"schema_version = 1\n# {mode}"
+            policy_input = (
+                {"LAUNCHPLANE_POLICY_TOML": policy}
+                if mode == "text"
+                else {"LAUNCHPLANE_POLICY_B64": base64.b64encode(policy.encode()).decode("ascii")}
+            )
+            result = self._run(
+                TMPDIR=str(job_directory), UV_CAPTURE_FILE=str(capture_file), **policy_input
+            )
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            captured_args = capture_file.read_text(encoding="utf-8").splitlines()
+            policy_path = Path(captured_args[captured_args.index("--policy-file") + 1])
+            self.assertEqual(policy_path.parent, job_directory)
+            return policy_path, policy + ("\n" if mode == "text" else "")
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            jobs = list(executor.map(start_job, ("text", "base64")))
+        self.assertNotEqual(jobs[0][0], jobs[1][0])
+        for policy_path, expected in jobs:
+            self.assertEqual(policy_path.read_text(encoding="utf-8"), expected)
+        self.assertEqual(unrelated_policy.read_text(encoding="utf-8"), unrelated_contents)
+        self.assertEqual(stat.S_IMODE(unrelated_policy.stat().st_mode), 0o444)
 
 
 class StartLaunchplaneOdooWorkersScriptTests(unittest.TestCase):

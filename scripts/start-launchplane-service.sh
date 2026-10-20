@@ -40,10 +40,10 @@ policy_file=""
 mkdir -p "$state_dir"
 
 if [ -n "$launchplane_policy_toml" ]; then
-	policy_file="/tmp/launchplane-authz.toml"
+	policy_file="${TMPDIR:-/tmp}/launchplane-authz.toml"
 	write_text_file "$policy_file" "$launchplane_policy_toml"
 elif [ -n "$launchplane_policy_b64" ]; then
-	policy_file="/tmp/launchplane-authz.toml"
+	policy_file="${TMPDIR:-/tmp}/launchplane-authz.toml"
 	write_base64_file "$policy_file" "LAUNCHPLANE_POLICY_B64"
 elif [ -n "$launchplane_policy_file" ]; then
 	policy_file="$launchplane_policy_file"
