@@ -9,6 +9,7 @@ import gzip
 import json
 from pathlib import Path
 import re
+from typing import cast
 
 import click
 
@@ -872,6 +873,19 @@ class OdooRehearsalAdapter:
             **diagnostics,
             "operation_journal_status": journal_status,
         }
+        if (
+            result.get("child_failure") is not None
+            or result.get("retained_upgrade_logs") is not None
+            or any(
+                event.get("child_failure") is not None
+                for event in cast(
+                    list[dict[str, object]], diagnostics.get("failure_events_after_checkpoint", [])
+                )
+            )
+        ):
+            result["diagnostics_private"] = True
+        else:
+            result.pop("diagnostics_private", None)
         stored_refusal = result.pop("_stored_refusal_code", "")
         if observation.get("completed") is not True:
             terminal = (

@@ -74,29 +74,36 @@ def digest(path):
 
 
 def bounded_capture(arguments,path,bound):
-    errors=tempfile.TemporaryFile()
-    process=subprocess.Popen(arguments,stdout=subprocess.PIPE,stderr=errors)
+    process=subprocess.Popen(arguments,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+    errors=b''
     try:
         size=0
         with path.open('xb') as output:
             os.chmod(path,0o600)
-            while True:
-                chunk=process.stdout.read(1024*1024)
-                if not chunk: break
-                size+=len(chunk)
-                if size>bound: raise RuntimeError('Source copy exceeds its reviewed storage bound')
-                output.write(chunk)
+            with selectors.DefaultSelector() as selector:
+                selector.register(process.stdout,selectors.EVENT_READ,'capture')
+                selector.register(process.stderr,selectors.EVENT_READ,'error')
+                while selector.get_map():
+                    for event,_ in selector.select():
+                        chunk=os.read(event.fd,65536)
+                        if not chunk:
+                            selector.unregister(event.fileobj)
+                        elif event.data=='error':
+                            errors=(errors+chunk)[-65536:]
+                        else:
+                            size+=len(chunk)
+                            if size>bound: raise RuntimeError('Source copy exceeds its reviewed storage bound')
+                            output.write(chunk)
         status=process.wait(timeout=30)
         if status:
-            errors.seek(max(0,errors.seek(0,os.SEEK_END)-65536))
             diagnostic=command_diagnostic(arguments,subprocess.CompletedProcess(
-                arguments,status,stdout=b'',stderr=errors.read(65536)),None)
+                arguments,status,stdout=b'',stderr=errors),None)
             raise RehearsalCommandFailure(diagnostic)
         if not size:
             raise RuntimeError('Incomplete source copy')
     finally:
-        errors.close()
         process.stdout.close()
+        process.stderr.close()
         if process.poll() is None:
             process.terminate()
             try: process.wait(timeout=15)

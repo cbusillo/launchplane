@@ -932,7 +932,7 @@ class RehearsalScenario(unittest.TestCase):
         checkpoint = datetime.now(timezone.utc)
         current = {"deploymentId": "failed-source-event", "createdAt": checkpoint.isoformat()}
         older = {"deploymentId": "older-event", "createdAt": "2000-01-01T00:00:00Z"}
-        import io
+        import sys
         import traceback
         import json
         from control_plane.contracts.canonical_json import canonical_json_sha256
@@ -940,14 +940,12 @@ class RehearsalScenario(unittest.TestCase):
         host_fixture = RehearsalHostSafetyTests()
         host_fixture.setUp()
         self.addCleanup(host_fixture.doCleanups)
-        process = Mock(stdout=io.BytesIO(b"fixture capture"))
-        process.wait.return_value = 1
-        process.poll.return_value = 0
         try:
-            with patch("subprocess.Popen", return_value=process):
-                host_fixture.host["bounded_capture"](
-                    ["fixture-command"], host_fixture.fixture.root / "partial.dump", 100
-                )
+            host_fixture.host["bounded_capture"](
+                [sys.executable, "-c", "import sys;print('fixture capture');sys.exit(1)"],
+                host_fixture.fixture.root / "partial.dump",
+                100,
+            )
         except RuntimeError as error:
             log = traceback.format_exc().splitlines()
             from control_plane.odoo_upgrade_rehearsal import REHEARSAL_HOST_FILENAME
@@ -1099,7 +1097,11 @@ class RehearsalScenario(unittest.TestCase):
             "_provider_operation_key": "private-key",
             "_stored_refusal_code": "",
         }
-        event = {"deployment_id": "original", "provider_status": "running"}
+        event = {
+            "deployment_id": "original",
+            "provider_status": "error",
+            "child_failure": {"error_text": "private fallback error"},
+        }
         with (
             patch.object(OdooRehearsalAdapter, "operation_readback", return_value=dict(journal)),
             patch.object(OdooRehearsalAdapter, "failure_events", return_value=([event], True)),
@@ -1115,6 +1117,7 @@ class RehearsalScenario(unittest.TestCase):
         ):
             result = adapter.native_readback(self.record, "original", lambda: None)
         self.assertEqual(result["failure_events_after_checkpoint"], [event])
+        self.assertTrue(result["diagnostics_private"])
         self.assertEqual(result["operation_state"], journal["operation_state"])
         self.assertTrue(result["host_observation_unavailable"])
         self.assertTrue(result["original_key_required"])
@@ -1972,7 +1975,7 @@ class RehearsalHostSafetyTests(unittest.TestCase):
                     [
                         sys.executable,
                         "-c",
-                        "import sys;sys.stdout.write('private capture bytes');sys.stderr.write('capture child error');sys.exit(7)",
+                        f"import sys;sys.stdout.write('private capture bytes');sys.stderr.buffer.write(b'x'*{REHEARSAL_DIAGNOSTIC_PROCESS_LIMIT + 1});sys.stderr.write('capture child error');sys.exit(7)",
                     ],
                     root / "partial.dump",
                     1024,
@@ -3792,6 +3795,7 @@ class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
                 result = response.json()["result"]
                 self.assertEqual(result["custody"], custody)
                 self.assertEqual(result["child_failure"], observed["child_failure"])
+                self.assertTrue(result["diagnostics_private"])
                 self.assertEqual(result["retained_upgrade_logs"], observed["retained_upgrade_logs"])
                 self.assertEqual(result["operation_state"], before[0].state)
                 self.assertEqual(result["provider_effect_phase"], before[0].provider_effect_phase)

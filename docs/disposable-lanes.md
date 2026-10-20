@@ -2851,6 +2851,8 @@ are marked truncated. If diagnostic storage is full or its interrupted pending
 receipt remains, a bounded operation-bound fallback stays in the existing job
 log; `failure_events_after_checkpoint` returns it only for the exact original
 intent, attempt and record. It is diagnostic evidence, never custody proof.
+That provider job log is outside private host-file custody; the marker is
+encoding, not encryption, and retains the same private-data handling rule.
 An unavailable log observation leaves child failure and custody readable and sets
 `retained_upgrade_logs_unavailable`. Credential redaction and byte limits apply
 before transport. These diagnostic fields carry `diagnostics_private: true`:
