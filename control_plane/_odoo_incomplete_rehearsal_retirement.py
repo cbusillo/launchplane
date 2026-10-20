@@ -20,8 +20,18 @@ def incomplete_retirement_locked(spec,root):
     record=spec['record']
     namespace=record['rehearsal_id']
     marker=root/'incomplete-retirement.json'
+    refusals=root/'incomplete-retirement-refusals.json'
     binding={'intent':record['intent_sha256'],'record':spec['record_binding_sha256'],
         'attempt':spec['attempt_sha256'],'resources':spec['resources_binding_sha256']}
+    progress=record.get('incomplete_retirement') or {}
+    review=progress.get('reviewed_plan_sha256')
+    if refusals.is_symlink(): raise RuntimeError('Aliased refusal receipt')
+    rejected={'binding':binding,'reviews':[]}
+    if refusals.exists():
+        rejected=json.loads(refusals.read_text())
+        if rejected['binding']!=binding: raise RuntimeError('Refusal belongs to another operation')
+    if spec['mode']=='apply' and (not review or review in rejected['reviews']):
+        raise RuntimeError('Missing or previously refused retirement review')
     def inventory():
         return [one_inspection(identifier) for identifier in docker('ps','-aq').decode().splitlines()]
     all_containers=inventory()
@@ -36,8 +46,10 @@ def incomplete_retirement_locked(spec,root):
                     raise RuntimeError('Raw custody has a container consumer')
     if marker.is_symlink(): raise RuntimeError('Aliased disposal receipt')
     if marker.exists():
-        manifest=json.loads(marker.read_text())
+        admitted=json.loads(marker.read_text())
+        manifest=admitted['manifest']
         if manifest['binding']!=binding: raise RuntimeError('Disposal belongs to another operation')
+        if admitted['reviewed_plan_sha256']!=review: raise RuntimeError('Disposal review changed')
     else:
         if not (root/'execute.started').is_file() or (root/'execute.started').is_symlink() or (root/'execute.json').exists():
             raise RuntimeError('Original execute is not incomplete')
@@ -82,7 +94,13 @@ def incomplete_retirement_locked(spec,root):
             if mount.get('Name') in manifest['volumes'] and item['Id'] not in remaining:
                 raise RuntimeError('Storage has another consumer')
     if spec['mode']=='apply':
-        if not marker.exists(): save(marker,manifest)
+        if progress.get('host_binding_sha256')!=binding_sha256:
+            if not marker.exists():
+                rejected['reviews']=sorted(set(rejected['reviews'])|{review})
+                save(refusals,rejected)
+            raise RuntimeError('Reviewed inventory changed; obtain a fresh dry-run')
+        if not marker.exists():
+            save(marker,{'manifest':manifest,'reviewed_plan_sha256':review})
         if remaining:
             docker('stop',*sorted(remaining))
             docker('rm',*sorted(remaining))
@@ -90,7 +108,7 @@ def incomplete_retirement_locked(spec,root):
         for name in sorted(volumes): docker('volume','rm',name)
         if network_present: docker('network','rm',manifest['network_id'])
         for path in root.iterdir():
-            if path.name in {'.execution.lock',marker.name}: continue
+            if path.name in {'.execution.lock',marker.name,refusals.name}: continue
             if path.is_symlink(): path.unlink()
             elif path.is_dir(): shutil.rmtree(path)
             else: path.unlink()
@@ -100,11 +118,12 @@ def incomplete_retirement_locked(spec,root):
         for item in inventory())
     volumes_absent=not set(manifest['volumes']) & set(docker('volume','ls','--format','{{.Name}}').decode().splitlines())
     network_absent=manifest['network_name'] not in set(docker('network','ls','--format','{{.Name}}').decode().splitlines())
-    raw_absent=all(path.name in {'.execution.lock',marker.name} for path in root.iterdir())
+    raw_absent=all(path.name in {'.execution.lock',marker.name,refusals.name} for path in root.iterdir())
     disposed=containers_absent and volumes_absent and network_absent and raw_absent
     if spec['mode']=='apply' and not disposed: raise RuntimeError('Disposal is incomplete')
     result={'qualified':True,'disposed':disposed,'binding_sha256':binding_sha256,
         'intent_sha256':record['intent_sha256'],'attempt_sha256':spec['attempt_sha256'],
+        'refused_reviews':rejected['reviews'],'disposal_started':marker.exists(),
         'containers_absent':containers_absent,'volumes_absent':volumes_absent,
         'network_absent':network_absent,'raw_source_absent':raw_absent,
         'public_route':False,'business_host_frozen':False}

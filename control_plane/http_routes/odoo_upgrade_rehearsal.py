@@ -159,11 +159,9 @@ def register_odoo_upgrade_rehearsal_routes(
                         route_path=ROUTE.format(product=product),
                         # Keep the original execute's held reservation intact
                         # until native disposal and placement absence are proved.
-                        reservation_scope=principal + "|incomplete-retirement",
+                        reservation_scope=retirement.reservation_scope(),
                         idempotency_key=idempotency_key,
-                        request_fingerprint=request_fingerprint(
-                            {"product": product, **body.model_dump(mode="json")}
-                        ),
+                        request_fingerprint=retirement.request_fingerprint(),
                         trace_id=trace,
                         adapter=retirement,
                         in_progress_message="The original incomplete rehearsal retirement is running.",

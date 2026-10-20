@@ -62,19 +62,13 @@ class IncompleteRehearsalRetirementTests(unittest.TestCase):
 
     def run_retirement(self, operation: Any) -> Any:
         from control_plane.provider_operations import run_durable_provider_operation
-        from control_plane.http_routes.mutation_support import request_fingerprint
 
         return run_durable_provider_operation(
             store=self.store,
-            scope=self.fixture.principal + "|incomplete-retirement",
+            scope=operation.reservation_scope(),
             route_path=ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=self.fixture.product),
             idempotency_key=operation.original_key,
-            request_fingerprint=request_fingerprint(
-                {
-                    "product": self.fixture.product,
-                    **operation.adapter.request.model_dump(mode="json"),
-                }
-            ),
+            request_fingerprint=operation.request_fingerprint(),
             lease_owner="retirement-worker",
             response_trace_id="retirement-trace",
             adapter=operation,
@@ -199,6 +193,12 @@ class IncompleteRehearsalRetirementTests(unittest.TestCase):
             owned,
         )
         self.assertEqual(operation.original(self.prepared).state, "reconcile_required")
+        with patch.object(type(operation), "placement", return_value=True):
+            plan = operation.plan()
+        self.assertNotIn("resources_preserved", plan)
+        self.assertTrue(plan["host_disposal"]["disposed"])
+        with self.assertRaises(RehearsalRefused):
+            operation.readback()
 
     def test_same_key_recovers_each_interrupted_retirement_phase(self) -> None:
         for phase in (
@@ -274,10 +274,102 @@ class IncompleteRehearsalRetirementTests(unittest.TestCase):
                     self.assertEqual(
                         operation.original(operation.record()).state, "reconcile_required"
                     )
+                    if phase != "precheck":
+                        self.assertNotIn("resources_preserved", operation.plan())
+                        with self.assertRaises(RehearsalRefused):
+                            operation.readback()
                     resumed = scenario.run_retirement(operation)
                     self.assertIn(resumed.status, {"completed", "adopted"})
                     self.assertTrue(resumed.response_payload["result"]["disposed"])
                     self.assertFalse(scenario.store.list_held_provider_target_reservations())
+
+    def test_native_refusal_and_new_review_resume_the_same_original_journal(self) -> None:
+        import copy
+        from control_plane.contracts.canonical_json import canonical_json_sha256
+
+        for failure in ("lost-refusal", "before-dispatch"):
+            with self.subTest(failure=failure):
+                scenario = IncompleteRehearsalRetirementTests()
+                scenario.setUp()
+                self.addCleanup(scenario.doCleanups)
+                native = IncompleteRetirementHostTests()
+                native.setUp()
+                self.addCleanup(native.doCleanups)
+                native.spec.update(
+                    attempt_sha256=canonical_json_sha256({"operation_key": scenario.key}),
+                    record_binding_sha256=scenario.prepared.binding_sha256,
+                )
+                native.spec["record"]["intent_sha256"] = scenario.prepared.intent_sha256
+                original_web = native.fixture.fixture.containers["web"]["Id"]
+                operation = scenario.retirement()
+                old_script: dict[str, Any] = {}
+                first = True
+
+                def host(mode: str, check: Any) -> dict[str, object]:
+                    nonlocal first, old_script
+                    check()
+                    current = scenario.store.read_odoo_upgrade_rehearsal(
+                        scenario.fixture.identifier
+                    )
+                    assert current is not None
+                    native.spec["mode"] = mode
+                    native.spec["record"]["incomplete_retirement"] = (
+                        current.incomplete_retirement.model_dump(mode="json")
+                        if current.incomplete_retirement
+                        else None
+                    )
+                    if mode == "apply" and first:
+                        first = False
+                        old_script = copy.deepcopy(native.spec)
+                        native.fixture.fixture.containers["web"]["Id"] = "recreated-private-web"
+                        if failure == "before-dispatch":
+                            raise RuntimeError("Schedule did not dispatch")
+                        # Persist the native no-effect refusal, then lose its reply.
+                        try:
+                            native.fixture.run_host(native.spec)
+                        except RuntimeError:
+                            raise TimeoutError("Native refusal reply lost") from None
+                        self.fail("Changed inventory must refuse")
+                    if mode == "apply" and old_script:
+                        saved = copy.deepcopy(native.spec)
+                        with self.assertRaises(RuntimeError):
+                            native.fixture.run_host(old_script)
+                        native.spec = saved
+                    return native.fixture.run_host(native.spec)
+
+                with (
+                    patch.object(type(operation), "host", side_effect=host),
+                    patch.object(type(operation), "placement", return_value=True),
+                ):
+                    review = operation.plan()["plan_sha256"]
+                    operation.adapter.request = operation.adapter.request.model_copy(
+                        update={"reviewed_plan_sha256": review}
+                    )
+                    with self.assertRaises((RuntimeError, TimeoutError)):
+                        scenario.run_retirement(operation)
+                    self.assertEqual(
+                        operation.original(scenario.prepared).state, "reconcile_required"
+                    )
+                    if failure == "before-dispatch":
+                        self.assertTrue(operation.plan()["review_refusal_required"])
+                        with self.assertRaises(RuntimeError):
+                            scenario.run_retirement(operation)
+                    self.assertTrue((native.root / "raw/database.dump").exists())
+                    self.assertFalse((native.root / "incomplete-retirement.json").exists())
+                    # Restoring the original inventory must still generate a new
+                    # review, rather than revive the durably refused admission.
+                    native.fixture.fixture.containers["web"]["Id"] = original_web
+                    fresh = operation.plan()
+                    self.assertNotEqual(fresh["plan_sha256"], review)
+                    operation.adapter.request = operation.adapter.request.model_copy(
+                        update={"reviewed_plan_sha256": fresh["plan_sha256"]}
+                    )
+                    result = scenario.run_retirement(operation)
+                    self.assertEqual(result.status, "completed")
+                    self.assertTrue(operation.readback()["disposed"])
+                    self.assertEqual(scenario.run_retirement(operation).status, "replayed")
+                    with self.assertRaises(RuntimeError):
+                        native.fixture.run_host(old_script)
 
     def test_verified_or_running_operation_is_refused_before_host_effects(self) -> None:
         operation = self.retirement()
@@ -300,6 +392,38 @@ class IncompleteRehearsalRetirementTests(unittest.TestCase):
             with self.assertRaises(RehearsalRefused):
                 operation.plan()
             host.assert_not_called()
+
+    def test_plan_binds_original_effect_identity_without_incidental_lease_metadata(self) -> None:
+        operation = self.retirement()
+        original = operation.original(self.prepared)
+        native = native_fixture(self.prepared, self.key, "d" * 64)
+        digest = operation.plan_digest(self.prepared, original, native)
+        self.assertEqual(
+            digest,
+            operation.plan_digest(
+                self.prepared,
+                original.model_copy(
+                    update={
+                        "lease_owner": "new-observer",
+                        "updated_at": "later-observation",
+                        "attempt": original.attempt + 1,
+                    }
+                ),
+                native,
+            ),
+        )
+        self.assertNotEqual(
+            digest,
+            operation.plan_digest(
+                self.prepared,
+                original.model_copy(
+                    update={
+                        "provider_effect_started_at": "different-effect",
+                    }
+                ),
+                native,
+            ),
+        )
 
     def test_placement_retirement_refuses_public_or_populated_projects_and_reads_absence(
         self,
@@ -407,6 +531,12 @@ class IncompleteRehearsalRetirementTests(unittest.TestCase):
 
 
 class IncompleteRetirementHostTests(unittest.TestCase):
+    def admit(self, plan: dict[str, Any], review: str = "a" * 64) -> None:
+        self.spec["record"]["incomplete_retirement"] = {
+            "reviewed_plan_sha256": review,
+            "host_binding_sha256": plan["binding_sha256"],
+        }
+
     def setUp(self) -> None:
         import hashlib
         from pathlib import Path
@@ -489,7 +619,12 @@ class IncompleteRetirementHostTests(unittest.TestCase):
         return cast(bytes, self.original_docker(*args, stdin=stdin))
 
     def test_host_dry_run_apply_and_replay_dispose_only_its_own_custody(self) -> None:
+        # A source snapshot may exist before clone/switch without a recorded copy.
+        snapshot = self.root / "source-snapshot"
+        snapshot.mkdir()
+        (snapshot / "receipt.json").write_text("{}")
         plan = self.fixture.run_host(self.spec)
+        self.admit(plan)
         self.assertFalse(plan["disposed"])
         self.assertTrue((self.root / "raw/database.dump").exists())
         self.assertFalse(
@@ -505,12 +640,28 @@ class IncompleteRetirementHostTests(unittest.TestCase):
         self.assertFalse(self.fixture.fixture.containers)
         self.assertFalse(self.fixture.fixture.volumes)
         self.assertFalse((self.root / "raw").exists())
+        self.assertFalse(snapshot.exists())
         self.assertEqual((self.outside / "keep").read_bytes(), b"production fixture")
         self.spec["mode"] = "apply"
         self.assertTrue(self.fixture.run_host(self.spec)["disposed"])
 
+    def test_host_refuses_unreviewed_inventory_without_deleting_custody(self) -> None:
+        plan = self.fixture.run_host(self.spec)
+        self.spec["record"]["incomplete_retirement"] = {
+            "reviewed_plan_sha256": "a" * 64,
+            "host_binding_sha256": plan["binding_sha256"],
+        }
+        self.fixture.fixture.containers["web"]["Id"] = "recreated-private-web"
+        self.spec["mode"] = "apply"
+        with self.assertRaises(RuntimeError):
+            self.fixture.run_host(self.spec)
+        self.assertFalse((self.root / "incomplete-retirement.json").exists())
+        self.assertTrue((self.root / "raw/database.dump").exists())
+        self.assertFalse(any(call[0] in {"stop", "rm"} for call in self.calls))
+
     def test_host_resumes_its_manifest_after_a_lost_volume_removal_reply(self) -> None:
         plan = self.fixture.run_host(self.spec)
+        self.admit(plan)
         self.spec["mode"] = "apply"
         docker = self.fixture.host["docker"]
         failed = False
@@ -530,6 +681,15 @@ class IncompleteRetirementHostTests(unittest.TestCase):
         self.spec["mode"] = "dry-run"
         resumed_plan = self.fixture.run_host(self.spec)
         self.assertEqual(resumed_plan["binding_sha256"], plan["binding_sha256"])
+        self.assertTrue(resumed_plan["disposal_started"])
+        admitted = self.spec["record"]["incomplete_retirement"]
+        self.spec["record"]["incomplete_retirement"] = {
+            **admitted,
+            "reviewed_plan_sha256": "b" * 64,
+        }
+        with self.assertRaises(RuntimeError):
+            self.fixture.run_host(self.spec)
+        self.spec["record"]["incomplete_retirement"] = admitted
         self.spec["mode"] = "apply"
         self.assertTrue(self.fixture.run_host(self.spec)["disposed"])
         self.assertEqual((self.outside / "keep").read_bytes(), b"production fixture")
@@ -635,7 +795,6 @@ class IncompleteRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(plan.status_code, 202, plan.text)
             payload.update(mode="apply", reviewed_plan_sha256=plan.json()["result"]["plan_sha256"])
             from control_plane.provider_operations import run_durable_provider_operation
-            from control_plane.http_routes.mutation_support import request_fingerprint
 
             operation = IncompleteRehearsalRetirement(
                 fixture.adapter("retire-incomplete"), "original-execute"
@@ -647,12 +806,10 @@ class IncompleteRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
             def run() -> Any:
                 return run_durable_provider_operation(
                     store=fixture.store,
-                    scope=fixture.principal + "|incomplete-retirement",
+                    scope=operation.reservation_scope(),
                     route_path=route,
                     idempotency_key="original-execute",
-                    request_fingerprint=request_fingerprint(
-                        {"product": fixture.product, **payload}
-                    ),
+                    request_fingerprint=operation.request_fingerprint(),
                     lease_owner="retirement-http-worker",
                     response_trace_id="retirement-http-trace",
                     adapter=operation,
@@ -682,7 +839,16 @@ class IncompleteRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(replay.status_code, 202, replay.text)
                 self.assertTrue(replay.json()["replayed"])
                 routed = route_runner.call_args.kwargs
-                self.assertEqual(routed["scope"], fixture.principal + "|incomplete-retirement")
+                self.assertEqual(routed["scope"], operation.reservation_scope())
+                self.assertNotEqual(routed["scope"], fixture.principal)
+                self.assertIsNotNone(
+                    fixture.store.read_idempotency_record(
+                        scope=routed["scope"],
+                        route_path=route,
+                        idempotency_key=headers["Idempotency-Key"],
+                    )
+                )
+                self.assertEqual(routed["request_fingerprint"], operation.request_fingerprint())
                 self.assertEqual(routed["idempotency_key"], headers["Idempotency-Key"])
                 self.assertNotEqual(routed["adapter"].target_key(), fixture.identifier)
             calls = host.call_count

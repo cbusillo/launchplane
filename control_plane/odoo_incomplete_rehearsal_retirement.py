@@ -37,11 +37,36 @@ class IncompleteRehearsalRetirement:
     adapter: OdooRehearsalAdapter
     original_key: str
 
+    def reservation_scope(self) -> str:
+        return self.adapter.principal + "|incomplete-retirement"
+
+    def request_fingerprint(self) -> str:
+        # One retirement of one original execute. The checkpoint and host fence
+        # own review admission, including proven no-effect replacement reviews.
+        return canonical_json_sha256(
+            {
+                "product": self.adapter.product,
+                "action": "retire-incomplete",
+                "intent": self.adapter.request.intent(),
+                "rehearsal_id": self.adapter.request.rehearsal_id,
+                "original_key": self.original_key,
+            }
+        )
+
     def target_key(self) -> str:
         return self.adapter.target_key() + ":incomplete-retirement"
 
     def reconciliation_key(self) -> str:
         return self.adapter.reconciliation_key()
+
+    @staticmethod
+    def review_was_refused(
+        progress: IncompleteRehearsalRetirementCheckpoint, native: dict[str, object]
+    ) -> bool:
+        return (
+            progress.reviewed_plan_sha256
+            in IncompleteRehearsalHostResult.model_validate(native).refused_reviews
+        )
 
     def original(self, record: OdooUpgradeRehearsalRecord) -> LaunchplaneIdempotencyRecord:
         execute = replace(
@@ -81,10 +106,6 @@ class IncompleteRehearsalRetirement:
         if progress is not None and (
             progress.original_key_sha256
             != canonical_json_sha256({"operation_key": self.original_key})
-            or (
-                self.adapter.request.mode == "apply"
-                and progress.reviewed_plan_sha256 != self.adapter.request.reviewed_plan_sha256
-            )
         ):
             raise RehearsalRefused(RehearsalPrerequisite.RECOVERY_REQUIRED)
         return record
@@ -238,8 +259,22 @@ class IncompleteRehearsalRetirement:
         return canonical_json_sha256(
             {
                 "record": record.binding_sha256,
-                "original": original.model_dump(mode="json"),
+                "original": {
+                    key: getattr(original, key)
+                    for key in (
+                        "record_id",
+                        "scope",
+                        "route_path",
+                        "idempotency_key",
+                        "request_fingerprint",
+                        "reconciliation_key",
+                        "provider_target_key",
+                        "provider_effect_phase",
+                        "provider_effect_started_at",
+                    )
+                },
                 "host": native["binding_sha256"],
+                "refused_reviews": native.get("refused_reviews", []),
             }
         )
 
@@ -256,7 +291,14 @@ class IncompleteRehearsalRetirement:
             progress.host_binding_sha256 != native["binding_sha256"]
             or progress.reviewed_plan_sha256 != digest
         ):
-            raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
+            if not self.review_was_refused(progress, native):
+                if progress.host_binding_sha256 == native["binding_sha256"]:
+                    raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
+                # Retry the admitted review to let the native fence prove a
+                # no-effect refusal, including a failed dispatch before start.
+                return progress.reviewed_plan_sha256, native
+            if native.get("disposal_started") is not False:
+                raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
         return digest, native
 
     def plan(self) -> dict[str, object]:
@@ -266,15 +308,27 @@ class IncompleteRehearsalRetirement:
             if check is None:
                 raise RehearsalRefused(RehearsalPrerequisite.RECOVERY_REQUIRED)
             record = self.record()
-            digest, _native = self.qualification(record, check)
+            digest, native = self.qualification(record, check)
+            public = self.adapter.public(record)
+            public.pop("resources_preserved", None)
             return {
-                **self.adapter.public(record),
+                **public,
                 "action": "retire-incomplete",
                 "applied": False,
                 "plan_sha256": digest,
                 "original_key_required": True,
                 "disposes_raw_capture": True,
                 "recovery_tuples_produced": False,
+                "host_disposal": native,
+                "remaining_work": "placement-publication"
+                if native and native["disposed"]
+                else "host-disposal",
+                "review_refusal_required": bool(
+                    record.incomplete_retirement
+                    and native
+                    and record.incomplete_retirement.host_binding_sha256 != native["binding_sha256"]
+                    and not self.review_was_refused(record.incomplete_retirement, native)
+                ),
             }
 
     def readback(self) -> dict[str, object]:
@@ -348,8 +402,14 @@ class IncompleteRehearsalRetirement:
 
             checkpoint()
             progress = record.incomplete_retirement
-            if progress is None:
+            if progress is None or progress.reviewed_plan_sha256 != digest:
                 assert native is not None
+                if progress is not None and (
+                    progress.host_disposal is not None
+                    or not self.review_was_refused(progress, native)
+                    or native.get("disposal_started") is not False
+                ):
+                    raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
                 progress = IncompleteRehearsalRetirementCheckpoint(
                     original_key_sha256=canonical_json_sha256({"operation_key": self.original_key}),
                     reviewed_plan_sha256=digest,

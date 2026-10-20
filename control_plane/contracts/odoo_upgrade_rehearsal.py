@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Literal, get_args
+from typing import Annotated, Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -126,6 +126,8 @@ class IncompleteRehearsalHostResult(BaseModel):
     binding_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     intent_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     attempt_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    refused_reviews: tuple[Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")], ...] = ()
+    disposal_started: bool = False
     containers_absent: bool
     volumes_absent: bool
     network_absent: bool

@@ -2597,8 +2597,8 @@ For a held execute that never produced its sanitized recovery copies, use
 `action: retire-incomplete` with the **unchanged original execute intent and
 execute key**. Take it through the same client dry-run, saved review, apply and
 readback. It accepts only `prepared` with no copy receipts and an exact original
-`reconcile_required` execute checkpoint. Its native scope is capture before the
-first sanitized source snapshot and target-runtime switch: the source database
+`reconcile_required` execute checkpoint. Its native scope is before the
+target-runtime switch, with no recorded copies: the source database
 must still be selected and the web writer stopped. Later-phase incomplete
 runtimes remain held for their qualified disposition. Verified, running,
 unbound or production-aliased operations refuse. Ordinary `retire` still requires both
@@ -2610,7 +2610,8 @@ checks that no container can see raw host custody and that the rehearsal web
 writer is stopped. Apply rechecks the reviewed binding, acquires the existing
 host lock, and records a private disposal manifest before stopping/removing only
 those containers, volumes and network. It deletes raw capture and partial host
-storage, retaining only the disposal manifest and unlocked lock file. It removes
+storage, including partial source snapshots, retaining only disposal/refusal
+receipts and the unlocked lock file. It removes
 the isolated provider compose through the existing compose retirement path,
 then its empty project. No source read, source mutation, credential creation,
 public-route operation or grant is involved.
@@ -2633,7 +2634,21 @@ the shared typed receipt and provider placement absence. Interrupted calls keep
 both journals held. An explicit same-key apply can resume only after read-only
 qualification of the bound host manifest or persisted host disposal under the
 executor lock; it skips the removed host runtime once disposal is proved.
-Unavailable, changed or running resources stay held. The client rejects a
+Unavailable or running resources stay held. Changed inventory refuses before
+deletion and records an attempt-bound, review-specific native refusal under the
+host lock. If dispatch failed before that fence ran, dry-run reports
+`review_refusal_required`: retry the saved old review once to establish its
+no-effect refusal. Then obtain and review a fresh dry-run and apply with the
+same original execute key. The retirement's stable request fingerprint binds
+the original intent; its checkpoint and native admission enforce each review.
+A replacement review requires a durable refusal with no disposal manifest or
+persisted host disposal. Refused reviews stay refused, including delayed host
+scripts. Replacement plan hashes include the refusal lineage, so restored
+inventory cannot revive an old admission. Once disposal starts, only its bound
+manifest can resume. Planning reports native absence and remaining work without
+claiming preserved resources. Completed readback uses the persisted host receipt
+and current placement absence; it does not dispatch a new host inspection after
+the placement has been removed. The client rejects a
 retirement result when an old execute request is replayed, so cancellation
 cannot be reported as a successful execute. A failed readback never authorizes
 a new capture.

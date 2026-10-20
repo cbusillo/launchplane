@@ -1158,7 +1158,7 @@ class OdooRehearsalAdapter:
             "shape_sha256": record.shape_sha256,
             "copies": [copy.model_dump(mode="json") for copy in record.copies],
             "elapsed_seconds": record.elapsed_seconds,
-            "resources_preserved": True,
+            **({"resources_preserved": True} if record.incomplete_retirement is None else {}),
             "public_route": False,
             "business_host_frozen": False,
         }
