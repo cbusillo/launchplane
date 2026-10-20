@@ -912,7 +912,7 @@ class RecipientCutoverAdapter:
                 automatic_recovery = True
 
             with self.store.provider_evidence_guard(
-                lease.evidence_reservation, authority_checkpoint=validate_authority
+                lease.evidence_reservation, effect_admission_checkpoint=validate_authority
             ):
                 return self._apply(provider_operation_key, lease, backup_check, begin_recovery)
 
@@ -965,9 +965,7 @@ class RecipientCutoverAdapter:
             record = replacement
             self.record = record
 
-        def check_local() -> None:
-            nonlocal source_admitted
-            self.validate_release()
+        def attempt_has_effects() -> bool:
             # Historical generic markers can belong to an earlier release or
             # repromotion. Only this attempt's pause dispatch or its original
             # trigger-bound deployment proves source admission already happened.
@@ -988,9 +986,15 @@ class RecipientCutoverAdapter:
                 attempt_started = attempt_started or bool(
                     lease.evidence_reservation().provider_effect_started_at
                 )
-            if not source_admitted and not attempt_started:
-                self.validate_source()
-            source_admitted = True
+            return attempt_started
+
+        def check_local() -> None:
+            nonlocal source_admitted
+            self.validate_release()
+            if not source_admitted:
+                if not attempt_has_effects():
+                    self.validate_source()
+                source_admitted = True
             require_writer_exclusive(self.store, record)
             backup_check()
 
@@ -1293,11 +1297,19 @@ class RecipientCutoverAdapter:
             )
             return self.result("pass")
         except Exception as error:
+            if (
+                isinstance(error, GenericWebPromotionSourceRefused)
+                and not started
+                and isinstance(lease, ProviderEvidenceLease)
+                and not attempt_has_effects()
+            ):
+                # Saved preparation can predate this operation's first dispatch.
+                # Only the exact reservation and own markers prove zero effects;
+                # the shared runner still decides whether it can release the key.
+                raise ProviderMutationRejectedError(error) from error
             if not started and not record.execution:
                 raise ProviderMutationRejectedError(
-                    error
-                    if isinstance(error, GenericWebPromotionSourceRefused)
-                    else ValueError("Recipient release gates refused bootstrap.")
+                    ValueError("Recipient release gates refused bootstrap.")
                 ) from error
             begin_recovery()
             terminal_deployment = (

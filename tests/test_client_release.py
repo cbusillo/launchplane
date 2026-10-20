@@ -582,6 +582,13 @@ class ClientReleaseTests(unittest.TestCase):
         accepted = self.accept()
         (backup_id,) = self.advance()
         self.finish(backup_id)
+        ready = read_client_release_run(
+            store=self.store,
+            profile=self.store.read_product_profile_record(PRODUCT),
+            decision=accepted,
+        )
+        assert ready is not None
+        self.assertEqual(ready.blocked_reason, "")
         testing = self.store.read_release_tuple_record(context_name=CONTEXT, channel_name="testing")
         # Use the existing production artifact as a different, fully readable candidate.
         self.store.write_release_tuple_record(
@@ -602,6 +609,14 @@ class ClientReleaseTests(unittest.TestCase):
             self.assertEqual(changed_testing.steps[0].operation_id, backup_id)
             self.assertEqual(self.advance(), ())
             self.store.write_release_tuple_record(testing)
+            restored = read_client_release_run(
+                store=self.store,
+                profile=self.store.read_product_profile_record(PRODUCT),
+                decision=accepted,
+            )
+            assert restored is not None
+            self.assertEqual(restored.blocked_reason, "")
+            self.assertEqual(restored.steps, changed_testing.steps)
             self.set_prod("artifact-testing")
             changed_production = read_client_release_run(
                 store=self.store,

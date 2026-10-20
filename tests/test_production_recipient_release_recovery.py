@@ -268,7 +268,7 @@ class RecipientReleaseRecoveryTests(unittest.TestCase):
                     "Resumption must not compare the changed production baseline"
                 ),
             ):
-                with self.assertRaises(ValueError):
+                with self.assertRaises(GenericWebPromotionSourceRefused):
                     run()
             upstreams.assert_not_called()
             f.store.write_deployment_record(testing)
@@ -467,6 +467,128 @@ class RecipientReleaseRecoveryTests(unittest.TestCase):
         self.assertEqual(
             f.store.read_environment_inventory(context_name=f.record.context, instance_name="prod"),
             f.publication_case.inventory,
+        )
+
+    def test_admitted_inverse_restores_baseline_after_hold(self) -> None:
+        self.inverse_revocation_after_pause(new_decision=False, abort=False)
+
+    def test_admitted_inverse_restores_baseline_after_new_human_decision(self) -> None:
+        self.inverse_revocation_after_pause(new_decision=True, abort=False)
+
+    def test_inverse_abort_restores_replacement_after_hold(self) -> None:
+        self.inverse_revocation_after_pause(new_decision=False, abort=True)
+
+    def inverse_revocation_after_pause(self, *, new_decision: bool, abort: bool) -> None:
+        from datetime import UTC, datetime, timedelta
+        from control_plane.generic_web_rollback_http import GENERIC_WEB_ROLLBACK_ROUTE
+        from control_plane.production_recipient_publication import RecipientOwnedAuthorityChanged
+
+        self.started_recipient_with_new_testing(resume=False)
+        f = self.fixture
+        profile = f.store.read_product_profile_record(f.record.product)
+
+        def revoke_after_pause(*args: Any, **kwargs: Any) -> None:
+            f.writer(*args, **kwargs)
+            if not kwargs.get("old") and kwargs.get("action") == "pause":
+                if new_decision:
+                    f.store.write_release_review_decision_record(
+                        self.decision.model_copy(
+                            update={
+                                "record_id": self.decision.record_id + "-new-human-decision",
+                                "decided_at": (
+                                    datetime.now(UTC) + timedelta(seconds=1)
+                                ).isoformat(),
+                            }
+                        )
+                    )
+                else:
+                    f.store.write_product_profile_record(
+                        profile.model_copy(update={"release_on_acceptance": "held"})
+                    )
+
+        step = releases.ClientReleaseStep("rollback", 1)
+        key = releases._step_key(self.decision, step)
+        with (
+            patch(
+                "control_plane.production_recipient_inverse.writer_action",
+                side_effect=revoke_after_pause,
+            ),
+            patch(
+                "control_plane.production_recipient_inverse._verify_health_evidence_with_identity",
+                side_effect=f.health,
+            ),
+        ):
+            if abort:
+                with patch(
+                    "control_plane.production_recipient_inverse.rollback_publication",
+                    side_effect=RecipientOwnedAuthorityChanged("changed owned row"),
+                ):
+                    self.assertTrue(
+                        releases._queue_recipient_inverse(
+                            f.store,
+                            f.fixture.root,
+                            profile,
+                            self.decision,
+                            step,
+                            f.record.context,
+                            self.decision.decided_at,
+                        )
+                    )
+            else:
+                self.assertTrue(
+                    releases._queue_recipient_inverse(
+                        f.store,
+                        f.fixture.root,
+                        profile,
+                        self.decision,
+                        step,
+                        f.record.context,
+                        self.decision.decided_at,
+                    )
+                )
+        reservation = f.store.read_idempotency_record(
+            scope=releases.CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
+            route_path=GENERIC_WEB_ROLLBACK_ROUTE,
+            idempotency_key=key,
+        )
+        assert reservation is not None
+        self.assertEqual(reservation.state, "completed")
+        saved = custody(f.store, f.record.product, f.record.context)
+        assert saved is not None
+        self.assertEqual(saved.phase, "published" if abort else "rolled_back")
+        self.assertEqual(f.old_running, not abort)
+        self.assertEqual(f.new_running, abort)
+
+    def test_inverse_hold_before_pause_starts_no_writer_effect(self) -> None:
+        from control_plane.generic_web_rollback_http import GENERIC_WEB_ROLLBACK_ROUTE
+
+        self.started_recipient_with_new_testing(resume=False)
+        f = self.fixture
+        profile = f.store.read_product_profile_record(f.record.product)
+        f.store.write_product_profile_record(
+            profile.model_copy(update={"release_on_acceptance": "held"})
+        )
+        actions = list(f.actions)
+        step = releases.ClientReleaseStep("rollback", 1)
+        with self.assertRaises(ValueError):
+            releases._queue_recipient_inverse(
+                f.store,
+                f.fixture.root,
+                profile,
+                self.decision,
+                step,
+                f.record.context,
+                self.decision.decided_at,
+            )
+        self.assertEqual(f.actions, actions)
+        self.assertFalse(f.old_running)
+        self.assertTrue(f.new_running)
+        self.assertIsNone(
+            f.store.read_idempotency_record(
+                scope=releases.CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
+                route_path=GENERIC_WEB_ROLLBACK_ROUTE,
+                idempotency_key=releases._step_key(self.decision, step),
+            )
         )
 
     def started_recipient_with_new_testing(self, *, resume: bool) -> None:

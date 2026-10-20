@@ -10,6 +10,7 @@ from tests.support.promotion_backup import stub_verified_promotion_backup
 from control_plane.workflows.production_promotion_backup import ProductionPromotionBackupGuard
 
 import click
+from control_plane.generic_web_source_qualification import GenericWebPromotionSourceRefused
 from pydantic import ValidationError
 
 from control_plane.contracts.backup_gate_record import BackupGateRecord
@@ -623,15 +624,17 @@ class GenericWebProdPromotionTests(unittest.TestCase):
             patch(
                 "control_plane.workflows.generic_web_promotion.github_api_request",
                 side_effect=fake_github_api_request,
-            ),
+            ) as read_tag,
         ):
-            with self.assertRaises(click.ClickException):
+            with self.assertRaises(click.ClickException) as refusal:
                 execute_generic_web_prod_promotion(
                     control_plane_root=Path("."),
                     record_store=store,
                     request=_request(release_tag="v0.3.0"),
                 )
 
+        self.assertNotIsInstance(refusal.exception, GenericWebPromotionSourceRefused)
+        read_tag.assert_called()
         self.assertFalse(deploy_called)
         self.assertEqual(store.deployments, initial_deployments)
         self.assertEqual(store.promotions, {})
@@ -786,8 +789,8 @@ class GenericWebProdPromotionTests(unittest.TestCase):
             patch(
                 "control_plane.workflows.generic_web_promotion.github_api_request",
                 side_effect=fake_github_api_request,
-            ),
-            self.assertRaises(click.ClickException),
+            ) as read_tag,
+            self.assertRaises(click.ClickException) as refusal,
         ):
             execute_generic_web_prod_promotion(
                 control_plane_root=Path("."),
@@ -795,6 +798,8 @@ class GenericWebProdPromotionTests(unittest.TestCase):
                 request=_request(dry_run=True, release_tag="v0.3.0"),
             )
 
+        self.assertNotIsInstance(refusal.exception, GenericWebPromotionSourceRefused)
+        read_tag.assert_called()
         self.assertEqual(store.deployments, initial_deployments)
         self.assertEqual(store.promotions, {})
 
@@ -1569,19 +1574,29 @@ class GenericWebProdPromotionRollbackTests(unittest.TestCase):
     ) -> None:
         store = _store_with_production(previous_deploy_reference="")
         provider = _ProductionProvider()
+        from control_plane.contracts.generic_web_rollback import build_generic_web_rollback_plan
 
-        with self.assertRaises(click.ClickException):
-            self._promote(store, provider)
-        with self.assertRaises(click.ClickException):
-            execute_generic_web_prod_promotion(
-                control_plane_root=Path("."),
-                record_store=store,
-                request=_request(
-                    dry_run=True,
-                    source_git_ref="2" * 40,
-                    artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:" + "b" * 64,
-                ),
-            )
+        with patch(
+            "control_plane.workflows.generic_web_promotion.build_generic_web_rollback_plan",
+            wraps=build_generic_web_rollback_plan,
+        ) as plan:
+            with self.assertRaises(click.ClickException) as refusal:
+                self._promote(store, provider)
+            self.assertNotIsInstance(refusal.exception, GenericWebPromotionSourceRefused)
+            plan.assert_called()
+            plan.reset_mock()
+            with self.assertRaises(click.ClickException) as refusal:
+                execute_generic_web_prod_promotion(
+                    control_plane_root=Path("."),
+                    record_store=store,
+                    request=_request(
+                        dry_run=True,
+                        source_git_ref="2" * 40,
+                        artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:" + "b" * 64,
+                    ),
+                )
+            self.assertNotIsInstance(refusal.exception, GenericWebPromotionSourceRefused)
+            plan.assert_called()
 
         self.assertEqual(provider.deployed_artifacts, [])
         self.assertEqual(store.promotions, {})

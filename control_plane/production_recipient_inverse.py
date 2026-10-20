@@ -225,18 +225,26 @@ class RecipientInverseAdapter:
 
         def checkpoint(phase: str) -> None:
             lease.assert_current()
+            lease.checkpoint_effect("recipient_inverse_" + phase)
+
+        def admission_checkpoint(phase: str) -> None:
             if not isinstance(lease, ProviderEvidenceLease):
                 raise ValueError("Inverse checkpoint requires an evidence-bound lease.")
+            # This attempt's persisted pause dispatch ends fresh inverse admission.
+            # Its receipt/restore must finish under its original lease and owned rows.
+            if record.execution.get("inverse_pause_dispatched:" + attempt):
+                checkpoint(phase)
+                return
+            self.validate_release()
             with self.store.provider_evidence_guard(
-                lease.evidence_reservation, authority_checkpoint=self.validate_release
+                lease.evidence_reservation, effect_admission_checkpoint=self.validate_release
             ):
-                lease.checkpoint_effect("recipient_inverse_" + phase)
+                checkpoint(phase)
 
         def stop_checkpoint(phase: str) -> None:
             from control_plane.dokploy.post_deploy import ODOO_POST_DEPLOY_SCHEDULE_TRIGGER
 
-            self.validate_release()
-            checkpoint(phase)
+            admission_checkpoint(phase)
             if phase == ODOO_POST_DEPLOY_SCHEDULE_TRIGGER and not record.execution.get(
                 "inverse_pause_dispatched:" + attempt
             ):
@@ -287,9 +295,10 @@ class RecipientInverseAdapter:
                     ),
                 )
             if record.phase in {"published", "reverting"}:
-                self.validate_release()
+                if not record.execution.get("inverse_pause_dispatched:" + attempt):
+                    self.validate_release()
                 require_owned_publication_rows(self.store, record)
-                require_peers_parked(self.root, self.store, record, checkpoint)
+                require_peers_parked(self.root, self.store, record, admission_checkpoint)
                 if record.phase == "published":
                     reservation = lease.evidence_reservation()
                     save(

@@ -451,6 +451,7 @@ class RecipientCutoverTests(unittest.TestCase):
             cutover_intent(self.fixture.root, self.store, self.record, wrong)
 
     def test_drill_restores_retained_data_then_repromotes_without_reinitialization(self) -> None:
+        from control_plane.generic_web_source_qualification import GenericWebPromotionSourceRefused
         from control_plane.production_recipient_inverse import run_recipient_inverse
 
         self.assertEqual(self.run_release().response_status_code, 202)
@@ -516,7 +517,9 @@ class RecipientCutoverTests(unittest.TestCase):
 
         def admit_source() -> None:
             if not source_qualified:
-                raise ValueError("Testing is not qualified for this repromotion.")
+                raise GenericWebPromotionSourceRefused(
+                    "Testing is not qualified for this repromotion."
+                )
 
         adapter.validate_source = admit_source
 
@@ -547,8 +550,9 @@ class RecipientCutoverTests(unittest.TestCase):
             self.accepted = True
             # Generic pause/trigger facts from the original release cannot
             # admit this new attempt. Its own dispatch marker then survives B.
-            with self.assertRaises(ValueError):
-                run_second()
+            for _ in range(2):
+                with self.assertRaises(GenericWebPromotionSourceRefused):
+                    run_second()
             source_qualified = True
             with patch(
                 "control_plane.production_recipient_cutover.writer_action",

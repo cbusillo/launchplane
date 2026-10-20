@@ -5505,7 +5505,8 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
 
                         def checkpoint(active: PostgresRecordStore) -> Any:
                             with active.provider_evidence_guard(
-                                lambda: reserved, authority_checkpoint=lambda: authority(active)
+                                lambda: reserved,
+                                effect_admission_checkpoint=lambda: authority(active),
                             ):
                                 return active.checkpoint_mutation_provider_effect(
                                     reservation=reserved, effect_phase="first_production_effect"

@@ -213,7 +213,8 @@ class GenericWebProdPromotionProviderMutationAdapter:
                 if not isinstance(lease, ProviderEvidenceLease):
                     raise ValueError("Promotion requires an evidence-bound provider lease.")
                 evidence_guard = self._record_store.provider_evidence_guard(
-                    lease.evidence_reservation, authority_checkpoint=validate_current_authority
+                    lease.evidence_reservation,
+                    effect_admission_checkpoint=validate_current_authority,
                 )
             else:
                 evidence_guard = nullcontext()

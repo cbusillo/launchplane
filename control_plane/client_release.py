@@ -905,6 +905,15 @@ def _require_standing_release_available(store: PostgresRecordStore, product: str
         and statuses.get("rollback-1")
         in {"not_started", "pending", "running", "reconciliation_required"}
     ):
+        production = release_version(store=store, profile=profile, instance="prod")
+        if production != decision.checklist.candidate:
+            return
+        try:
+            _generic_web_drill_target(store, profile, decision)
+        except ClientReleaseNotReady:
+            # No original inverse was dispatched. A new candidate must qualify
+            # its own reviewed production baseline and drill before any effect.
+            return
         raise ClientReleaseNotReady("standing_release_inverse_outstanding")
 
 
@@ -1107,14 +1116,7 @@ def _run_generic_web_promotion(
         def validate_recipient_source() -> None:
             # The adapter admits the source before this attempt starts production;
             # its later acceptance and recovery checks do not chase testing.
-            try:
-                candidate = release_version(store=store, profile=profile, instance="testing")
-            except (FileNotFoundError, ValueError) as error:
-                raise GenericWebPromotionSourceRefused(
-                    "Testing is no longer qualified for release."
-                ) from error
-            if candidate != decision.checklist.candidate:
-                raise GenericWebPromotionSourceRefused("The accepted testing release changed.")
+            _require_qualified_generic_web_release_source(store, profile, decision)
 
         if recipient.phase != "published" and not recipient.execution:
             _require_current_release(store, control_plane_root, profile, decision)
@@ -1314,6 +1316,21 @@ def _advance(
     return ""
 
 
+def _require_qualified_generic_web_release_source(
+    store: PostgresRecordStore,
+    profile: LaunchplaneProductProfileRecord,
+    decision: ReleaseReviewDecisionRecord,
+) -> None:
+    try:
+        candidate = release_version(store=store, profile=profile, instance="testing")
+    except (FileNotFoundError, ValueError) as error:
+        raise GenericWebPromotionSourceRefused(
+            "Testing is no longer qualified for release."
+        ) from error
+    if candidate != decision.checklist.candidate:
+        raise GenericWebPromotionSourceRefused("The accepted testing release changed.")
+
+
 def _require_current_release(
     store: PostgresRecordStore,
     control_plane_root: Path,
@@ -1326,14 +1343,35 @@ def _require_current_release(
     # Cheap reads first, so a stale acceptance does not read GitHub on every poll.
     try:
         production = release_version(store=store, profile=profile, instance="prod")
-        candidate = release_version(store=store, profile=profile, instance="testing")
     except (FileNotFoundError, ValueError) as error:
         raise ClientReleaseNotReady("release_record_missing") from error
-    if (production, candidate) != (checklist.production, checklist.candidate):
+    if production != checklist.production:
         raise ClientReleaseNotReady("release_changed")
+    if profile.driver_id == "generic-web":
+        _require_qualified_generic_web_release_source(store, profile, decision)
+    else:
+        try:
+            candidate = release_version(store=store, profile=profile, instance="testing")
+        except (FileNotFoundError, ValueError) as error:
+            raise ClientReleaseNotReady("release_record_missing") from error
+        if candidate != checklist.candidate:
+            raise ClientReleaseNotReady("release_changed")
     review = current_release_review(
         control_plane_root=control_plane_root, record_store=store, profile=profile
     )
+    if profile.driver_id == "generic-web":
+        if (
+            review.latest_decision is not None
+            and review.latest_decision.record_id != decision.record_id
+        ):
+            raise ClientReleaseNotReady("release_not_accepted")
+        if review.unavailable_reason == "candidate_identity_missing":
+            raise GenericWebPromotionSourceRefused("Testing is no longer qualified for release.")
+        if review.checklist is not None:
+            if review.checklist.production != checklist.production:
+                raise ClientReleaseNotReady("release_changed")
+            if review.checklist.candidate != checklist.candidate:
+                raise GenericWebPromotionSourceRefused("The accepted testing release changed.")
     if (
         not review.approved
         or review.checklist_digest != decision.checklist_digest

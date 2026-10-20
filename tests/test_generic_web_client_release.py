@@ -738,6 +738,13 @@ class GenericWebClientReleaseTests(unittest.TestCase):
             self.assertEqual(held.state, "waiting")
             self.assertIn("hold", held.blocked_reason)
             self.switch("promote")
+            ready = read_client_release_run(
+                store=self.store,
+                profile=self.store.read_product_profile_record(self.profile.product),
+                decision=accepted,
+            )
+            assert ready is not None
+            self.assertEqual(ready.blocked_reason, "")
             testing = self.store.read_environment_inventory(
                 context_name=self.context, instance_name="testing"
             )
@@ -762,6 +769,15 @@ class GenericWebClientReleaseTests(unittest.TestCase):
             self.assertEqual(self.advance(), ())
             self.assertEqual(self.provider.deployed_artifacts, [])
             self.assertEqual(self.store.list_verireel_prod_backup_gate_operation_records(), ())
+            self.write_qualified_testing_inventory(testing)
+            restored = read_client_release_run(
+                store=self.store,
+                profile=self.store.read_product_profile_record(self.profile.product),
+                decision=accepted,
+            )
+            assert restored is not None
+            self.assertEqual(restored.blocked_reason, "")
+            self.assertEqual(restored.steps, stale.steps)
 
     def test_client_acceptance_runs_verified_backup_and_promotion_once(self) -> None:
         accepted = self.accept()
@@ -975,7 +991,19 @@ class GenericWebClientReleaseTests(unittest.TestCase):
     def test_standing_new_candidate_waits_for_admitted_drill_inverse(self) -> None:
         self.standing_testing_change_after_admission(new_candidate=True)
 
-    def standing_testing_change_after_admission(self, *, new_candidate: bool) -> None:
+    def test_supported_baseline_restore_does_not_pin_next_standing_candidate(self) -> None:
+        self.standing_testing_change_after_admission(new_candidate=True, production_changed=True)
+
+    def test_missing_old_target_does_not_pin_independently_qualified_next_drill(self) -> None:
+        self.standing_testing_change_after_admission(new_candidate=True, prior_target_missing=True)
+
+    def standing_testing_change_after_admission(
+        self,
+        *,
+        new_candidate: bool,
+        production_changed: bool = False,
+        prior_target_missing: bool = False,
+    ) -> None:
         from tests.support.lane_builds import LaneBuildGitHub
 
         next_commit = "d" * 40
@@ -991,14 +1019,59 @@ class GenericWebClientReleaseTests(unittest.TestCase):
                         HEAD: "sha256:" + "b" * 64,
                         next_commit: next_digest,
                     },
+                    tags={HEAD: ("first-candidate",), next_commit: ("next-candidate",)},
                 ),
             )
         )
+        baseline = self.store.read_environment_inventory(
+            context_name=self.context, instance_name="prod"
+        )
+        if prior_target_missing:
+            initial_testing = self.store.read_environment_inventory(
+                context_name=self.context, instance_name="testing"
+            )
+            assert initial_testing.runtime_identity is not None
+            self.write_qualified_testing_inventory(
+                initial_testing.model_copy(
+                    update={
+                        "runtime_identity": initial_testing.runtime_identity.model_copy(
+                            update={
+                                "image_reference": self.profile.image.repository
+                                + ":first-candidate"
+                            }
+                        )
+                    }
+                )
+            )
         self.switch("director_standing")
         self.advance()
         self.capture()
         self.advance()
         decision = self.store.list_release_review_decision_records(product=self.profile.product)[0]
+        if production_changed:
+            from control_plane.workflows.generic_web_rollback import (
+                execute_generic_web_rollback,
+            )
+            from control_plane.contracts.generic_web_rollback import GenericWebRollbackPlanRequest
+
+            restored = execute_generic_web_rollback(
+                control_plane_root=self.root,
+                record_store=self.store,
+                request=GenericWebRollbackPlanRequest(
+                    product=self.profile.product,
+                    rollback_deployment_record_id=baseline.deployment_record_id,
+                ),
+                deploy_provider=self.provider,
+            )
+            self.assertEqual(restored.rollback_status, "pass")
+            self.assertEqual(self.store.list_held_provider_target_reservations(), ())
+        if prior_target_missing:
+            previous = self.store.read_deployment_record(baseline.deployment_record_id)
+            self.store.write_deployment_record(
+                previous.model_copy(
+                    update={"deploy": previous.deploy.model_copy(update={"status": "fail"})}
+                )
+            )
         inventory = self.store.read_environment_inventory(
             context_name=self.context, instance_name="testing"
         )
@@ -1012,7 +1085,8 @@ class GenericWebClientReleaseTests(unittest.TestCase):
                             update={
                                 "artifact_id": self.profile.image.repository + "@" + next_digest,
                                 "source_git_ref": next_commit,
-                                "image_reference": "",
+                                "image_reference": self.profile.image.repository
+                                + ":next-candidate",
                             }
                         )
                     }
@@ -1028,6 +1102,25 @@ class GenericWebClientReleaseTests(unittest.TestCase):
                     }
                 )
             )
+        if production_changed or prior_target_missing:
+            self.assertTrue(self.advance())
+            next_decision = self.store.list_release_review_decision_records(
+                product=self.profile.product
+            )[0]
+            self.assertNotEqual(next_decision.record_id, decision.record_id)
+            self.assertEqual(next_decision.checklist.candidate.source_commit, next_commit)
+            self.capture()
+            self.assertTrue(self.advance())
+            self.assertTrue(self.advance())
+            self.assertTrue(self.advance())
+            self.capture()
+            self.assertTrue(self.advance())
+            run = read_client_release_run(
+                store=self.store, profile=self.profile, decision=next_decision
+            )
+            assert run is not None
+            self.assertEqual(run.state, "passed")
+            return
         self.assertTrue(self.advance())
         self.assertEqual(
             self.store.list_release_review_decision_records(product=self.profile.product),
@@ -1911,6 +2004,72 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         assert run is not None
         self.assertEqual(run.state, "stopped")
         self.assertEqual(self.provider.deployed_artifacts, [])
+
+    def test_source_loss_during_target_resolution_keeps_accepted_step_retryable(self) -> None:
+        self.source_loss_before_effect(during_review=False)
+
+    def test_source_loss_during_review_keeps_accepted_step_retryable(self) -> None:
+        self.source_loss_before_effect(during_review=True)
+
+    def source_loss_before_effect(self, *, during_review: bool) -> None:
+        accepted = self.accept()
+        self.advance()
+        self.capture()
+        inventory = self.store.read_environment_inventory(
+            context_name=self.context, instance_name="testing"
+        )
+        testing = self.store.read_deployment_record(inventory.deployment_record_id)
+        original = self.provider.resolve_deploy_target
+        reviews = 0
+
+        def fail_source() -> None:
+            self.store.write_deployment_record(
+                testing.model_copy(
+                    update={
+                        "post_deploy_update": PostDeployUpdateEvidence(
+                            attempted=True, status="fail"
+                        )
+                    }
+                )
+            )
+
+        def lose_source(**kwargs: Any) -> GenericWebResolvedDeployTarget:
+            target = original(**kwargs)
+            if not during_review:
+                fail_source()
+            return target
+
+        def review(**kwargs: object) -> ReleaseReviewStatus:
+            nonlocal reviews
+            reviews += 1
+            if during_review and reviews == 2:
+                fail_source()
+                return ReleaseReviewStatus(unavailable_reason="candidate_identity_missing")
+            return self.review(**kwargs)
+
+        with (
+            patch.object(self.provider, "resolve_deploy_target", side_effect=lose_source),
+            patch("control_plane.client_release.current_release_review", side_effect=review),
+            patch(
+                "control_plane.production_delivery_monitor.record_production_delivery_failure"
+            ) as failure,
+        ):
+            self.assertEqual(self.advance(), ())
+            failure.assert_not_called()
+        run = read_client_release_run(store=self.store, profile=self.profile, decision=accepted)
+        assert run is not None
+        promotion = next(step for step in run.steps if step.step == "promote-1")
+        self.assertEqual(promotion.status, "not_started")
+        self.assertEqual(self.provider.deployed_artifacts, [])
+        self.store.write_deployment_record(testing)
+        self.assertTrue(self.advance())
+        self.assertEqual(
+            self.store.list_release_review_decision_records(product=self.profile.product),
+            (accepted,),
+        )
+        self.assertEqual(
+            self.provider.deployed_artifacts, [accepted.checklist.candidate.artifact_id]
+        )
 
     def test_second_review_read_failure_stops_release_without_a_silent_retry(self) -> None:
         accepted = self.accept()
