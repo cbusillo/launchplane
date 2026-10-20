@@ -6,7 +6,8 @@ from typing import Any
 import unittest
 from unittest.mock import patch
 
-from sqlalchemy import delete, event
+from sqlalchemy import delete, event, Select
+from sqlalchemy.sql.elements import BindParameter
 
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
@@ -100,17 +101,35 @@ class ProviderHoldAttentionTests(unittest.TestCase):
     def test_read_is_sql_bounded_and_does_not_call_bulk_inventory_or_catalog(self) -> None:
         for index in range(5):
             reserve_attention_hold(self.store, f"sql-{index}")
-        statements = []
+        membership_bounds: list[int | None] = []
 
         def capture(
             _connection: object,
             _cursor: object,
-            statement: str,
-            parameters: Any,
-            _context: object,
+            _statement: str,
+            _parameters: Any,
+            context: Any,
             _many: bool,
         ) -> None:
-            statements.append((statement, parameters))
+            compiled = context.compiled
+            if compiled is None or not isinstance(compiled.statement, Select):
+                return
+            statement = compiled.statement
+            if not any(
+                column.get("entity") is LaunchplaneIdempotencyRow
+                for column in statement.column_descriptions
+            ):
+                return
+            # The first reservation select is membership; receipt reads follow it.
+            # Observe its executed row-cap value, independent of dialect rendering.
+            cap = statement._limit_clause
+            if cap is None:
+                cap = statement._fetch_clause
+                if (statement._fetch_clause_options or {}).get("percent"):
+                    cap = None
+            bind_name = compiled.bind_names.get(cap) if isinstance(cap, BindParameter) else None
+            value = context.compiled_parameters[0].get(bind_name) if bind_name else None
+            membership_bounds.append(value if type(value) is int else None)
 
         event.listen(self.store._engine, "before_cursor_execute", capture)
         self.addCleanup(event.remove, self.store._engine, "before_cursor_execute", capture)
@@ -127,11 +146,10 @@ class ProviderHoldAttentionTests(unittest.TestCase):
             limit = 1
             page = self.store.read_provider_hold_attention_page(limit=limit)
         self.assertTrue(page.has_more)
-        membership = [value for value in statements if "LIMIT" in value[0]]
-        self.assertTrue(membership)
-        self.assertTrue(all(limit + 1 in parameters for _statement, parameters in membership))
+        self.assertTrue(membership_bounds)
+        self.assertEqual(membership_bounds[0], limit + 1)
         # Increasing retained inventory must not increase work for a fixed page.
-        # The indexed limit above proves membership is bounded independently of N;
+        # The executed row cap above proves membership is bounded independently of N;
         # compare projected source work without pinning an implementation query budget.
         with patch.object(
             self.store, "_read_provider_hold_record", wraps=self.store._read_provider_hold_record

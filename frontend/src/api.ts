@@ -1215,11 +1215,13 @@ export function decideBackupPolicyProposal(payload: { operationId: string; decis
   }, options.signal, options.idempotencyKey, options.onDispatch);
 }
 
+export const PROVIDER_HOLD_ATTENTION_ROUTE = "/v1/operations/provider-hold-attention";
+
 export function readProviderHoldAttention(
   page: { limit?: number; cursor?: string | null } = {}, signal?: AbortSignal,
 ): Promise<import("./generated/openapi.ts").ProviderHoldAttentionResponse> {
   const query = new URLSearchParams();
   if (page.limit !== undefined) query.set("limit", String(page.limit));
   if (page.cursor) query.set("cursor", page.cursor);
-  return requestJson(`/v1/operations/provider-hold-attention${query.size ? `?${query}` : ""}`, "GET", undefined, signal);
+  return requestJson(`${PROVIDER_HOLD_ATTENTION_ROUTE}${query.size ? `?${query}` : ""}`, "GET", undefined, signal);
 }

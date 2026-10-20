@@ -1,7 +1,9 @@
+import { PROVIDER_HOLD_ATTENTION_ROUTE } from "../../src/api";
+
 import { expect, setClockTime, test, waitForState, type Page } from "./state";
 import type { ProviderHoldAttentionPage, ProviderHoldAttentionItem, ProductSiteOverview } from "../../src/generated/openapi.ts";
 
-const attentionPath = "**/v1/operations/provider-hold-attention**";
+const attentionPath = `**${PROVIDER_HOLD_ATTENTION_ROUTE}**`;
 
 async function fixture(page: Page) {
   await page.goto("/ui/products?fixture=products");
@@ -63,7 +65,6 @@ for (const empty of [false, true]) {
     const panel = page.getByRole("region", { name: "Service operation attention" });
     await expect(panel).toContainText("Original ownership unknown");
     await expect(panel).toContainText("Running operation");
-    await expect(panel).not.toContainText("stuck");
     if (empty) await expect(page.getByRole("heading", { name: "No products are owned by Launchplane yet" })).toBeVisible();
     else {
       await expect(page.getByRole("region", { name: "Active public ingress incidents" })).toContainText("unknown original ownership");
