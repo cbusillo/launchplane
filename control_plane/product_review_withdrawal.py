@@ -31,6 +31,25 @@ class ReviewWithdrawalUnsettled(ReviewWithdrawalRefused):
     """The provider effect is not yet settled; retain the original operation key."""
 
 
+class ReviewWithdrawalNotDispatched(ReviewWithdrawalRefused):
+    def __init__(self, state: Literal["target_busy", "in_progress", "conflict"]) -> None:
+        self.state = state
+        super().__init__(
+            {
+                "target_busy": "Another withdrawal owns this PR. This request was not dispatched; the original caller must recover its saved operation.",
+                "in_progress": "This original withdrawal is still running. Wait and read back with the same caller and key.",
+                "conflict": "The operation key belongs to another request. This request was not dispatched.",
+            }[state]
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewWithdrawalChange:
+    head_sha: str
+    labels: frozenset[str]
+    is_open: bool = True
+
+
 class ReviewWithdrawalRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -60,7 +79,7 @@ class ReviewWithdrawalRequest(BaseModel):
 
 
 class ReviewWithdrawalSource(Protocol):
-    def change(self) -> tuple[str, frozenset[str]]: ...
+    def change(self) -> ReviewWithdrawalChange: ...
     def history(self, marker: str, body: str = "") -> str: ...
     def remove_label(self, label: str) -> None: ...
 
@@ -101,7 +120,10 @@ class ReviewWithdrawalService:
             raise ReviewWithdrawalRefused("The product or its Client changed. Review again.")
         if current.repository.casefold() != request.repository.casefold():
             raise ReviewWithdrawalRefused("The product does not own this repository.")
-        head, labels = self.source.change()
+        change = self.source.change()
+        head, labels = change.head_sha, change.labels
+        if not change.is_open:
+            raise ReviewWithdrawalRefused("A new withdrawal requires an open pull request.")
         if head != request.expected_head_sha:
             raise ReviewWithdrawalRefused("The PR head changed. Review again.")
         if any(
@@ -155,7 +177,8 @@ class ReviewWithdrawalService:
             if request.mode == "readback":
                 if original is None:
                     raise ReviewWithdrawalRefused("No saved withdrawal exists for this key.")
-                head, labels = self.source.change()
+                change = self.source.change()
+                head, labels = change.head_sha, change.labels
                 saved = cast(dict[str, object], original.response_payload.get("result", {}))
                 history_url = str(saved.get("history_url", ""))
                 # This is observation only. A later request is never removed on readback.
@@ -164,6 +187,7 @@ class ReviewWithdrawalService:
                     "applied": original.state == "completed" and saved.get("applied") is True,
                     "head_sha": request.expected_head_sha,
                     "plan_sha256": digest,
+                    "operation_state": original.state,
                     "readback_matches": original.state == "completed"
                     and saved.get("applied") is True
                     and head == request.expected_head_sha
@@ -205,6 +229,8 @@ class ReviewWithdrawalService:
                 allow_mutation=True,
                 original_intent=plan,
             )
+            if result.status in {"target_busy", "in_progress", "conflict"}:
+                raise ReviewWithdrawalNotDispatched(result.status)
             if result.status not in {"completed", "replayed", "adopted"}:
                 raise ReviewWithdrawalUnsettled(
                     "Withdrawal outcome is unsettled. Preserve the original key and read back."
@@ -248,13 +274,14 @@ class _WithdrawalAdapter:
     def observe(
         self, provider_operation_key: str, provider_effect_phase: str, reconciliation_key: str
     ) -> ProviderObservation:
-        head, labels = self.service.source.change()
         marker = self._marker(provider_operation_key)
         url = self.service.source.history(marker)
         if url:
             # Published only after confirmed removal: a later request cannot undo
             # the historical receipt, and is never removed by its recovery.
             return ProviderObservation("present", response_payload=self._result(marker, url))
+        change = self.service.source.change()
+        head, labels = change.head_sha, change.labels
         authority = json.loads(self.encoded_plan)
         has_label = str(authority["review_label"]).casefold() in {
             label.casefold() for label in labels
@@ -268,7 +295,8 @@ class _WithdrawalAdapter:
             )
         )
         if (
-            head == self.request.expected_head_sha
+            change.is_open
+            and head == self.request.expected_head_sha
             and authority["profile_sha256"] == self.service._authority_digest()
             and not decided
         ):
@@ -302,7 +330,7 @@ class _WithdrawalAdapter:
         try:
             self.service._pending(self.request, require_label=not self.recovering)
             if self.recovering:
-                _, labels = self.service.source.change()
+                labels = self.service.source.change().labels
                 if self.service.profile.owner.review_label.casefold() in {
                     label.casefold() for label in labels
                 }:
@@ -324,7 +352,8 @@ class _WithdrawalAdapter:
             self.service.source.remove_label(self.service.profile.owner.review_label)
         else:
             lease.assert_current()
-        head, labels = self.service.source.change()
+        change = self.service.source.change()
+        head, labels = change.head_sha, change.labels
         if (
             head != self.request.expected_head_sha
             or self.service.profile.owner.review_label.casefold()

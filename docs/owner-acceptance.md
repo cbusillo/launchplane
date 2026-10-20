@@ -24,7 +24,8 @@ Launchplane requests review when a pull request has real `Client test notes`
 (`Owner test notes` remains a supported heading). No label is needed. The
 product's review label remains an explicit override requiring real test notes.
 `Nothing for the Client to test: <reason>` with a nonempty reason marks an
-engineering-only change; it cannot be used with the review label. Missing notes,
+engineering-only change; it cannot be used with the review label. When the
+Director reroutes an already labeled request, use [pending request withdrawal](#withdrawing-a-pending-request). Missing notes,
 empty template comments, or a malformed engineering-only declaration visibly
 refuse preview readiness and merge admission for repositories feeding a Client
 release. Shared inputs are resolved from recorded production/testing artifacts,
@@ -272,3 +273,12 @@ and changes no release acceptance. It does not rewrite test notes or publish a
 successful Client-review check. Set truthful engineering notes separately; real
 test notes or a later review label request review normally, including on the
 same head. The normal preview reconciler refreshes the check after those edits.
+
+Recovery and readback can observe a closed PR; a new withdrawal still requires
+an open PR. A published history receipt remains historical proof after closure.
+A closed request without a receipt settles the original intent as needing a new
+plan, preserving uncertainty about prior effects, without deleting any label.
+A competing operation returns `product_review_withdrawal_target_busy`: the new
+call dispatched nothing and its key cannot recover the original caller's work.
+`product_review_withdrawal_in_progress` names a still-running original call;
+`product_review_withdrawal_conflict` names a key/request conflict.

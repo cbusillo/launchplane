@@ -5,7 +5,7 @@ from collections.abc import Callable
 import re
 from urllib.parse import quote
 
-from control_plane.product_review_withdrawal import ReviewWithdrawalRefused
+from control_plane.product_review_withdrawal import ReviewWithdrawalRefused, ReviewWithdrawalChange
 from control_plane.github_payload import required_positive_int
 
 
@@ -21,13 +21,13 @@ class GitHubReviewWithdrawalSource:
     def path(self) -> str:
         return f"/repos/{quote(self.repository, safe='/')}/issues/{self.pull_request}"
 
-    def change(self) -> tuple[str, frozenset[str]]:
+    def change(self) -> ReviewWithdrawalChange:
         change = self.api_request(
             path=f"/repos/{quote(self.repository, safe='/')}/pulls/{self.pull_request}",
             token=self.token,
         )
-        if not isinstance(change, dict) or change.get("state") != "open":
-            raise ReviewWithdrawalRefused("The pull request is unavailable or closed.")
+        if not isinstance(change, dict) or change.get("state") not in {"open", "closed"}:
+            raise ReviewWithdrawalRefused("The pull request lifecycle is unavailable.")
         head = change.get("head")
         sha = head.get("sha") if isinstance(head, dict) else None
         labels = change.get("labels")
@@ -41,7 +41,9 @@ class GitHubReviewWithdrawalSource:
             )
         ):
             raise ReviewWithdrawalRefused("Current pull request evidence is incomplete.")
-        return sha, frozenset(label["name"] for label in labels)
+        return ReviewWithdrawalChange(
+            sha, frozenset(label["name"] for label in labels), is_open=change["state"] == "open"
+        )
 
     def remove_label(self, label: str) -> None:
         # Never swallow provider errors or switch credentials.

@@ -24,6 +24,7 @@ from control_plane.product_review_withdrawal import (
     ReviewWithdrawalService,
     ReviewWithdrawalRefused,
     ReviewWithdrawalUnsettled,
+    ReviewWithdrawalNotDispatched,
 )
 from control_plane.product_review_withdrawal_github import GitHubReviewWithdrawalSource
 from control_plane.service_auth import (
@@ -107,6 +108,8 @@ def register_product_review_withdrawal_route(
             result = await run_in_worker_thread(execute)
         except FileNotFoundError:
             refuse(404, "not_found", "The product profile was not found.")
+        except ReviewWithdrawalNotDispatched as error:
+            refuse(409, "product_review_withdrawal_" + error.state, str(error))
         except ReviewWithdrawalUnsettled as error:
             refuse(409, "product_review_withdrawal_unsettled", str(error))
         except ReviewWithdrawalRefused as error:

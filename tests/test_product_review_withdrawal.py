@@ -11,6 +11,8 @@ from control_plane.product_review_withdrawal import (
     ReviewWithdrawalService,
     ReviewWithdrawalRefused,
     ReviewWithdrawalUnsettled,
+    ReviewWithdrawalChange,
+    ReviewWithdrawalNotDispatched,
 )
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.storage.postgres import PostgresRecordStore
@@ -27,9 +29,10 @@ class SourceControl:
         self.labels = {REVIEW_LABEL, "keep-me"}
         self.comments: dict[str, str] = {}
         self.deletes = 0
+        self.is_open = True
 
-    def change(self) -> tuple[str, frozenset[str]]:
-        return self.head, frozenset(self.labels)
+    def change(self) -> ReviewWithdrawalChange:
+        return ReviewWithdrawalChange(self.head, frozenset(self.labels), is_open=self.is_open)
 
     def history(self, marker: str, body: str = "") -> str:
         if body:
@@ -265,6 +268,52 @@ class ReviewWithdrawalTests(unittest.TestCase):
         )
         self.assertTrue(read["readback_matches"])
 
+    def test_competing_caller_is_not_dispatched_and_original_recovers_after_closure(self) -> None:
+        from unittest.mock import patch
+
+        remove = self.source.remove_label
+
+        def lost(label: str) -> None:
+            remove(label)
+            self.source.labels.add(label)
+            raise OSError("lost response")
+
+        with patch.object(self.source, "remove_label", side_effect=lost):
+            with self.assertRaises(ReviewWithdrawalUnsettled):
+                self.apply()
+        other = ReviewWithdrawalService(
+            self.store, self.source, self.profile, actor="director-agent:other"
+        )
+        plan = other.run(self.request, key="", trace="plan-other")
+        with self.assertRaises(ReviewWithdrawalNotDispatched) as blocked:
+            other.run(
+                self.request.model_copy(
+                    update={"mode": "apply", "reviewed_plan_sha256": plan["plan_sha256"]}
+                ),
+                key="other-key",
+                trace="other",
+            )
+        self.assertEqual(blocked.exception.state, "target_busy")
+        self.assertEqual(self.source.deletes, 1)
+        self.source.is_open = False
+        settled = self.apply()
+        self.assertFalse(settled["applied"])
+        self.assertTrue(settled["replan_required"])
+        self.assertTrue(settled["prior_effects_unknown"])
+        with self.assertRaises(ReviewWithdrawalRefused):
+            self.service.run(self.request, key="", trace="new-closed")
+
+    def test_closed_pr_preserves_a_completed_withdrawal_readback(self) -> None:
+        self.apply()
+        self.source.is_open = False
+        observed = self.service.run(
+            self.reviewed_request.model_copy(update={"mode": "readback"}),
+            key="withdraw-1",
+            trace="audit-closed",
+        )
+        self.assertTrue(observed["applied"])
+        self.assertTrue(observed["readback_matches"])
+
 
 class ReviewWithdrawalHttpTests(unittest.IsolatedAsyncioTestCase):
     async def test_director_agent_uses_standing_permission_and_scoped_agents_refuse(self) -> None:
@@ -276,7 +325,11 @@ class ReviewWithdrawalHttpTests(unittest.IsolatedAsyncioTestCase):
         from control_plane.http_routes.product_review_withdrawal import (
             register_product_review_withdrawal_route,
         )
-        from control_plane.service_auth import LocalOperatorIdentity, LaunchplaneAuthzPolicy
+        from control_plane.service_auth import (
+            LocalOperatorIdentity,
+            LaunchplaneAuthzPolicy,
+            LocalOperatorPolicyRule,
+        )
         from tests.support.http import request
 
         with TemporaryDirectory() as temporary:
@@ -290,7 +343,18 @@ class ReviewWithdrawalHttpTests(unittest.IsolatedAsyncioTestCase):
             source = SourceControl()
             identity = LocalOperatorIdentity("director", "existing-bootstrap", director_agent=True)
             app = FastAPI()
-            policy = LaunchplaneAuthzPolicy(schema_version=3)
+            policy = LaunchplaneAuthzPolicy(
+                schema_version=3,
+                local_operators=(
+                    LocalOperatorPolicyRule(
+                        subjects=("other-agent",),
+                        token_labels=("other-token",),
+                        products=(profile.product,),
+                        contexts=("launchplane",),
+                        actions=("product_profile.read", "product_review.withdraw"),
+                    ),
+                ),
+            )
             register_product_review_withdrawal_route(
                 cast(ApiRouteRegistrar, app),
                 dependencies=ReadRouteDependencies(
@@ -347,7 +411,6 @@ class ReviewWithdrawalHttpTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(result.status_code, 202, result.text)
                 self.assertTrue(result.json()["result"]["applied"])
-                # A generic agent with no Director marker cannot attest a Director decision.
                 with patch(
                     "control_plane.http_routes.product_review_withdrawal.ReviewWithdrawalService.run",
                     side_effect=ReviewWithdrawalUnsettled("Outcome is unsettled"),
@@ -364,14 +427,42 @@ class ReviewWithdrawalHttpTests(unittest.IsolatedAsyncioTestCase):
                         unsettled.json()["detail"]["code"], "product_review_withdrawal_unsettled"
                     )
                 identity = LocalOperatorIdentity("other-agent", "other-token")
-                denied = await request(
+                # Plan is a read; a scoped write rule still cannot attest a Director decision.
+                source.labels.add(REVIEW_LABEL)
+                planned = await request(
                     app, "POST", "/v1/product-review/withdrawal", payload=payload
                 )
+                self.assertEqual(planned.status_code, 202, planned.text)
+                scoped_apply = payload | {
+                    "mode": "apply",
+                    "reviewed_plan_sha256": planned.json()["result"]["plan_sha256"],
+                }
+                denied = await request(
+                    app,
+                    "POST",
+                    "/v1/product-review/withdrawal",
+                    payload=scoped_apply,
+                    headers={"Idempotency-Key": "scoped"},
+                )
                 self.assertEqual(denied.status_code, 403)
-                self.assertEqual(denied.json()["detail"]["code"], "authorization_denied")
+                self.assertIn(REVIEW_LABEL, source.labels)
 
 
 class ReviewWithdrawalGitHubTests(unittest.TestCase):
+    def test_closed_pr_remains_observable_for_recovery(self) -> None:
+        from unittest.mock import Mock
+        from control_plane.product_review_withdrawal_github import GitHubReviewWithdrawalSource
+
+        source = GitHubReviewWithdrawalSource(
+            _REPOSITORY,
+            42,
+            "test-token",
+            Mock(return_value={"state": "closed", "head": {"sha": HEAD}, "labels": []}),
+            app_id=2,
+        )
+        self.assertFalse(source.change().is_open)
+        self.assertEqual(source.change().head_sha, HEAD)
+
     def test_delivery_app_history_recovery_ignores_forged_markers(self) -> None:
         from unittest.mock import Mock
         from control_plane.product_review_withdrawal_github import GitHubReviewWithdrawalSource
