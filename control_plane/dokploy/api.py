@@ -160,6 +160,11 @@ class DokployScheduleExecutionFailed(click.ClickException):
 
 
 def is_transient_dokploy_error(error: BaseException) -> bool:
+    if (
+        isinstance(error, DokployScheduleExecutionFailed)
+        and error.cause == "trigger_baseline_unavailable"
+    ):
+        return isinstance(error.__cause__, DokployRequestFailed) and error.__cause__.retryable
     return isinstance(error, DokployRequestFailed) and error.retryable
 
 
@@ -1147,7 +1152,6 @@ def trigger_dokploy_schedule_and_wait(
     if execution_timeout_seconds < 1:
         raise ValueError("Dokploy schedule execution timeout must be positive.")
     before_keys = {deployment_key(item) for item in baseline}
-    before_key = deployment_key(_latest_deployment_from_list(baseline))
     started_monotonic = time.monotonic()
     trigger_started_at = time.time()
     try:
@@ -1200,13 +1204,32 @@ def trigger_dokploy_schedule_and_wait(
             interval_seconds=observation_interval_seconds,
             trigger_detail=_bounded_provider_detail(str(error)),
         )
-    remaining_seconds = execution_timeout_seconds - (time.monotonic() - started_monotonic)
-    return wait_for_dokploy_schedule_deployment(
+    deployment = _read_back_triggered_schedule_deployment(
         host=host,
         token=token,
         schedule_id=schedule_id,
-        before_key=before_key,
+        before_keys=before_keys,
+        trigger_started_at=trigger_started_at,
+        grace_seconds=readback_grace_seconds,
+        interval_seconds=readback_interval_seconds,
+        trigger_error=None,
+    )
+    if deployment is None:
+        raise DokployScheduleExecutionFailed(
+            schedule_id=schedule_id,
+            deployment_id="",
+            deployment_status="unknown",
+            cause="trigger_outcome_unknown",
+            provider_detail="The acknowledged trigger has no observable new job; it was not retried.",
+        )
+    remaining_seconds = execution_timeout_seconds - (time.monotonic() - started_monotonic)
+    return wait_for_exact_dokploy_schedule_deployment(
+        host=host,
+        token=token,
+        schedule_id=schedule_id,
+        deployment_id=deployment_key(deployment),
         timeout_seconds=max(1, int(remaining_seconds)),
+        interval_seconds=observation_interval_seconds,
     )
 
 
@@ -1281,10 +1304,11 @@ def _read_back_triggered_schedule_deployment(
     trigger_started_at: float,
     grace_seconds: float,
     interval_seconds: float,
-    trigger_error: DokployRequestFailed,
+    trigger_error: DokployRequestFailed | None,
 ) -> JsonObject | None:
     """Find the one deployment this trigger created, or fail closed as unknown."""
     deadline = time.monotonic() + grace_seconds
+    trigger_detail = str(trigger_error) if trigger_error else "Dokploy acknowledged the trigger."
     while True:
         try:
             deployments = _read_schedule_deployments(
@@ -1297,7 +1321,7 @@ def _read_back_triggered_schedule_deployment(
                 deployment_status="unknown",
                 cause="trigger_outcome_unknown",
                 provider_detail=_bounded_provider_detail(
-                    f"{trigger_error} Read-back failed: {read_error.message} "
+                    f"{trigger_detail} Read-back failed: {read_error.message} "
                     "The trigger was not retried."
                 ),
             ) from trigger_error
@@ -1314,7 +1338,7 @@ def _read_back_triggered_schedule_deployment(
                 deployment_status="unknown",
                 cause="trigger_outcome_unknown",
                 provider_detail=_bounded_provider_detail(
-                    f"{trigger_error} Read-back found several new deployments ({candidate_ids}); "
+                    f"{trigger_detail} Read-back found several new deployments ({candidate_ids}); "
                     "none was chosen and the trigger was not retried."
                 ),
             ) from trigger_error
@@ -1517,9 +1541,8 @@ def _latest_new_schedule_deployment(
         )
     except click.ClickException:
         return None
-    return _latest_deployment_from_list(
-        [item for item in deployments if deployment_key(item) not in before_keys]
-    )
+    unseen = [item for item in deployments if deployment_key(item) not in before_keys]
+    return unseen[0] if len(unseen) == 1 else None
 
 
 def _schedule_execution_failure(

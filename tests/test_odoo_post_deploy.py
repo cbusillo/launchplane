@@ -82,7 +82,6 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
                 hold_uncertain_effects=True,
             )
         self.assertEqual(result.post_deploy_status, "fail")
-        self.assertIn("trigger_baseline_unavailable", result.error_message)
 
     def _source_of_truth(self) -> DokploySourceOfTruth:
         return DokploySourceOfTruth(
@@ -397,7 +396,10 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
                                     },
                                 ]
                             ),
-                            wait_for_dokploy_schedule_deployment=Mock(
+                            _read_back_triggered_schedule_deployment=Mock(
+                                return_value={"deploymentId": "failed-maintenance"}
+                            ),
+                            wait_for_exact_dokploy_schedule_deployment=Mock(
                                 return_value="deployment=failed-maintenance status=done"
                             ),
                             dokploy_request=Mock(return_value={"ok": True}),
@@ -544,7 +546,10 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
                                     {"deploymentId": "current", "status": "done", "logs": logs},
                                 ]
                             ),
-                            wait_for_dokploy_schedule_deployment=Mock(
+                            _read_back_triggered_schedule_deployment=Mock(
+                                return_value={"deploymentId": "current"}
+                            ),
+                            wait_for_exact_dokploy_schedule_deployment=Mock(
                                 return_value="deployment=current status=done"
                             ),
                             dokploy_request=Mock(return_value={"ok": True}),

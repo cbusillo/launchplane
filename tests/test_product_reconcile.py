@@ -1,7 +1,7 @@
 from control_plane.contracts.odoo_target_replacement_failures import TESTING_RESTORE_REQUIRED_CODE
 from control_plane.odoo_testing_restore import FreshOdooTestingGeneration
 from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
-from control_plane.dokploy.api import DokployRequestFailed
+from control_plane.dokploy.api import DokployRequestFailed, DokployScheduleExecutionFailed
 from control_plane.contracts.record_failures import record_failure_summary
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone, tzinfo
@@ -6026,15 +6026,23 @@ class ProductReconcileGenericWebPreviewTests(ProductReconcileTestCase):
                 detail="unavailable",
                 status_code=status_code,
             )
-            with patch(
-                "control_plane.generic_web_preview_http.execute_generic_web_preview_destroy",
-                side_effect=error,
-            ):
-                for _attempt in range(PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS + 1):
-                    self.request("preview", 5)
-                    with self.assertLogs("control_plane.product_reconcile", "WARNING"):
-                        failed = self.run_once()
-                    self.assertEqual(failed.last_plan["destroy_failed_attempts"], 0)
+            baseline_error = DokployScheduleExecutionFailed(
+                schedule_id="fixture",
+                deployment_id="",
+                deployment_status="not_started",
+                cause="trigger_baseline_unavailable",
+            )
+            baseline_error.__cause__ = error
+            for failure in (error, baseline_error):
+                with patch(
+                    "control_plane.generic_web_preview_http.execute_generic_web_preview_destroy",
+                    side_effect=failure,
+                ):
+                    for _attempt in range(PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS + 1):
+                        self.request("preview", 5)
+                        with self.assertLogs("control_plane.product_reconcile", "WARNING"):
+                            failed = self.run_once()
+                        self.assertEqual(failed.last_plan["destroy_failed_attempts"], 0)
         self.request("preview", 5)
         self.assertEqual(self.reconcile()["preview_result_status"], "pass")
 

@@ -436,7 +436,11 @@ def _render_script(
             ),
         ),
         patch(
-            "control_plane.dokploy.api.wait_for_dokploy_schedule_deployment",
+            "control_plane.dokploy.api._read_back_triggered_schedule_deployment",
+            return_value={"deploymentId": "schedule-after"},
+        ),
+        patch(
+            "control_plane.dokploy.api.wait_for_exact_dokploy_schedule_deployment",
             return_value="deployment=schedule-after status=done",
         ),
         patch("control_plane.dokploy.api.dokploy_request", return_value={"ok": True}),
@@ -534,7 +538,11 @@ def _render_post_deploy_script(
             ),
         ),
         patch(
-            "control_plane.dokploy.api.wait_for_dokploy_schedule_deployment",
+            "control_plane.dokploy.api._read_back_triggered_schedule_deployment",
+            return_value={"deploymentId": "schedule-after"},
+        ),
+        patch(
+            "control_plane.dokploy.api.wait_for_exact_dokploy_schedule_deployment",
             return_value="deployment=schedule-after status=done",
         ),
         patch("control_plane.dokploy.api.dokploy_request", return_value={"ok": True}),
