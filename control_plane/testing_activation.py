@@ -28,6 +28,12 @@ from control_plane.disposable_lanes import disposable_lane_configuration
 from control_plane.disposable_lanes import LaneConfigurationRecord
 from control_plane.contracts.secret_record import SecretRecord, SecretBinding
 from control_plane.dokploy import api, compose, post_deploy, source
+from control_plane.dokploy.network_capacity import (
+    BridgeNetworkCapacityRefused,
+    compose_bridge_network_requirement,
+    require_bridge_network_capacity,
+)
+from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 from control_plane.generic_web_testing_exclusion import (
     _bind,
     _target_reservations,
@@ -1296,12 +1302,6 @@ class TestingActivationAdapter:
                     lease.checkpoint_effect(phase)
                     started = True
 
-                inspect_new_resources(
-                    self.root,
-                    resources,
-                    ports_for(record, runtime_values(self.store, self.root, record, resources)),
-                    checkpoint,
-                )
                 host, token = source.read_dokploy_config(control_plane_root=self.root)
                 old = api.fetch_dokploy_target_payload(
                     host=host,
@@ -1317,6 +1317,21 @@ class TestingActivationAdapter:
                     raise TestingActivationRefusal(
                         "Preserve an existing activation placement for original-key inspection."
                     )
+                if existing is None:
+                    require_bridge_network_capacity(
+                        host=host,
+                        token=token,
+                        server_id=str(old.get("serverId") or ""),
+                        required_networks=compose_bridge_network_requirement(
+                            json.loads(record.compose_source)
+                        ),
+                    )
+                inspect_new_resources(
+                    self.root,
+                    resources,
+                    ports_for(record, runtime_values(self.store, self.root, record, resources)),
+                    checkpoint,
+                )
                 # A refused/transient inspection must not strand a permanent
                 # custody row. Persist immediately before creation, after all
                 # prerequisites; every subsequent uncertain write stays fenced.
@@ -1466,7 +1481,14 @@ class TestingActivationAdapter:
             if not started:
                 raise ProviderMutationRejectedError(
                     error
-                    if isinstance(error, TestingActivationRefusal)
+                    if isinstance(
+                        error,
+                        (
+                            TestingActivationRefusal,
+                            BridgeNetworkCapacityRefused,
+                            NativeSourceAuthorizationDenied,
+                        ),
+                    )
                     else ValueError("Activation refused before provider effects.")
                 ) from error
             raise ProviderMutationUnknownError(

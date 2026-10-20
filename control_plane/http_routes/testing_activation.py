@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Annotated
 
 import click
+from control_plane.dokploy.network_capacity import BridgeNetworkCapacityRefused
+from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 from fastapi import Depends, Header, Path as PathParameter
 
 from control_plane.contracts.testing_activation import (
@@ -139,6 +141,17 @@ def register_testing_activation_routes(
                     in_progress_message="Testing activation is running under its original key.",
                     reconcile_message="Testing activation outcome is unknown; preserve original placement, holds and fences.",
                 )
+        except BridgeNetworkCapacityRefused as error:
+            raise dependencies.http_error(
+                status_code=409, trace_id=trace, code=error.code, message=str(error)
+            ) from None
+        except NativeSourceAuthorizationDenied:
+            raise dependencies.http_error(
+                status_code=403,
+                trace_id=trace,
+                code="authorization_denied",
+                message="The provider denied the read.",
+            ) from None
         except TestingActivationRefusal as error:
             raise dependencies.http_error(
                 status_code=409,

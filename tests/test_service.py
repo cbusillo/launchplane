@@ -3902,7 +3902,13 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 domain_routes.append((domain_host, runtime_port))
                 return "domain-123"
 
+            from control_plane.contracts.host_network_capacity import BridgeNetworkCapacity
+
             with (
+                patch(
+                    "control_plane.dokploy.network_capacity.read_bridge_network_capacity",
+                    return_value=BridgeNetworkCapacity(total_slots=16, free_slots=16),
+                ),
                 patch(
                     "control_plane.dokploy_target_setup_http.dokploy_source.read_dokploy_config",
                     return_value=("https://dokploy.example.invalid", "token"),

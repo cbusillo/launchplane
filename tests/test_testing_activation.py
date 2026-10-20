@@ -135,6 +135,14 @@ class ActivationTests(unittest.TestCase):
     local_credential_fixture = False
 
     def setUp(self) -> None:
+        from control_plane.contracts.host_network_capacity import BridgeNetworkCapacity
+
+        self.capacity_read = self.enterContext(
+            patch(
+                "control_plane.dokploy.network_capacity.read_bridge_network_capacity",
+                return_value=BridgeNetworkCapacity(total_slots=16, free_slots=16),
+            )
+        )
         self.preparation = preparation.SeparationResourceTests()
         self.preparation.database_url = self.database_url
         self.preparation.setUp()
@@ -471,6 +479,25 @@ class ActivationTests(unittest.TestCase):
             response_trace_id="launchplane_req_fixture",
             adapter=self.adapter,
         )
+
+    def test_capacity_refusal_leaves_no_custody_and_original_key_can_continue(self) -> None:
+        from control_plane.contracts.host_network_capacity import BridgeNetworkCapacity
+        from control_plane.dokploy.network_capacity import (
+            BRIDGE_NETWORK_CAPACITY_MARGIN,
+            BridgeNetworkCapacityRefused,
+        )
+
+        for free in (0, BRIDGE_NETWORK_CAPACITY_MARGIN):
+            self.capacity_read.return_value = BridgeNetworkCapacity(total_slots=16, free_slots=free)
+            with self.subTest(free=free), self.assertRaises(BridgeNetworkCapacityRefused):
+                self.run_activation()
+            self.assertEqual(self.writes, [])
+            self.assertIsNone(activation_record(self.store, self.product, self.context))
+        self.capacity_read.return_value = BridgeNetworkCapacity(
+            total_slots=16, free_slots=1 + BRIDGE_NETWORK_CAPACITY_MARGIN
+        )
+        self.assertEqual(self.run_activation().response_status_code, 202)
+        self.assertEqual(self.capacity_read.call_args.kwargs["server_id"], "server")
 
     def test_unencodable_input_retains_allocation_fences_without_configure_checkpoint(self) -> None:
         from control_plane.dokploy import api
