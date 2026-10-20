@@ -50,6 +50,10 @@ class ReviewWithdrawalChange:
     is_open: bool = True
 
 
+class ReviewWithdrawalHistoryUnverifiable(ValueError):
+    """The bounded authenticated history cannot be uniquely reconciled."""
+
+
 class ReviewWithdrawalRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -275,7 +279,10 @@ class _WithdrawalAdapter:
         self, provider_operation_key: str, provider_effect_phase: str, reconciliation_key: str
     ) -> ProviderObservation:
         marker = self._marker(provider_operation_key)
-        url = self.service.source.history(marker)
+        try:
+            url = self.service.source.history(marker)
+        except ReviewWithdrawalHistoryUnverifiable:
+            return self._replan(bool(provider_effect_phase))
         if url:
             # Published only after confirmed removal: a later request cannot undo
             # the historical receipt, and is never removed by its recovery.
@@ -311,13 +318,16 @@ class _WithdrawalAdapter:
         # The current labeled request may be newer, or its authority/head changed.
         # Settle this original intent without claiming success or absence of prior
         # effects. A fresh reviewed plan and new key can then address the request.
+        return self._replan(bool(provider_effect_phase))
+
+    def _replan(self, prior_effects_unknown: bool) -> ProviderObservation:
         return ProviderObservation(
             "present",
             response_payload={
                 "result": {
                     "applied": False,
                     "replan_required": True,
-                    "prior_effects_unknown": bool(provider_effect_phase),
+                    "prior_effects_unknown": prior_effects_unknown,
                     "plan_sha256": self.digest,
                     "head_sha": self.request.expected_head_sha,
                 }
@@ -348,6 +358,7 @@ class _WithdrawalAdapter:
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
         if not self.recovering:
+            self.service.source.history(self._marker(provider_operation_key))
             lease.checkpoint_effect("withdraw-review-request")
             self.service.source.remove_label(self.service.profile.owner.review_label)
         else:
@@ -373,7 +384,6 @@ class _WithdrawalAdapter:
                 "## Pending Client review request withdrawn",
                 f"Head: `{self.request.expected_head_sha}`",
                 f"Recorded Director decision: {self.request.director_decision_url}",
-                f"Requested by: `{self.service.actor}`",
                 "",
                 quoted_reason,
                 "",

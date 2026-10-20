@@ -13,6 +13,7 @@ from control_plane.product_review_withdrawal import (
     ReviewWithdrawalUnsettled,
     ReviewWithdrawalChange,
     ReviewWithdrawalNotDispatched,
+    ReviewWithdrawalHistoryUnverifiable,
 )
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.storage.postgres import PostgresRecordStore
@@ -91,6 +92,7 @@ class ReviewWithdrawalTests(unittest.TestCase):
         history = next(iter(self.source.comments.values()))
         self.assertIn(self.request.reason, history)
         self.assertIn(self.request.director_decision_url, history)
+        self.assertNotIn(self.service.actor, history)
         self.assertIn(HEAD, history)
         self.assertEqual(
             self.store.list_product_review_decision_records(
@@ -314,6 +316,22 @@ class ReviewWithdrawalTests(unittest.TestCase):
         self.assertTrue(observed["applied"])
         self.assertTrue(observed["readback_matches"])
 
+    def test_history_limits_settle_without_removing_a_label(self) -> None:
+        from unittest.mock import patch
+
+        with patch.object(
+            self.source,
+            "history",
+            side_effect=ReviewWithdrawalHistoryUnverifiable("ambiguous or bounded"),
+        ):
+            with self.assertRaises(ReviewWithdrawalUnsettled):
+                self.apply()
+            settled = self.apply()
+        self.assertTrue(settled["replan_required"])
+        self.assertFalse(settled["prior_effects_unknown"])
+        self.assertEqual(self.source.deletes, 0)
+        self.assertIn(REVIEW_LABEL, self.source.labels)
+
 
 class ReviewWithdrawalHttpTests(unittest.IsolatedAsyncioTestCase):
     async def test_director_agent_uses_standing_permission_and_scoped_agents_refuse(self) -> None:
@@ -449,6 +467,18 @@ class ReviewWithdrawalHttpTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ReviewWithdrawalGitHubTests(unittest.TestCase):
+    def test_malformed_provider_evidence_is_unavailable_not_an_eligibility_refusal(self) -> None:
+        from unittest.mock import Mock
+        from control_plane.product_review_withdrawal_github import GitHubReviewWithdrawalSource
+
+        source = GitHubReviewWithdrawalSource(
+            _REPOSITORY, 42, "test-token", Mock(return_value=None), app_id=2
+        )
+        for read in (source.change, lambda: source.history("marker")):
+            with self.assertRaises(ValueError) as unavailable:
+                read()
+            self.assertNotIsInstance(unavailable.exception, ReviewWithdrawalRefused)
+
     def test_closed_pr_remains_observable_for_recovery(self) -> None:
         from unittest.mock import Mock
         from control_plane.product_review_withdrawal_github import GitHubReviewWithdrawalSource
@@ -474,4 +504,6 @@ class ReviewWithdrawalGitHubTests(unittest.TestCase):
         api = Mock(side_effect=[[forged, genuine]])
         source = GitHubReviewWithdrawalSource(_REPOSITORY, 42, "test-token", api, app_id=2)
         self.assertTrue(source.history(marker).endswith("#issuecomment-12"))
-        self.assertEqual(api.call_count, 1)
+        self.assertTrue(
+            all(call.kwargs.get("method", "GET") == "GET" for call in api.call_args_list)
+        )

@@ -282,3 +282,10 @@ A competing operation returns `product_review_withdrawal_target_busy`: the new
 call dispatched nothing and its key cannot recover the original caller's work.
 `product_review_withdrawal_in_progress` names a still-running original call;
 `product_review_withdrawal_conflict` names a key/request conflict.
+
+Provider evidence failures are unavailable evidence, not eligibility refusals.
+A fresh apply checks authenticated history before removing a label. A permanent
+history bound or ambiguous receipt settles the original operation as needing a
+new plan, preserving uncertainty about prior effects. The durable operation
+retains the full caller identity; the public history contains the reviewed head,
+reason and Director citation without internal identity labels.

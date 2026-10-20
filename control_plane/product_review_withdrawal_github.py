@@ -5,7 +5,10 @@ from collections.abc import Callable
 import re
 from urllib.parse import quote
 
-from control_plane.product_review_withdrawal import ReviewWithdrawalRefused, ReviewWithdrawalChange
+from control_plane.product_review_withdrawal import (
+    ReviewWithdrawalChange,
+    ReviewWithdrawalHistoryUnverifiable,
+)
 from control_plane.github_payload import required_positive_int
 
 
@@ -27,7 +30,7 @@ class GitHubReviewWithdrawalSource:
             token=self.token,
         )
         if not isinstance(change, dict) or change.get("state") not in {"open", "closed"}:
-            raise ReviewWithdrawalRefused("The pull request lifecycle is unavailable.")
+            raise ValueError("The pull request lifecycle is unavailable.")
         head = change.get("head")
         sha = head.get("sha") if isinstance(head, dict) else None
         labels = change.get("labels")
@@ -40,7 +43,7 @@ class GitHubReviewWithdrawalSource:
                 for label in labels
             )
         ):
-            raise ReviewWithdrawalRefused("Current pull request evidence is incomplete.")
+            raise ValueError("Current pull request evidence is incomplete.")
         return ReviewWithdrawalChange(
             sha, frozenset(label["name"] for label in labels), is_open=change["state"] == "open"
         )
@@ -68,10 +71,10 @@ class GitHubReviewWithdrawalSource:
                 path=f"{self.path}/comments?per_page=100&page={page}", token=self.token
             )
             if not isinstance(comments, list):
-                raise ReviewWithdrawalRefused("Withdrawal history lookup is unavailable.")
+                raise ValueError("Withdrawal history lookup is unavailable.")
             for comment in comments:
                 if not isinstance(comment, dict):
-                    raise ReviewWithdrawalRefused("Withdrawal history lookup is incomplete.")
+                    raise ValueError("Withdrawal history lookup is incomplete.")
                 user = comment.get("user")
                 app = comment.get("performed_via_github_app")
                 matches_actor = (
@@ -85,9 +88,11 @@ class GitHubReviewWithdrawalSource:
             if len(comments) < 100:
                 break
         else:
-            raise ReviewWithdrawalRefused("Withdrawal history lookup exceeded its bound.")
+            raise ReviewWithdrawalHistoryUnverifiable(
+                "Withdrawal history lookup exceeded its bound."
+            )
         if len(matches) > 1:
-            raise ReviewWithdrawalRefused("Withdrawal history is ambiguous.")
+            raise ReviewWithdrawalHistoryUnverifiable("Withdrawal history is ambiguous.")
         if not matches and not body:
             return ""
         comment = (
@@ -98,7 +103,7 @@ class GitHubReviewWithdrawalSource:
             )
         )
         if not isinstance(comment, dict) or (body and comment.get("body") != body):
-            raise ReviewWithdrawalRefused("Withdrawal history was not confirmed.")
+            raise ValueError("Withdrawal history was not confirmed.")
         comment_id = required_positive_int(
             comment.get("id"), "Withdrawal history was not confirmed.", error_type=ValueError
         )
