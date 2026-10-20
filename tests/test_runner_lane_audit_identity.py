@@ -7,12 +7,15 @@ import unittest
 
 from control_plane.contracts.runner_lane_registration import (
     RunnerLaneLifecycleOperation,
+    RunnerLaneRegistrationAuditIdentityConflict,
     RunnerLaneRegistrationAuditRecord,
     RunnerLaneRegistrationAuditStatus,
+    RunnerLaneRegistrationPolicy,
 )
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.workflows.runner_lane_relabel import deliver_terminal_audit, execute_relabel
 from tests.http_app_test_support import (
     _post_runner_lane_registration_audit_evidence,
     _runner_lane_registration_audit_write_identity,
@@ -20,7 +23,8 @@ from tests.http_app_test_support import (
 )
 from tests.support.auth import _StubVerifier
 from tests.support.runner_audits import lifecycle_audit
-from tests.support.stores import _sqlite_database_url
+from tests.support.stores import sqlite_database_url
+from tests.test_runner_lane_relabel import Transport
 
 
 StoreKind = Literal["filesystem", "sqlite"]
@@ -35,7 +39,7 @@ def audit_store(
     if kind == "filesystem":
         yield FilesystemRecordStore(state_dir=root / "state")
     else:
-        store = PostgresRecordStore(database_url=_sqlite_database_url(root / "audit.sqlite"))
+        store = PostgresRecordStore(database_url=sqlite_database_url(root / "audit.sqlite"))
         try:
             store.ensure_schema()
             yield store
@@ -63,7 +67,7 @@ class RunnerAuditIdentityTests(unittest.TestCase):
                         ):
                             original = lifecycle_audit(operation=original_operation)
                             store.write_runner_lane_registration_audit_record(original)
-                            with self.assertRaises(ValueError):
+                            with self.assertRaises(RunnerLaneRegistrationAuditIdentityConflict):
                                 store.write_runner_lane_registration_audit_record(
                                     lifecycle_audit(operation=incoming_operation)
                                 )
@@ -94,7 +98,7 @@ class RunnerAuditIdentityTests(unittest.TestCase):
                     ):
                         original = lifecycle_audit(operation="relabel")
                         store.write_runner_lane_registration_audit_record(original)
-                        with self.assertRaises(ValueError):
+                        with self.assertRaises(RunnerLaneRegistrationAuditIdentityConflict):
                             store.write_runner_lane_registration_audit_record(
                                 lifecycle_audit(operation="relabel", request_changes={field: value})
                             )
@@ -170,9 +174,65 @@ class RunnerAuditIdentityTests(unittest.TestCase):
             original = lifecycle_audit()
             store.write_runner_lane_registration_audit_record(original)
             source.write_runner_lane_registration_audit_record(lifecycle_audit(operation="retire"))
-            with self.assertRaises(ValueError):
+            with self.assertRaises(RunnerLaneRegistrationAuditIdentityConflict):
                 store.import_core_records_from_filesystem(source)
             self.assertEqual(store.list_runner_lane_registration_audit_records(), (original,))
+
+    def test_retained_relabel_delivery_updates_original_audit_without_replaying_provider_write(
+        self,
+    ) -> None:
+        for kind in STORE_KINDS:
+            with (
+                self.subTest(kind=kind),
+                TemporaryDirectory() as directory,
+                audit_store(kind, Path(directory)) as store,
+            ):
+                planned = lifecycle_audit(operation="relabel")
+                transport = Transport()
+
+                def persist(
+                    record: RunnerLaneRegistrationAuditRecord, _key: str
+                ) -> dict[str, object]:
+                    store.write_runner_lane_registration_audit_record(record)
+                    return {
+                        "status": "accepted",
+                        "records": {
+                            "runner_lane_registration_audit_record_key": record.audit_record_key
+                        },
+                    }
+
+                def interrupted_delivery(
+                    record: RunnerLaneRegistrationAuditRecord, key: str
+                ) -> dict[str, object]:
+                    if record.status != "planned":
+                        raise TimeoutError("terminal upload interrupted")
+                    return persist(record, key)
+
+                result = execute_relabel(
+                    request=planned.request,
+                    policy=RunnerLaneRegistrationPolicy(
+                        allowed_repositories=(planned.request.repository,),
+                        approved_hosts=(planned.request.host_name,),
+                        allowed_registration_roots=(planned.request.registration_root,),
+                    ),
+                    transport=transport,
+                    inventory_reader=lambda: planned.pre_inventory,
+                    audit_poster=interrupted_delivery,
+                    protected_lane_names=(),
+                    protected_labels=(),
+                )
+                self.assertEqual(result["status"], "audit_delivery_pending")
+                self.assertEqual(sum(call[0] == "PUT" for call in transport.calls), 1)
+                calls_before_recovery = list(transport.calls)
+                for _ in range(2):
+                    receipt = deliver_terminal_audit(result, persist)
+                    self.assertEqual(receipt["status"], "audit_delivered")
+                terminal = RunnerLaneRegistrationAuditRecord.model_validate(
+                    result["terminal_audit"]
+                )
+                self.assertEqual(terminal.request, planned.request)
+                self.assertEqual(store.list_runner_lane_registration_audit_records(), (terminal,))
+                self.assertEqual(transport.calls, calls_before_recovery)
 
 
 class RunnerAuditHttpIdentityTests(unittest.IsolatedAsyncioTestCase):

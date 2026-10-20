@@ -234,6 +234,20 @@ class RunnerLaneRegistrationAuditRecord(BaseModel):
         return self
 
 
+class RunnerLaneRegistrationAuditIdentityConflict(ValueError):
+    """An audit key is already bound to a different original lifecycle request."""
+
+
+def validate_runner_lane_registration_audit_identity(
+    existing: RunnerLaneRegistrationAuditRecord,
+    incoming: RunnerLaneRegistrationAuditRecord,
+) -> None:
+    if existing.request != incoming.request:
+        raise RunnerLaneRegistrationAuditIdentityConflict(
+            "Runner lifecycle audit key is already bound to a different request."
+        )
+
+
 class RunnerLaneRegistrationTokenRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

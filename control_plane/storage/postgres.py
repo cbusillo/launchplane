@@ -491,7 +491,10 @@ from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAu
 from control_plane.contracts.runner_host_hygiene import (
     sanitize_runner_host_hygiene_audit_record_for_persistence,
 )
-from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrationAuditRecord
+from control_plane.contracts.runner_lane_registration import (
+    RunnerLaneRegistrationAuditRecord,
+    validate_runner_lane_registration_audit_identity,
+)
 from control_plane.contracts.secret_record import (
     SecretAuditEvent,
     SecretBinding,
@@ -7504,6 +7507,17 @@ class PostgresRecordStore(HumanSessionStore):
         session.execute(
             text("select pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
             {"lock_name": f"launchplane:route-binding:{binding_key}"},
+        )
+
+    def _lock_runner_lane_registration_audit_write(
+        self, session: Session, *, audit_record_key: str
+    ) -> None:
+        if self.database_url.startswith("sqlite"):
+            return
+        # A row lock cannot serialize first writers when the audit key is absent.
+        session.execute(
+            text("select pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
+            {"lock_name": f"launchplane:runner-lifecycle-audit:{audit_record_key}"},
         )
 
     def _lock_merge_train_policy_write(self, session: Any) -> None:
@@ -24950,17 +24964,31 @@ class PostgresRecordStore(HumanSessionStore):
     def write_runner_lane_registration_audit_record(
         self, record: RunnerLaneRegistrationAuditRecord
     ) -> None:
-        self._write_row(
-            LaunchplaneRunnerLaneRegistrationAuditRow(
-                audit_record_key=record.audit_record_key,
-                repository=record.request.repository.strip().lower(),
-                host_name=record.request.host_name.strip().lower(),
-                lane_name=record.request.lane_name.strip().lower(),
-                status=record.status,
-                mutate=int(record.request.mutate),
-                payload=self._payload_dict(record),
+        record = RunnerLaneRegistrationAuditRecord.model_validate(record.model_dump(mode="python"))
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_runner_lane_registration_audit_write(
+                session, audit_record_key=record.audit_record_key
             )
-        )
+            existing = session.get(
+                LaunchplaneRunnerLaneRegistrationAuditRow, record.audit_record_key
+            )
+            if existing is not None:
+                validate_runner_lane_registration_audit_identity(
+                    RunnerLaneRegistrationAuditRecord.model_validate(existing.payload), record
+                )
+            session.merge(
+                LaunchplaneRunnerLaneRegistrationAuditRow(
+                    audit_record_key=record.audit_record_key,
+                    repository=record.request.repository,
+                    host_name=record.request.host_name,
+                    lane_name=record.request.lane_name,
+                    status=record.status,
+                    mutate=int(record.request.mutate),
+                    payload=self._payload_dict(record),
+                )
+            )
+            session.commit()
 
     def list_runner_lane_registration_audit_records(
         self,

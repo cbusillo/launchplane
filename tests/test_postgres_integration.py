@@ -38,6 +38,13 @@ from sqlalchemy import create_engine, delete, event, insert, inspect, select, te
 from sqlalchemy.engine import Engine
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, OperationalError, SQLAlchemyError
+from sqlalchemy.orm import Session
+
+from control_plane.contracts.runner_lane_registration import (
+    RunnerLaneRegistrationAuditIdentityConflict,
+    RunnerLaneRegistrationAuditRecord,
+)
+from tests.support.runner_audits import lifecycle_audit
 
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.merge_train_events import MergeTrainEventListener
@@ -559,6 +566,145 @@ def _store_for_fresh_head_database() -> Iterator[PostgresRecordStore]:
             yield store
         finally:
             store.close()
+
+
+class RealPostgresRunnerAuditIdentityTests(unittest.TestCase):
+    def setUp(self) -> None:
+        database_url = self.enterContext(_head_postgres_database())
+        self.winner = self.enterContext(closing(PostgresRecordStore(database_url=database_url)))
+        self.contender = self.enterContext(closing(PostgresRecordStore(database_url=database_url)))
+
+    def _contend(
+        self,
+        first: RunnerLaneRegistrationAuditRecord,
+        second: RunnerLaneRegistrationAuditRecord,
+        *,
+        unrelated: RunnerLaneRegistrationAuditRecord | None = None,
+    ) -> tuple[str, str]:
+        self.assertEqual(first.audit_record_key, second.audit_record_key)
+        acquired = threading.Event()
+        attempted = threading.Event()
+        release = threading.Event()
+        backend_pids: dict[str, int] = {}
+        winner_lock = self.winner._lock_runner_lane_registration_audit_write
+        contender_lock = self.contender._lock_runner_lane_registration_audit_write
+
+        def hold_winner(session: Session, *, audit_record_key: str) -> None:
+            pid = session.scalar(text("SELECT pg_backend_pid()"))
+            if not isinstance(pid, int):
+                raise AssertionError("The winner's PostgreSQL backend PID is unavailable.")
+            backend_pids["winner"] = pid
+            winner_lock(session, audit_record_key=audit_record_key)
+            acquired.set()
+            if not release.wait(timeout=30):
+                raise AssertionError("Timed out releasing the runner audit identity writer.")
+
+        def observe_contender(session: Session, *, audit_record_key: str) -> None:
+            if audit_record_key == first.audit_record_key:
+                pid = session.scalar(text("SELECT pg_backend_pid()"))
+                if not isinstance(pid, int):
+                    raise AssertionError("The contender's PostgreSQL backend PID is unavailable.")
+                backend_pids["contender"] = pid
+                attempted.set()
+            contender_lock(session, audit_record_key=audit_record_key)
+
+        def write(store: PostgresRecordStore, record: RunnerLaneRegistrationAuditRecord) -> str:
+            try:
+                store.write_runner_lane_registration_audit_record(record)
+            except RunnerLaneRegistrationAuditIdentityConflict:
+                return "conflict"
+            return "written"
+
+        with (
+            patch.object(
+                self.winner, "_lock_runner_lane_registration_audit_write", side_effect=hold_winner
+            ),
+            patch.object(
+                self.contender,
+                "_lock_runner_lane_registration_audit_write",
+                side_effect=observe_contender,
+            ),
+            ThreadPoolExecutor(max_workers=2) as executor,
+        ):
+            first_future = executor.submit(write, self.winner, first)
+            second_future = None
+            try:
+                self.assertTrue(acquired.wait(timeout=10))
+                if unrelated is not None:
+                    self.assertNotEqual(unrelated.audit_record_key, first.audit_record_key)
+                    self.assertEqual(
+                        executor.submit(write, self.contender, unrelated).result(timeout=10),
+                        "written",
+                    )
+                second_future = executor.submit(write, self.contender, second)
+                self.assertTrue(attempted.wait(timeout=10))
+                self.assertNotEqual(backend_pids["winner"], backend_pids["contender"])
+                blocked_by_winner = False
+                deadline = time.monotonic() + 5
+                with self.winner._engine.connect() as observer:
+                    self.assertNotIn(
+                        observer.scalar(text("SELECT pg_backend_pid()")), backend_pids.values()
+                    )
+                    while not second_future.done() and time.monotonic() < deadline:
+                        blocked_by_winner = bool(
+                            observer.scalar(
+                                text("SELECT :winner_pid = ANY(pg_blocking_pids(:contender_pid))"),
+                                {
+                                    "winner_pid": backend_pids["winner"],
+                                    "contender_pid": backend_pids["contender"],
+                                },
+                            )
+                        )
+                        if blocked_by_winner:
+                            break
+                        release.wait(timeout=min(0.01, max(0, deadline - time.monotonic())))
+                self.assertTrue(
+                    blocked_by_winner,
+                    "The contender never waited for the exact winner's PostgreSQL lock.",
+                )
+            finally:
+                release.set()
+                first_future.exception(timeout=15)
+                if second_future is not None:
+                    second_future.exception(timeout=15)
+            assert second_future is not None
+            return first_future.result(), second_future.result()
+
+    def test_absent_key_conflicting_requests_keep_the_first_identity(self) -> None:
+        original = lifecycle_audit()
+        foreign = lifecycle_audit(operation="retire")
+
+        self.assertEqual(self._contend(original, foreign), ("written", "conflict"))
+        self.assertEqual(self.contender.list_runner_lane_registration_audit_records(), (original,))
+
+    def test_absent_key_same_request_repeats_without_an_insert_error(self) -> None:
+        original = lifecycle_audit(operation="relabel")
+
+        self.assertEqual(self._contend(original, original), ("written", "written"))
+        self.assertEqual(self.contender.list_runner_lane_registration_audit_records(), (original,))
+
+    def test_original_terminal_update_excludes_a_foreign_request(self) -> None:
+        original = lifecycle_audit(operation="relabel")
+        terminal = lifecycle_audit(operation="relabel", status="completed")
+        foreign = lifecycle_audit(operation="register")
+        self.winner.write_runner_lane_registration_audit_record(original)
+
+        self.assertEqual(self._contend(terminal, foreign), ("written", "conflict"))
+        self.assertEqual(self.contender.list_runner_lane_registration_audit_records(), (terminal,))
+
+    def test_conflict_releases_the_key_and_does_not_block_an_unrelated_key(self) -> None:
+        original = lifecycle_audit()
+        terminal = lifecycle_audit(status="completed")
+        foreign = lifecycle_audit(operation="retire")
+        unrelated = lifecycle_audit(key="runner-audit/unrelated")
+        self.winner.write_runner_lane_registration_audit_record(original)
+
+        self.assertEqual(
+            self._contend(foreign, terminal, unrelated=unrelated), ("conflict", "written")
+        )
+        self.assertCountEqual(
+            self.contender.list_runner_lane_registration_audit_records(), (terminal, unrelated)
+        )
 
 
 class RealPostgresMergeTrainNotificationTests(unittest.TestCase):
