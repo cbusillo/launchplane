@@ -130,12 +130,10 @@ class CapacityHostProgramTests(unittest.TestCase):
         self.list_calls = 0
         self.changed = False
 
-    def run_program(self, *, denial: bool = False) -> dict[str, Any]:
+    def run_program(self, *, denial: bytes = b"", denial_command: str = "docker") -> dict[str, Any]:
         def provider(arguments: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
-            if denial:
-                return subprocess.CompletedProcess(
-                    arguments, 1, stdout=b"", stderr=b"permission denied: private-detail"
-                )
+            if denial and arguments[0] == denial_command:
+                return subprocess.CompletedProcess(arguments, 1, stdout=b"", stderr=denial)
             if arguments[:2] == ["docker", "info"]:
                 value = self.pool
             elif arguments[:3] == ["docker", "network", "inspect"]:
@@ -195,4 +193,16 @@ class CapacityHostProgramTests(unittest.TestCase):
             with self.subTest(field=field), patch.object(self, field, value):
                 self.list_calls = 0
                 self.assertEqual(self.run_program(), {"type": "failed"})
-        self.assertEqual(self.run_program(denial=True), {"type": "denied"})
+        self.assertEqual(
+            self.run_program(denial=b"Error response from daemon: unauthorized"), {"type": "denied"}
+        )
+        self.assertEqual(
+            self.run_program(denial=b"Error response from daemon: access denied"),
+            {"type": "denied"},
+        )
+        self.assertEqual(
+            self.run_program(denial=b"permission denied: unrelated filesystem"), {"type": "failed"}
+        )
+        self.assertEqual(
+            self.run_program(denial=b"permission denied", denial_command="ip"), {"type": "failed"}
+        )

@@ -79,6 +79,26 @@ class RehearsalRefused(ValueError):
         super().__init__(code.value)
 
 
+class RehearsalPreparationReadRefused(Exception):
+    """A rejection cause exposed by the runner only after reservation release.
+
+    Never raise this directly: carry it inside ProviderMutationRejectedError.
+    If effects or unresolved custody prevent release, the runner keeps it held
+    and the route cannot emit the release marker.
+    """
+
+    def __init__(self, error: api.DokployRequestFailed | NativeSourceAuthorizationDenied) -> None:
+        self.status_code = (
+            403
+            if isinstance(error, NativeSourceAuthorizationDenied) or error.status_code in {401, 403}
+            else 503
+        )
+        self.code = (
+            "authorization_denied" if self.status_code == 403 else "rehearsal_provider_unavailable"
+        )
+        super().__init__("The rehearsal provider read was refused before any new effect.")
+
+
 def _artifact(store: PostgresRecordStore, artifact_id: str) -> ArtifactIdentityManifest:
     try:
         manifest = store.read_artifact_manifest(artifact_id)
@@ -1352,11 +1372,23 @@ class OdooRehearsalAdapter:
                 if not recovering_project:
                     try:
                         existing_placement = created_placement(self.root, record.rehearsal_id)
+                    except IsolatedPlacementObservationRequired:
+                        raise ProviderMutationRejectedError(
+                            RehearsalRefused(
+                                RehearsalPrerequisite.PRECHECK_REFUSED,
+                                prerequisite=RehearsalPrerequisite.RECOVERY_REQUIRED,
+                            )
+                        ) from None
                     except api.DokployRequestFailed as error:
-                        raise ProviderMutationRejectedError(error) from None
+                        raise ProviderMutationRejectedError(
+                            RehearsalPreparationReadRefused(error)
+                        ) from None
                     except (ValueError, OSError, click.ClickException):
                         raise ProviderMutationRejectedError(
-                            BridgeNetworkCapacityRefused("host_bridge_network_capacity_unavailable")
+                            RehearsalRefused(
+                                RehearsalPrerequisite.PRECHECK_REFUSED,
+                                prerequisite=RehearsalPrerequisite.PLACEMENT_UNAVAILABLE,
+                            )
                         ) from None
                 if recovering_project:
                     checkpoint()
@@ -1380,15 +1412,23 @@ class OdooRehearsalAdapter:
                     # Partial creation stays on its original recovery protocol.
                     try:
                         host, token = source.read_dokploy_config(control_plane_root=self.root)
+                    except (ValueError, OSError, click.ClickException):
+                        raise ProviderMutationRejectedError(
+                            RehearsalRefused(
+                                RehearsalPrerequisite.PRECHECK_REFUSED,
+                                prerequisite=RehearsalPrerequisite.PLACEMENT_UNAVAILABLE,
+                            )
+                        ) from None
+                    try:
                         require_bridge_network_capacity(
                             host=host, token=token, server_id=record.server_id, required_networks=1
                         )
-                    except (BridgeNetworkCapacityRefused, NativeSourceAuthorizationDenied) as error:
-                        raise ProviderMutationRejectedError(error) from None
-                    except (ValueError, OSError, click.ClickException):
+                    except NativeSourceAuthorizationDenied as error:
                         raise ProviderMutationRejectedError(
-                            BridgeNetworkCapacityRefused("host_bridge_network_capacity_unavailable")
+                            RehearsalPreparationReadRefused(error)
                         ) from None
+                    except BridgeNetworkCapacityRefused as error:
+                        raise ProviderMutationRejectedError(error) from None
                 # The built-in local-password writer is scoped to the new record;
                 # it creates no key that can reach a live system or person grant.
                 prepare_rehearsal_local_credentials(

@@ -2544,6 +2544,14 @@ another capacity read; discovering existing placement takes precedence over
 fresh-create admission. Missing provider configuration rejects the fresh
 operation before effects instead of holding an uncertain reservation.
 
+A provider-read refusal carries `X-Launchplane-Mutation-Reservation: released`
+only after the durable runner successfully releases that request's fresh,
+effect-free reservation. The rehearsal helper uses this evidence to distinguish
+a clean refusal from an uncertain operation requiring its original key. This
+header does not assert that older placement is absent. Configuration failures
+use the placement prerequisite; uncertain physical placement keeps the recovery
+prerequisite and cannot be misreported as a capacity shortage.
+
 The reader creates no probe network, schedule, container or host file, and emits
 only capacity counts. It does not assume Docker's stock pool capacity. Hosts
 must expose their configured pools in daemon info; the fleet pool rollout is

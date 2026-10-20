@@ -9,6 +9,7 @@ from control_plane.contracts.host_network_capacity import (
     HOST_BRIDGE_NETWORK_FAILURE_MESSAGES,
 )
 from control_plane.dokploy import native_copy_stream
+from control_plane.docker_errors import docker_daemon_authorization_denied
 
 
 BRIDGE_NETWORK_CAPACITY_MARGIN = 2
@@ -75,6 +76,8 @@ def calculate_capacity(
 # Only fixed metadata reads. No schedules, containers, networks or files are created.
 BRIDGE_CAPACITY_PROGRAM = (
     "from collections.abc import Mapping, Sequence\n"
+    + inspect.getsource(docker_daemon_authorization_denied)
+    + "\n"
     + inspect.getsource(calculate_capacity)
     + r"""
 import json, subprocess, sys, time
@@ -87,8 +90,7 @@ def checked(arguments):
         raise ValueError('Capacity read exceeded its budget')
     result = subprocess.run(arguments, capture_output=True, check=False, timeout=min(10, remaining))
     if result.returncode:
-        if any(value in result.stderr.lower() for value in
-               (b'permission denied', b'authentication failed', b'authorization denied')):
+        if arguments[0] == 'docker' and docker_daemon_authorization_denied(result.stderr):
             raise PermissionError('Existing provider reader refused the read')
         raise ValueError('Capacity read unavailable')
     if len(result.stdout) > 8 * 1024 * 1024:

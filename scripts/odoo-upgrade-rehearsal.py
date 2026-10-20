@@ -14,6 +14,7 @@ from control_plane.contracts.odoo_upgrade_rehearsal import (
     ODOO_UPGRADE_REHEARSAL_ROUTE,
     ODOO_UPGRADE_REHEARSAL_PREFLIGHT_ROUTE,
     REHEARSAL_PUBLIC_FAILURE_MESSAGES,
+    REHEARSAL_RELEASED_RESERVATION_HEADERS,
     OdooUpgradeRehearsalRequest,
     IncompleteRehearsalRetirementReceipt,
     RehearsalPreflightResult,
@@ -187,9 +188,21 @@ def main() -> int:
         except (ValueError, TypeError, AttributeError):
             trace = ""
             code = "rehearsal_unavailable"
-        refused = error.code == 409 and (
-            code in REHEARSAL_PUBLIC_FAILURE_MESSAGES
-            or code in HOST_BRIDGE_NETWORK_FAILURE_MESSAGES
+        released = (
+            args.mode == "apply"
+            and error.headers is not None
+            and all(
+                error.headers.get(name) == value
+                for name, value in REHEARSAL_RELEASED_RESERVATION_HEADERS.items()
+            )
+        )
+        refused = (
+            released
+            or error.code == 409
+            and (
+                code in REHEARSAL_PUBLIC_FAILURE_MESSAGES
+                or code in HOST_BRIDGE_NETWORK_FAILURE_MESSAGES
+            )
         )
         print(
             json.dumps(
