@@ -1564,15 +1564,24 @@ Prelaunch failures therefore stay visible as readiness evidence without being
 reported as public outages. Moving to `public` deterministically activates
 incident eligibility on the next monitor cycle.
 
-The monitor also watches every generic-web lane's deploy fence, with no lane
-configuration. A lane whose provider target is held by an unresolved deploy
+The monitor also watches every generic-web lane's shared provider-operation fence,
+with no lane configuration. A lane whose current provider target is held by an unresolved operation
 gets a Launchplane-owned `provider` check named `launchplane-deploy-fence`:
 it fails with `deploy_fence_held`, at warning severity, once a `running`
 reservation's lease has expired or a `reconcile_required` reservation has
-stood for 15 minutes. The incident names the held deploy's idempotency key,
-start time, and last provider-effect phase, notifies through the lane's
+stood for 15 minutes. All operation kinds are matched by the exact current
+physical reservation key when provider-target records are available, so a moved
+target is not mistaken for its replacement. Minimal legacy stores without a
+provider-target reader retain the decoded deployment snapshot fallback. Encoded
+legacy deployment holds retain their recovery contract. Runtime sync and other
+opaque operations' incidents name a safe record reference, start time and last
+provider-effect phase, omitting the original request key and caller scope. It
+does not advertise generic-web deploy recovery for a different operation.
+The incident notifies through the lane's
 notification policies, and resolves on the first cycle after recovery clears
-the fence. The monitor never clears a fence itself. Lanes with no fence and no
+the fence. Monitoring also works for a lane with no HTTP checks and preserves
+attention when the original browser tab closes. The monitor never clears a fence
+or replays an effect itself. Lanes with no fence and no
 open fence incident get no probe. A later deploy refused by that fence gets
 409 `mutation_reconciliation_required` naming when the held request started,
 instead of `mutation_in_progress`.

@@ -14,6 +14,7 @@ from click.testing import CliRunner
 
 from control_plane.cli import main as launchplane_cli
 from control_plane.contracts.deployment_record import ResolvedTargetEvidence
+from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
@@ -82,6 +83,7 @@ from control_plane.workflows.public_ingress_monitor import (
     run_public_ingress_monitor_once,
 )
 from control_plane.outbound_http import PublicHttpDestinationError
+from control_plane.integration_allowances import canonical_sha256
 from control_plane.outbound_http import PublicTlsCertificate
 from control_plane.outbound_http import PublicTlsProbeResult
 from control_plane.outbox_worker import run_outbox_worker_once
@@ -90,6 +92,7 @@ from control_plane.workflows.generic_web_deploy_provider import (
     GenericWebResolvedDeployTarget,
     build_generic_web_provider_reconciliation_key,
     build_generic_web_provider_target_key,
+    held_generic_web_provider_target_reservations,
 )
 from tests.support.stores import _sqlite_database_url
 from tests.test_outbound_http import _FakeConnection, _FakeResponse, _resolver_for
@@ -472,7 +475,12 @@ def _constant_tls_probe(
 
 
 def _hold_deploy_fence(
-    store: PostgresRecordStore, *, idempotency_key: str, reconcile_required: bool = True
+    store: PostgresRecordStore,
+    *,
+    idempotency_key: str,
+    reconcile_required: bool = True,
+    runtime_sync: bool = False,
+    route_path: str = "",
 ) -> LaunchplaneIdempotencyRecord:
     target = GenericWebResolvedDeployTarget(
         ship_request=ShipRequest(
@@ -499,9 +507,14 @@ def _hold_deploy_fence(
     reconciliation_key = build_generic_web_provider_reconciliation_key(
         target, product="example-site"
     )
+    if runtime_sync:
+        reconciliation_key = canonical_sha256(
+            {"operation": "runtime-sync", "fixture": idempotency_key}
+        )
     reserved = store.reserve_mutation(
         scope="cbusillo/example-site|deploy.yml|subject",
-        route_path="/v1/drivers/generic-web/deploy",
+        route_path=route_path
+        or ("/v1/live-target-runtime/apply" if runtime_sync else "/v1/drivers/generic-web/deploy"),
         idempotency_key=idempotency_key,
         request_fingerprint="fingerprint",
         lease_owner="trace-original",
@@ -509,7 +522,8 @@ def _hold_deploy_fence(
         provider_target_key=build_generic_web_provider_target_key(target),
     ).record
     checkpointed = store.checkpoint_mutation_provider_effect(
-        reservation=reserved, effect_phase="deploy_trigger"
+        reservation=reserved,
+        effect_phase="runtime_environment_sync" if runtime_sync else "deploy_trigger",
     ).record
     assert checkpointed is not None
     if not reconcile_required:
@@ -519,6 +533,19 @@ def _hold_deploy_fence(
     ).record
     assert held is not None
     return held
+
+
+def _runtime_fence_target(store: PostgresRecordStore) -> ProviderTargetRecord:
+    return ProviderTargetRecord(
+        context="example-site",
+        instance="prod",
+        provider_id="dokploy",
+        target_category="compose",
+        provider_target_type="compose",
+        target_id="compose-example-site-prod",
+        display_name="example-site-prod",
+        updated_at=store.read_product_profile_record("example-site").updated_at,
+    )
 
 
 def _minutes_after(timestamp: str, minutes: int) -> str:
@@ -601,6 +628,142 @@ class PublicIngressMonitorCliTests(unittest.TestCase):
 
 
 class PublicIngressMonitorTests(unittest.TestCase):
+    def test_monitor_surfaces_runtime_shared_fence_without_deploy_recovery(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(directory) / "records.db")
+            )
+            self.addCleanup(store.close)
+            store.ensure_schema()
+            store.write_product_profile_record(
+                _profile(lane=ProductLaneProfile(instance="prod", context="example-site"))
+            )
+            provider = _runtime_fence_target(store)
+            store.write_provider_target_record(provider)
+            store.write_public_ingress_notification_policy_record(
+                _notification_policy(
+                    PublicIngressNotificationDestination(
+                        destination_id="github-main",
+                        kind="github_issue",
+                        github_repository="cbusillo/launchplane",
+                        github_label="public-ingress",
+                    )
+                )
+            )
+            held = _hold_deploy_fence(
+                store, idempotency_key="private-human-request-key", runtime_sync=True
+            )
+            settling = run_public_ingress_monitor_once(
+                record_store=store, checked_at=_minutes_after(held.updated_at, 5)
+            )
+            stuck = run_public_ingress_monitor_once(
+                record_store=store, checked_at=_minutes_after(held.updated_at, 60)
+            )
+            self.assertEqual(settling.open_incident_count, 0)
+            self.assertEqual(stuck.open_incident_count, 1)
+            self.assertEqual(stuck.incidents[0].failure_code, "deploy_fence_held")
+            summary = stuck.records[0].summary
+            self.assertIn(held.record_id, summary)
+            for private in (
+                held.idempotency_key,
+                held.scope,
+                held.reconciliation_key,
+            ):
+                self.assertNotIn(private, summary)
+            self.assertEqual(
+                len(
+                    store.list_outbox_delivery_records(
+                        states=("pending",), kind="public_ingress_notification"
+                    )
+                ),
+                1,
+            )
+            for change in (
+                {"target_id": "different-target"},
+                {"provider_target_type": "application"},
+                {"provider_id": "another-provider"},
+            ):
+                store.write_provider_target_record(provider.model_copy(update=change))
+                self.assertFalse(
+                    any(
+                        target.deploy_fence is not None
+                        for target in discover_public_ingress_monitor_targets(store)
+                    )
+                )
+            store.write_provider_target_record(provider)
+            still_held = run_public_ingress_monitor_once(
+                record_store=store, checked_at=_minutes_after(held.updated_at, 90)
+            )
+            self.assertEqual(still_held.resolved_incident_count, 0)
+            self.assertEqual(still_held.fail_count, 1)
+            completed = store.adopt_reconciled_mutation(
+                reservation=held,
+                response_status_code=409,
+                response_trace_id="terminal-fixture",
+                response_payload={"error": {"code": "runtime_sync_unverified"}},
+            )
+            self.assertEqual(completed.status, "adopted")
+            cleared = run_public_ingress_monitor_once(
+                record_store=store, checked_at=_minutes_after(held.updated_at, 120)
+            )
+            self.assertEqual(cleared.resolved_incident_count, 1)
+            self.assertEqual(
+                run_public_ingress_monitor_once(
+                    record_store=store, checked_at=_minutes_after(held.updated_at, 150)
+                ).target_count,
+                0,
+            )
+            other = _hold_deploy_fence(
+                store,
+                idempotency_key="another-private-key",
+                runtime_sync=True,
+                route_path="/v1/fixture/opaque-provider-operation",
+            )
+            generic = run_public_ingress_monitor_once(
+                record_store=store, checked_at=_minutes_after(held.updated_at, 180)
+            )
+            self.assertEqual(generic.open_incident_count, 1)
+            self.assertIn(other.record_id, generic.records[0].summary)
+            for private in (
+                other.idempotency_key,
+                other.scope,
+                other.reconciliation_key,
+            ):
+                self.assertNotIn(private, generic.records[0].summary)
+            store.adopt_reconciled_mutation(
+                reservation=other,
+                response_status_code=409,
+                response_trace_id="other-terminal-fixture",
+                response_payload={"error": {"code": "runtime_sync_unverified"}},
+            )
+            legacy = _hold_deploy_fence(store, idempotency_key="generic-web-legacy-hold")
+            for change in (
+                {"target_id": "different-target"},
+                {"provider_target_type": "application"},
+                {"provider_id": "another-provider"},
+            ):
+                store.write_provider_target_record(provider.model_copy(update=change))
+                self.assertFalse(
+                    any(
+                        target.deploy_fence is not None
+                        for target in discover_public_ingress_monitor_targets(store)
+                    )
+                )
+            store.write_provider_target_record(provider)
+            self.assertTrue(
+                any(
+                    target.deploy_fence == legacy
+                    for target in discover_public_ingress_monitor_targets(store)
+                )
+            )
+            with patch.object(store, "list_provider_target_records", None):
+                self.assertEqual(
+                    (held_generic_web_provider_target_reservations(store) or {}).get(
+                        (provider.context, provider.instance)
+                    ),
+                    legacy,
+                )
+
     def test_persisted_tls_readers_preserve_bound_and_profile_intent_evidence(self) -> None:
         for binding_status in ("active", "disabled", "missing"):
             with self.subTest(binding_status=binding_status):
@@ -3146,6 +3309,7 @@ class PublicIngressMonitorTests(unittest.TestCase):
                     )
                 )
             )
+            store.write_provider_target_record(_runtime_fence_target(store))
             held = _hold_deploy_fence(store, idempotency_key="generic-web-stable-deploy:run-7:1")
 
             settling = run_public_ingress_monitor_once(
@@ -3202,6 +3366,7 @@ class PublicIngressMonitorTests(unittest.TestCase):
             store.write_product_profile_record(
                 _profile(lane=ProductLaneProfile(instance="prod", context="example-site"))
             )
+            store.write_provider_target_record(_runtime_fence_target(store))
             running = _hold_deploy_fence(
                 store,
                 idempotency_key="generic-web-stable-deploy:run-8:1",
@@ -3232,6 +3397,7 @@ class PublicIngressMonitorTests(unittest.TestCase):
             store.write_product_profile_record(
                 _profile(lane=ProductLaneProfile(instance="prod", context="example-site"))
             )
+            store.write_provider_target_record(_runtime_fence_target(store))
             running = _hold_deploy_fence(
                 store,
                 idempotency_key="generic-web-stable-deploy:run-9:1",

@@ -651,6 +651,14 @@ class ActivationTests(unittest.TestCase):
             self.store.list_held_provider_target_reservations(), (self.preparation.original,)
         )
         self.assertTrue(retained_fence_is_separated(self.store, self.preparation.original))
+        from control_plane.workflows.generic_web_deploy_provider import (
+            held_generic_web_provider_target_reservations,
+        )
+
+        self.assertNotIn(
+            (self.context, "testing"),
+            held_generic_web_provider_target_reservations(self.store) or {},
+        )
         self.assertEqual(
             self.payloads[self.preparation.fixture.target.resolved_target.target_id],
             old_provider[self.preparation.fixture.target.resolved_target.target_id],
@@ -1443,6 +1451,7 @@ class ActivationTests(unittest.TestCase):
         )
         from control_plane.workflows.generic_web_deploy_provider import (
             build_generic_web_provider_reconciliation_key,
+            build_generic_web_provider_target_key,
         )
 
         target = self.preparation.fixture.target.model_copy(deep=True)
@@ -1452,6 +1461,7 @@ class ActivationTests(unittest.TestCase):
         current_fence = self.preparation.original.model_copy(
             update={
                 "idempotency_key": "new-recipient-outcome-unknown",
+                "provider_target_key": build_generic_web_provider_target_key(target),
                 "reconciliation_key": build_generic_web_provider_reconciliation_key(
                     target, product=self.product
                 ),

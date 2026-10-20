@@ -1182,7 +1182,9 @@ export async function applyProductEnvironmentConfigForFixture(
   const retiredKeys = [...(payload.retired_provider_keys ?? [])].sort();
   const runtimeKeys = [...Object.keys(payload.runtime_settings ?? {}), ...retiredKeys].sort();
   const secretInputs = payload.managed_secrets ?? [];
-  const nextActions = runtimeKeys.length
+  const runtimeSyncKeys = [...new Set([...runtimeKeys, ...secretInputs
+    .filter(secret => secret.integration === "runtime_environment").map(secret => secret.binding_key)])].sort();
+  const nextActions = runtimeSyncKeys.length
     ? [
         {
           kind: "live_target_runtime_apply" as const,
@@ -1194,7 +1196,7 @@ export async function applyProductEnvironmentConfigForFixture(
             target_type: "application",
             target_name: `${detail.product}-${detail.environment}`,
           },
-          changed_keys: runtimeKeys,
+          changed_keys: runtimeSyncKeys,
           dry_run: {
             method: "POST" as const,
             endpoint: "/v1/live-target-runtime/apply",

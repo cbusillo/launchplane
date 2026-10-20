@@ -23,7 +23,10 @@ from control_plane.contracts.deploy_reference import validate_provider_deploy_re
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.deployment_record import ResolvedTargetEvidence
-from control_plane.contracts.idempotency_record import parse_launchplane_mutation_timestamp
+from control_plane.contracts.idempotency_record import (
+    LaunchplaneIdempotencyRecord,
+    parse_launchplane_mutation_timestamp,
+)
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
@@ -136,6 +139,48 @@ def dokploy_generic_web_provider_target_key(provider_target: ProviderTargetRecor
         target_type=_dokploy_target_type_from_provider_target(provider_target=provider_target),
         target_id=provider_target.target_id,
     )
+
+
+def held_generic_web_provider_target_reservations(
+    record_store: object,
+) -> dict[tuple[str, str], LaunchplaneIdempotencyRecord] | None:
+    """Project held shared keys onto their recorded lanes, without decoding opaque intents."""
+    read_held = getattr(record_store, "list_held_provider_target_reservations", None)
+    if not callable(read_held):
+        return None
+    from control_plane.testing_activation import retained_fence_is_separated
+
+    reservations = tuple(
+        reservation
+        for reservation in read_held()
+        if isinstance(reservation, LaunchplaneIdempotencyRecord)
+        and not retained_fence_is_separated(record_store, reservation)
+    )
+    fences: dict[tuple[str, str], LaunchplaneIdempotencyRecord] = {}
+    read_targets = getattr(record_store, "list_provider_target_records", None)
+    if callable(read_targets):
+        by_key = {reservation.provider_target_key: reservation for reservation in reservations}
+        for provider in read_targets():
+            if (
+                not isinstance(provider, ProviderTargetRecord)
+                or provider.provider_id != "dokploy"
+                or provider.provider_target_type not in {"application", "compose"}
+            ):
+                continue
+            matched = by_key.get(dokploy_generic_web_provider_target_key(provider))
+            if matched is not None:
+                fences[(provider.context, provider.instance)] = matched
+        return fences
+    # Minimal legacy stores cannot project current physical target records.
+    for reservation in reservations:
+        try:
+            target = decode_generic_web_provider_reconciliation_target(
+                reservation.reconciliation_key
+            )
+        except ValueError:
+            continue
+        fences[(target.context, target.instance)] = reservation
+    return fences
 
 
 def build_generic_web_provider_reconciliation_key(

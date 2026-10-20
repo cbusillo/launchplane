@@ -267,26 +267,37 @@ for (const scenario of scenarios) {
   });
 }
 
-test("runtime sync next action navigates to the existing lane control without invoking an advertised endpoint", async ({ page }) => {
-  const state = await fixture(page, "saved");
+for (const form of ["runtime-settings", "managed-secrets"] as const) {
+for (const mode of ["supported", "odoo", "unavailable", "other-target", "fixture"] as const) {
+test(`runtime sync next action ${form}: ${mode}`, { tag: ["supported", "odoo"].includes(mode) ? "@layout" : [] }, async ({ page }, testInfo) => {
+  const state = await fixture(page, mode === "odoo" ? "odoo" : mode === "unavailable" ? "apply-unavailable" : "saved");
   await page.route("**/v1/products/atlas-commerce/environments/testing/config/apply", async route => {
     const body = route.request().postDataJSON();
     const response = await page.evaluate(async request => {
       const f = await import("/ui/src/dev-fixtures.ts");
       return f.applyProductEnvironmentConfigForFixture("products", "atlas-commerce", "testing", request);
     }, body);
+    if (mode === "other-target") for (const action of response.result.next_actions) action.target.context = "another-context";
     await route.fulfill({ status: 202, json: response });
   });
-  await page.getByRole("link", { name: "Runtime settings", exact: true }).click();
-  const field = page.locator(".product-config-field").filter({ hasText: "PUBLIC_ORIGIN" });
+  await page.goto(`/ui/products/atlas-commerce/environments/testing/${form}${mode === "fixture" ? "?fixture=products" : ""}`);
+  const field = page.locator(".product-config-field").filter({ hasText: form === "runtime-settings" ? "PUBLIC_ORIGIN" : "SMTP_PASSWORD" });
   await field.getByRole("checkbox").check();
-  await field.getByLabel("New value").fill("https://review.example.invalid");
+  await field.getByRole("textbox").fill(form === "runtime-settings" ? "https://review.example.invalid" : "inert-secret-value");
   await page.getByLabel("Change reason").fill("Review the recorded origin.");
   await page.getByRole("button", { name: "Run dry-run", exact: true }).click();
   const next = page.getByRole("link", { name: "Review runtime sync", exact: true });
+  if (mode !== "supported") {
+    await expect(next).toHaveCount(0);
+    await expect(page.locator(".runtime-sync-inspect-only")).toBeVisible();
+    if (mode === "odoo") await page.screenshot({ path: testInfo.outputPath(`runtime-sync-${form}-inspect-only.png`), fullPage: true });
+    expect(state.calls).toHaveLength(0); return;
+  }
   await expect(next).toHaveAttribute("href", "/ui/products/atlas-commerce/environments/testing/actions");
   await next.click();
   await expect(state.panel).toBeVisible();
   await expect(state.panel.getByRole("button", { name: "Review runtime sync", exact: true })).toBeEnabled();
   expect(state.calls).toHaveLength(0);
 });
+}
+}

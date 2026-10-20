@@ -21826,13 +21826,19 @@ def create_launchplane_fastapi_app(
                 )
             if prior.state not in {"running", "reconcile_required"}:
                 terminal_error = prior.response_payload.get("error")
-                if (prior.response_status_code or 0) >= 400:
+                if "error" in prior.response_payload or (prior.response_status_code or 0) >= 400:
                     code = terminal_error.get("code") if isinstance(terminal_error, dict) else None
                     if (
-                        not isinstance(code, str)
+                        prior.response_status_code != 409
+                        or not isinstance(code, str)
                         or code not in browser_runtime_sync.RUNTIME_SYNC_TERMINAL_MESSAGES
                     ):
-                        code = "runtime_sync_unverified"
+                        raise _launchplane_http_error(
+                            status_code=503,
+                            trace_id=trace_id,
+                            code="runtime_sync_unavailable",
+                            message="The original runtime sync receipt is unavailable; preserve its request and key.",
+                        )
                     raise _launchplane_http_error(
                         status_code=prior.response_status_code or 409,
                         trace_id=prior.response_trace_id,

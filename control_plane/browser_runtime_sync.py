@@ -65,10 +65,6 @@ def _terminal_payload(code: str, trace_id: str) -> dict[str, object]:
     }
 
 
-class RuntimeSyncObservationUnavailable(Exception):
-    """The original recipient and render verified, but its current read failed."""
-
-
 def _stale_payload(trace_id: str) -> dict[str, object]:
     return _terminal_payload("stale", trace_id)
 
@@ -391,12 +387,9 @@ def prepare_runtime_sync_observation(
         purpose="browser-runtime-sync-values",
     ):
         raise RuntimeSyncRefused()
-    try:
-        payload = dokploy_api.fetch_dokploy_target_payload(
-            host=host, token=token, target_type=review.target_type, target_id=review.target_id
-        )
-    except (click.ClickException, OSError) as error:
-        raise RuntimeSyncObservationUnavailable() from error
+    payload = dokploy_api.fetch_dokploy_target_payload(
+        host=host, token=token, target_type=review.target_type, target_id=review.target_id
+    )
     return runtime.PreparedLiveTargetRuntime(
         control_plane_root=root,
         database_url=store.database_url,
@@ -450,6 +443,13 @@ class ReviewedRuntimeSync:
                 outcome="present",
                 response_status_code=409,
                 response_payload=_stale_payload(self.trace_id),
+            )
+
+        def unverified() -> ProviderObservation:
+            return ProviderObservation(
+                outcome="present",
+                response_status_code=409,
+                response_payload=_terminal_payload("runtime_sync_unverified", self.trace_id),
             )
 
         try:
@@ -506,13 +506,7 @@ class ReviewedRuntimeSync:
                         purpose="browser-runtime-sync-values",
                     )
                 ):
-                    return ProviderObservation(
-                        outcome="present",
-                        response_status_code=409,
-                        response_payload=_terminal_payload(
-                            "runtime_sync_unverified", self.trace_id
-                        ),
-                    )
+                    return unverified()
             result = runtime.apply_prepared_live_target_runtime_environment(
                 prepared,
                 apply_changes=False,
@@ -540,15 +534,15 @@ class ReviewedRuntimeSync:
                     result=result,
                 ),
             )
-        except RuntimeSyncObservationUnavailable:
-            return ProviderObservation(
-                outcome="present",
-                response_status_code=409,
-                response_payload=_terminal_payload("runtime_sync_unverified", self.trace_id),
-            )
         except RuntimeSyncRefused:
+            if provider_effect_phase == _ACKNOWLEDGED_PHASE:
+                return unverified()
             return ProviderObservation(outcome="unknown") if provider_effect_phase else stale()
         except Exception:
+            if provider_effect_phase == _ACKNOWLEDGED_PHASE:
+                # The POST ended. Missing current proof can refuse verification,
+                # but cannot make that completed update pending again.
+                return unverified()
             return ProviderObservation(outcome="unknown")
 
     def apply(

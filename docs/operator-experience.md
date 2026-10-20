@@ -650,8 +650,10 @@ the existing fields only to reconstruct that request; its retained fingerprint
 rejects a different payload before dispatch. New dry-runs and Start over remain
 unavailable until that Apply settles. Secret values are cleared again after each
 retry, including a rejected mismatch. A runtime-sync `next_actions` entry links
-to the lane's **Actions** page through a fixed UI route, retaining the supplied
-key names and counts; the browser never dispatches an advertised endpoint.
+to the lane's **Actions** page through a fixed UI route only when current runtime
+planning and applying are available for that exact product/context/lane.
+Unsupported lanes, unmatched targets and fixture mode retain inspect-only
+instructions and key/count evidence; the browser never dispatches an advertised endpoint.
 For both configuration forms, a server or gateway 5xx after dispatch keeps the
 Apply uncertain even when the error response is valid JSON. The retained key and
 fingerprint survive navigation/reload; a pre-dispatch failure or explicit client
@@ -676,6 +678,10 @@ verified sync. A terminal unverified outcome says the update ended but settings
 are unverified, and allows another review. A provider timeout without durable
 acknowledgement remains unknown even when current values match: that read cannot
 prove an older remote write has ended, so its request and target fence stay held.
+The existing provider-operation monitor surfaces that hold as a durable warning
+after its reconciliation grace, even when the lane has no HTTP checks. The
+incident, reminders and configured notification outbox preserve attention after
+the original browser tab closes; they do not release the fence or replay effects.
 
 The environment Managed secrets form can also select a credential supplied by the
 named Client. The Client receives the focused `/ui/owner-secrets` page, containing

@@ -6,7 +6,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
-from typing import Any, Literal, Protocol, cast, runtime_checkable
+from typing import Any, Literal, Protocol, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
@@ -131,7 +131,7 @@ from control_plane.contracts.product_topology_read_model import product_lane_pub
 from control_plane.outbound_http import request_private_http
 from control_plane.outbound_http import PublicHttpResponse
 from control_plane.workflows.generic_web_deploy_provider import (
-    decode_generic_web_provider_reconciliation_target,
+    held_generic_web_provider_target_reservations,
 )
 from control_plane.outbound_http import request_public_http
 from control_plane.workflows.odoo_verification import (
@@ -506,32 +506,10 @@ def _open_deploy_fence_incident_lanes(
     }
 
 
-@runtime_checkable
-class _HeldReservationReader(Protocol):
-    def list_held_provider_target_reservations(
-        self,
-    ) -> tuple[LaunchplaneIdempotencyRecord, ...]: ...
-
-
 def _held_generic_web_deploy_fences(
     record_store: object,
 ) -> dict[tuple[str, str], LaunchplaneIdempotencyRecord] | None:
-    if not isinstance(record_store, _HeldReservationReader):
-        return None
-    fences: dict[tuple[str, str], LaunchplaneIdempotencyRecord] = {}
-    for reservation in record_store.list_held_provider_target_reservations():
-        from control_plane.testing_activation import retained_fence_is_separated
-
-        if retained_fence_is_separated(record_store, reservation):
-            continue
-        try:
-            target = decode_generic_web_provider_reconciliation_target(
-                reservation.reconciliation_key
-            )
-        except ValueError:
-            continue
-        fences[(target.context, target.instance)] = reservation
-    return fences
+    return held_generic_web_provider_target_reservations(record_store)
 
 
 def _deploy_fence_monitor_target(
@@ -2923,7 +2901,7 @@ def _check_deploy_fence(
             target="provider",
             url=url,
             status="pass",
-            summary="No unresolved deploy is holding this target.",
+            summary="No unresolved provider operation is holding this target.",
         )
     if target.preview_fence:
         return PublicIngressTargetObservation(
@@ -2938,6 +2916,23 @@ def _check_deploy_fence(
             ),
         )
     phase = fence.provider_effect_phase or "no provider effect"
+    if fence.route_path != "/v1/drivers/generic-web/deploy":
+        operation = (
+            "Runtime sync"
+            if fence.route_path == "/v1/live-target-runtime/apply"
+            else "Provider operation"
+        )
+        return PublicIngressTargetObservation(
+            target="provider",
+            url=url,
+            status="fail",
+            failure_code="deploy_fence_held",
+            summary=(
+                f"{operation} {fence.record_id} remains unresolved ({fence.state}, last at {phase}, "
+                f"since {fence.created_at or 'an unknown time'}). The original target fence stays held; "
+                "preserve the original request and key. No effects are replayed by monitoring."
+            ),
+        )
     return PublicIngressTargetObservation(
         target="provider",
         url=url,
@@ -3080,7 +3075,9 @@ def _record_summary(
 ) -> str:
     if status == "pass":
         if _is_deploy_fence_target(target):
-            return f"No unresolved deploy is holding {target.product}/{target.instance}."
+            return (
+                f"No unresolved provider operation is holding {target.product}/{target.instance}."
+            )
         coverage = next(
             (item.dependency_health for item in observations if item.dependency_health), None
         )
@@ -3102,7 +3099,7 @@ def _check_label(target: PublicIngressMonitorTarget) -> str:
     if target.check_kind == "private_http":
         return "Private health check"
     if _is_deploy_fence_target(target):
-        return "Deploy fence"
+        return "Provider operation fence"
     if target.check_kind == "provider":
         return "Provider health check"
     return "Public ingress"

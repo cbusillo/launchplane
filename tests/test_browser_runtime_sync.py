@@ -32,6 +32,7 @@ from control_plane.provider_operations import ProviderMutationUnknownError
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.workflows.public_ingress_monitor import run_public_ingress_monitor_once
 from tests.http_app_test_support import (
     _browser_mutation_headers,
     _github_human_identity,
@@ -403,6 +404,8 @@ class BrowserRuntimeSyncTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unacknowledged_write_cannot_settle_from_matching_values(self) -> None:
         payload = self.apply_payload(await self.plan())
+        lane = (self.product, self.context, self.instance)
+        before_revision = self.store.health_monitor_authority_revisions()[lane]
         self.timeout_after_update = True
         first = await self.post(payload, "unacknowledged")
         self.assertEqual(first.status_code, 409, first.text)
@@ -412,6 +415,20 @@ class BrowserRuntimeSyncTests(unittest.IsolatedAsyncioTestCase):
         other = await self.post(payload, "must-still-be-fenced")
         self.assertEqual(other.json()["error"]["code"], "runtime_sync_target_busy")
         self.assertEqual(len(self.updates), 1)
+        self.assertNotEqual(self.store.health_monitor_authority_revisions()[lane], before_revision)
+        record = self.store.read_idempotency_record(
+            scope=idempotency_scope(self.session.identity),
+            route_path="/v1/live-target-runtime/apply",
+            idempotency_key="unacknowledged",
+        )
+        assert record is not None
+        checked_at = (
+            datetime.fromisoformat(record.updated_at.replace("Z", "+00:00")) + timedelta(hours=1)
+        ).isoformat()
+        monitored = run_public_ingress_monitor_once(record_store=self.store, checked_at=checked_at)
+        self.assertEqual(monitored.open_incident_count, 1)
+        self.assertIn(record.record_id, monitored.records[0].summary)
+        self.assertNotIn(record.idempotency_key, monitored.records[0].summary)
 
     async def test_delayed_old_post_stays_fenced_after_machine_writes_matching_values(self) -> None:
         payload = self.apply_payload(await self.plan())
@@ -493,6 +510,31 @@ class BrowserRuntimeSyncTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(replay.json(), first.json())
                 self.store.write_runtime_environment_record(self.setting)
         self.assertFalse(self.updates)
+        terminal = self.store.read_idempotency_record(
+            scope=idempotency_scope(self.session.identity),
+            route_path="/v1/live-target-runtime/apply",
+            idempotency_key=key,
+        )
+        assert terminal is not None
+        for status, error in (
+            (409, {}),
+            (409, {"code": "unexpected_terminal"}),
+            (503, {"code": "runtime_sync_unverified"}),
+            (202, {"code": "runtime_sync_unverified"}),
+        ):
+            with self.subTest(status=status, error=error):
+                self.store.write_idempotency_record(
+                    terminal.model_copy(
+                        update={
+                            "response_status_code": status,
+                            "response_payload": {"error": error},
+                        }
+                    )
+                )
+                uncertain = await self.post(payload, key)
+                self.assertEqual(uncertain.status_code, 503, uncertain.text)
+                self.assertEqual(uncertain.json()["error"]["code"], "runtime_sync_unavailable")
+        self.store.write_idempotency_record(terminal)
         self.assertEqual(
             (await self.post(self.apply_payload(await self.plan()), "after-refusals")).status_code,
             202,
@@ -719,30 +761,37 @@ class BrowserRuntimeSyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fresh.status_code, 202, fresh.text)
         self.assertEqual(len(self.updates), 1)
 
-    async def test_unknown_receipt_uses_original_retained_fingerprint_key(self) -> None:
+    async def test_acknowledged_receipt_requires_retained_key_for_verified_success(self) -> None:
         old_key, new_key = Fernet.generate_key().decode(), Fernet.generate_key().decode()
-        config = {"active_key_id": "old", "keys": {"old": old_key, "new": new_key}}
-        with patch.dict(
-            os.environ,
-            {secrets.LAUNCHPLANE_SECRET_KEYS_JSON_ENV_VAR: json.dumps(config)},
-            clear=True,
-        ):
-            payload = self.apply_payload(await self.plan())
-            await self.interrupt_acknowledged(payload, "key-rotation")
-            config["active_key_id"] = "new"
-            config["keys"] = {"new": new_key}
-            os.environ[secrets.LAUNCHPLANE_SECRET_KEYS_JSON_ENV_VAR] = json.dumps(config)
-            missing = await self.post(payload, "key-rotation")
-            self.assertEqual(missing.status_code, 409, missing.text)
-            config["keys"] = {"old": new_key, "new": new_key}
-            os.environ[secrets.LAUNCHPLANE_SECRET_KEYS_JSON_ENV_VAR] = json.dumps(config)
-            replaced = await self.post(payload, "key-rotation")
-            self.assertEqual(replaced.status_code, 409, replaced.text)
-            config["keys"] = {"old": old_key, "new": new_key}
-            os.environ[secrets.LAUNCHPLANE_SECRET_KEYS_JSON_ENV_VAR] = json.dumps(config)
-            adopted = await self.post(payload, "key-rotation")
-            self.assertEqual(adopted.status_code, 202, adopted.text)
-            self.assertEqual(len(self.updates), 1)
+        for change in ("retained", "missing", "replaced"):
+            with self.subTest(change=change):
+                config = {"active_key_id": "old", "keys": {"old": old_key, "new": new_key}}
+                with patch.dict(
+                    os.environ,
+                    {secrets.LAUNCHPLANE_SECRET_KEYS_JSON_ENV_VAR: json.dumps(config)},
+                    clear=True,
+                ):
+                    self.env = "GOOGLE_ANALYTICS_MEASUREMENT_ID=old-private-value\n"
+                    payload = self.apply_payload(await self.plan())
+                    await self.interrupt_acknowledged(payload, change)
+                    config["active_key_id"] = "new"
+                    if change == "missing":
+                        config["keys"] = {"new": new_key}
+                    elif change == "replaced":
+                        config["keys"] = {"old": new_key, "new": new_key}
+                    os.environ[secrets.LAUNCHPLANE_SECRET_KEYS_JSON_ENV_VAR] = json.dumps(config)
+                    outcome = await self.post(payload, change)
+                    self.assertEqual(
+                        outcome.status_code, 202 if change == "retained" else 409, outcome.text
+                    )
+                    if change != "retained":
+                        self.assertEqual(outcome.json()["error"]["code"], "runtime_sync_unverified")
+                        config["keys"] = {"old": old_key, "new": new_key}
+                        os.environ[secrets.LAUNCHPLANE_SECRET_KEYS_JSON_ENV_VAR] = json.dumps(
+                            config
+                        )
+                        self.assertEqual((await self.post(payload, change)).json(), outcome.json())
+        self.assertEqual(len(self.updates), 3)
 
     async def test_unknown_effect_adopts_after_policy_metadata_change(self) -> None:
         secrets.write_secret_value(
@@ -801,42 +850,47 @@ class BrowserRuntimeSyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stale.json()["error"]["code"], "stale")
         self.assertEqual(len(self.updates), 1)
 
-    async def test_unknown_changed_inputs_remain_unknown(self) -> None:
-        payload = self.apply_payload(await self.plan())
-        await self.interrupt_acknowledged(payload, "unknown-drift")
-        self.change_setting()
-        response = await self.post(payload, "unknown-drift")
-        self.assertEqual(response.status_code, 409, response.text)
-        self.assertEqual(response.json()["error"]["code"], "mutation_reconciliation_required")
-        self.assertEqual(len(self.updates), 1)
-        self.store.write_runtime_environment_record(self.setting)
-        self.host = "https://changed-provider.invalid"
-        wrong_recipient = await self.post(payload, "unknown-drift")
-        self.assertEqual(wrong_recipient.status_code, 409, wrong_recipient.text)
-        self.assertEqual(
-            wrong_recipient.json()["error"]["code"], "mutation_reconciliation_required"
-        )
-        self.host = "https://provider.invalid"
-        self.store.write_runtime_environment_record(
-            RuntimeEnvironmentRecord.model_validate(
-                {
-                    **self.setting.model_dump(mode="json"),
-                    "schema_version": 2,
-                    "retired_provider_keys": ["PROVIDER_ONLY"],
-                }
-            )
-        )
-        retirement_drift = await self.post(payload, "unknown-drift")
-        self.assertEqual(retirement_drift.status_code, 409, retirement_drift.text)
-        self.assertEqual(
-            retirement_drift.json()["error"]["code"], "mutation_reconciliation_required"
-        )
-        self.store.write_runtime_environment_record(self.setting)
-        self.env = "GOOGLE_ANALYTICS_MEASUREMENT_ID=unexpected-live-value\n"
-        wrong_live = await self.post(payload, "unknown-drift")
-        self.assertEqual(wrong_live.status_code, 409, wrong_live.text)
-        self.assertEqual(wrong_live.json()["error"]["code"], "runtime_sync_unverified")
-        self.assertEqual(len(self.updates), 1)
+    async def test_acknowledged_drift_settles_unverified_without_false_success(self) -> None:
+        for change in ("values", "host", "retirement", "live", "missing-record"):
+            with self.subTest(change=change):
+                self.env = "GOOGLE_ANALYTICS_MEASUREMENT_ID=old-private-value\n"
+                payload = self.apply_payload(await self.plan())
+                await self.interrupt_acknowledged(payload, change)
+                before = len(self.updates)
+                if change == "values":
+                    self.change_setting()
+                elif change == "host":
+                    self.host = "https://changed-provider.invalid"
+                elif change == "retirement":
+                    self.store.write_runtime_environment_record(
+                        RuntimeEnvironmentRecord.model_validate(
+                            {
+                                **self.setting.model_dump(mode="json"),
+                                "schema_version": 2,
+                                "retired_provider_keys": ["PROVIDER_ONLY"],
+                            }
+                        )
+                    )
+                elif change == "missing-record":
+                    self.assertEqual(
+                        self.store.delete_dokploy_target_record(expected_record=self.target),
+                        "deleted",
+                    )
+                else:
+                    self.env = "GOOGLE_ANALYTICS_MEASUREMENT_ID=unexpected-live-value\n"
+                reads = self.fetch_count
+                outcome = await self.post(payload, change)
+                self.assertEqual(outcome.status_code, 409, outcome.text)
+                self.assertEqual(outcome.json()["error"]["code"], "runtime_sync_unverified")
+                if change in {"values", "host", "retirement", "missing-record"}:
+                    self.assertEqual(self.fetch_count, reads)
+                self.assertEqual(len(self.updates), before)
+                self.host = "https://provider.invalid"
+                self.store.write_runtime_environment_record(self.setting)
+                self.store.write_dokploy_target_record(self.target)
+                self.assertEqual((await self.post(payload, change)).json(), outcome.json())
+                fresh = await self.post(self.apply_payload(await self.plan()), f"fresh-{change}")
+                self.assertEqual(fresh.status_code, 202, fresh.text)
 
     async def test_unchanged_apply_has_no_provider_effect_and_still_checks_baseline(self) -> None:
         self.env = "GOOGLE_ANALYTICS_MEASUREMENT_ID=private-desired-value\n"

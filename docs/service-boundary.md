@@ -2947,8 +2947,13 @@ requires a durable acknowledgement and verifies separate private values/retireme
 and physical-recipient evidence with the original retained fingerprint key.
 Readback recovery does not attribute the write merely from its dispatch checkpoint.
 Descriptive metadata, current lane qualification or write-policy
-changes do not prevent proof of that historical effect; changed desired values,
-changed physical recipients or unavailable original proof remain uncertain.
+changes do not prevent proof of that historical effect. Once acknowledgement
+proves the original POST ended, changed desired values, a changed physical
+recipient, missing records or unavailable retained proof yield a terminal
+unverified receipt. They never produce a false verified result or turn that
+completed POST back into an uncertain dispatch. Unrecognized or malformed stored
+terminal receipts instead fail closed as unavailable; they cannot invent a
+settled unverified outcome.
 Odoo browser sync stays unavailable until its operation
 ownership also participates in this durable fence (tracked in #4190).
 

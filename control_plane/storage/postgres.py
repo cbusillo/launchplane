@@ -5694,18 +5694,14 @@ class PostgresRecordStore(HumanSessionStore):
                     ("secret-version", secret_id, version_id, status)
                 )
         from control_plane.workflows.generic_web_deploy_provider import (
-            decode_generic_web_provider_reconciliation_target,
+            held_generic_web_provider_target_reservations,
         )
 
-        for reservation in self.list_held_provider_target_reservations():
-            try:
-                target = decode_generic_web_provider_reconciliation_target(
-                    reservation.reconciliation_key
-                )
-            except ValueError:
-                continue
-            snapshots.setdefault((target.context, target.instance), []).append(
-                ("deploy-fence", reservation.record_id, reservation.state)
+        for fenced_lane, reservation in (
+            held_generic_web_provider_target_reservations(self) or {}
+        ).items():
+            snapshots.setdefault(fenced_lane, []).append(
+                ("provider-fence", reservation.record_id, reservation.state)
             )
         revisions = {}
         for profile in profiles:

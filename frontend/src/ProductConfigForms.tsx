@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { AppLink, productEnvironmentPath } from "./router";
+import type { RuntimeSyncScope } from "./runtime-sync-operation";
 
 import { applyProductEnvironmentConfig, readOwnerSecretInputs } from "./api";
 import type { BrowserOperationState } from "./browser-operation";
@@ -292,7 +293,7 @@ export function RuntimeSettingsChangePanel({
         ) : null}
       </div>
       {planResult ? (
-        <ProductConfigEvidence label="Dry-run evidence" response={planResult} state={planOperation.state} />
+        <ProductConfigEvidence label="Dry-run evidence" response={planResult} state={planOperation.state} runtimeSyncTarget={runtimeSyncEvidenceTarget(config, fixtureMode)} />
       ) : null}
       {planResult && !planMatchesDraft ? (
         <InlineFormError message="The draft changed after this dry-run. Apply is disabled until you run it again." />
@@ -310,7 +311,7 @@ export function RuntimeSettingsChangePanel({
         />
       ) : null}
       {applyResult ? (
-        <ProductConfigEvidence label="Apply evidence" response={applyResult} state={applyOperation.state} />
+        <ProductConfigEvidence label="Apply evidence" response={applyResult} state={applyOperation.state} runtimeSyncTarget={runtimeSyncEvidenceTarget(config, fixtureMode)} />
       ) : null}
     </ProductConfigPanel>
   );
@@ -599,7 +600,7 @@ export function ManagedSecretsChangePanel({
       </div>
       {planResult ? (
         <>
-          <ProductConfigEvidence label="Dry-run evidence" response={planResult} state={planOperation.state} />
+          <ProductConfigEvidence label="Dry-run evidence" response={planResult} state={planOperation.state} runtimeSyncTarget={runtimeSyncEvidenceTarget(config, fixtureMode)} />
           <div className="secret-reentry-note">
             <KeyRound aria-hidden="true" />
             <p>
@@ -625,7 +626,7 @@ export function ManagedSecretsChangePanel({
         />
       ) : null}
       {applyResult ? (
-        <ProductConfigEvidence label="Apply evidence" response={applyResult} state={applyOperation.state} />
+        <ProductConfigEvidence label="Apply evidence" response={applyResult} state={applyOperation.state} runtimeSyncTarget={runtimeSyncEvidenceTarget(config, fixtureMode)} />
       ) : null}
     </ProductConfigPanel>
   );
@@ -970,14 +971,21 @@ function ApplyConfirmation({
   );
 }
 
+function runtimeSyncEvidenceTarget(config: ProductEnvironmentConfigStatus, fixtureMode: DevFixtureMode): RuntimeSyncScope | null {
+  return !fixtureMode && config.runtime_sync?.plan.available && config.runtime_sync.apply.available
+    ? { product: config.product, context: config.context, instance: config.environment } : null;
+}
+
 function ProductConfigEvidence({
   label,
   response,
   state,
+  runtimeSyncTarget,
 }: {
   label: string;
   response: ProductConfigApplyResponse;
   state: BrowserOperationState;
+  runtimeSyncTarget: RuntimeSyncScope | null;
 }) {
   const result = response.result;
   const changedKeys = result.runtime_environment.changed_keys;
@@ -1034,7 +1042,11 @@ function ProductConfigEvidence({
             <div key={`${nextAction.kind}:${nextAction.target.target_name}`}>
               <p>{nextAction.target.target_name} · {nextAction.changed_keys.length} changed keys</p>
               <ul>{nextAction.changed_keys.map(key => <li key={key}><code>{key}</code></li>)}</ul>
-              <AppLink to={productEnvironmentPath(result.product, nextAction.target.instance, "actions")}>Review runtime sync</AppLink>
+              {runtimeSyncTarget && result.product === runtimeSyncTarget.product && result.context === runtimeSyncTarget.context &&
+                result.instance === runtimeSyncTarget.instance && nextAction.target.context === runtimeSyncTarget.context &&
+                nextAction.target.instance === runtimeSyncTarget.instance ?
+                <AppLink to={productEnvironmentPath(runtimeSyncTarget.product, runtimeSyncTarget.instance, "actions")}>Review runtime sync</AppLink> :
+                <p className="runtime-sync-inspect-only">Inspect only: {nextAction.instruction}</p>}
             </div>
           ))}
         </div>

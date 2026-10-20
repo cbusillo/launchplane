@@ -43,7 +43,14 @@ from control_plane.workflows.public_ingress_monitor import (
     run_public_ingress_monitor_once,
 )
 from tests.support.stores import _sqlite_database_url
-from tests.test_public_ingress_monitor import _Store, _identity, _lane_summary, _profile
+from tests.test_public_ingress_monitor import (
+    _Store,
+    _identity,
+    _lane_summary,
+    _profile,
+    _hold_deploy_fence,
+    _runtime_fence_target,
+)
 
 
 class HealthMonitorSchedulerTests(unittest.TestCase):
@@ -78,6 +85,24 @@ class HealthMonitorSchedulerTests(unittest.TestCase):
         self.now += 1
         self.assertTrue(self.scheduler.run_once())
         self.assertEqual(self.probe.call_count, 2)
+
+    def test_opaque_shared_fence_changes_probe_revision_without_metadata_edits(self) -> None:
+        self.store.write_provider_target_record(_runtime_fence_target(self.store))
+        self.assertTrue(self.scheduler.run_once())
+        self.assertFalse(self.scheduler.run_once())
+        held = _hold_deploy_fence(self.store, idempotency_key="runtime-unknown", runtime_sync=True)
+        self.assertTrue(self.scheduler.run_once())
+        self.assertFalse(self.scheduler.run_once())
+        completed = self.store.adopt_reconciled_mutation(
+            reservation=held,
+            response_status_code=409,
+            response_trace_id="terminal-fixture",
+            response_payload={"error": {"code": "runtime_sync_unverified"}},
+        )
+        self.assertEqual(completed.status, "adopted")
+        self.assertTrue(self.scheduler.run_once())
+        self.assertFalse(self.scheduler.run_once())
+        self.assertEqual(self.probe.call_count, 3)
 
     def test_production_and_testing_have_separate_due_slots(self) -> None:
         profile = _profile()
