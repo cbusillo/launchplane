@@ -47,6 +47,7 @@ def _review_store(*, review_label: str = "owner-review") -> Any:
         list_product_profile_records=lambda: (profile,),
         list_runtime_environment_records=_advisory_runtime_records,
         list_merge_train_branch_refresh_records=lambda **_: (),
+        read_merge_train_pr_feedback_record=lambda _feedback_id: None,
     )
 
 
