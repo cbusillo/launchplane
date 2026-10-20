@@ -1,6 +1,6 @@
 """Repair only a fresh testing generation's recorded certificate intent."""
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, ExitStack
 from dataclasses import dataclass
 from typing import Literal
@@ -204,9 +204,7 @@ class TestingBootstrapRouteRepair:
         )
 
     @staticmethod
-    def effect_binding(
-        generation: FreshOdooTestingGeneration, route: dokploy_api.JsonObject
-    ) -> str:
+    def effect_binding(generation: FreshOdooTestingGeneration, route: Mapping[str, object]) -> str:
         return "repair-certificate:" + canonical_json_sha256(
             {
                 "generation": generation_binding(generation),

@@ -1,6 +1,7 @@
 """Original-generation certificate repair never reboots the bootstrap pipeline."""
 
 from contextlib import contextmanager, nullcontext
+from collections.abc import Iterator, Callable
 from typing import Any
 from unittest.mock import Mock, patch
 
@@ -327,7 +328,7 @@ class TestingBootstrapRouteRepairTests(FreshTestingBootstrapScenario):
         held = False
 
         @contextmanager
-        def authority():
+        def authority() -> Iterator[Callable[[], None]]:
             nonlocal held
             held = True
             try:
