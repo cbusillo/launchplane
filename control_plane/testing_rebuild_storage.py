@@ -132,6 +132,8 @@ def require_rebuild_successor(
             raise ValueError("A rebuild cannot replace its independent-copy receipt.")
         if current.error and record.error != current.error:
             raise ValueError("A rebuild cannot replace its recorded failure.")
+        if current.predecessor_change and record.predecessor_change != current.predecessor_change:
+            raise ValueError("A rebuild cannot replace its original predecessor-drift decision.")
         if (
             current.private_readiness_failed_at is not None
             and record.private_readiness_failed_at != current.private_readiness_failed_at

@@ -123,6 +123,7 @@ class TestingProvider:
         return False
 
     def current_route(self, plan: TestingRebuildPlan) -> TestingRouteObservation:
+        assert isinstance(self.serving, TestingCopy)
         if self.serving == plan.new:
             self.new_public_probes += 1
             if self.fail_second_public_probe and self.new_public_probes > 1:

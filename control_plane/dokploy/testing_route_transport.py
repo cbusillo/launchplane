@@ -242,12 +242,10 @@ def main(spec):
     old_availability='absent' if not members else 'stopped' if all(item.get('State',{}).get('Status') in {'exited','created'} for item in members) else 'available'
     old_inventory_sha256=retained_inventory_sha256(containers,{'project':old_project})
     unavailable=spec.get('unavailable_predecessor')
-    if unavailable is not None and (unavailable.get('project')!=old_project or unavailable.get('availability')!=old_availability or unavailable.get('inventory_sha256')!=old_inventory_sha256 or old_availability not in {'stopped','absent'}):
-        raise RuntimeError('The unavailable testing predecessor changed')
     old=[item for item in containers if (item.get('Config',{}).get('Labels') or {}).get('com.docker.compose.project')==old_project and (item.get('Config',{}).get('Labels') or {}).get('com.docker.compose.service')=='web']
     endpoints=[]
     old_identity=None
-    if len(old)==1 and old[0].get('State',{}).get('Status')=='running':
+    if unavailable is None and len(old)==1 and old[0].get('State',{}).get('Status')=='running':
         environment=dict(item.split('=',1) for item in old[0]['Config'].get('Env',[]) if '=' in item)
         if environment.get('PLATFORM_INSTANCE')!='testing':
             raise RuntimeError('The retained web process is not a testing copy')
@@ -275,6 +273,8 @@ def main(spec):
         custody_matches=same_physical_root(spec['execution_custody'],custody)
         if not custody_matches or not re.fullmatch(r'[a-f0-9]{64}',spec['execution_key']):
             raise RuntimeError('The original route execution custody changed')
+        if unavailable is not None and spec['desired_backend'] is not None and (unavailable.get('project')!=old_project or unavailable.get('availability')!=old_availability or unavailable.get('inventory_sha256')!=old_inventory_sha256 or old_availability not in {'stopped','absent'}):
+            raise RuntimeError('The unavailable testing predecessor changed before forward publication')
         if unavailable is None and (spec['retained_backend'] not in endpoints or not isinstance(old_identity,dict) or spec['expected_old_identity_sha256']!=hashlib.sha256(json.dumps(old_identity,sort_keys=True,separators=(',',':')).encode()).hexdigest()):
             raise RuntimeError('The retained physical testing copy changed')
         desired=urlsplit(spec['desired_backend']) if spec['desired_backend'] is not None else None
@@ -441,15 +441,27 @@ class DokployTestingRouteTransport:
                 "The managed proxy does not watch its directory mount.",
             )
         observed_identity = parse_runtime_identity_payload(frame.get("old_identity"))
-        if observed_identity is not None and (
-            self.old_runtime_identity is None
-            or observed_identity.model_dump(exclude={"deployed_at"})
-            != self.old_runtime_identity.model_dump(exclude={"deployed_at"})
+        if (
+            "unavailable_predecessor" not in self.payload
+            and observed_identity is not None
+            and (
+                self.old_runtime_identity is None
+                or observed_identity.model_dump(exclude={"deployed_at"})
+                != self.old_runtime_identity.model_dump(exclude={"deployed_at"})
+            )
         ):
             raise TestingRouteObservationRefused(
                 "testing_route_identity_changed", "Retained testing runtime identity changed."
             )
         return frame
+
+    def unavailable_predecessor_matches(self, frame: dict[str, Any]) -> bool:
+        expected = self.payload.get("unavailable_predecessor")
+        return isinstance(expected, dict) and (
+            frame.get("old_availability") == expected["availability"]
+            and frame.get("old_inventory_sha256") == expected["inventory_sha256"]
+            and frame.get("old_availability") in {"stopped", "absent"}
+        )
 
     def execution_intent(
         self, plan: TestingLaneRoute, backend: str | None, *, operation_id: str
@@ -670,6 +682,12 @@ class DokployTestingRouteTransport:
         if (
             plan.unavailable_preimage is not None
             and backend is not None
+            and not self.unavailable_predecessor_matches(frame)
+        ):
+            raise TestingRouteWriteNotStarted("The predecessor changed before the forward write.")
+        if (
+            plan.unavailable_preimage is not None
+            and backend is not None
             and hashlib.sha256(frame["static_configuration"].encode()).hexdigest()
             != plan.unavailable_preimage.static_sha256
         ):
@@ -681,11 +699,20 @@ class DokployTestingRouteTransport:
         owned = None if frame["owned_file"] is None else json.loads(frame["owned_file"])
         if frame["owned_file"] is not None and not isinstance(owned, dict):
             raise ValueError("Testing route file is not an owned document.")
-        observed = observe_testing_route(plan, frame["raw"], owned)
-        if observed not in {expected_backend, backend}:
-            raise ValueError("Testing route no longer identifies its admitted previous copy.")
         content = route_document_content(plan, backend)
         intended = json.loads(content) if content is not None else None
+        if backend is None and plan.unavailable_preimage is not None:
+            # Same writer, restricted to reversing our exact forward document.
+            # Reappeared Docker routes are neither adopted nor modified.
+            if frame["owned_file"] not in {
+                content,
+                route_document_content(plan, plan.new_backend),
+            }:
+                raise ValueError("The inverse cannot overwrite a foreign testing route file.")
+        else:
+            observed = observe_testing_route(plan, frame["raw"], owned)
+            if observed not in {expected_backend, backend}:
+                raise ValueError("Testing route no longer identifies its admitted previous copy.")
         if (backend is not None and owned == intended) or frame["owned_file"] == content:
             return "applied"
         if plan.unavailable_preimage is None and (

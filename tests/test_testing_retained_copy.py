@@ -233,6 +233,19 @@ class RetainedTestingCopyTests(unittest.TestCase):
             )[0],
             read,
         )
+        for item in self.containers:
+            item["State"].update(
+                Pid=0,
+                ExitCode=1,
+                StartedAt="2026-10-20T11:00:00Z",
+                FinishedAt="2026-10-20T11:01:00Z",
+            )
+        self.assertEqual(
+            self.run_host(
+                extra={"allow_unavailable": True, "unavailable_sha256": read["observation_sha256"]}
+            )[0],
+            read,
+        )
         self.containers[0]["Id"] = "different-stopped-web"
         self.assertEqual(
             self.run_host(

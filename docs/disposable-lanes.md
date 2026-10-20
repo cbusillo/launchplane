@@ -32,8 +32,9 @@ at the original address precede metadata adoption and old-copy retirement.
 Retirement drains/stops the old runtime and preserves its storage and custody;
 physical deletion is outside this operation. Public probe URLs must use the
 stable lane origin. Missing, stale, unverified or skipped evidence preserves the
-intent for observation; only a fresh verified failure or identity mismatch
-starts automatic rollback.
+intent for observation. A fresh verified failure or identity mismatch starts
+automatic rollback. An unavailable-origin attempt also reverses its own cutover
+if positively observed predecessor or ingress changes invalidate its admission.
 
 Failed preparation or private readiness leaves the old copy serving. Failed
 public verification, including immediately before metadata adoption or before
@@ -60,7 +61,9 @@ template or the provider's converted web-router declaration, checked against the
 current proxy listeners, TLS resolver and applied conflicts. Missing placement or
 ingress declaration is a record/capability prerequisite; repairing or starting
 the old application is not an admission step. Forward checkpoints retain the
-original declaration and listener witnesses. Candidate preparation, generated
+normalized web-ingress declaration and listener witnesses. Unrelated application
+environment, image or Compose formatting changes do not change that declaration
+witness. Candidate preparation, generated
 local credentials, sanitation, immutable build, private identity and public
 health checks use the ordinary lifecycle.
 Transient provider-inventory reads keep the original operation pending; provider
@@ -75,10 +78,26 @@ route preimage covers its public listeners and middleware dependencies, excludin
 unrelated proxy management routes and canonical certificate challenges. Inverse
 restoration uses the current proxy/file CAS; unrelated static configuration edits
 do not require keeping a failed candidate selected. An unavailable
-original stays unavailable after rollback. After successful publication, automatic
+original is not started or advertised as healthy by rollback. Original-file
+readback proves exact bytes or absence and reports current stopped, absent or
+present process state separately; a reappeared process has unverified health.
+After successful publication, automatic
 deployment of the old target is disabled and its stop is recorded as undispatched
 because it was already unavailable. That success receipt does not itself request
 rollback after a checkpoint interruption. Its data is never deleted here.
+
+Stopped custody binds member identities, ownership labels and storage, separately
+from current stopped/absent state. Incidental Docker lifecycle timestamps do not
+invalidate an unchanged stopped copy. A changed predecessor before cutover can
+end admission once the original file/metadata and terminal candidate custody are
+proved. After possible cutover, the worker first persists its abort decision and
+settles or excludes the original physical writer. That settlement never allocates
+another initializer or sends another forward write, including after a busy call.
+Unknown or busy execution stays pending with the decision latched. Reappeared
+Docker routers are not adopted or modified: the existing inverse may restore
+only the exact original file or the exact candidate document this attempt wrote.
+Foreign file bytes, changed physical custody and metadata CAS conflicts remain
+fenced. The final source-drift result does not invent a health failure.
 
 `testing_rebuild_storage.py` stores checkpoints in the existing DB-backed record
 payloads, scoped by product, context and operation key. The envelope is completed
@@ -103,7 +122,9 @@ never dispatched and is safe to run. After an interrupted stop, preserve the
 retirement intent: the old copy may already be stopped, so it cannot be
 advertised as a healthy rollback target.
 The supported exception requires an original stop proven terminal and never
-dispatched, plus fresh private readiness for the old copy. The checkpoint keeps
+dispatched, plus fresh private readiness for a previously healthy old copy. An
+unavailable-origin rollback instead keeps the exact durable stop-exclusion
+receipt, without asserting the old runtime remains unavailable. The checkpoint keeps
 that recovery proof before moving back; its contract refuses rollback without
 that proof once a stop intent exists. Pending, dispatched and unknown stops
 cannot use this path. A refusal propagates before any inverse action.

@@ -14,8 +14,10 @@ from control_plane.contracts.testing_rebuild import (
     TestingRouteObservation,
     TestingPredecessor,
     UnavailableTestingPredecessor,
-    TestingUnavailableReadback,
     TestingRetirementRecovery,
+    TestingRouteReadback,
+    TestingOriginalIngressReadback,
+    TestingStopExclusionReadback,
 )
 from control_plane.traffic_switch import (
     MAX_READINESS_AGE_SECONDS,
@@ -47,7 +49,7 @@ class TestingRebuildProvider(Protocol):
         """
         ...
 
-    def current_route(self, plan: TestingRebuildPlan) -> TestingRouteObservation: ...
+    def current_route(self, plan: TestingRebuildPlan) -> TestingRouteReadback: ...
     def prepare(self, plan: TestingRebuildPlan) -> TestingCopyReceipt:
         """Allocate/restore/sanitize only the independent copy, preserving serving authority."""
         ...
@@ -111,19 +113,19 @@ class TestingRebuildProvider(Protocol):
 
 
 def _route(
-    observation: TestingRouteObservation, plan: TestingRebuildPlan, copy: TestingPredecessor
+    observation: TestingRouteReadback, plan: TestingRebuildPlan, copy: TestingPredecessor
 ) -> None:
     if isinstance(copy, UnavailableTestingPredecessor):
         if (
-            not observation.unavailable
-            or observation.target_url is not None
-            or observation.applied != copy.route_applied
+            not isinstance(observation, TestingOriginalIngressReadback)
+            or observation.observation_sha256 != copy.observation_sha256
+            or observation.plan_digest != plan.digest
             or (observation.route_id, observation.host, observation.slot_id)
             != (plan.route_id, plan.host, copy.copy_id)
         ):
             raise ValueError("The unavailable predecessor's exact route preimage changed.")
         return
-    if observation.unavailable or not observation.applied:
+    if not isinstance(observation, TestingRouteObservation):
         raise ValueError("A serving copy requires its applied backend.")
     require_route_authority(
         observation,
@@ -156,7 +158,7 @@ class TestingRebuildRouteFailure(ValueError):
 
 
 def _serving(
-    observation: TestingRouteObservation,
+    observation: TestingRouteReadback,
     plan: TestingRebuildPlan,
     copy: TestingPredecessor,
     now: datetime,
@@ -166,6 +168,7 @@ def _serving(
         if not 0 <= (now - observation.observed_at).total_seconds() <= MAX_READINESS_AGE_SECONDS:
             raise TestingRebuildObservationUnavailable("The unavailable route preimage is stale.")
         return
+    assert isinstance(observation, TestingRouteObservation)
     require_fresh_readiness(
         observed_at=observation.observed_at,
         now=now,
@@ -393,8 +396,7 @@ def execute_testing_rebuild(
                         raise ValueError("Retirement recovery belongs to another copy or address.")
                     if isinstance(plan.old, UnavailableTestingPredecessor):
                         if (
-                            not isinstance(recovery, TestingUnavailableReadback)
-                            or recovery.observation_sha256 != plan.old.observation_sha256
+                            not isinstance(recovery, TestingStopExclusionReadback)
                             or not 0
                             <= (clock() - recovery.observed_at).total_seconds()
                             <= MAX_READINESS_AGE_SECONDS
@@ -418,13 +420,22 @@ def execute_testing_rebuild(
 
         if record.step == "rolling_back":
             provider.guard(plan, recovery=True)
-            observation = provider.current_route(plan)
-            if observation.slot_id == plan.new.copy_id:
-                _route(observation, plan, plan.new)
+            if isinstance(plan.old, UnavailableTestingPredecessor):
+                # Undo only our exact file through its original physical fence.
+                # Current old processes/routers are not serving authority for
+                # this inverse and cannot require a fabricated health result.
                 resuming = record.rollback_started
                 save(rollback_started=True)
                 provider.switch(plan, plan.new, plan.old, reconcile_only=resuming)
                 observation = provider.current_route(plan)
+            else:
+                observation = provider.current_route(plan)
+                if observation.slot_id == plan.new.copy_id:
+                    _route(observation, plan, plan.new)
+                    resuming = record.rollback_started
+                    save(rollback_started=True)
+                    provider.switch(plan, plan.new, plan.old, reconcile_only=resuming)
+                    observation = provider.current_route(plan)
             _serving(observation, plan, plan.old, clock())
             provider.guard(plan, recovery=True)
             provider.publish(plan, plan.old, forward_started=record.publication_started)

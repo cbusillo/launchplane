@@ -105,6 +105,10 @@ class TestingRoutePending(ValueError):
     """The owned file and applied provider view have not converged."""
 
 
+class TestingRouteAuthorityChanged(ValueError):
+    """A positively enabled route conflicts with the original lane authority."""
+
+
 class UnavailableTestingRoutePreimage(FrozenRecord):
     file_content: str | None
     raw: dict[str, Any]
@@ -558,23 +562,7 @@ def compile_unavailable_testing_route(
     if template is None:
         if file_content is not None:
             raise ValueError("The existing testing route has no recorded template authority.")
-        configuration = yaml.safe_load(configured_compose)
-        services = configuration.get("services") if isinstance(configuration, dict) else None
-        web = services.get("web") if isinstance(services, dict) else None
-        supplied = web.get("labels") if isinstance(web, dict) else None
-        if isinstance(supplied, list):
-            if any(not isinstance(item, str) or "=" not in item for item in supplied):
-                raise ValueError("The declared testing router labels are incomplete.")
-            pairs = [item.split("=", 1) for item in supplied]
-            if len({pair[0] for pair in pairs}) != len(pairs):
-                raise ValueError("The declared testing router labels conflict.")
-            labels = dict(pairs)
-        elif isinstance(supplied, dict) and all(
-            isinstance(key, str) and isinstance(value, str) for key, value in supplied.items()
-        ):
-            labels = supplied
-        else:
-            raise ValueError("The provider's converted testing router declaration is unavailable.")
+        labels = declared_testing_ingress(configured_compose)
         if (
             labels.get("traefik.enable", "").lower() != "true"
             or labels.get("traefik.docker.network") != "dokploy-network"
@@ -680,7 +668,10 @@ def compile_unavailable_testing_route(
             priority = int(fields.get("priority", str(len(rule.encode()))))
             if not 0 < priority < 2147482647:
                 raise ValueError("The declared testing priority cannot admit a strict winner.")
-            if tls == "true" and connections + "@file" not in references:
+            if (
+                not redirects_to_https(raw, {"middlewares": references})
+                and connections + "@file" not in references
+            ):
                 references.append(connections + "@file")
             document = http_route_payload(
                 route_id=identifier,
@@ -727,8 +718,10 @@ def compile_unavailable_testing_route(
         if tls_config is not None:
             if not isinstance(tls_config, dict):
                 raise ValueError("The testing template's TLS configuration is unavailable.")
-            resolver = tls_config.get("certResolver")
-            if resolver and resolver not in static.get("certificatesResolvers", {}):
+            recorded_resolver = tls_config.get("certResolver")
+            if recorded_resolver and recorded_resolver not in static.get(
+                "certificatesResolvers", {}
+            ):
                 raise ValueError("The testing template's certificate resolver is unavailable.")
     raw = select_testing_route_raw(raw, host, points, testing_route_external_middlewares(template))
     matches = possible_lane_routers(raw, host, points)
@@ -765,11 +758,36 @@ def compile_unavailable_testing_route(
             observation_sha256=observation_sha256,
             applied=bool(matches),
             static_sha256=hashlib.sha256(static_configuration.encode()).hexdigest(),
-            declaration_sha256=hashlib.sha256(configured_compose.encode()).hexdigest()
+            declaration_sha256=canonical_json_sha256(declared_testing_ingress(configured_compose))
             if recorded_template is None
             else "",
         ),
     )
+
+
+def declared_testing_ingress(configured_compose: str) -> dict[str, str]:
+    """The provider's web ingress labels, independent of rendering and application data."""
+    try:
+        configuration = yaml.safe_load(configured_compose)
+    except yaml.YAMLError as error:
+        raise ValueError("The provider's testing ingress declaration is malformed.") from error
+    services = configuration.get("services") if isinstance(configuration, dict) else None
+    web = services.get("web") if isinstance(services, dict) else None
+    supplied = web.get("labels") if isinstance(web, dict) else None
+    if isinstance(supplied, list):
+        if any(not isinstance(item, str) or "=" not in item for item in supplied):
+            raise ValueError("The declared testing router labels are incomplete.")
+        pairs = [item.split("=", 1) for item in supplied]
+        if len({pair[0] for pair in pairs}) != len(pairs):
+            raise ValueError("The declared testing router labels conflict.")
+        labels = dict(pairs)
+    elif isinstance(supplied, dict) and all(
+        isinstance(key, str) and isinstance(value, str) for key, value in supplied.items()
+    ):
+        labels = supplied
+    else:
+        raise ValueError("The provider's converted testing router declaration is unavailable.")
+    return {key: value for key, value in labels.items() if key.startswith("traefik.")}
 
 
 def observe_testing_route(
@@ -798,7 +816,11 @@ def observe_testing_route(
             expected = {**expected, "service": plan.route_id + "@file"}
             observed["service"] = str(observed.get("service") or "").removesuffix("@file") + "@file"
             if router.get("status") != "enabled" or observed != expected:
-                raise ValueError("Owned testing router differs from the admitted lane route.")
+                if router.get("status") == "enabled":
+                    raise TestingRouteAuthorityChanged(
+                        "Owned testing router differs from the admitted lane route."
+                    )
+                raise TestingRoutePending("Owned testing router is not enabled.")
         elif (
             name not in plan.legacy_routers
             or router.get("status") != "enabled"
@@ -806,7 +828,9 @@ def observe_testing_route(
             or applied_service_backend(raw, str(router.get("service") or ""), "docker")
             != (plan.legacy_backend or plan.old_backend)
         ):
-            raise ValueError("Foreign or changed testing router appeared.")
+            if router.get("status") == "enabled":
+                raise TestingRouteAuthorityChanged("Foreign or changed testing router appeared.")
+            raise TestingRoutePending("The current testing router is not enabled.")
     present = names & set(matches)
     if not present:
         if owned_document is not None:

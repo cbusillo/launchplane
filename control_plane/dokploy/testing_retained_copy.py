@@ -39,7 +39,6 @@ def retained_inventory_sha256(containers: list[dict[str, Any]], spec: dict[str, 
     members = [
         {
             "id": item["Id"],
-            "state": item.get("State"),
             "labels": item.get("Config", {}).get("Labels"),
             "mounts": item.get("Mounts"),
         }

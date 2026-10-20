@@ -143,7 +143,7 @@ class InventoryTests(unittest.TestCase):
         self.assertTrue(target_reads)
         for detail in target_reads:
             self.assertEqual(detail["path"], "/api/postgres.one")
-            self.assertEqual(detail["query"], {"postgresId": "database-only"})
+            self.assertEqual(detail["query"], {TARGET_COLLECTIONS["postgres"][1]: "database-only"})
         self.assertNotIn("never-output", location.model_dump_json())
 
     def test_owned_placement_cannot_use_partial_membership_or_a_moved_target(self) -> None:

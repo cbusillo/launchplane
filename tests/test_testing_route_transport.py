@@ -1036,6 +1036,81 @@ class TestingRouteTransportTests(unittest.TestCase):
         self.assertFalse(self.route_file.exists())
         self.assertEqual(self.remote_modes.count("publish_v2"), writes)
 
+    def test_unavailable_inverse_survives_a_reappeared_old_process_and_docker_routes(self) -> None:
+        for present in (False, True):
+            with self.subTest(present=present):
+                fixture = TestingRouteTransportTests()
+                fixture.setUp()
+                try:
+                    old = deepcopy(fixture.containers["old"])
+                    before = fixture.unavailable_route(preserve_file=present)
+                    fixture.publish(fixture.plan.new_backend, None)
+                    old["State"]["Status"] = "running"
+                    old["Id"] = "redeployed-old"
+                    fixture.containers["old"] = old
+                    for section in ("routers", "services", "middlewares"):
+                        fixture.raw[section].update(deepcopy(fixture.fixture.raw[section]))
+                    frame = fixture.client.read()
+                    self.assertEqual(frame["old_availability"], "available")
+                    with self.assertRaises(transport.TestingRouteWriteNotStarted):
+                        fixture.publish(fixture.plan.new_backend, None)
+                    self.assertEqual(
+                        fixture.publish_attempt(
+                            fixture.fenced_attempt(None), fixture.plan.new_backend
+                        ),
+                        "applied",
+                    )
+                    self.assertEqual(
+                        fixture.route_file.read_text() if fixture.route_file.exists() else None,
+                        before,
+                    )
+                    frame = fixture.client.read()
+                    self.assertEqual(frame["old_availability"], "available")
+                    self.assertEqual(frame["owned_file"], before)
+                finally:
+                    fixture.doCleanups()
+
+    def test_unavailable_inverse_preserves_a_foreign_owned_file(self) -> None:
+        self.unavailable_route()
+        self.publish(self.plan.new_backend, None)
+        foreign = json.dumps({"http": {"routers": {}, "services": {}}})
+        self.route_file.write_text(foreign)
+        writes = self.remote_modes.count("publish_v2")
+        with self.assertRaises(ValueError):
+            self.publish(None, self.plan.new_backend)
+        self.assertEqual(self.route_file.read_text(), foreign)
+        self.assertEqual(self.remote_modes.count("publish_v2"), writes)
+
+    def test_declared_nonredirecting_http_and_https_routes_reach_the_actual_writer(self) -> None:
+        self.unavailable_route()
+        frame = self.client.read()
+        points = tuple(yaml.safe_load(self.static)["entryPoints"])
+        for tls in (False, True):
+            with self.subTest(tls=tls):
+                labels = {
+                    "traefik.enable": "true",
+                    "traefik.docker.network": "dokploy-network",
+                    "traefik.http.routers.testing.rule": f"Host(`{self.plan.host}`)",
+                    "traefik.http.routers.testing.entrypoints": points[-1] if tls else points[0],
+                    "traefik.http.routers.testing.tls": str(tls).lower(),
+                }
+                self.plan = compile_unavailable_testing_route(
+                    product=self.plan.product,
+                    context=self.plan.context,
+                    host=self.plan.host,
+                    new_backend=self.plan.new_backend,
+                    raw=frame["raw"],
+                    file_content=None,
+                    observation_sha256="c" * 64,
+                    static_configuration=self.static,
+                    configured_compose=yaml.safe_dump({"services": {"web": {"labels": labels}}}),
+                )
+                self.client.payload["entrypoints"] = self.plan.public_entrypoints
+                self.publish(self.plan.new_backend, None)
+                self.assertTrue(self.route_file.exists())
+                self.publish(None, self.plan.new_backend)
+                self.assertFalse(self.route_file.exists())
+
     def test_incomplete_host_inventory_never_proves_absence(self) -> None:
         command = self.command
 
@@ -1078,7 +1153,9 @@ class TestingRouteTransportTests(unittest.TestCase):
             configured_compose=configured,
         )
         self.client.payload["entrypoints"] = self.plan.public_entrypoints
-        self.assertEqual(set(self.plan.public_entrypoints), {"web", "websecure"})
+        self.assertEqual(
+            set(self.plan.public_entrypoints), set(yaml.safe_load(self.static)["entryPoints"])
+        )
         self.publish(self.plan.new_backend, None)
         self.publish(None, self.plan.new_backend)
         self.assertFalse(self.route_file.exists())

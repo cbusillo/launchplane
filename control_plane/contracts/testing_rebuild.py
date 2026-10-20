@@ -119,39 +119,46 @@ class TestingCopyReadiness(FrozenRecord):
     evidence_id: str = Field(min_length=1)
 
 
-class TestingUnavailableReadback(FrozenRecord):
+class TestingOriginalIngressReadback(FrozenRecord):
+    """The original file is preserved/restored; no claim about serving health."""
+
+    route_id: str
+    host: str
+    slot_id: str
+    observed_at: datetime
+    plan_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    observation_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    preimage_sha256: str = Field(pattern=r"^(absent|[a-f0-9]{64})$")
+    exact_preimage: Literal[True] = True
+    predecessor_state: Literal["stopped", "absent", "present"]
+
+
+class TestingStopExclusionReadback(FrozenRecord):
+    """An original stop is durably excluded, irrespective of current old health."""
+
     copy_id: str
     host: str
     observed_at: datetime
-    observation_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    evidence_id: str = Field(min_length=1)
+    not_dispatched: Literal[True] = True
     runtime_identity: None = None
-    healthy: Literal[False] = False
 
 
-TestingRetirementRecovery = TestingCopyReadiness | TestingUnavailableReadback
+TestingRetirementRecovery = TestingCopyReadiness | TestingStopExclusionReadback
 
 
 class TestingRouteObservation(FrozenRecord):
     route_id: str
     host: str
-    target_url: str | None
+    target_url: str
     slot_id: str
-    applied: bool
-    authoritative_router_count: Literal[0, 1]
+    applied: Literal[True]
+    authoritative_router_count: Literal[1]
     observed_at: datetime
     public_health: HealthcheckEvidence | None = None
-    unavailable: bool = Field(default=False, exclude_if=lambda value: not value)
 
-    @model_validator(mode="after")
-    def validate_route(self) -> Self:
-        if self.applied != bool(self.authoritative_router_count):
-            raise ValueError("Applied routing must agree with its observed authority count.")
-        if self.unavailable:
-            if self.target_url is not None or self.public_health is not None:
-                raise ValueError("An unavailable predecessor cannot claim a backend or health.")
-        elif not self.applied or not self.target_url:
-            raise ValueError("Serving routing requires its applied backend.")
-        return self
+
+TestingRouteReadback = TestingRouteObservation | TestingOriginalIngressReadback
 
 
 TestingRebuildStep = Literal[
@@ -174,7 +181,7 @@ class TestingRebuildRecord(FrozenRecord):
     ended_at: datetime | None = None
     preparation: TestingCopyReceipt | None = None
     readiness: TestingCopyReadiness | None = None
-    route: TestingRouteObservation | None = None
+    route: TestingRouteReadback | None = None
     retirement_started: bool = False
     publication_started: bool = False
     rollback_started: bool = False
@@ -186,8 +193,10 @@ class TestingRebuildRecord(FrozenRecord):
         "candidate_route_not_applied",
         "candidate_private_readiness_failed",
         "testing_rebuild_admission_changed",
+        "testing_predecessor_changed",
     ] = ""
     admission_refusal: str = Field(default="", exclude_if=lambda value: not value)
+    predecessor_change: str = Field(default="", exclude_if=lambda value: not value)
     preparation_failure_evidence: str = Field(default="", exclude_if=lambda value: not value)
     private_readiness_failed_at: datetime | None = Field(
         default=None, exclude_if=lambda value: value is None
@@ -214,14 +223,32 @@ class TestingRebuildRecord(FrozenRecord):
         if (
             isinstance(self.plan.old, UnavailableTestingPredecessor)
             and self.retirement_recovery is not None
-            and (
-                not isinstance(self.retirement_recovery, TestingUnavailableReadback)
-                or self.retirement_recovery.observation_sha256 != self.plan.old.observation_sha256
-            )
+            and (not isinstance(self.retirement_recovery, TestingStopExclusionReadback))
         ):
             raise ValueError(
-                "Unavailable retirement recovery must retain its original inventory witness."
+                "Unavailable retirement recovery requires the original undispatched-stop receipt."
             )
+        if isinstance(self.route, TestingOriginalIngressReadback) and (
+            not isinstance(self.plan.old, UnavailableTestingPredecessor)
+            or (self.route.route_id, self.route.host, self.route.slot_id)
+            != (self.plan.route_id, self.plan.host, self.plan.old.copy_id)
+            or self.route.observation_sha256 != self.plan.old.observation_sha256
+            or self.route.plan_digest != self.plan.digest
+        ):
+            raise ValueError("Original ingress readback belongs to another admitted preimage.")
+        if bool(self.predecessor_change) != (self.error == "testing_predecessor_changed") or (
+            self.predecessor_change
+            and (
+                not isinstance(self.plan.old, UnavailableTestingPredecessor)
+                or self.step in {"preparing", "prepared", "complete"}
+                or self.step == "failed"
+                and (
+                    not self.rollback_started
+                    or not isinstance(self.route, TestingOriginalIngressReadback)
+                )
+            )
+        ):
+            raise ValueError("Predecessor drift requires a latched original inverse and readback.")
         for stamp in (
             self.began_at,
             self.updated_at,

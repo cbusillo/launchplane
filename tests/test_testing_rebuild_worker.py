@@ -25,6 +25,7 @@ from control_plane.contracts.testing_rebuild import (
     REBUILD_ROUTE,
     TestingCopy,
     TestingRebuildRecord,
+    TestingOriginalIngressReadback,
 )
 from control_plane.contracts.testing_candidate import (
     TestingCandidateAllocation,
@@ -38,18 +39,27 @@ from control_plane.dokploy.testing_route import (
 )
 from control_plane.dokploy.testing_route_transport import DokployTestingRouteTransport
 from control_plane.dokploy import post_deploy, api, source, compose
-from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
+from control_plane.dokploy.native_copy_stream import (
+    NativeSourceUnavailable,
+    NativeSourceAuthorizationDenied,
+)
 from control_plane.dokploy_inventory import TARGET_COLLECTIONS
 from control_plane import testing_candidate_application as candidate_application
 from control_plane.testing_candidate_allocation import candidate_resources
 from control_plane.testing_candidate_runtime import candidate_runtime_inputs
 from control_plane.testing_local_credentials import generation_bundle
+from control_plane.testing_rebuild_storage import RecordTestingRebuildStore
+from control_plane.testing_route_effects import TestingRouteEffects, ROUTE_PREPARING
 from control_plane.testing_serving_copy import (
     published_testing_copy,
     render_maintained_testing_copy,
 )
 from control_plane.odoo_testing_usage import OdooTestingUsage
-from control_plane.testing_publication_storage import read_snapshot, publish as publication_write
+from control_plane.testing_publication_storage import (
+    read_snapshot,
+    read_publication,
+    publish as publication_write,
+)
 from tests import test_testing_publication as publication_tests
 from tests import test_testing_route as route_tests
 from tests.test_testing_rebuild_service import exercise_published_copy_maintenance
@@ -316,7 +326,11 @@ class NativeTestingWorkerTests(unittest.TestCase):
             )
             if transport is not None
             else deepcopy(self.raw),
-            "owned_file": json.dumps(self.owned) if self.owned is not None else None,
+            "owned_file": json.dumps(self.owned, sort_keys=True, separators=(",", ":"))
+            if self.owned is not None
+            else None,
+            "old_availability": self.retained.get("availability", "available"),
+            "old_inventory_sha256": self.retained.get("inventory_sha256"),
             "old_endpoints": tuple(endpoints),
             "file_sha256": canonical_json_sha256(self.owned)
             if self.owned is not None
@@ -435,7 +449,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
                 }
             }
         )
-        self.enterContext(
+        self.converted_compose = self.enterContext(
             patch.object(compose, "fetch_dokploy_converted_compose_file", return_value=configured)
         )
         self.intent = self.capture_function(
@@ -455,6 +469,243 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertEqual(self.current().target_id.target_id, self.fixture.candidate.compose_id)
         self.assertTrue(self.retained["stopped"])
 
+    def start_original(self) -> None:
+        self.retained.update(availability="available", stopped=False, web_stopped=False)
+        original = route_tests.TestingRouteTests()
+        original.setUp()
+        for router in original.raw["routers"].values():
+            router["rule"] = f"Host(`{self.fixture.route.host}`)"
+        for section in ("routers", "services", "middlewares"):
+            self.raw[section].update(deepcopy(original.raw[section]))
+
+    def checkpoint(self) -> TestingRebuildRecord:
+        return RecordTestingRebuildStore(self.store).load_operation(
+            product=self.operation.product,
+            context=self.operation.context,
+            operation_id=self.operation.operation_id,
+        )
+
+    def test_unavailable_declaration_ignores_unrelated_compose_and_rendering_changes(self) -> None:
+        self.admit_unavailable("absent")
+        configuration = yaml.safe_load(self.converted_compose.return_value)
+        configuration["services"]["web"].update(
+            image="example.invalid/new-build:fixture",
+            environment={"UNRELATED_APPLICATION_SETTING": "changed"},
+        )
+        self.converted_compose.return_value = yaml.safe_dump(configuration, sort_keys=False)
+        result = self.execute()
+        self.assertEqual(result.deploy_status, "pass", result.error_code)
+        self.assertEqual(self.effects, ["switch-new"])
+
+    def test_unavailable_declaration_read_failures_do_not_invent_source_drift(self) -> None:
+        self.admit_unavailable("absent")
+        for response in ("services: [", "services: {}"):
+            with self.subTest(response=response):
+                with patch.object(
+                    compose, "fetch_dokploy_converted_compose_file", return_value=response
+                ):
+                    with self.assertRaises(service.NativeTestingRebuildPending):
+                        self.execute()
+                self.assertEqual(self.effects, [])
+                self.assertEqual(self.current(), self.fixture.before)
+        denied = api.DokployRequestFailed(
+            method="GET",
+            path="/api/compose.getConvertedCompose",
+            status_code=403,
+            detail="Fixture refused declaration read",
+        )
+        with patch.object(compose, "fetch_dokploy_converted_compose_file", side_effect=denied):
+            with self.assertRaises(NativeSourceAuthorizationDenied):
+                self.execute()
+        self.assertEqual(self.effects, [])
+        self.assertEqual(self.current(), self.fixture.before)
+
+    def test_started_predecessor_ends_preparation_without_inventing_old_health(self) -> None:
+        self.admit_unavailable("stopped")
+        prepare = service.NativeTestingRebuildExecution.prepare
+
+        def changed(executor: Any, plan: Any) -> Any:
+            receipt = prepare(executor, plan)
+            self.start_original()
+            return receipt
+
+        with patch.object(service.NativeTestingRebuildExecution, "prepare", new=changed):
+            result = self.execute()
+        self.assertEqual(result.error_code, "testing_rebuild_admission_changed")
+        self.assertEqual(result.health_status, "skipped")
+        self.assertEqual(self.effects, [])
+        self.assertEqual(self.current(), self.fixture.before)
+        readback = self.checkpoint().route
+        self.assertIsInstance(readback, TestingOriginalIngressReadback)
+        assert isinstance(readback, TestingOriginalIngressReadback)
+        self.assertEqual(readback.predecessor_state, "present")
+        self.assertNotIn("public_health", readback.model_dump())
+
+    def test_started_predecessor_after_cutover_restores_only_the_original_ingress_and_metadata(
+        self,
+    ) -> None:
+        for boundary in ("switch", "publication", "retirement"):
+            with self.subTest(boundary=boundary):
+                fixture = NativeTestingWorkerTests()
+                fixture.database_url = self.database_url
+                try:
+                    for name, function in self.real_route_transport.items():
+                        fixture.enterContext(
+                            patch.object(DokployTestingRouteTransport, name, new=function)
+                        )
+                    fixture.enterContext(
+                        patch.object(service, "capture_rebuild_intent", new=self.capture_function)
+                    )
+                    fixture.setUp()
+                    fixture.admit_unavailable("stopped")
+                    switch = fixture.switch
+                    publication = service.NativeTestingRebuildExecution.publish
+                    retirement = service.NativeTestingRebuildExecution.retire_old
+
+                    def changed_switch(*args: Any, **kwargs: Any) -> str:
+                        outcome = switch(*args, **kwargs)
+                        if args[1] is not None:
+                            fixture.start_original()
+                        return outcome
+
+                    def changed_publication(
+                        executor: Any, plan: Any, desired: Any, **kwargs: Any
+                    ) -> None:
+                        publication(executor, plan, desired, **kwargs)
+                        if desired == plan.new:
+                            fixture.start_original()
+
+                    def changed_retirement(executor: Any, plan: Any) -> None:
+                        fixture.start_original()
+                        retirement(executor, plan)
+
+                    with (
+                        patch.object(
+                            DokployTestingRouteTransport, "publish", side_effect=changed_switch
+                        )
+                        if boundary == "switch"
+                        else patch.object(
+                            service.NativeTestingRebuildExecution,
+                            "publish" if boundary == "publication" else "retire_old",
+                            new=changed_publication
+                            if boundary == "publication"
+                            else changed_retirement,
+                        )
+                    ):
+                        result = fixture.execute()
+                    self.assertEqual(result.error_code, "testing_predecessor_changed")
+                    self.assertEqual(result.health_status, "skipped")
+                    self.assertEqual(fixture.effects, ["switch-new", "switch-old"])
+                    self.assertEqual(fixture.current(), fixture.fixture.before)
+                    self.assertIsNone(fixture.owned)
+                    readback = fixture.checkpoint().route
+                    self.assertIsInstance(readback, TestingOriginalIngressReadback)
+                    assert isinstance(readback, TestingOriginalIngressReadback)
+                    self.assertEqual(readback.predecessor_state, "present")
+                    self.assertTrue(
+                        any(name.endswith("@docker") for name in fixture.raw["routers"])
+                    )
+                finally:
+                    fixture.doCleanups()
+
+    def test_predecessor_abort_wait_is_latched_and_never_reopens_forward_work(self) -> None:
+        self.admit_unavailable("absent")
+        switch = self.switch
+
+        def lost(*args: Any, **kwargs: Any) -> str:
+            switch(*args, **kwargs)
+            self.start_original()
+            raise NativeSourceUnavailable("fixture lost original forward reply")
+
+        with patch.object(DokployTestingRouteTransport, "publish", side_effect=lost):
+            with self.assertRaises(service.NativeTestingRebuildPending):
+                self.execute()
+        with patch.object(DokployTestingRouteTransport, "settle_attempt", return_value="busy"):
+            with self.assertRaises(service.NativeTestingRebuildPending):
+                self.execute()
+        latched = self.checkpoint()
+        self.assertEqual(latched.error, "testing_predecessor_changed")
+        self.assertEqual(latched.step, "switching")
+        self.assertTrue(latched.predecessor_change)
+        # A later stopped/absent observation cannot erase the abort decision.
+        self.retained.update(availability="absent", stopped=True, web_stopped=True)
+        for section in ("routers", "services", "middlewares"):
+            self.raw[section] = {
+                name: value
+                for name, value in self.raw[section].items()
+                if not name.endswith("@docker")
+            }
+        result = self.execute()
+        self.assertEqual(result.error_code, "testing_predecessor_changed")
+        self.assertEqual(self.effects, ["switch-new", "switch-old"])
+        self.assertEqual(self.checkpoint().predecessor_change, latched.predecessor_change)
+
+    def test_predecessor_abort_seals_an_original_route_that_never_dispatched_a_writer(self) -> None:
+        for preparing in (False, True):
+            with self.subTest(preparing=preparing):
+                fixture = NativeTestingWorkerTests()
+                fixture.database_url = self.database_url
+                try:
+                    for name, function in self.real_route_transport.items():
+                        fixture.enterContext(
+                            patch.object(DokployTestingRouteTransport, name, new=function)
+                        )
+                    fixture.enterContext(
+                        patch.object(service, "capture_rebuild_intent", new=self.capture_function)
+                    )
+                    fixture.setUp()
+                    fixture.admit_unavailable("absent")
+                    original_switch = service.NativeTestingRebuildExecution.switch
+                    original_apply = TestingRouteEffects.apply
+                    leases: list[Any] = []
+
+                    def before_writer(
+                        executor: Any, plan: Any, previous: Any, desired: Any, **kwargs: Any
+                    ) -> None:
+                        if desired == plan.new and not kwargs.get("abort_forward"):
+                            fixture.start_original()
+                            raise service.NativeTestingRebuildAdmissionChanged(
+                                "Fixture changed before route reservation."
+                            )
+                        original_switch(executor, plan, previous, desired, **kwargs)
+
+                    def preparing_writer(effect: Any, lease: Any) -> Any:
+                        if effect.inverse:
+                            return original_apply(effect, lease)
+                        leases.append(lease)
+                        lease.checkpoint_effect(ROUTE_PREPARING)
+                        fixture.start_original()
+                        raise service.NativeTestingRebuildAdmissionChanged(
+                            "Fixture changed during route preparation."
+                        )
+
+                    with (
+                        patch.object(TestingRouteEffects, "apply", new=preparing_writer)
+                        if preparing
+                        else patch.object(
+                            service.NativeTestingRebuildExecution, "switch", new=before_writer
+                        )
+                    ):
+                        result = fixture.execute()
+                    self.assertEqual(result.error_code, "testing_predecessor_changed")
+                    self.assertEqual(fixture.effects, [])
+                    self.assertEqual(fixture.current(), fixture.fixture.before)
+                    forward = fixture.store.read_idempotency_record(
+                        scope=REBUILD_SCOPE,
+                        route_path=REBUILD_ROUTE + ":effect",
+                        idempotency_key=fixture.operation.operation_id
+                        + ":route:"
+                        + fixture.fixture.candidate.namespace,
+                    )
+                    assert forward is not None
+                    self.assertEqual(forward.state, "completed")
+                    self.assertTrue(forward.response_payload["route_write_not_started"])
+                    for lease in leases:
+                        with self.assertRaises(RuntimeError):
+                            lease.checkpoint_effect("late-original-write")
+                finally:
+                    fixture.doCleanups()
+
     def test_absent_predecessor_rebuild_preserves_unknown_old_storage_custody(self) -> None:
         self.admit_unavailable("absent")
         before = dict(self.retained)
@@ -465,14 +716,87 @@ class NativeTestingWorkerTests(unittest.TestCase):
 
     def test_unavailable_declaration_change_ends_before_candidate_execution(self) -> None:
         self.admit_unavailable("absent")
+        changed = yaml.safe_load(self.converted_compose.return_value)
+        changed["services"]["web"]["labels"]["traefik.http.routers.testing.rule"] = (
+            "Host(`changed.example.invalid`)"
+        )
         with (
-            patch.object(compose, "fetch_dokploy_converted_compose_file", return_value="{}"),
+            patch.object(
+                compose,
+                "fetch_dokploy_converted_compose_file",
+                return_value=yaml.safe_dump(changed),
+            ),
             patch.object(service, "prepare_candidate_application") as prepare,
         ):
             result = self.execute()
         self.assertEqual(result.deploy_status, "fail")
         prepare.assert_not_called()
         self.assertEqual(self.effects, [])
+        self.assertEqual(self.current(), self.fixture.before)
+
+    def test_unavailable_host_exclusion_does_not_invent_a_health_failure(self) -> None:
+        from control_plane.dokploy.testing_route_transport import TestingRouteWriteNotStarted
+
+        self.admit_unavailable("stopped")
+
+        def refused(plan: Any, backend: Any, **kwargs: Any) -> Any:
+            kwargs["dispatch_guard"](self.start_original)
+            raise TestingRouteWriteNotStarted("Fixture host saw the old copy start.")
+
+        with patch.object(DokployTestingRouteTransport, "publish", side_effect=refused) as writer:
+            result = self.execute()
+        self.assertEqual(result.error_code, "candidate_route_not_applied")
+        self.assertEqual(result.health_status, "skipped")
+        self.assertEqual(writer.call_count, 1)
+        self.assertEqual(self.effects, [])
+        self.assertEqual(self.current(), self.fixture.before)
+
+    def test_complete_unavailable_provider_drift_ends_admission_after_preparation(self) -> None:
+        self.admit_unavailable("stopped")
+        prepare = service.NativeTestingRebuildExecution.prepare
+
+        def changed(executor: Any, plan: Any) -> Any:
+            receipt = prepare(executor, plan)
+            self.old_provider["serverId"] = "different-registered-server"
+            return receipt
+
+        with patch.object(service.NativeTestingRebuildExecution, "prepare", new=changed):
+            result = self.execute()
+        self.assertEqual(result.error_code, "testing_rebuild_admission_changed")
+        self.assertEqual(result.health_status, "skipped")
+        self.assertEqual(self.effects, [])
+        self.assertEqual(self.current(), self.fixture.before)
+        self.assertIsNone(self.owned)
+
+    def test_unavailable_planned_inverse_checks_metadata_under_its_transaction_lock(self) -> None:
+        self.admit_unavailable("absent")
+        self.fail_public = True
+        publish = publication_write
+        raced: dict[str, Any] = {}
+
+        def changed_before_transaction(*args: Any, **kwargs: Any) -> Any:
+            if kwargs.get("inverse") and not raced:
+                target = self.current().target
+                changed = target.model_copy(
+                    update={"env": {**target.env, "FIXTURE_CONCURRENT_EDIT": "preserved"}}
+                )
+                self.store.write_dokploy_target_record(changed)
+                raced.update(key=kwargs["plan"].key, target=changed)
+            return publish(*args, **kwargs)
+
+        with patch.object(service, "publish", side_effect=changed_before_transaction):
+            with self.assertRaises(service.NativeTestingRebuildPending):
+                self.execute()
+        receipt = read_publication(self.store, raced["key"])
+        assert receipt is not None
+        self.assertEqual(receipt.state, "planned")
+        self.assertEqual(self.current().target, raced["target"])
+        self.assertIsNone(self.owned)
+        self.assertEqual(self.checkpoint().step, "rolling_back")
+        self.store.write_dokploy_target_record(self.fixture.before.target)
+        result = self.execute()
+        self.assertEqual(result.error_code, "candidate_public_health_failed")
+        self.assertEqual(self.effects, ["switch-new", "switch-old"])
         self.assertEqual(self.current(), self.fixture.before)
 
     def test_unavailable_predecessor_reports_missing_registered_placement(self) -> None:
