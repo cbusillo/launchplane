@@ -221,7 +221,7 @@ def register_odoo_upgrade_rehearsal_routes(
                         "business_host_frozen",
                         "resources_preserved",
                     ):
-                        public_record.pop(field)
+                        public_record.pop(field, None)
                 result = {
                     **public_record,
                     **{

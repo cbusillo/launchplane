@@ -634,6 +634,7 @@ class IncompleteRetirementHostTests(unittest.TestCase):
             )
         )
         self.spec["mode"] = "apply"
+        (self.root / "incomplete-retirement.pending").write_bytes(b"interrupted receipt")
         applied = self.fixture.run_host(self.spec)
         self.assertTrue(applied["disposed"])
         self.assertEqual(applied["binding_sha256"], plan["binding_sha256"])
@@ -653,8 +654,10 @@ class IncompleteRetirementHostTests(unittest.TestCase):
         }
         self.fixture.fixture.containers["web"]["Id"] = "recreated-private-web"
         self.spec["mode"] = "apply"
+        (self.root / "incomplete-retirement-refusals.pending").write_bytes(b"interrupted refusal")
         with self.assertRaises(RuntimeError):
             self.fixture.run_host(self.spec)
+        self.assertTrue((self.root / "incomplete-retirement-refusals.json").is_file())
         self.assertFalse((self.root / "incomplete-retirement.json").exists())
         self.assertTrue((self.root / "raw/database.dump").exists())
         self.assertFalse(any(call[0] in {"stop", "rm"} for call in self.calls))
@@ -858,5 +861,21 @@ class IncompleteRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(readback.json()["result"]["state"], "retired")
             self.assertEqual(readback.json()["result"]["copies"], [])
             self.assertEqual(host.call_count, calls)
+            payload["action"] = "execute"
+            with patch.object(
+                OdooRehearsalAdapter,
+                "native_readback",
+                return_value={
+                    "completed": False,
+                    "host_observation_unavailable": True,
+                    "host_observation_reason": "provider_transport_unavailable",
+                },
+            ):
+                original_readback = await request(
+                    fixture.app, "POST", route, payload=payload, headers=headers
+                )
+            self.assertEqual(original_readback.status_code, 202, original_readback.text)
+            self.assertFalse(original_readback.json()["result"]["completed"])
+            self.assertNotIn("resources_preserved", original_readback.json()["result"])
         self.assertEqual(fixture.authority(), before)
         self.assertFalse(fixture.store.list_held_provider_target_reservations())

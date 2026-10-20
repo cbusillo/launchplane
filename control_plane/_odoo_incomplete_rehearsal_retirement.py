@@ -25,6 +25,11 @@ def incomplete_retirement_locked(spec,root):
         'attempt':spec['attempt_sha256'],'resources':spec['resources_binding_sha256']}
     progress=record.get('incomplete_retirement') or {}
     review=progress.get('reviewed_plan_sha256')
+    def retirement_save(path,payload):
+        # The original flock excludes all writers. A killed save may leave its
+        # uncommitted temporary file; never let it strand the admitted attempt.
+        path.with_suffix('.pending').unlink(missing_ok=True)
+        save(path,payload)
     if refusals.is_symlink(): raise RuntimeError('Aliased refusal receipt')
     rejected={'binding':binding,'reviews':[]}
     if refusals.exists():
@@ -97,10 +102,10 @@ def incomplete_retirement_locked(spec,root):
         if progress.get('host_binding_sha256')!=binding_sha256:
             if not marker.exists():
                 rejected['reviews']=sorted(set(rejected['reviews'])|{review})
-                save(refusals,rejected)
+                retirement_save(refusals,rejected)
             raise RuntimeError('Reviewed inventory changed; obtain a fresh dry-run')
         if not marker.exists():
-            save(marker,{'manifest':manifest,'reviewed_plan_sha256':review})
+            retirement_save(marker,{'manifest':manifest,'reviewed_plan_sha256':review})
         if remaining:
             docker('stop',*sorted(remaining))
             docker('rm',*sorted(remaining))
