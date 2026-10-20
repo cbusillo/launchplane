@@ -14894,30 +14894,12 @@ class RealPostgresNativeTestingWorkerTests(unittest.TestCase):
 
     def run_worker_case(self, name: str) -> None:
         from tests import test_testing_rebuild_worker as worker_tests
-        from tests.test_route_binding_refresh_controller import _controller_policy
 
         with _head_postgres_database() as url:
             fixture = worker_tests.NativeTestingWorkerTests()
             fixture.database_url = url
             fixture.setUp()
             try:
-                # PostgreSQL reloads DB policy for service requests; the injected
-                # HTTP test policy alone is only sufficient for SQLite fixtures.
-                payload = _controller_policy(mode="apply").model_dump()
-                payload["github_actions"][1].update(
-                    products=[fixture.operation.product], contexts=[fixture.operation.context]
-                )
-                policy = LaunchplaneAuthzPolicy.model_validate(payload)
-                digest = authz_policy_sha256(policy)
-                seeded = fixture.store.seed_authz_policy_if_absent(
-                    LaunchplaneAuthzPolicyRecord(
-                        record_id=build_authz_policy_record_id(revision=1, policy_sha256=digest),
-                        source="test:native-testing-worker",
-                        updated_at=fixture.operation.updated_at,
-                        policy=policy,
-                    )
-                )
-                self.assertEqual(seeded.policy_sha256, digest)
                 getattr(fixture, name)()
             finally:
                 fixture.doCleanups()

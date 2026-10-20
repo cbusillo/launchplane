@@ -52,14 +52,15 @@ async def refresh_testing_binding_http(
     allowed: bool = True,
     mode: str = "apply",
 ) -> Response:
-    payload = _controller_policy(
-        mode="apply" if mode == "apply" else "plan", include_binding_authority=allowed
-    ).model_dump()
-    if allowed:
-        payload["github_actions"][1].update(products=[product], contexts=[context])
+    policy = _controller_policy(
+        mode="apply" if mode == "apply" else "plan",
+        include_binding_authority=allowed,
+        products=(product,),
+        contexts=(context,),
+    )
     app = create_launchplane_fastapi_app(
         verifier=_StubVerifier(_identity()),
-        authz_policy=LaunchplaneAuthzPolicy.model_validate(payload),
+        authz_policy=policy,
         record_store_factory=lambda: store,
         control_plane_root_path=root,
     )
@@ -372,8 +373,9 @@ class NativeTestingRouteRefreshTests(unittest.IsolatedAsyncioTestCase):
             self.store.write_route_binding_record(
                 self.binding().model_copy(update={"product": product, "context": context})
             )
-        rules = _controller_policy(mode="apply").model_dump()
-        rules["github_actions"][1].update(products=products, contexts=contexts)
+        policy = _controller_policy(
+            mode="apply", products=tuple(products), contexts=tuple(contexts)
+        )
         events: list[tuple[str, str]] = []
         reconcile = self.store.reconcile_route_binding_record
         observations = 0
@@ -417,7 +419,7 @@ class NativeTestingRouteRefreshTests(unittest.IsolatedAsyncioTestCase):
 
         app = create_launchplane_fastapi_app(
             verifier=_StubVerifier(_identity()),
-            authz_policy=LaunchplaneAuthzPolicy.model_validate(rules),
+            authz_policy=policy,
             record_store_factory=lambda: self.store,
         )
         with (

@@ -70,6 +70,8 @@ def _controller_policy(
     *,
     mode: str,
     include_binding_authority: bool = True,
+    products: tuple[str, ...] = ("example-product",),
+    contexts: tuple[str, ...] = ("example-testing",),
 ) -> LaunchplaneAuthzPolicy:
     controller_action = f"route_binding.odoo_testing_refresh.{mode}"
     binding_action = "route_binding.apply" if mode == "apply" else "route_binding.read"
@@ -93,8 +95,8 @@ def _controller_policy(
                     "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
                 ],
                 "event_names": ["pull_request"],
-                "products": ["example-product"],
-                "contexts": ["example-testing"],
+                "products": list(products),
+                "contexts": list(contexts),
                 "instances": ["testing"],
                 "actions": [binding_action],
             }

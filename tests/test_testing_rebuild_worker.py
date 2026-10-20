@@ -1846,6 +1846,29 @@ class NativeTestingWorkerTests(unittest.TestCase):
         import asyncio
         from tests.test_native_testing_route_refresh import refresh_testing_binding_http
 
+        from control_plane.contracts.authz_policy_record import (
+            LaunchplaneAuthzPolicyRecord,
+            authz_policy_sha256,
+            build_authz_policy_record_id,
+        )
+        from tests.test_route_binding_refresh_controller import _controller_policy
+
+        # Only refresh scenarios own this policy. Other worker scenarios seed
+        # their own identities, including the cancellation boundary.
+        policy = _controller_policy(
+            mode="apply", products=(self.operation.product,), contexts=(self.operation.context,)
+        )
+        digest = authz_policy_sha256(policy)
+        seeded = self.store.seed_authz_policy_if_absent(
+            LaunchplaneAuthzPolicyRecord(
+                record_id=build_authz_policy_record_id(revision=1, policy_sha256=digest),
+                source="test:native-testing-refresh",
+                updated_at=self.operation.updated_at,
+                policy=policy,
+            )
+        )
+        self.assertEqual(seeded.policy_sha256, digest)
+
         current = self.current()
         publication = published_testing_copy(
             self.store, product=self.operation.product, context=self.operation.context
