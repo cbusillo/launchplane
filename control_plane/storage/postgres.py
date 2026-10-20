@@ -8,6 +8,7 @@ from control_plane.route_binding_reconcile import (
 )
 from control_plane.contracts.merge_train_stall import MergeTrainStallRecord
 from control_plane.contracts.odoo_upgrade_rehearsal import OdooUpgradeRehearsalRecord
+from control_plane.contracts.testing_route_refresh import TestingRouteRefreshSources
 from control_plane.contracts.testing_rebuild import TestingRebuildRecord
 from control_plane.contracts.testing_candidate import TestingCandidateAllocation
 
@@ -599,6 +600,7 @@ from control_plane.service_human_auth import (
 from control_plane.storage import landing_authority
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.product_authority_bundle import (
+    ProductContextOwnershipError,
     PublicHostAuthorityBusy,
     SecretCopySourceConflictError,
     SecretDeliveryConflictError,
@@ -28092,7 +28094,14 @@ class PostgresRecordStore(HumanSessionStore):
         mutation: DbOnlyMutationRequest,
         reviewed_sources: RouteBindingReviewSources | None = None,
         reviewed_product: str = "",
+        native_sources: TestingRouteRefreshSources | None = None,
     ) -> RouteBindingReconcileWriteResult:
+        if native_sources is not None and (
+            expected_record is None
+            or (replacement_record.product, replacement_record.context, replacement_record.instance)
+            != (native_sources.product, native_sources.context, "testing")
+        ):
+            raise ValueError("Native route refresh requires its original testing binding.")
         if expected_record is not None and (
             expected_record.product,
             expected_record.context,
@@ -28122,7 +28131,7 @@ class PostgresRecordStore(HumanSessionStore):
         reservation_insert_error: IntegrityError | None = None
         with self._session_factory() as session:
             self._begin_serialized_write(session)
-            if reviewed_sources is not None:
+            if reviewed_sources is not None or native_sources is not None:
                 self._lock_product_authority_bundle_write(session)
             self._lock_route_binding_write(
                 session,
@@ -28159,11 +28168,12 @@ class PostgresRecordStore(HumanSessionStore):
                     mutation=mutation,
                     reviewed_sources=reviewed_sources,
                     reviewed_product=reviewed_product,
+                    native_sources=native_sources,
                 )
 
         with self._session_factory() as session:
             self._begin_serialized_write(session)
-            if reviewed_sources is not None:
+            if reviewed_sources is not None or native_sources is not None:
                 self._lock_product_authority_bundle_write(session)
             self._lock_route_binding_write(
                 session,
@@ -28248,6 +28258,7 @@ class PostgresRecordStore(HumanSessionStore):
                 mutation=mutation,
                 reviewed_sources=reviewed_sources,
                 reviewed_product=reviewed_product,
+                native_sources=native_sources,
             )
 
     def _reconcile_route_binding_locked(
@@ -28262,7 +28273,19 @@ class PostgresRecordStore(HumanSessionStore):
         mutation: DbOnlyMutationRequest,
         reviewed_sources: RouteBindingReviewSources | None = None,
         reviewed_product: str = "",
+        native_sources: TestingRouteRefreshSources | None = None,
     ) -> RouteBindingReconcileWriteResult:
+        if native_sources is not None:
+            from control_plane.native_testing_route_refresh import (
+                check_native_testing_route_sources,
+            )
+
+            try:
+                check_native_testing_route_sources(self, session, native_sources)
+            except (RouteBindingSourceChanged, ProductContextOwnershipError):
+                session.delete(reservation_row)
+                session.commit()
+                return RouteBindingReconcileWriteResult(status="changed")
         if reviewed_sources is not None:
             self._check_browser_route_binding_sources(
                 session=session,

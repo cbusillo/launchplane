@@ -11,7 +11,11 @@ from control_plane.odoo_testing_restore import generation_snapshot_matches
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_candidate_allocation import candidate_resources
 from control_plane.testing_candidate_runtime import candidate_runtime_fences
-from control_plane.testing_publication_storage import read_publication, read_snapshot
+from control_plane.testing_publication_storage import (
+    read_publication,
+    read_snapshot,
+    testing_binding_authority,
+)
 
 
 def published_testing_copy(
@@ -83,12 +87,9 @@ def published_testing_copy(
         or snapshot.target.public_hosts
         or snapshot.target.pending_public_host_effects
         or binding is None
-        or binding.provider_target.target_name != candidate.namespace
         or binding.source.source_versions.get("testing_route") != plan.route.digest
         or candidate_custody != candidate
-        or binding.domains != plan.after.binding.domains
-        or binding.ingress != plan.after.binding.ingress
-        or binding.tls.owner != plan.after.binding.tls.owner
+        or testing_binding_authority(binding) != testing_binding_authority(plan.after.binding)
         or snapshot.runtime is None
     ):
         raise ValueError("Serving testing copy no longer matches its publication custody.")
