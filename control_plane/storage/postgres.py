@@ -892,6 +892,14 @@ class ExistingMutationReservationLookupResult(NamedTuple):
     observed_at: str
 
 
+class MutationEffectAdmissionRefusedError(Exception):
+    """Internal checkpoint refusal; earlier operation effects remain unclassified."""
+
+    def __init__(self, cause: Exception) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
+
+
 class MutationReservationUpdateResult(NamedTuple):
     status: MutationReservationUpdateStatus
     record: LaunchplaneIdempotencyRecord | None = None
@@ -5904,20 +5912,30 @@ class PostgresRecordStore(HumanSessionStore):
         reservation_reader: Callable[[], LaunchplaneIdempotencyRecord],
         *,
         authority_checkpoint: Callable[[], None] | None = None,
+        effect_admission_checkpoint: Callable[[], None] | None = None,
     ) -> Iterator[None]:
-        """Fence evidence and authority writes to one captured execution identity."""
+        """Fence writes to one execution; authority_checkpoint gates bundle publication.
+
+        effect_admission_checkpoint opts into new-effect admission only. Receipt
+        capture leaves it unset so acknowledged identities survive authority drift.
+        """
         previous = getattr(self._provider_evidence_context, "reservation_reader", None)
         previous_checkpoint = getattr(self._provider_evidence_context, "authority_checkpoint", None)
+        previous_effect_checkpoint = getattr(
+            self._provider_evidence_context, "effect_admission_checkpoint", None
+        )
         # Capture stable lease identity before any row lock. Nested publication
         # can already own that row while the heartbeat waits on it under its mutex.
         expected = reservation_reader().model_copy()
         self._provider_evidence_context.reservation_reader = lambda: expected
         self._provider_evidence_context.authority_checkpoint = authority_checkpoint
+        self._provider_evidence_context.effect_admission_checkpoint = effect_admission_checkpoint
         try:
             yield
         finally:
             self._provider_evidence_context.reservation_reader = previous
             self._provider_evidence_context.authority_checkpoint = previous_checkpoint
+            self._provider_evidence_context.effect_admission_checkpoint = previous_effect_checkpoint
 
     def _lock_landing_authority(self, session: Any, *names: str) -> None:
         if self.database_dialect_name != "postgresql":
@@ -8863,6 +8881,16 @@ class PostgresRecordStore(HumanSessionStore):
             from control_plane.production_recipient_budget import require_budget_checkpoint
 
             require_budget_checkpoint(self, session, reservation)
+            effect_admission_checkpoint = getattr(
+                self._provider_evidence_context, "effect_admission_checkpoint", None
+            )
+            if effect_admission_checkpoint is not None:
+                # Reads only, before locking the reservation against its heartbeat.
+                # Decision insertion uses this same authority transaction lock.
+                try:
+                    effect_admission_checkpoint()
+                except Exception as error:
+                    raise MutationEffectAdmissionRefusedError(error) from error
             row = session.scalar(
                 self._idempotency_statement(
                     scope=reservation.scope,
@@ -23964,12 +23992,20 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
     def create_release_review_decision_record_if_absent(
-        self, record: ReleaseReviewDecisionRecord
+        self,
+        record: ReleaseReviewDecisionRecord,
+        *,
+        validate_before_insert: Callable[[], None] | None = None,
     ) -> ReleaseReviewDecisionRecord:
         """Insert once; a competing replica receives the stored decision unchanged."""
         with self._session_factory() as session:
             self._begin_serialized_write(session)
             self._lock_product_authority_bundle_write(session)
+            existing = session.get(LaunchplaneReleaseReviewDecisionRow, record.record_id)
+            if existing is not None:
+                return ReleaseReviewDecisionRecord.model_validate(existing.payload)
+            if validate_before_insert is not None:
+                validate_before_insert()
             row = LaunchplaneReleaseReviewDecisionRow(
                 record_id=record.record_id,
                 product=record.product,

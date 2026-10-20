@@ -29,6 +29,7 @@ from control_plane.provider_operations import (
     provider_operation_response_payload as _provider_operation_response_payload,
 )
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.generic_web_source_qualification import GenericWebPromotionSourceRefused
 
 from control_plane.workflows.generic_web_deploy import normalize_generic_web_artifact_id
 from control_plane.workflows.generic_web_deploy_provider import (
@@ -191,12 +192,17 @@ class GenericWebProdPromotionProviderMutationAdapter:
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
         provider_effect_attempted = False
+        automatic_rollback = False
+
+        def validate_current_authority() -> None:
+            if self._validate_before_checkpoint is not None and not automatic_rollback:
+                self._validate_before_checkpoint()
 
         def checkpoint_provider_effect(phase: str) -> None:
-            nonlocal provider_effect_attempted
+            nonlocal provider_effect_attempted, automatic_rollback
             # Recovery must finish even if acceptance is withdrawn after deployment.
-            if self._validate_before_checkpoint is not None and not phase.startswith("rollback_"):
-                self._validate_before_checkpoint()
+            automatic_rollback = phase.startswith("rollback_")
+            validate_current_authority()
             lease.checkpoint_effect(phase)
             provider_effect_attempted = True
 
@@ -207,7 +213,8 @@ class GenericWebProdPromotionProviderMutationAdapter:
                 if not isinstance(lease, ProviderEvidenceLease):
                     raise ValueError("Promotion requires an evidence-bound provider lease.")
                 evidence_guard = self._record_store.provider_evidence_guard(
-                    lease.evidence_reservation
+                    lease.evidence_reservation,
+                    effect_admission_checkpoint=validate_current_authority,
                 )
             else:
                 evidence_guard = nullcontext()
@@ -231,6 +238,10 @@ class GenericWebProdPromotionProviderMutationAdapter:
                 raise ProviderMutationRejectedError(error) from error
             if provider_effect_attempted:
                 raise ProviderMutationUnknownError(str(error)) from error
+            if isinstance(error, GenericWebPromotionSourceRefused):
+                # The shared runner alone releases a reservation, and only when
+                # its authoritative effect checkpoint proves nothing dispatched.
+                raise ProviderMutationRejectedError(error) from error
             if self._settle_pre_effect_failure:
                 return ProviderMutationOutcome(
                     response_status_code=202,

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Callable, Literal, Protocol, cast
 
 import click
+from control_plane.generic_web_source_qualification import GenericWebPromotionSourceRefused
 from control_plane.generic_web_testing_inputs import TestingInputSafetyRefused
 from control_plane.provider_operations import ProviderMutationUnknownError
 from control_plane.lane_movement import (
@@ -486,6 +487,7 @@ def execute_generic_web_deploy(
     provider_effect_checkpoint: Callable[[str], None] | None = None,
     before_records_commit: Callable[[], None] | None = None,
     before_failure_records_commit: Callable[[], None] | None = None,
+    before_deployment_records: Callable[[], None] | None = None,
     recorded_artifact: bool = False,
     rollback: bool = False,
     proved_pre_image_retry: bool = False,
@@ -583,6 +585,7 @@ def execute_generic_web_deploy(
                 rollback=rollback,
                 checkpoint=provider_effect_checkpoint or (lambda _phase: None),
                 before_records_commit=before_records_commit or (lambda: None),
+                before_deployment_records=before_deployment_records,
             )
             return cutover_deploy_result(
                 deployment,
@@ -605,6 +608,7 @@ def execute_generic_web_deploy(
             provider_effect_checkpoint=provider_effect_checkpoint,
             before_records_commit=before_records_commit,
             before_failure_records_commit=before_failure_records_commit,
+            before_deployment_records=before_deployment_records,
             recorded_artifact=recorded_artifact,
             rollback=rollback,
             proved_pre_image_retry=proved_pre_image_retry,
@@ -629,6 +633,7 @@ def _execute_generic_web_deploy_unserialized(
     provider_effect_checkpoint: Callable[[str], None] | None = None,
     before_records_commit: Callable[[], None] | None = None,
     before_failure_records_commit: Callable[[], None] | None = None,
+    before_deployment_records: Callable[[], None] | None = None,
     recorded_artifact: bool = False,
     rollback: bool = False,
     proved_pre_image_retry: bool = False,
@@ -676,10 +681,11 @@ def _execute_generic_web_deploy_unserialized(
     fallback_request: ShipRequest | None = None
     post_deploy_update = PostDeployUpdateEvidence()
     verified_build_evidence: dict[str, str] = {}
+    prior_attempt_exists = True
     try:
         prior_attempt = record_store.read_deployment_record(record_id)
     except FileNotFoundError:
-        pass
+        prior_attempt_exists = False
     else:
         # A refusal before dispatch must retain the original attempt's receipts.
         verified_build_evidence = dict(prior_attempt.runtime_source)
@@ -942,6 +948,8 @@ def _execute_generic_web_deploy_unserialized(
         )
         if application_lifecycle is not None:
             application_lifecycle.capture()
+            if before_deployment_records is not None:
+                before_deployment_records()
             post_deploy_update = PostDeployUpdateEvidence(
                 evidence=application_lifecycle.snapshot.evidence(),
             )
@@ -1056,6 +1064,14 @@ def _execute_generic_web_deploy_unserialized(
                 },
             )
     except (click.ClickException, TestingInputSafetyRefused) as exc:
+        if (
+            isinstance(exc, GenericWebPromotionSourceRefused)
+            and not prior_attempt_exists
+            and not provider_effect_attempted
+        ):
+            # This first admission refusal precedes dispatch. Do not turn it
+            # into a failed deployment that prevents the same accepted retest.
+            raise
         if isinstance(exc, GenericWebProviderDeploymentFailed):
             provider_deployment_observation = exc.observation
         if application_lifecycle is not None:

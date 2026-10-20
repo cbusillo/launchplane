@@ -462,6 +462,12 @@ the first migrated provider routes; both require an `Idempotency-Key` and a
 database store. Provider-specific observation and reconciliation stay behind
 the adapter boundary.
 
+An admission refusal inside the atomic effect checkpoint reaches the adapter as
+its original domain error, so it can settle a pre-effect refusal normally. The
+checkpoint refusal says only that this proposed dispatch did not start; any
+earlier effect marker and the exact reservation identity still govern release.
+Storage failures and lost leases retain their existing reconciliation behavior.
+
 The `launchplane_idempotency_active_reconciliation_idx` partial unique index
 fences each provider target while its reservation is `running` or
 `reconcile_required`, regardless of caller idempotency key, using the promoted

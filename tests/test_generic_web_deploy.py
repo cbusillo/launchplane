@@ -971,11 +971,12 @@ class GenericWebDeployTests(unittest.TestCase):
     def test_execute_generic_web_deploy_writes_pass_record_for_profile_lane(self) -> None:
         store = _GenericWebDeployStore(_profile())
         deploy_provider = _FakeGenericWebDeployProvider()
+        request = _request().model_copy(update={"source_git_ref": "a" * 40})
 
         result = execute_generic_web_deploy(
             control_plane_root=Path("."),
             record_store=store,
-            request=_request(),
+            request=request,
             deploy_provider=deploy_provider,
         )
 
@@ -992,7 +993,7 @@ class GenericWebDeployTests(unittest.TestCase):
         self.assertEqual(len(store.inventories), 1)
         self.assertEqual(store.inventories[0].context, "sellyouroutboard-testing")
         self.assertEqual(store.inventories[0].instance, "testing")
-        self.assertEqual(store.inventories[0].source_git_ref, "abc123")
+        self.assertEqual(store.inventories[0].source_git_ref, request.source_git_ref)
         self.assertEqual(
             store.inventories[0].deployment_record_id,
             store.deployments[0].record_id,
@@ -1007,8 +1008,29 @@ class GenericWebDeployTests(unittest.TestCase):
             runtime_identity.artifact_id,
             "ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
         )
-        self.assertEqual(runtime_identity.source_git_ref, "abc123")
+        self.assertEqual(runtime_identity.source_git_ref, request.source_git_ref)
         self.assertEqual(store.inventories[0].runtime_identity, runtime_identity)
+        from control_plane.generic_web_source_qualification import (
+            qualified_generic_web_source_inventory,
+        )
+
+        qualified = qualified_generic_web_source_inventory(
+            store=store,
+            profile=store.profile,
+            lane=next(lane for lane in store.profile.lanes if lane.instance == "testing"),
+        )
+        self.assertEqual(qualified.deployment_record_id, result.deployment_record_id)
+        self.assertEqual(qualified.runtime_identity, runtime_identity)
+        from control_plane.release_review import ReleaseReviewStore, release_version
+
+        # The real producer fake supplies this branch's three record readers.
+        version = release_version(
+            store=cast(ReleaseReviewStore, cast(object, store)),
+            profile=store.profile,
+            instance="testing",
+        )
+        self.assertEqual(version.artifact_id, runtime_identity.artifact_id)
+        self.assertEqual(version.source_commit, runtime_identity.source_git_ref)
         artifact_identity = store.deployments[0].artifact_identity
         assert artifact_identity is not None
         self.assertEqual(
