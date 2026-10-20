@@ -2383,9 +2383,9 @@ def _execute_target_replacement_with_checkpoint(
                 ),
             }
         )
-    except DurableOperationAuthorizationDeniedError as error:
+    except (DurableOperationAuthorizationDeniedError, ScheduleMaterializationTooLarge) as error:
         logging.warning(
-            "Odoo stable target replacement operation %s was denied at a provider boundary: %s",
+            "Odoo stable target replacement operation %s was refused at a provider boundary: %s",
             operation.operation_id,
             error,
         )
@@ -2413,15 +2413,11 @@ def _execute_target_replacement_with_checkpoint(
             isinstance(error, DrillPrerequisite)
             and error.code == "testing_storage_reconciliation_pending"
         )
-        rebuild_pending = (
-            operation.is_native_testing_rebuild
-            and not isinstance(error, ScheduleMaterializationTooLarge)
-            and (
-                isinstance(error, (NativeTestingRebuildPending, TimeoutError))
-                or (
-                    isinstance(record_store, PostgresRecordStore)
-                    and native_rebuild_effects_started(record_store, operation)
-                )
+        rebuild_pending = operation.is_native_testing_rebuild and (
+            isinstance(error, (NativeTestingRebuildPending, TimeoutError))
+            or (
+                isinstance(record_store, PostgresRecordStore)
+                and native_rebuild_effects_started(record_store, operation)
             )
         )
         rebuild_message = (

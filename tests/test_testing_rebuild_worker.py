@@ -51,43 +51,6 @@ from tests.test_testing_rebuild_service import exercise_published_copy_maintenan
 class NativeTestingWorkerTests(unittest.TestCase):
     database_url = ""
 
-    def test_schedule_refusal_keeps_typed_cause_and_original_native_custody(self) -> None:
-        from control_plane.contracts.provider_schedule import ScheduleMaterializationTooLarge
-
-        refusal = ScheduleMaterializationTooLarge()
-
-        def interrupted(executor: service.NativeTestingRebuildExecution) -> None:
-            executor.lease.checkpoint_effect("candidate_allocated")
-            raise refusal
-
-        with (
-            patch.object(
-                service.NativeTestingRebuildExecution, "run", autospec=True, side_effect=interrupted
-            ),
-            self.assertRaises(ScheduleMaterializationTooLarge),
-        ):
-            self.execute()
-        original = self.store.read_idempotency_record(
-            scope=REBUILD_SCOPE,
-            route_path=REBUILD_ROUTE,
-            idempotency_key=self.operation.operation_id,
-        )
-        assert original is not None
-        with (
-            patch.object(service.NativeTestingRebuildExecution, "run", side_effect=refusal),
-            self.assertRaises(ScheduleMaterializationTooLarge),
-        ):
-            self.execute()
-        retained = self.store.read_idempotency_record(
-            scope=REBUILD_SCOPE,
-            route_path=REBUILD_ROUTE,
-            idempotency_key=self.operation.operation_id,
-        )
-        assert retained is not None
-        self.assertEqual(retained.provider_effect_phase, original.provider_effect_phase)
-        self.assertEqual(retained.provider_effect_started_at, original.provider_effect_started_at)
-        self.assertEqual(retained.state, "reconcile_required")
-
     def setUp(self) -> None:
         self.fixture = publication_tests.TestingPublicationTests()
         self.fixture.database_url = self.database_url
@@ -2246,12 +2209,13 @@ class NativeTestingWorkerTests(unittest.TestCase):
             post_deploy_status="pass",
             health_status="pass",
         )
-        for response in (
-            success,
-            service.NativeTestingRebuildPending("fixture observation pending"),
-            RuntimeError("Fixture execution lock lost after dispatch"),
-            KeyError("Fixture malformed frame after dispatch"),
-            ScheduleMaterializationTooLarge(),
+        for response, effects_started in (
+            (success, False),
+            (service.NativeTestingRebuildPending("fixture observation pending"), True),
+            (RuntimeError("Fixture execution lock lost after dispatch"), True),
+            (KeyError("Fixture malformed frame after dispatch"), True),
+            (ScheduleMaterializationTooLarge(), True),
+            (ScheduleMaterializationTooLarge(), False),
         ):
             with (
                 self.subTest(pending=isinstance(response, Exception)),
@@ -2270,7 +2234,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
                 patch.object(
                     worker,
                     "native_rebuild_effects_started",
-                    return_value=isinstance(response, Exception),
+                    return_value=effects_started,
                 ),
                 patch.object(
                     self.store,
@@ -2295,9 +2259,11 @@ class NativeTestingWorkerTests(unittest.TestCase):
             legacy.assert_not_called()
             terminal = complete.call_args.kwargs["record"]
             if isinstance(response, ScheduleMaterializationTooLarge):
-                self.assertEqual(terminal.status, "fail")
+                self.assertEqual(
+                    terminal.status, "reconciliation_required" if effects_started else "fail"
+                )
                 self.assertEqual(terminal.error_code, response.code)
-                self.assertTrue(terminal.finished_at)
+                self.assertEqual(bool(terminal.finished_at), not effects_started)
                 continue
             self.assertEqual(
                 terminal.status, "pending" if isinstance(response, Exception) else "pass"

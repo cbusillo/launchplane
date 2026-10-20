@@ -1883,8 +1883,11 @@ it does not erase those effects or establish that the whole attempt was unused.
 Resource preparation likewise renders and validates before advancing its effect
 checkpoint. Qualified original-key continuations retain their prior effect
 phase and timestamp if rendering refuses before the next provider write.
-The native rebuild worker retains the same typed cause and original reservation
-instead of requeueing a deterministic size refusal as an observation wait.
+The native rebuild worker retains the same typed cause and original reservation.
+An operation with earlier native effects stays `reconciliation_required` for
+the supported explicit same-operation resume by its original authorized caller;
+it cannot be claimed automatically. A refusal without effects can finish as a
+failure. Historical caller restrictions on resume still apply.
 
 The receiver verifies whole artifacts and rejects archive traversal, symlinks,
 hardlinks and special files. Only content-addressed Odoo attachment files enter

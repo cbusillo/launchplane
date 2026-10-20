@@ -187,6 +187,9 @@ class TestingCandidateTests(unittest.TestCase):
         return {"composeId": self.placement[2]}
 
     def resource_schedule(self, **kwargs: object) -> dict[str, str]:
+        callback = kwargs.get("before_provider_mutation")
+        if callable(callback):
+            callback("schedule_upsert")
         self.assert_serving_unchanged()
         record = self.store.read_testing_candidate(self.allocation.namespace)
         assert record is not None
@@ -317,8 +320,31 @@ class TestingCandidateTests(unittest.TestCase):
         self.assertEqual(self.request.call_count, 1)
         self.assert_serving_unchanged()
 
+    def test_storage_render_refusal_preserves_previous_effect_checkpoint(self) -> None:
+        from control_plane.contracts.provider_schedule import ScheduleMaterializationTooLarge
+
+        def refused(**kwargs: object) -> None:
+            raise ScheduleMaterializationTooLarge()
+
+        self.storage.side_effect = refused
+        with self.assertRaises(ScheduleMaterializationTooLarge):
+            self.prepare()
+        record = self.store.read_testing_candidate(self.allocation.namespace)
+        assert record is not None
+        self.assertEqual(record.effect, "compose_id")
+        self.lease.checkpoint_effect.assert_called_with("compose_id")
+        self.lease.checkpoint_effect.reset_mock()
+        with self.assertRaises(ScheduleMaterializationTooLarge):
+            self.prepare()
+        self.lease.checkpoint_effect.assert_not_called()
+        self.assertEqual(self.store.read_testing_candidate(record.namespace), record)
+
     def test_storage_timeout_recovers_by_readback_without_recreating(self) -> None:
-        self.storage.side_effect = TimeoutError("schedule reply lost")
+        def lost(**kwargs: object) -> dict[str, str]:
+            self.resource_schedule(**kwargs)
+            raise TimeoutError("schedule reply lost")
+
+        self.storage.side_effect = lost
         with self.assertRaises(TimeoutError):
             self.prepare()
         self.storage.side_effect = self.resource_schedule

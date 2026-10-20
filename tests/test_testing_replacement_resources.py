@@ -221,7 +221,7 @@ class TestingResourceScheduleTests(unittest.TestCase):
         from uuid import uuid4
         from control_plane.odoo_testing_resources import OdooTestingResources
         from control_plane.testing_replacement_resources import run_resource_schedule
-        from control_plane.dokploy import post_deploy
+        from control_plane.dokploy import api, post_deploy
 
         resources = OdooTestingResources(
             product="example",
@@ -339,6 +339,54 @@ class TestingResourceScheduleTests(unittest.TestCase):
                             candidate_server_id="new-server",
                         )
                     run.assert_not_called()
+            from control_plane.contracts.provider_schedule import ScheduleMaterializationTooLarge
+
+            guard = Mock()
+            dispatch = Mock()
+
+            def execute_schedule(**kwargs: Any) -> dict[str, str]:
+                before = kwargs["before_provider_mutation"]
+                before("schedule_upsert")
+                dispatch.assert_called_once()
+                upsert_checks = guard.call_count
+                before("schedule_trigger")
+                dispatch.assert_called_once()
+                self.assertGreater(guard.call_count, upsert_checks)
+                return evidence
+
+            run.side_effect = execute_schedule
+            run_resource_schedule(
+                root=Path("."),
+                store=store,
+                resources=resources,
+                mode="prepare",
+                checkpoint=guard,
+                before_provider_mutation=dispatch,
+                candidate_target=candidate,
+                candidate_server_id="new-server",
+            )
+            dispatch.assert_called_once()
+            run.reset_mock()
+            guard.reset_mock()
+            dispatch.reset_mock()
+            oversized = resources.model_copy(
+                update={"operation_id": "x" * api.DOKPLOY_SCHEDULE_MATERIALIZATION_LIMIT_BYTES}
+            )
+            with self.assertRaises(ScheduleMaterializationTooLarge):
+                run_resource_schedule(
+                    root=Path("."),
+                    store=store,
+                    resources=oversized,
+                    mode="prepare",
+                    checkpoint=guard,
+                    before_provider_mutation=dispatch,
+                    candidate_target=candidate,
+                    candidate_server_id="new-server",
+                )
+            guard.assert_not_called()
+            dispatch.assert_not_called()
+            run.assert_not_called()
+            run.side_effect = None
             run.reset_mock()
             with self.assertRaises(ValueError):
                 run_resource_schedule(
