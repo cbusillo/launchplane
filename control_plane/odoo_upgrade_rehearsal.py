@@ -24,6 +24,11 @@ from control_plane.contracts.odoo_upgrade_rehearsal import (
     RehearsalPrerequisite,
 )
 from control_plane.dokploy import api, source
+from control_plane.dokploy.network_capacity import (
+    BridgeNetworkCapacityRefused,
+    require_bridge_network_capacity,
+)
+from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 from control_plane.odoo_testing_restore import (
     encoded_restore_source,
     FRESH_TESTING_LOCAL_CREDENTIAL_KEYS,
@@ -1340,6 +1345,16 @@ class OdooRehearsalAdapter:
                 require_unaliased_rehearsal(self.store, fresh)
 
             if self.request.action == "prepare" and not self._continue_prepare_host:
+                # Refuse before generating credentials, recording a create
+                # checkpoint, or allocating any provider resources. An original
+                # partial placement keeps its existing observation/custody rules.
+                host, token = source.read_dokploy_config(control_plane_root=self.root)
+                try:
+                    require_bridge_network_capacity(
+                        host=host, token=token, server_id=record.server_id, required_networks=1
+                    )
+                except (BridgeNetworkCapacityRefused, NativeSourceAuthorizationDenied) as error:
+                    raise ProviderMutationRejectedError(error) from None
                 if recovering_project:
                     checkpoint()
                     if (

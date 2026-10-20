@@ -9,6 +9,7 @@ import runpy
 import urllib.error
 from urllib.parse import quote
 
+from control_plane.contracts.host_network_capacity import HOST_BRIDGE_NETWORK_FAILURE_MESSAGES
 from control_plane.contracts.odoo_upgrade_rehearsal import (
     ODOO_UPGRADE_REHEARSAL_ROUTE,
     ODOO_UPGRADE_REHEARSAL_PREFLIGHT_ROUTE,
@@ -186,7 +187,10 @@ def main() -> int:
         except (ValueError, TypeError, AttributeError):
             trace = ""
             code = "rehearsal_unavailable"
-        refused = error.code == 409 and code in REHEARSAL_PUBLIC_FAILURE_MESSAGES
+        refused = error.code == 409 and (
+            code in REHEARSAL_PUBLIC_FAILURE_MESSAGES
+            or code in HOST_BRIDGE_NETWORK_FAILURE_MESSAGES
+        )
         print(
             json.dumps(
                 {
