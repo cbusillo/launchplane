@@ -1,12 +1,13 @@
 """Repository/Client identity without runtime authority, through retained surfaces."""
 
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import closing
+from contextlib import closing, nullcontext
+from itertools import chain, repeat
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import threading
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import DEFAULT, Mock, patch
 
 import click
 from pydantic import ValidationError
@@ -46,6 +47,7 @@ from control_plane.workflows.generic_web_deploy import (
     resolve_generic_web_profile_lane,
 )
 from control_plane.product_promotion_http import resolve_product_promotion_target
+from control_plane.release_invitation import publish_release_invitation
 from control_plane.workflows.product_onboarding import plan_product_onboarding_authority_bundle
 from control_plane.workflows.public_ingress_monitor import discover_public_ingress_monitor_targets
 from tests.http_app_test_support import _asgi_request, _product_config_policy
@@ -62,6 +64,7 @@ from tests.support.auth import StubVerifier, identity
 from tests.support.profiles import product_profile_payload
 from tests.support.stores import sqlite_database_url
 from tests.test_github_app_webhook import _inventory
+from tests.test_authz_administration_read import _database_app
 
 NOW = "2026-10-20T20:00:00Z"
 ROUTE = "/v1/product-onboarding/apply"
@@ -362,9 +365,106 @@ class NonruntimeProductTests(unittest.TestCase):
             self.assertEqual(overview.warnings, ())
             self.assertFalse(any(action.enabled for action in overview.available_actions))
             self.assertEqual(discover_public_ingress_monitor_targets(store), ())
+            with (
+                patch(
+                    "control_plane.release_invitation.launchplane_public_origin_from_env",
+                    return_value="https://launchplane.example.invalid",
+                ),
+                patch(
+                    "control_plane.release_invitation.release_version",
+                    side_effect=AssertionError("An inert product has no runtime release"),
+                ),
+            ):
+                self.assertFalse(
+                    publish_release_invitation(
+                        store=store,
+                        control_plane_root=Path(directory),
+                        profile=profile.model_copy(
+                            update={
+                                "owner": ProductOwnerProfile(
+                                    github_login="example-client", github_id="1234"
+                                )
+                            }
+                        ),
+                    )
+                )
 
 
 class NonruntimeProductHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_inert_plan_uses_existing_plan_authority_without_apply(self) -> None:
+        payload: dict[str, object] = {
+            "product": "launchplane",
+            "mode": "dry_run",
+            "manifest": inert_manifest(),
+        }
+        for action, expected in (
+            ("product_onboarding.plan", 202),
+            ("generic_web_onboarding.plan", 403),
+        ):
+            with (
+                self.subTest(action=action),
+                TemporaryDirectory() as directory,
+                closing(
+                    PostgresRecordStore(
+                        database_url=sqlite_database_url(Path(directory) / "db.sqlite")
+                    )
+                ) as store,
+            ):
+                store.ensure_schema()
+                app = create_launchplane_fastapi_app(
+                    verifier=StubVerifier(identity()),
+                    authz_policy=_product_config_policy(
+                        action=action, product="launchplane", context="launchplane"
+                    ),
+                    record_store_factory=lambda: store,
+                )
+                headers = {"Authorization": "Bearer valid-token"}
+                dry = await _asgi_request(app, "POST", ROUTE, headers=headers, payload=payload)
+                self.assertEqual(dry.status_code, expected, dry.text)
+                apply = await _asgi_request(
+                    app,
+                    "POST",
+                    ROUTE,
+                    headers=headers,
+                    payload={**payload, "mode": "apply", "reviewed_plan_sha256": "0" * 64},
+                )
+                self.assertEqual(apply.status_code, 403, apply.text)
+                self.assertEqual(store.list_product_profile_records(), ())
+                self.assertEqual(store.list_physical_provider_target_records(), ())
+                self.assertEqual(store.list_runtime_environment_records(), ())
+                self.assertEqual(store.list_secret_bindings(), ())
+        with _database_app(LaunchplaneAuthzPolicy(schema_version=2), director_agent=True) as (
+            store,
+            _,
+            app,
+        ):
+            headers = {"Authorization": "Bearer reader-token"}
+            with patch.object(
+                store,
+                "write_idempotency_record",
+                side_effect=AssertionError("A dry run cannot persist an apply receipt"),
+            ):
+                dry = await _asgi_request(
+                    app,
+                    "POST",
+                    ROUTE,
+                    headers={**headers, "Idempotency-Key": "director-plan"},
+                    payload=payload,
+                )
+            self.assertEqual(dry.status_code, 202, dry.text)
+            apply = await _asgi_request(
+                app,
+                "POST",
+                ROUTE,
+                headers=headers,
+                payload={**payload, "mode": "apply", "reviewed_plan_sha256": "0" * 64},
+            )
+            self.assertEqual(apply.status_code, 403, apply.text)
+            self.assertEqual(store.list_product_profile_records(), ())
+            self.assertEqual(store.list_physical_provider_target_records(), ())
+            self.assertEqual(store.list_runtime_environment_records(), ())
+            self.assertEqual(store.list_secret_bindings(), ())
+
     async def test_reviewed_registration_is_write_free_until_apply_and_replays(self) -> None:
         with (
             TemporaryDirectory() as directory,
@@ -444,6 +544,36 @@ class NonruntimeProductHttpTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(replay.json()["original_trace_id"], accepted.json()["trace_id"])
             self.assertEqual(replay.json()["result"], accepted.json()["result"])
+            for missed_profile in (False, True):
+                with (
+                    self.subTest(missed_profile=missed_profile),
+                    patch.object(
+                        store,
+                        "read_idempotency_record",
+                        side_effect=chain((None,), repeat(DEFAULT)),
+                        wraps=store.read_idempotency_record,
+                    ),
+                    patch.object(
+                        store,
+                        "read_product_profile_record",
+                        side_effect=chain((None,), repeat(DEFAULT)),
+                        wraps=store.read_product_profile_record,
+                    )
+                    if missed_profile
+                    else nullcontext(),
+                ):
+                    raced_replay = await _asgi_request(
+                        app,
+                        "POST",
+                        ROUTE,
+                        headers={**headers, "Idempotency-Key": "register"},
+                        payload=apply,
+                    )
+                self.assertEqual(raced_replay.status_code, 202, raced_replay.text)
+                self.assertEqual(
+                    raced_replay.json()["original_trace_id"], accepted.json()["trace_id"]
+                )
+                self.assertEqual(raced_replay.json()["result"], accepted.json()["result"])
             readback = store.read_product_profile_record("desktop-tool")
             self.assertEqual(readback.repository, "example/desktop-tool")
             self.assertFalse(readback.is_managed_runtime)
@@ -529,10 +659,14 @@ class NonruntimeProductHttpTests(unittest.IsolatedAsyncioTestCase):
 
             # Reuse the existing full-profile service for an inert record's lifecycle.
             current = store.read_product_profile_record(readback.product)
+            # Standing setup; the separate signed-human test proves its service authority.
+            current = current.model_copy(update={"release_on_acceptance": "director_standing"})
+            store.write_product_profile_record(current)
             converted = {
                 **product_profile_payload(current.product),
                 "repository": current.repository,
                 "owner": current.owner.model_dump(mode="json"),
+                "release_on_acceptance": current.release_on_acceptance,
             }
             refused = await _asgi_request(
                 app, "POST", "/v1/product-profiles", headers=headers, payload=converted
@@ -580,6 +714,7 @@ class NonruntimeProductHttpTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 new_profile.release_on_acceptance, inert_profile().release_on_acceptance
             )
+            self.assertNotEqual(new_profile.release_on_acceptance, retired.release_on_acceptance)
             self.assertEqual(store.read_product_profile_record(current.product), retired)
             new_mapping = await _asgi_request(
                 app, "GET", "/v1/repo-product-mapping", headers=headers

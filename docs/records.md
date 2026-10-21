@@ -907,7 +907,9 @@ ambiguous active repositories are named in `ambiguous_repositories` and omitted
 from the mapping, including its work-request fallback. Other entries stay available.
 
 Register a new non-runtime product through `POST /v1/product-onboarding/apply`
-using the existing `product_onboarding.apply` authorization. Send `product:
+using the existing `product_onboarding.plan` authorization for the dry run
+(existing apply-authorized callers may also plan), and `product_onboarding.apply`
+for apply. Send `product:
 "launchplane"`, `mode: "dry_run"` and a `manifest` containing the new product key,
 display name, one `owner/repository`, explicit classification and `driver_id: ""`.
 Optional `repository_id` and `repository_owner_id` must be supplied together. Supply no

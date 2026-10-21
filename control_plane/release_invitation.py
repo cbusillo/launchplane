@@ -636,6 +636,7 @@ def publish_release_invitation(
     if (
         not origin
         or not profile.is_active
+        or not profile.is_managed_runtime
         or profile.production_use == "prelaunch"
         or profile.release_on_acceptance == "director_standing"
         or not profile.owner.is_set

@@ -13929,15 +13929,7 @@ def create_launchplane_fastapi_app(
                 code="product_onboarding_review_required",
                 message="Register a non-runtime product through reviewed product onboarding.",
             )
-        try:
-            profile_store.write_product_profile_record(profile)
-        except ProductProfileConflictError as error:
-            raise _launchplane_http_error(
-                status_code=409,
-                trace_id=trace_id,
-                code="product_profile_changed",
-                message=str(error),
-            ) from error
+        profile_store.write_product_profile_record(profile)
         response = accepted_evidence_response(
             trace_id=trace_id,
             records={"product_profile": profile.product},
@@ -18664,9 +18656,16 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Request payload failed validation.",
             ) from error
+        inert_dry_run = (
+            onboarding_request.mode == "dry_run"
+            and onboarding_request.manifest is not None
+            and onboarding_request.manifest.classification != "managed_runtime"
+        )
         onboarding_action = (
             "generic_web_onboarding.plan"
             if onboarding_request.generic_web is not None and onboarding_request.mode == "dry_run"
+            else "product_onboarding.plan"
+            if inert_dry_run
             else "product_onboarding.apply"
         )
         if not resolved_authz_policy_runtime.allows(
@@ -18674,6 +18673,14 @@ def create_launchplane_fastapi_app(
             action=onboarding_action,
             product=onboarding_request.product,
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ) and not (
+            inert_dry_run
+            and resolved_authz_policy_runtime.allows(
+                identity=identity,
+                action="product_onboarding.apply",
+                product=onboarding_request.product,
+                context=_LAUNCHPLANE_SERVICE_CONTEXT,
+            )
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -18700,6 +18707,19 @@ def create_launchplane_fastapi_app(
         )
         if replay_response is not None:
             return replay_response
+
+        def replay_committed_onboarding() -> AcceptedEvidenceResponse | None:
+            if onboarding_request.mode != "apply" or not normalized_idempotency_key:
+                return None
+            return replay_stored_apply_idempotency(
+                record_store=database_store,
+                identity=identity,
+                route_path=_PRODUCT_ONBOARDING_APPLY_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+            )
+
         onboarding_manifest = onboarding_request.manifest
         generic_web_plan_sha256 = ""
         inert_plan_sha256 = ""
@@ -18736,6 +18756,9 @@ def create_launchplane_fastapi_app(
                     existing_profile=existing_profile,
                 )
             except ValueError as error:
+                replay_response = replay_committed_onboarding()
+                if replay_response is not None:
+                    return replay_response
                 raise _launchplane_http_error(
                     status_code=400,
                     trace_id=trace_id,
@@ -18810,6 +18833,9 @@ def create_launchplane_fastapi_app(
         except (ProductRepositoryOwnershipError, ProductClassificationChangeError):
             raise
         except ProductProfileConflictError as error:
+            replay_response = replay_committed_onboarding()
+            if replay_response is not None:
+                return replay_response
             raise _launchplane_http_error(
                 status_code=409,
                 trace_id=trace_id,
@@ -18817,6 +18843,9 @@ def create_launchplane_fastapi_app(
                 message=str(error),
             ) from error
         except ValueError as error:
+            replay_response = replay_committed_onboarding()
+            if replay_response is not None:
+                return replay_response
             raise _launchplane_http_error(
                 status_code=400,
                 trace_id=trace_id,

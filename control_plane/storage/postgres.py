@@ -27290,19 +27290,13 @@ class PostgresRecordStore(HumanSessionStore):
                     session.delete(reservation_row)
                     session.commit()
                 return ProductProfileCompareWriteResult(status="history_conflict")
-        try:
-            require_product_profile_writes(
-                (replacement_record,),
-                (
-                    self._read_product_profile_payload(item.payload)
-                    for item in session.scalars(select(LaunchplaneProductProfileRow)).all()
-                ),
-            )
-        except ProductProfileConflictError:
-            if reservation_row is not None:
-                session.delete(reservation_row)
-                session.commit()
-            return ProductProfileCompareWriteResult(status="changed")
+        require_product_profile_writes(
+            (replacement_record,),
+            (
+                self._read_product_profile_payload(item.payload)
+                for item in session.scalars(select(LaunchplaneProductProfileRow)).all()
+            ),
+        )
         row.display_name = replacement_record.display_name
         row.repository = replacement_record.repository
         row.driver_id = replacement_record.driver_id
