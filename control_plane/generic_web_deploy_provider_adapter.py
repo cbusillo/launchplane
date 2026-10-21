@@ -750,13 +750,27 @@ class GenericWebDeployProviderMutationAdapter:
                 provider_evidence="provider_read_failed",
                 provider_read_error_class="target_resolution_failed",
             )
-        observation = qualify_testing_application_observation(
-            provider=self._deploy_provider,
-            control_plane_root=self._control_plane_root,
-            target=resolved_target,
-            observation=observation,
-            deployment_record_id=self._deployment_record_id(provider_operation_key),
+        saved = evidence.execution_record
+        # Missing required receipts returned unknown above; None means the
+        # existing image-only legacy path required no product execution.
+        final_failed_result = (
+            self._application_testing(resolved_target)
+            and (evidence.execution is None or evidence.execution.outcome == "terminal")
+            and saved is not None
+            and _saved_testing_result_is_final(saved)
+            and not deployment_record_passed(saved)
+            and observation.outcome == "present"
+            and saved.deploy.deployment_id == observation.deployment_id
+            and observation.deployment_status not in {"canceled", "cancelled", "killed"}
         )
+        if not final_failed_result:
+            observation = qualify_testing_application_observation(
+                provider=self._deploy_provider,
+                control_plane_root=self._control_plane_root,
+                target=resolved_target,
+                observation=observation,
+                deployment_record_id=self._deployment_record_id(provider_operation_key),
+            )
         if observation.outcome != "present":
             return replace(evidence, observation=observation)
         post_deploy_unobserved = generic_web_provider_deployment_succeeded(

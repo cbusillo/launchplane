@@ -222,9 +222,17 @@ runtime wait share the original deployment timeout. Unknown or updating runtime
 remains fenced; missing or unreadable task/container evidence is also unknown at
 the original deadline. A complete observation of settled nonconvergence may fail
 qualification at that deadline. A correlated terminal rollback or failed
-qualification never receives delivery credit. Recovery adds the same current-runtime check while
-retaining exact-original execution receipts, reviewed settlement and publication
-CAS. A healthy image cannot prove that earlier product work has stopped.
+qualification never receives delivery credit. Recovery adds the same
+current-runtime check while retaining exact-original execution receipts,
+reviewed settlement and publication CAS. A healthy image cannot prove that
+earlier product work has stopped. An already final failed original result may
+finish that reservation as failed once
+its required execution is terminal, or existing image-only legacy rules prove
+no product execution was required. It needs no current runtime success proof.
+This preserves the failed record and inventory; it grants no delivery credit.
+Missing required or nonterminal execution proof and cancelled jobs remain
+fenced. Recovery does not infer the original runtime deadline from an expired
+reservation lease.
 
 Ordinary sweeps check current application runtime before returning
 `already_deployed`. Positively stable service drift permits one normal

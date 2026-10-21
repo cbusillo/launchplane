@@ -1013,7 +1013,13 @@ class ExecutionRecoveryTests(unittest.TestCase):
         self.provider.observation = self.provider.observation.model_copy(
             update={"deployment_status": "error"}
         )
-        status, result = self.complete_original("deploy_trigger")
+        with patch.object(
+            self.provider,
+            "observe_testing_application_runtime",
+            side_effect=RuntimeError("Current runtime became unreadable."),
+        ) as runtime:
+            status, result = self.complete_original("deploy_trigger")
+        runtime.assert_not_called()
         self.assertEqual(status, 202)
         self.assertEqual(result["reservation_state"], "completed")
         completed = self.store.read_idempotency_record(
@@ -1274,48 +1280,104 @@ class ExecutionRecoveryTests(unittest.TestCase):
         )
         self.assertEqual(qualified.deployment_record_id, self.normal_record(successor).record_id)
 
-    def test_durable_normal_pass_recovery_preserves_corrected_inventory(self) -> None:
+    def test_durable_normal_result_recovery_preserves_corrected_inventory(self) -> None:
         self.profile = _profile()
         self.store.write_product_profile_record(self.profile)
         publish = self.store.publish_generic_web_testing_result
         executions: list[str] = []
 
-        def executor(*_args: object) -> PostDeployUpdateEvidence:
-            executions.append("executed")
-            return PostDeployUpdateEvidence(attempted=True, status="pass")
+        for verdict in ("pass", "fail"):
+            with self.subTest(verdict=verdict):
 
-        def lose_completion(**kwargs: Any) -> None:
-            publish(**kwargs)
-            if kwargs["deployment"].post_deploy_update.status == "pass":
-                raise ValueError("Publication committed before worker stopped.")
+                def executor(*_args: object) -> PostDeployUpdateEvidence:
+                    executions.append(verdict)
+                    return PostDeployUpdateEvidence(attempted=True, status=cast(Any, verdict))
 
-        with (
-            patch(
-                "control_plane.generic_web_deploy_http._generic_web_post_deploy_executor_for_profile",
-                return_value=executor,
-            ),
-            patch.object(
-                self.store, "publish_generic_web_testing_result", side_effect=lose_completion
-            ),
-        ):
-            outcome = self.run_normal(self.normal_adapter(), "durable-pass")
-        self.assertEqual(outcome.status, "reconcile_required")
-        saved = self.normal_record(outcome)
-        inventory = self.store.read_environment_inventory(
-            context_name=saved.context, instance_name="testing"
-        ).model_copy(update={"bootstrap_record_id": "supported-correction"})
-        self.store.write_environment_inventory(inventory)
-        status, result = self.complete_original("durable-pass")
-        self.assertEqual((status, result["reservation_state"]), (202, "completed"))
-        self.assertEqual(self.store.read_deployment_record(saved.record_id), saved)
-        self.assertEqual(
-            self.store.read_environment_inventory(
-                context_name=saved.context, instance_name="testing"
-            ),
-            inventory,
-        )
-        self.assertEqual(self.run_normal(self.normal_adapter(), "durable-pass").status, "replayed")
-        self.assertEqual(executions, ["executed"])
+                def lose_completion(**kwargs: Any) -> None:
+                    publish(**kwargs)
+                    if kwargs["deployment"].post_deploy_update.status == verdict:
+                        raise ValueError("Publication committed before worker stopped.")
+
+                key = f"durable-{verdict}"
+                with (
+                    patch(
+                        "control_plane.generic_web_deploy_http._generic_web_post_deploy_executor_for_profile",
+                        return_value=executor,
+                    ),
+                    patch.object(
+                        self.store,
+                        "publish_generic_web_testing_result",
+                        side_effect=lose_completion,
+                    ),
+                ):
+                    outcome = self.run_normal(self.normal_adapter(), key)
+                self.assertEqual(outcome.status, "reconcile_required")
+                saved = self.normal_record(outcome)
+                inventory = self.store.read_environment_inventory(
+                    context_name=saved.context, instance_name="testing"
+                ).model_copy(update={"bootstrap_record_id": f"supported-correction-{verdict}"})
+                self.store.write_environment_inventory(inventory)
+                with patch.object(
+                    self.provider,
+                    "observe_testing_application_runtime",
+                    side_effect=RuntimeError("Current runtime became unreadable."),
+                ) as runtime:
+                    if verdict == "fail":
+                        original_observation = self.provider.observation
+                        for changes in (
+                            {"deployment_status": "cancelled"},
+                            {"deployment_id": "another-job"},
+                        ):
+                            self.provider.observation = original_observation.model_copy(
+                                update=changes
+                            )
+                            with patch(
+                                "control_plane.generic_web_deploy_provider_adapter.default_generic_web_deploy_provider",
+                                return_value=self.provider,
+                            ):
+                                status, held = _invoke_recovery(
+                                    self.app,
+                                    original_deploy=self.request,
+                                    idempotency_key=key,
+                                    reason="Check original failure binding.",
+                                )
+                            self.assertEqual(
+                                (status, held["proposed_action"]), (200, "hold_unknown")
+                            )
+                        self.provider.observation = original_observation
+                        runtime.reset_mock()
+                        status, result = self.complete_original(key)
+                        runtime.assert_not_called()
+                    else:
+                        with patch(
+                            "control_plane.generic_web_deploy_provider_adapter.default_generic_web_deploy_provider",
+                            return_value=self.provider,
+                        ):
+                            status, held = _invoke_recovery(
+                                self.app,
+                                original_deploy=self.request,
+                                idempotency_key=key,
+                                reason="Require current runtime for a saved pass.",
+                            )
+                        self.assertEqual((status, held["proposed_action"]), (200, "hold_unknown"))
+                        runtime.assert_called()
+                if verdict == "pass":
+                    status, result = self.complete_original(key)
+                self.assertEqual((status, result["reservation_state"]), (202, "completed"))
+                self.assertEqual(self.store.read_deployment_record(saved.record_id), saved)
+                self.assertEqual(
+                    self.store.read_environment_inventory(
+                        context_name=saved.context, instance_name="testing"
+                    ),
+                    inventory,
+                )
+                replay = self.run_normal(self.normal_adapter(), key)
+                self.assertEqual(replay.status, "replayed")
+                assert replay.record is not None
+                self.assertEqual(
+                    replay.record.response_status_code, 202 if verdict == "pass" else 502
+                )
+        self.assertEqual(executions, ["pass", "fail"])
 
     def test_exact_original_image_failure_disqualifies_saved_normal_pass(self) -> None:
         self.profile = _profile()
