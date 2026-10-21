@@ -1184,7 +1184,7 @@ class RealPostgresWalkthroughRecoveryTests(unittest.TestCase):
             WALKTHROUGH_LOGIN_PREFIX,
             WALKTHROUGH_MARKER_PREFIX,
         )
-        from control_plane.dokploy.odoo_walkthrough import ACCOUNT_DATABASE_PROBE
+        from control_plane.dokploy.odoo_walkthrough import ACCOUNT_DATABASE_PROBE, TestingRead
         from control_plane.odoo_testing_restore import TESTING_COPY_COMPLETION_PARAMETER
         from control_plane.odoo_connection_isolation import CONNECTION_ISOLATION_PARAMETERS
 
@@ -1243,7 +1243,7 @@ class RealPostgresWalkthroughRecoveryTests(unittest.TestCase):
                         close=connection.close,
                     )
 
-                def probe() -> bool:
+                def probe() -> TestingRead:
                     output = io.StringIO()
                     with (
                         patch.dict(sys.modules, {"psycopg2": SimpleNamespace(connect=connect)}),
@@ -1260,22 +1260,22 @@ class RealPostgresWalkthroughRecoveryTests(unittest.TestCase):
                         redirect_stdout(output),
                     ):
                         exec(compile(ACCOUNT_DATABASE_PROBE, "native-database-probe", "exec"), {})
-                    return json.loads(output.getvalue())["clear"] is True
+                    return TestingRead(json.loads(output.getvalue())["reason"])
 
                 owner.execute(
                     "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
                     (WALKTHROUGH_LOCK_PREFIX + spec["binding"],),
                 )
-                self.assertFalse(probe())
+                self.assertEqual(probe(), TestingRead.DISPATCH_UNSETTLED)
                 owner.commit()
-                self.assertTrue(probe())
+                self.assertEqual(probe(), TestingRead.CLEAR)
                 spec["mode"] = "usage"
-                self.assertTrue(probe())
+                self.assertEqual(probe(), TestingRead.CLEAR)
                 owner.execute(
                     "INSERT INTO res_users_log VALUES (%s,now() AT TIME ZONE 'UTC')", (17,)
                 )
                 owner.commit()
-                self.assertTrue(probe())
+                self.assertEqual(probe(), TestingRead.CLEAR)
                 # A completed task's history does not masquerade as staff use
                 # when a new task is admitted on this same isolated copy.
                 owner.execute("UPDATE res_users SET active=false WHERE id=17")
@@ -1295,7 +1295,7 @@ class RealPostgresWalkthroughRecoveryTests(unittest.TestCase):
                 )
                 owner.commit()
                 spec.update(mode="lane_usage", task_id="2" * 32)
-                self.assertTrue(probe())
+                self.assertEqual(probe(), TestingRead.CLEAR)
                 owner.execute(
                     "UPDATE ir_config_parameter SET value=%s WHERE key=%s",
                     (
@@ -1310,26 +1310,25 @@ class RealPostgresWalkthroughRecoveryTests(unittest.TestCase):
                     ),
                 )
                 owner.commit()
-                self.assertFalse(probe())
+                self.assertEqual(probe(), TestingRead.PROTECTED_SIGNIN)
 
                 owner.execute("DELETE FROM res_users_log")
                 owner.execute(
                     "INSERT INTO res_users_log VALUES (%s,now() AT TIME ZONE 'UTC')", (23,)
                 )
                 owner.commit()
-                self.assertFalse(probe())
+                self.assertEqual(probe(), TestingRead.PROTECTED_SIGNIN)
 
                 spec["mode"] = "isolation"
-                self.assertTrue(probe())
+                self.assertEqual(probe(), TestingRead.CLEAR)
                 key = next(iter(CONNECTION_ISOLATION_PARAMETERS))
                 owner.execute(
                     "UPDATE ir_config_parameter SET value=%s WHERE key=%s", ("changed", key)
                 )
                 owner.commit()
-                with self.assertRaises(RuntimeError):
-                    probe()
+                self.assertEqual(probe(), TestingRead.ISOLATION_REFUSED)
                 spec["mode"] = "quiescence"
-                self.assertTrue(probe())
+                self.assertEqual(probe(), TestingRead.CLEAR)
 
 
 @unittest.skipUnless(
