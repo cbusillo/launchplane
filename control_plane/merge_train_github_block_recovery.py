@@ -305,13 +305,27 @@ def recover_candidate_block(
         pr = client.read_pull_request_snapshot(repository=repository, pull_request_number=number)
         reader = GitHubMergeTrainSnapshotReader(transport=client.transport)
         same_head = pr.head_sha == candidate.candidate.entries[0].head_sha
+        # The GitHub reader lowercases repository names; the policy keeps its
+        # own casing. GitHub repository names are case-insensitive.
+        if (
+            pr.base_repository.casefold() != repository.casefold()
+            or pr.head_repository.casefold() != repository.casefold()
+        ):
+            _LOGGER.warning(
+                "Candidate block recovery found another repository; preserving hold",
+                extra={
+                    "repository": repository,
+                    "pull_request_number": number,
+                    "base_repository": pr.base_repository,
+                    "head_repository": pr.head_repository,
+                },
+            )
+            return False
         eligible = (
             pr.head_sha == expected_head_sha
             and pr.state == "open"
             and not pr.is_draft
-            and pr.base_repository == repository
             and pr.base_ref == policy.base_branch
-            and pr.head_repository == repository
             and pr.required_checks_status == "pass"
             and pr.mergeable == "mergeable"
             and not pr.client_test_notes_error
