@@ -4240,9 +4240,9 @@ native **Engineering Ops → Preview cleanup** page offers **Report** and
 delete confirmation; it discovers current desired state again, rather than
 applying a previously displayed report. The page shows per-product failures,
 held reservations and record/trace evidence even when the HTTP request completes.
-A dropped response locks both modes until the original request is retried with
-its retained operation key, including after reloading the page. The page
-reconstructs the original report or cleanup request by matching that key's
+A dropped response locks both modes in this browser tab until the original
+request is retried with its retained operation key, including after a reload.
+The page reconstructs the original report or cleanup request by matching that key's
 retained fingerprint; it does not depend on a separately saved form draft.
 Each new cleanup attempt consumes its delete confirmation, including a refused
 attempt. Retrying an uncertain cleanup preserves the originally confirmed

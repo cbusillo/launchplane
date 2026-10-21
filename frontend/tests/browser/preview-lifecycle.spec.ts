@@ -107,7 +107,7 @@ test("an unrecognized retained fingerprint cannot dispatch a different sweep", a
 test("read-only browser sessions have no sweep controls", async ({ page }) => {
   const fixture = await setup(page, false, "read_only");
   await page.goto("/ui/engineering/preview-lifecycle");
-  await expect(page.getByText("Preview cleanup requires a signed-in administrator outside demonstration mode.")).toBeVisible();
+  await expect(page.getByRole("region", { name: "Preview cleanup controls" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Report", exact: true })).toHaveCount(0);
   expect(fixture.requests).toEqual([]);
 });
