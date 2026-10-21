@@ -191,7 +191,7 @@ def register_legacy_preview_reconciliation_route(
         try:
             # Preserve completion/replay evidence even when the HTTP caller disconnects.
             return await asyncio.shield(asyncio.to_thread(execute))
-        except (ValueError, FileNotFoundError, RuntimeError, click.ClickException) as error:
+        except (ValueError, FileNotFoundError, click.ClickException) as error:
             if reconciliation.mode != "inspect":
                 _, _, completed = await dependencies.replay_apply_idempotency(**replay_args)
                 if completed is not None:

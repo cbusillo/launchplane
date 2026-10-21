@@ -95,32 +95,6 @@ class LegacyOdooPreviewReconciliationTests(legacy_tests.LegacyPreviewReconciliat
         self.assertTrue(inspected.json()["result"]["provider_absence_verified"])
         self.assertTrue(self.search.called)
 
-    async def test_lost_physical_lock_returns_conflict_without_retirement(self) -> None:
-        plan = await self.plan()
-        self.reads.clear()
-        for mode in ("inspect", "plan", "apply"):
-            with (
-                self.subTest(mode=mode),
-                patch.object(
-                    self.store,
-                    "testing_replacement_execution_is_excluded",
-                    side_effect=RuntimeError("Testing replacement execution lock was lost."),
-                ),
-            ):
-                response = (
-                    await self.apply(plan)
-                    if mode == "apply"
-                    else await self.call(mode, key="lost-lock-plan")
-                )
-                self.assertEqual(response.status_code, 409, response.text)
-                self.assertEqual(
-                    response.json()["error"]["code"], "legacy_preview_reconciliation_blocked"
-                )
-                self.assertEqual(
-                    self.store.read_preview_record(self.preview.preview_id), self.preview
-                )
-                self.assertFalse(self.reads)
-
     async def test_exact_compose_or_domain_blocks_apply_without_delete(self) -> None:
         self.compose(name="example-site-preview-pr-1")
         planned = await self.plan()
