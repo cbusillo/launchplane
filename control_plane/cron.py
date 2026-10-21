@@ -1,7 +1,5 @@
 """The supported UTC cron grammar for managed application schedules."""
 
-from datetime import datetime
-
 
 def _field_matches(field: str, value: int, *, minimum: int, maximum: int) -> bool:
     if "," in field:
@@ -34,20 +32,3 @@ def validate_cron_expression(expression: str) -> None:
         raise ValueError("Managed cron expressions must have five fields.")
     for field, minimum, maximum in zip(fields, (0, 0, 1, 1, 0), (59, 23, 31, 12, 6), strict=True):
         _field_matches(field, minimum, minimum=minimum, maximum=maximum)
-
-
-def cron_matches_utc(expression: str, scheduled_at: datetime) -> bool:
-    validate_cron_expression(expression)
-    values = (
-        scheduled_at.minute,
-        scheduled_at.hour,
-        scheduled_at.day,
-        scheduled_at.month,
-        (scheduled_at.weekday() + 1) % 7,
-    )
-    return all(
-        _field_matches(field, value, minimum=minimum, maximum=maximum)
-        for field, value, minimum, maximum in zip(
-            expression.split(), values, (0, 0, 1, 1, 0), (59, 23, 31, 12, 6), strict=True
-        )
-    )

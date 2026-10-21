@@ -196,21 +196,6 @@ class VeriReelPreviewInventoryRequest(BaseModel):
         return self
 
 
-class VeriReelPreviewInventoryItem(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    applicationId: str
-    applicationName: str
-    previewSlug: str
-
-
-class VeriReelPreviewInventoryResult(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    context: str
-    previews: tuple[VeriReelPreviewInventoryItem, ...]
-
-
 class _DatabaseParts(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -229,14 +214,6 @@ def _preview_application_name(
     preview_slug: str, prefix: str = PREVIEW_APP_PREFIX, suffix: str = "-app"
 ) -> str:
     return f"{_preview_app_name(preview_slug, prefix)}{suffix}"
-
-
-def _preview_slug_from_application_name(application_name: str) -> str:
-    prefix = f"{PREVIEW_APP_PREFIX}-"
-    suffix = "-app"
-    if not application_name.startswith(prefix) or not application_name.endswith(suffix):
-        return ""
-    return application_name[len(prefix) : -len(suffix)]
 
 
 def _preview_database_identifiers(
@@ -523,43 +500,6 @@ def _find_application_by_name(*, host: str, token: str, application_name: str) -
                 )
             return {**application, "applicationId": application_id}
     return None
-
-
-def execute_verireel_preview_inventory(
-    *,
-    control_plane_root: Path,
-    request: VeriReelPreviewInventoryRequest,
-) -> VeriReelPreviewInventoryResult:
-    host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
-    raw_projects = dokploy_api.dokploy_request(
-        host=host,
-        token=token,
-        path="/api/project.all",
-    )
-    preview_items: list[VeriReelPreviewInventoryItem] = []
-    for application in dokploy_api.iter_dokploy_applications(raw_projects):
-        application_name = str(application.get("name") or "").strip()
-        preview_slug = _preview_slug_from_application_name(application_name)
-        if not preview_slug:
-            continue
-        application_id = str(
-            application.get("applicationId") or application.get("id") or ""
-        ).strip()
-        if not application_id:
-            raise click.ClickException(
-                "Dokploy project inventory has incomplete application identity."
-            )
-        preview_items.append(
-            VeriReelPreviewInventoryItem(
-                applicationId=application_id,
-                applicationName=application_name,
-                previewSlug=preview_slug,
-            )
-        )
-    return VeriReelPreviewInventoryResult(
-        context=request.context,
-        previews=tuple(sorted(preview_items, key=lambda item: item.previewSlug)),
-    )
 
 
 def _fetch_application(*, host: str, token: str, application_id: str) -> JsonObject:

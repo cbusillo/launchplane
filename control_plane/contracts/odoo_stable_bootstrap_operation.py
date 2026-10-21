@@ -199,12 +199,6 @@ def build_odoo_stable_bootstrap_operation_id(
     )
 
 
-def odoo_stable_bootstrap_operation_is_terminal(
-    record: OdooStableBootstrapOperationRecord,
-) -> bool:
-    return record.status in ODOO_STABLE_BOOTSTRAP_TERMINAL_OPERATION_STATUSES
-
-
 def _normalize_required(value: str, message: str) -> str:
     normalized = value.strip()
     if not normalized:

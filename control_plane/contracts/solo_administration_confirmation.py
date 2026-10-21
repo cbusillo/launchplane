@@ -93,13 +93,6 @@ def solo_administration_acknowledgement_sha256(acknowledgement: str) -> str:
     return solo_administration_confirmation_acknowledgement_sha256(acknowledgement)
 
 
-def verify_solo_administration_confirmation_acknowledgement(
-    acknowledgement: str,
-    acknowledgement_sha256: str,
-) -> bool:
-    return verify_solo_administration_acknowledgement(acknowledgement, acknowledgement_sha256)
-
-
 def build_solo_administration_confirmation_id(
     *,
     reviewed_plan_sha256: str,

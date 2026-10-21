@@ -22,7 +22,6 @@ from control_plane.launchplane_mutations import (
     apply_launchplane_destroy_preview as shared_apply_launchplane_destroy_preview,
     apply_launchplane_generation_evidence as shared_apply_launchplane_generation_evidence,
     build_launchplane_preview_from_request,
-    upsert_launchplane_preview_from_request as shared_upsert_launchplane_preview_from_request,
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
@@ -765,19 +764,6 @@ def _apply_launchplane_request_generation(
         "preview_id": transitioned_preview.preview_id,
         "preview_path": _record_locator(preview_path, transitioned_preview.preview_id),
     }
-
-
-def _upsert_launchplane_preview_from_request(
-    *,
-    control_plane_root: Path,
-    record_store: LaunchplanePreviewRecordStore,
-    request: PreviewMutationRequest,
-) -> PreviewRecord:
-    return shared_upsert_launchplane_preview_from_request(
-        control_plane_root_path=control_plane_root,
-        record_store=record_store,
-        request=request,
-    )
 
 
 def _apply_launchplane_generation_evidence(
