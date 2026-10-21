@@ -1646,10 +1646,23 @@ no hostname, provider ID, upstream, certificate, raw config or source-copy input
 The service derives the new domain from the current generation/profile/target,
 and its edge from the lane's existing active service-owned NPMplus binding.
 Live provider placement must agree with that recorded endpoint. The existing
-edge host must be public, enabled, free of custom locations/config/access
-controls, and use an existing unexpired certificate covering the new domain.
-The only allowed template config is this operation's own audited identity
-comment. Its generated comment is preserved by the current provider API;
+edge host must be enabled and use an existing unexpired certificate covering
+the new domain. Clean public templates still require no access controls or
+custom locations/config, apart from this operation's audited identity comment.
+There is a separate, bounded protected Odoo template: one existing provider
+access-list reference, no auth-request provider or structured custom locations,
+and exactly two existing `location ^~` exceptions, `/web/image/` and
+`/shopify/webhook`. Each must contain only `auth_basic off`, `satisfy any`,
+`allow all`, a `proxy_pass` to the recorded upstream with `$request_uri`, and
+the Host, X-Real-IP, X-Forwarded-For and X-Forwarded-Proto headers using
+`$host`, `$remote_addr`, `$proxy_add_x_forwarded_for` and `$scheme`, respectively.
+Directive order follows the retained supported structure. The service copies
+these existing rules unchanged and reuses the same access-list and certificate
+references. It never adds an exception, changes ACL membership, or accepts raw
+configuration from the caller. Unknown or incompatible restrictions still
+refuse with `testing_edge_template_incompatible`. An audited protected route
+can template a later generation only while its full route digest still agrees.
+Its generated identity comment is preserved by the current provider API;
 legacy `meta` is neither accepted on writes nor returned by that API.
 Fresh provider reads must show loaded Nginx configuration and no private TLS,
 extra location/directory config or authentication upstream before publication
@@ -1681,21 +1694,29 @@ targets, storage, passwords, restored database and capture records.
 
 Recovery is forward-only under the original edge key: a lost create response
 can adopt only the exact provider route carrying the reviewed plan's marker.
-That marker is a generated Nginx comment, with no directives or caller-supplied
-config. The service also refuses active redirection/404 host claims before
-creation. Provider legacy protocol settings must retain their supported
+That marker is a generated Nginx comment; protected routes retain their verified
+existing rules after it. The service also refuses active redirection/404 host
+claims before creation. Provider legacy protocol settings must retain their supported
 defaults; enable/disable remains the provider's separate lifecycle operation.
 Existing disabled hosts retain that state during updates and can use the normal
 lifecycle endpoints. The provider always creates hosts enabled, so a request
 to create a disabled host refuses before transport rather than briefly exposing
-it. This continuation deliberately publishes an enabled public testing route.
+it. This continuation publishes an enabled route with its template's allowed audience.
 Its pending audit binds the generation, route authority and exact provider
 payload, so certificate renewal with the same ID and unrelated metadata refresh
 do not strand adoption. Meaningful authority or payload drift still refuses;
 publication revalidates current records and uses a fresh compare-and-write.
 An absent or foreign route after a dispatched create stays unknown and is
-never created again. `readback` checks actual route, certificate and binding;
-a terminal apply replay is historical evidence, not a fresh health check.
+never created again. `readback` checks actual loaded route, certificate and binding,
+then probes the generation's public hostname using public DNS address validation
+and strict TLS hostname, chain and expiry verification. Provider certificate
+metadata or an origin `letsencrypt` record is insufficient. A failed TLS probe
+returns `testing_edge_tls_unverified`; after a provider effect, the original
+operation stays unknown until same-key observation verifies it. No second create
+is allowed to repair verification. Successful apply/readback receipts include
+`public_tls_verified=true`; dry-run reports false. This proves TLS at the public
+edge, not application health. A terminal apply replay is historical evidence,
+not a fresh health check.
 Do not issue a new key, edit records, replay bootstrap/restore, recapture data,
 change the origin certificate policy, or dismiss an incident to resolve TLS.
 Retain private review/receipts outside the checkout for same-key recovery.

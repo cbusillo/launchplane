@@ -8,7 +8,9 @@ import unittest
 from control_plane.contracts.edge_endpoint_record import EdgeEndpointRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetStaffTestingHold
 from control_plane.contracts.route_binding_record import EnvironmentRouteBindingRecord
-from control_plane.npmplus import NpmplusCertificate
+from control_plane.npmplus import NpmplusAccessList, NpmplusCertificate
+from control_plane.outbound_http import PublicTlsProbeResult
+from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.odoo_testing_restore import FreshOdooTestingGeneration, generation_binding
 from control_plane.contracts.odoo_testing_source import (
     NativeTestingCopyCapture,
@@ -23,6 +25,7 @@ from control_plane.provider_operations import (
 )
 from control_plane.testing_public_ingress import (
     ROUTE,
+    TestingIngressPrerequisiteError,
     TestingPublicIngressAdapter,
     TestingPublicIngressRequest,
 )
@@ -72,9 +75,17 @@ class EdgeClient(_FakeNpmplusIngressClient):
             raise ValueError("Unknown fixture certificate")
         return self.certificate
 
+    @staticmethod
+    def get_access_list(access_list_id: int) -> NpmplusAccessList:
+        return NpmplusAccessList(
+            id=access_list_id, name="fixture", satisfy_any=True, pass_auth=False
+        )
+
 
 class TestingPublicIngressScenario(FreshTestingBootstrapScenario):
     database_url = ""
+    client: EdgeClient
+    store: PostgresRecordStore
 
     def setUp(self) -> None:
         self.seed(self.database_url)
@@ -95,6 +106,7 @@ class TestingPublicIngressScenario(FreshTestingBootstrapScenario):
             prepared_at=self.profile.updated_at,
             source_mode="container-export",
             source_binding_sha256=source_observation.binding_sha256,
+            certificate_type="letsencrypt",
         )
         self.store.write_product_profile_record(
             self.profile.model_copy(
@@ -214,6 +226,34 @@ class TestingPublicIngressScenario(FreshTestingBootstrapScenario):
             )
         )
         self.edge_lease = Mock(spec=["assert_current", "checkpoint_effect"])
+        self.public_tls = self.enterContext(
+            patch(
+                "control_plane.testing_public_ingress.probe_public_tls",
+                return_value=PublicTlsProbeResult(
+                    status="valid", failure_code=None, summary="verified"
+                ),
+            )
+        )
+
+    def protect_template(self) -> str:
+        upstream = f"{self.endpoint.upstream_scheme}://{self.endpoint.upstream_host}:{self.endpoint.upstream_port}"
+        config = "\n\n".join(
+            f"""location ^~ {path} {{
+    auth_basic off;
+    satisfy any;
+    allow all;
+    proxy_pass {upstream}$request_uri;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}}"""
+            for path in ("/web/image/", "/shopify/webhook")
+        )
+        self.client.proxy_hosts[0] = self.client.proxy_hosts[0].model_copy(
+            update={"access_list_id": 17, "advanced_config": config}
+        )
+        return config
 
     def edge(self) -> TestingPublicIngressAdapter:
         return TestingPublicIngressAdapter(
@@ -238,6 +278,105 @@ class TestingPublicIngressScenario(FreshTestingBootstrapScenario):
 
 
 class TestingPublicIngressTests(TestingPublicIngressScenario):
+    def test_protected_continuation_preserves_audience_rules_and_original_route(self) -> None:
+        config = self.protect_template()
+        retained = self.client.proxy_hosts[0].model_copy(deep=True)
+        self.assertFalse(self.edge()._clean_template(retained, self.old_binding))
+        self.review_edge()
+        self.assertFalse(self.public_tls.called)
+        result = self.publish().response_payload["result"]
+        self.assertTrue(result["public_tls_verified"])
+        self.assertFalse(result["public_health_verified"])
+        current = self.client.proxy_hosts[-1]
+        self.assertEqual(current.access_list_id, retained.access_list_id)
+        self.assertTrue(current.advanced_config.endswith(config))
+        self.assertEqual(current.certificate_id, retained.certificate_id)
+        self.assertEqual(self.client.proxy_hosts[0], retained)
+        self.assertEqual(self.client.calls.count("create"), 1)
+        self.assertTrue(self.edge().readback()["public_tls_verified"])
+        self.assertEqual(
+            self.edge()
+            .observe("foreign-provider-key", "create_testing_public_route", "fixture")
+            .outcome,
+            "unknown",
+        )
+        undispatched = self.edge().observe("foreign-provider-key", "", "fixture")
+        self.assertEqual(undispatched.outcome, "absent")
+        self.assertTrue(undispatched.retry_safe)
+        binding = self.store.read_route_binding_record(
+            product=self.profile.product, context_name=self.fixture.context, instance_name="testing"
+        )
+        self.assertFalse(self.edge()._clean_template(current, binding))
+        self.assertTrue(self.edge()._protected_template(current, binding))
+
+    def test_protected_template_refuses_unknown_rules_and_changed_destination_before_effects(
+        self,
+    ) -> None:
+        config = self.protect_template()
+        for changed in (
+            config + "\nlocation / { auth_basic off; }",
+            config.replace("/web/image/", "/web/"),
+            config.replace("$host;", "foreign.example.invalid;"),
+            config.replace(self.endpoint.upstream_host, "192.0.2.99"),
+        ):
+            with self.subTest(config=changed):
+                self.client.proxy_hosts[0].advanced_config = changed
+                with self.assertRaises(ValueError):
+                    self.edge().plan()
+        self.assertNotIn("create", self.client.calls)
+
+    def test_letsencrypt_intent_and_provider_certificate_cannot_replace_strict_public_tls(
+        self,
+    ) -> None:
+        self.review_edge()
+        self.public_tls.return_value = PublicTlsProbeResult(
+            status="self_signed", failure_code="tls_self_signed", summary="untrusted edge"
+        )
+        with self.assertRaises(ProviderMutationUnknownError):
+            self.publish()
+        self.assertEqual(self.client.calls.count("create"), 1)
+        with self.assertRaises(ValueError):
+            self.edge().readback()
+        self.assertEqual(
+            self.edge()
+            .observe("fixture-provider-key", "create_testing_public_route", "fixture")
+            .outcome,
+            "unknown",
+        )
+        self.public_tls.return_value = PublicTlsProbeResult(
+            status="valid", failure_code=None, summary="verified"
+        )
+        self.assertEqual(
+            self.edge()
+            .observe("fixture-provider-key", "create_testing_public_route", "fixture")
+            .outcome,
+            "present",
+        )
+        self.assertEqual(self.client.calls.count("create"), 1)
+
+    def test_protected_unknown_create_recovers_without_dropping_rules(self) -> None:
+        self.protect_template()
+        self.review_edge()
+        create = self.client.create_proxy_host
+
+        def lost(payload: Any) -> Any:
+            create(payload)
+            raise OSError("lost reply")
+
+        with patch.object(self.client, "create_proxy_host", side_effect=lost):
+            with self.assertRaises(ProviderMutationUnknownError):
+                self.publish()
+        self.assertEqual(
+            self.edge()
+            .observe("fixture-provider-key", "create_testing_public_route", "fixture")
+            .outcome,
+            "present",
+        )
+        self.assertEqual(self.client.calls.count("create"), 1)
+        self.client.proxy_hosts[-1].access_list_id = 0
+        with self.assertRaises(ValueError):
+            self.edge().readback()
+
     def test_private_or_unloaded_template_refuses_before_creation(self) -> None:
         self.client.restricted_hosts.add(self.client.proxy_hosts[0].id)
         with self.assertRaises(ValueError):
@@ -616,6 +755,27 @@ class TestingPublicIngressTests(TestingPublicIngressScenario):
 
 
 class TestingPublicIngressHttpTests(TestingPublicIngressScenario, unittest.IsolatedAsyncioTestCase):
+    async def test_unknown_protected_rules_report_a_value_free_prerequisite(self) -> None:
+        self.protect_template()
+        self.client.proxy_hosts[0].advanced_config += "\nreturn 302 /foreign;"
+        with self.assertRaises(TestingIngressPrerequisiteError) as caught:
+            self.edge().plan()
+        with patch(
+            "control_plane.http_routes.testing_public_ingress.build_npmplus_ingress_client_from_env",
+            return_value=self.client,
+        ):
+            response = await request(
+                self.fixture.app,
+                "POST",
+                ROUTE.format(product=self.profile.product),
+                headers={"Authorization": "Bearer local-operator-token"},
+                payload=self.edge_request.model_dump(mode="json"),
+            )
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["error"]["code"], caught.exception.code)
+        self.assertNotIn("foreign", response.text)
+        self.assertNotIn("create", self.client.calls)
+
     async def test_only_director_agent_and_exact_testing_input_reach_planning(self) -> None:
         with patch(
             "control_plane.http_routes.testing_public_ingress.build_npmplus_ingress_client_from_env",

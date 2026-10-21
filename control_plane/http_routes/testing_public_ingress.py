@@ -21,6 +21,7 @@ from control_plane.service_auth import LaunchplaneIdentity, director_agent_ident
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_public_ingress import (
     ROUTE,
+    TestingIngressPrerequisiteError,
     TestingPublicIngressAdapter,
     TestingPublicIngressRequest,
 )
@@ -85,6 +86,12 @@ def register_testing_public_ingress_routes(
                 adapter.plan if body.mode == "dry-run" else adapter.readback
             )
             return accepted_evidence_response(trace_id=trace, records={}, result=result)
+        except TestingIngressPrerequisiteError as error:
+            refuse(
+                409,
+                error.code,
+                "Testing edge prerequisite is unverified; preserve the original plan and key.",
+            )
         except (ValueError, FileNotFoundError, RuntimeError, OSError, click.ClickException):
             refuse(
                 409,
