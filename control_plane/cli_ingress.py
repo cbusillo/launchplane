@@ -57,8 +57,17 @@ def ingress() -> None:
     multiple=True,
     help="Required KIND:NAME identity witness, a subset of --check.",
 )
+@click.option(
+    "--exclude-check",
+    "excluded_checks",
+    multiple=True,
+    help="Diagnostic KIND:NAME stream deliberately outside the lane figure.",
+)
 def health_history_summary(
-    pages: tuple[Path, ...], checks: tuple[str, ...], identity_checks: tuple[str, ...]
+    pages: tuple[Path, ...],
+    checks: tuple[str, ...],
+    identity_checks: tuple[str, ...],
+    excluded_checks: tuple[str, ...],
 ) -> None:
     """Account for one lane's saved GET health-history pages, in cursor order."""
     from control_plane.lane_health_history import LaneHealthHistoryResponse, summarize_history_pages
@@ -76,6 +85,9 @@ def health_history_summary(
             required_checks=adapter.validate_python([check.split(":", 1) for check in checks]),
             identity_checks=adapter.validate_python(
                 [check.split(":", 1) for check in identity_checks]
+            ),
+            excluded_checks=adapter.validate_python(
+                [check.split(":", 1) for check in excluded_checks]
             ),
         )
     except (ValueError, OSError) as error:

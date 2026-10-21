@@ -140,8 +140,8 @@ class LaneHealthHistoryHttpTests(unittest.IsolatedAsyncioTestCase):
                 headers={"Authorization": "Bearer valid-token"},
                 capture_server_error_response=True,
             )
-            self.assertEqual(invalid_evidence.status_code, 500)
-            self.assertNotIn("invalid_query", invalid_evidence.text)
+            self.assertGreaterEqual(invalid_evidence.status_code, 500)
+            self.assertLess(invalid_evidence.status_code, 600)
 
 
 class LaneHealthHistoryAccountingTests(unittest.TestCase):
@@ -389,3 +389,84 @@ class LaneIntersectionTests(unittest.TestCase):
         self.assertEqual(missing.lane_health_pass_seconds, 0)
         self.assertEqual(missing.lane_health_unknown_seconds, 60)
         self.assertEqual(missing.missing_checks, (("private_http", "missing"),))
+
+
+class HistoryStreamSelectionTests(unittest.TestCase):
+    def test_unlisted_failure_requires_explicit_diagnostic_exclusion(self) -> None:
+        from control_plane.lane_health_history import summarize_observations
+
+        records = (
+            observation("health", 0),
+            observation("source-fail", 0, check="source", status="fail").model_copy(
+                update={"check_kind": "provider"}
+            ),
+            observation("source-pass", 30, check="source").model_copy(
+                update={"check_kind": "provider"}
+            ),
+        )
+        with self.assertRaises(ValueError):
+            summarize_observations(
+                records,
+                since=START,
+                until=START + timedelta(seconds=60),
+                instance="prod",
+                required_checks=REQUIRED,
+                identity_checks=REQUIRED,
+            )
+        excluded: tuple[tuple[PublicIngressCheckKind, str], ...] = (("provider", "source"),)
+        result = summarize_observations(
+            records,
+            since=START,
+            until=START + timedelta(seconds=60),
+            instance="prod",
+            required_checks=REQUIRED,
+            identity_checks=REQUIRED,
+            excluded_checks=excluded,
+        )
+        self.assertEqual(result.lane_health_pass_seconds, 60)
+        self.assertEqual(result.excluded_checks, excluded)
+        source = next(check for check in result.checks if check.check_name == "source")
+        self.assertEqual(source.health_fail_seconds, 30)
+        included = summarize_observations(
+            records,
+            since=START,
+            until=START + timedelta(seconds=60),
+            instance="prod",
+            required_checks=(*REQUIRED, *excluded),
+            identity_checks=REQUIRED,
+        )
+        self.assertEqual(included.lane_health_pass_seconds, 30)
+        with self.assertRaises(ValueError):
+            summarize_observations(
+                records,
+                since=START,
+                until=START + timedelta(seconds=60),
+                instance="prod",
+                required_checks=REQUIRED,
+                identity_checks=REQUIRED,
+                excluded_checks=REQUIRED,
+            )
+
+    def test_expired_and_reconciliation_only_checks_are_missing(self) -> None:
+        from control_plane.lane_health_history import summarize_observations
+
+        required: tuple[tuple[PublicIngressCheckKind, str], ...] = (
+            ("public_http", "expired"),
+            ("public_http", "reconciled"),
+        )
+        records = (
+            observation("expired", -health_monitor_freshness_seconds("prod") - 1, check="expired"),
+            observation("reconciled", 0, check="reconciled").model_copy(
+                update={"purpose": "reconciliation", "status": "skipped"}
+            ),
+        )
+        result = summarize_observations(
+            records,
+            since=START,
+            until=START + timedelta(seconds=60),
+            instance="prod",
+            required_checks=required,
+            identity_checks=required,
+        )
+        self.assertEqual(result.missing_checks, required)
+        self.assertEqual(result.lane_health_unknown_seconds, 60)

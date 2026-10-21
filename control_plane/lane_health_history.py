@@ -227,6 +227,7 @@ class HealthHistoryAccounting(BaseModel):
     checks: tuple[CheckHistoryAccounting, ...]
     required_checks: tuple[tuple[PublicIngressCheckKind, str], ...]
     identity_checks: tuple[tuple[PublicIngressCheckKind, str], ...]
+    excluded_checks: tuple[tuple[PublicIngressCheckKind, str], ...]
     missing_checks: tuple[tuple[PublicIngressCheckKind, str], ...]
     lane_health_pass_seconds: float
     lane_health_fail_seconds: float
@@ -251,6 +252,7 @@ def summarize_observations(
     instance: str,
     required_checks: tuple[tuple[PublicIngressCheckKind, str], ...],
     identity_checks: tuple[tuple[PublicIngressCheckKind, str], ...],
+    excluded_checks: tuple[tuple[PublicIngressCheckKind, str], ...] = (),
 ) -> HealthHistoryAccounting:
     """A lower bound on verified time for each stream, not a physical uptime claim."""
     since, until = _window(since, until)
@@ -262,6 +264,8 @@ def summarize_observations(
         or not identity_checks
         or len(set(identity_checks)) != len(identity_checks)
         or not set(identity_checks) <= set(required_checks)
+        or len(set(excluded_checks)) != len(excluded_checks)
+        or set(required_checks) & set(excluded_checks)
     ):
         raise ValueError(
             "Supply distinct required checks and their nonempty identity-check subset."
@@ -279,6 +283,12 @@ def summarize_observations(
         seen.add(item.record_id)
         if item.observed_at < until:
             streams[(item.check_kind, item.check_name)].append(item)
+    unlisted = set(streams) - set(required_checks) - set(excluded_checks)
+    if unlisted:
+        raise ValueError(
+            "Account for every observed stream with --check or --exclude-check: "
+            + ", ".join(f"{kind}:{name}" for kind, name in sorted(unlisted))
+        )
     results = []
     # End events precede start events at the same instant; a new observation
     # replaces expiry without manufacturing a gap or overwriting the new state.
@@ -375,7 +385,13 @@ def summarize_observations(
         checks=tuple(results),
         required_checks=required_checks,
         identity_checks=identity_checks,
-        missing_checks=tuple(key for key in required_checks if key not in streams),
+        excluded_checks=excluded_checks,
+        missing_checks=tuple(
+            (check.check_kind, check.check_name)
+            for check in results
+            if (check.check_kind, check.check_name) in required_checks
+            and check.health_pass_seconds + check.health_fail_seconds == 0
+        ),
         lane_health_pass_seconds=lane_pass,
         lane_health_fail_seconds=lane_fail,
         lane_health_unknown_seconds=denominator - lane_pass - lane_fail,
@@ -391,6 +407,7 @@ def summarize_history_pages(
     *,
     required_checks: tuple[tuple[PublicIngressCheckKind, str], ...],
     identity_checks: tuple[tuple[PublicIngressCheckKind, str], ...],
+    excluded_checks: tuple[tuple[PublicIngressCheckKind, str], ...] = (),
 ) -> LaneHealthHistoryAccounting:
     """Refuse truncated, mixed or skipped pages before computing percentages."""
     first = None
@@ -420,6 +437,7 @@ def summarize_history_pages(
         instance=first.instance,
         required_checks=required_checks,
         identity_checks=identity_checks,
+        excluded_checks=excluded_checks,
     )
     return LaneHealthHistoryAccounting(
         **accounting.model_dump(),

@@ -1324,8 +1324,11 @@ durations. Provider delivery/source-warning streams stay separate from actual
 HTTP health streams. Supply the complete reviewed required check set with
 repeated `--check KIND:NAME`
 and the checks that must verify runtime identity with `--identity-check KIND:NAME`.
-The latter must be a nonempty subset of the former. The report prints both sets
-and any absent checks. Lane totals intersect these streams in time, so disjoint
+The latter must be a nonempty subset of the former. Use repeated `--exclude-check KIND:NAME` for diagnostic streams deliberately
+outside the health set. Every observed stream must be required or explicitly
+excluded; an unaccounted-for stream refuses the calculation. Required and
+excluded sets cannot overlap. The report prints all three sets, every stream
+row, and required checks with zero measured pass/fail coverage. Lane totals intersect these streams in time, so disjoint
 failures cannot hide behind individually passing percentages. A required check
 with no records contributes unknown time, not a pass. TLS or dependency checks
 can belong to the health set without being runtime-identity witnesses. The

@@ -29829,12 +29829,20 @@ class PostgresRecordStore(HumanSessionStore):
             # the widened text bounds admit every representation before the
             # exact instant comparison below.
             row.observed_at >= (since - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S"),
-            row.observed_at < (until + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S"),
+            # The extra second keeps a fractional bound conservative after formatting.
+            row.observed_at < (until + timedelta(days=1, seconds=1)).strftime("%Y-%m-%dT%H:%M:%S"),
             observed >= bound(since),
             observed < bound(until),
         ]
         if before is not None:
-            position = bound(datetime.fromisoformat(before[0].replace("Z", "+00:00")))
+            before_time = datetime.fromisoformat(before[0].replace("Z", "+00:00")).astimezone(
+                timezone.utc
+            )
+            position = bound(before_time)
+            filters.append(
+                row.observed_at
+                < (before_time + timedelta(days=1, seconds=1)).strftime("%Y-%m-%dT%H:%M:%S")
+            )
             filters.append(
                 or_(observed < position, and_(observed == position, row.record_id < before[1]))
             )
