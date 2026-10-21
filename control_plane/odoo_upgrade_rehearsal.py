@@ -268,8 +268,8 @@ def rehearsal_inputs(
             raise RehearsalRefused(RehearsalPrerequisite.ARTIFACT_UNAVAILABLE)
         if (
             request.action == "verify"
-            and previous.business_validation is not None
-            and not previous.business_validation.passed
+            and previous.business_validations
+            and not previous.business_validations[-1].passed
         ):
             raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
         if (
@@ -654,7 +654,7 @@ class OdooRehearsalAdapter:
             != request_fingerprint(
                 {
                     "product": record.product,
-                    **original.payload(),
+                    **original.model_dump(mode="json"),
                 }
             )
         ):
@@ -1293,6 +1293,21 @@ class OdooRehearsalAdapter:
             or result["state"] != allowed[self.request.action]
         ):
             raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
+        validations = list(record.business_validations)
+        if self.request.action == "validate-business":
+            from control_plane.contracts.odoo_rehearsal_business_validation import (
+                BusinessValidationReceipt,
+            )
+
+            validation = BusinessValidationReceipt.model_validate(result["business_validation"])
+            prior = next(
+                (item for item in validations if item.attempt_sha256 == validation.attempt_sha256),
+                None,
+            )
+            if prior is not None and prior != validation:
+                raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
+            if prior is None:
+                validations.append(validation)
         updated = OdooUpgradeRehearsalRecord.model_validate(
             {
                 **record.model_dump(mode="json"),
@@ -1300,8 +1315,7 @@ class OdooRehearsalAdapter:
                 "copies": result["copies"],
                 "elapsed_seconds": result["elapsed_seconds"],
                 "updated_at": datetime.now(timezone.utc),
-                "business_validation": result.get("business_validation")
-                or record.business_validation,
+                "business_validations": validations,
             }
         )
         old_copies = {copy.database: copy for copy in record.copies}
@@ -1313,17 +1327,19 @@ class OdooRehearsalAdapter:
             raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
         if not set(old_copies) <= {copy.database for copy in updated.copies}:
             raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
-        if self.request.action == "verify" and record.business_validation is not None:
+        if self.request.action == "verify" and record.business_validations:
             final = next(
                 (copy for copy in updated.copies if copy.database.endswith("_final_upgrade")), None
             )
-            if (
-                final is None
-                or final.business_validation_sha256 != record.business_validation.sha256
+            if final is None or final.business_validation_sha256 != canonical_json_sha256(
+                [item.model_dump(mode="json") for item in record.business_validations]
             ):
                 raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
         self.store.compare_and_write_odoo_upgrade_rehearsal(record, updated)
-        return self.public(updated)
+        public = self.public(updated)
+        if self.request.action == "validate-business":
+            public["business_validation"] = result["business_validation"]
+        return public
 
     @staticmethod
     def public(record: OdooUpgradeRehearsalRecord) -> dict[str, object]:
@@ -1341,8 +1357,12 @@ class OdooRehearsalAdapter:
             "public_route": False,
             "business_host_frozen": False,
             **(
-                {"business_validation": record.business_validation.model_dump(mode="json")}
-                if record.business_validation
+                {
+                    "business_validations": [
+                        item.model_dump(mode="json") for item in record.business_validations
+                    ]
+                }
+                if record.business_validations
                 else {}
             ),
         }

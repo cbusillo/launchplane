@@ -188,12 +188,12 @@ def snapshot(spec,root,containers,database):
         'database_sha256':digest(path/'database.dump'),'filestore_sha256':digest(path/'filestore.tar'),
         'source_capture_sha256':digest(root/'capture.json'),
         'sanitized':True,'odoo_version':version,'captured_at':datetime.now(timezone.utc).isoformat()}
-    validation=spec['record'].get('business_validation')
-    if database.endswith('_final_upgrade') and validation is not None:
-        if validation.get('passed') is not True:
+    validations=spec['record'].get('business_validations',[])
+    if database.endswith('_final_upgrade') and validations:
+        if validations[-1].get('passed') is not True:
             raise RuntimeError('Product validation has not passed')
         receipt['business_validation_sha256']=hashlib.sha256(
-            json.dumps(validation,sort_keys=True,separators=(',',':'),ensure_ascii=True).encode()).hexdigest()
+            json.dumps(validations,sort_keys=True,separators=(',',':'),ensure_ascii=True).encode()).hexdigest()
     save(path/'receipt.json',receipt)
     return receipt
 
@@ -534,7 +534,7 @@ def observe(spec, root, receipt, lock_held=False):
     namespace=record['rehearsal_id']
     action=spec['action']
     if not receipt.is_file() or receipt.is_symlink():
-        if not (root/(action+'.started')).exists():
+        if not (root/(spec.get('receipt_action',action)+'.started')).exists():
             refused=read_refusal(spec,root)
             if refused is not None:
                 emit_rehearsal_result(refused)

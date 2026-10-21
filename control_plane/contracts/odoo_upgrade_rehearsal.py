@@ -132,13 +132,6 @@ class OdooUpgradeRehearsalRequest(BaseModel):
             mode="json", exclude={"mode", "action", "reviewed_plan_sha256", "business_validation"}
         )
 
-    def payload(self) -> dict[str, object]:
-        """Preserve original lifecycle fingerprints for already retained rehearsals."""
-        return self.model_dump(
-            mode="json",
-            exclude={"business_validation"} if self.business_validation is None else set(),
-        )
-
 
 class RehearsalCopyReceipt(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -266,8 +259,8 @@ class OdooUpgradeRehearsalRecord(BaseModel):
     compose_id: str = ""
     state: RehearsalState = "planned"
     copies: tuple[RehearsalCopyReceipt, ...] = ()
-    business_validation: BusinessValidationReceipt | None = Field(
-        default=None, exclude_if=lambda value: value is None
+    business_validations: tuple[BusinessValidationReceipt, ...] = Field(
+        default=(), exclude_if=lambda value: not value
     )
     incomplete_retirement: IncompleteRehearsalRetirementCheckpoint | None = None
     elapsed_seconds: dict[str, float] = Field(default_factory=dict)

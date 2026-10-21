@@ -2891,9 +2891,13 @@ this bounded transport and its isolation, review and custody checks.
 
 Each step has a unique `key`:
 
-- `create`: supplies an allowed standard Odoo business `model` and JSON
+- `create`: supplies an allowed standard Odoo business `model` and scalar
   `values`. `{"$ref": "earlier_create_key"}` in a value resolves to that
-  synthetic record's id, including in nested Odoo create commands.
+  synthetic record's id. Relational command lists and nested creates are
+  refused. Create an order line as its own step with `order_id` and `product_id`
+  references, so its id is independently identified.
+  Explicit relations must reference an earlier synthetic record of the field's
+  actual Odoo model; raw foreign-key ids are refused.
 - `call`: names an earlier created `record` and a supported standard business
   `method`. The schema permits sales confirmation and inventory application
   or delivery validation. It accepts no method arguments or context overrides.
@@ -2904,8 +2908,8 @@ Each step has a unique `key`:
 A batch requires creates and assertions, with at most 64 steps and 64 KiB of
 JSON. It accepts neither Python/SQL nor arbitrary methods, model names, commands,
 HTTP destinations, credentials or an existing record as an operation target.
-Synthetic order lines can be nested creates; an inventory batch can create its
-own product, internal location and quant before applying an adjustment. Use
+An inventory batch can create its own product, internal location and quant
+before applying an adjustment. Use
 product-owned cases that test both order workflow and persisted stock effects;
 a successful trivial batch is not proof of those cases or Client acceptance.
 
@@ -2922,19 +2926,27 @@ Odoo shell configuration and fixed ORM code inside the isolated runner.
 Only step keys, synthetic record ids and booleans leave the runner. Raw Odoo
 output, errors and copied database values are withheld. A passing batch commits
 and reads its assertions again after cache invalidation. A failed assertion or
-exception rolls back the current transaction and returns `passed: false`; the
-client exits nonzero. This is a completed failed validation, not an uncertain
-transport outcome. Preserve its evidence and diagnose the product case. A
+exception before commit rolls back and returns `passed: false, committed: false`,
+without ids for rolled-back records. A failed assertion/read after confirmed
+commit returns `passed: false, committed: true` and retains the created ids.
+The client exits nonzero for that operation's failed validation; an inert
+review or another operation's readback keeps its own status. These are known
+outcomes. A failed commit acknowledgement is uncertain and produces no completed
+receipt. Preserve its original operation, rather than asserting rollback.
+Preserve failed validation evidence and diagnose the product case. A
 separately reviewed corrected batch may use a new key after that known result.
 An interruption or unavailable result retains the original operation and must
 never be replayed or replaced to diagnose it.
 
 For validation `readback`, supply the original intent, key **and evidence file**;
 the saved review binds the journal even after publication changes the rehearsal
-record. Each operation has its own host marker and receipt. Observation cannot
+record. Each operation has its own host marker, receipt and bound failure
+diagnostic. Observation cannot
 re-execute a batch or adopt another operation's result. After a successful batch,
-ordinary `verify` seals its receipt digest into the final upgraded snapshot's
-`business_validation_sha256`; it refuses a known failed latest validation.
+ordinary `verify` seals a digest of the complete ordered `business_validations`
+receipt list into the final upgraded snapshot's `business_validation_sha256`;
+it refuses a known failed latest validation. Earlier passing batches and any
+committed failed batches keep their identified writes in that list.
 The final sanitized old-version tuple stays unchanged. Hand both managed tuples
 and the value-free validation receipt to the rollback consumer before ordinary
 retirement. This capability does not perform that consumer's business checks

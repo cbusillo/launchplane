@@ -29,12 +29,19 @@ BUSINESS_METHODS = {
 }
 
 
+class BusinessReference(BaseModel):
+    model_config = ConfigDict(extra="forbid", serialize_by_alias=True)
+    ref: BusinessKey = Field(alias="$ref")
+
+
 class BusinessCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     op: Literal["create"]
     key: BusinessKey
     model: BusinessModel
-    values: dict[str, JsonValue] = Field(min_length=1, max_length=40)
+    values: dict[str, str | int | float | bool | None | BusinessReference] = Field(
+        min_length=1, max_length=40
+    )
 
 
 class BusinessCall(BaseModel):
@@ -70,27 +77,13 @@ class BusinessValidation(BaseModel):
         keys: set[str] = set()
         assertions = 0
 
-        def references(value: JsonValue) -> None:
-            if isinstance(value, dict):
-                if "$ref" in value:
-                    if (
-                        set(value) != {"$ref"}
-                        or not isinstance(value["$ref"], str)
-                        or value["$ref"] not in models
-                    ):
-                        raise ValueError("References must name an earlier synthetic create.")
-                else:
-                    for item in value.values():
-                        references(item)
-            elif isinstance(value, list):
-                for item in value:
-                    references(item)
-
         for step in self.steps:
             if step.key in keys:
                 raise ValueError("Step keys must be unique.")
             if isinstance(step, BusinessCreate):
-                references(step.values)
+                for value in step.values.values():
+                    if isinstance(value, BusinessReference) and value.ref not in models:
+                        raise ValueError("References must name an earlier synthetic create.")
                 models[step.key] = step.model
             else:
                 if step.record not in models:
@@ -131,6 +124,13 @@ class BusinessValidationReceipt(BaseModel):
     source_commit: str = Field(pattern=r"^[a-f0-9]{40}$")
     steps: list[BusinessStepEvidence] = Field(min_length=1, max_length=64)
     passed: bool
+    committed: bool
+
+    @model_validator(mode="after")
+    def successful_commit(self) -> Self:
+        if self.passed and not self.committed:
+            raise ValueError("A passing batch requires confirmed committed writes.")
+        return self
 
     @property
     def sha256(self) -> str:

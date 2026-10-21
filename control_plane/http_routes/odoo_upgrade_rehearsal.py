@@ -188,7 +188,9 @@ def register_odoo_upgrade_rehearsal_routes(
                     identity=identity,
                     route_path=ROUTE.format(product=product),
                     idempotency_key=idempotency_key,
-                    request_fingerprint=request_fingerprint({"product": product, **body.payload()}),
+                    request_fingerprint=request_fingerprint(
+                        {"product": product, **body.model_dump(mode="json")}
+                    ),
                     trace_id=trace,
                     adapter=adapter,
                     in_progress_message="This rehearsal retains the original operation; do not replay an uncertain effect.",

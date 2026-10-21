@@ -4524,7 +4524,26 @@
           },
           "values": {
             "additionalProperties": {
-              "$ref": "#/components/schemas/JsonValue"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "$ref": "#/components/schemas/BusinessReference"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "maxProperties": 40,
             "minProperties": 1,
@@ -4566,6 +4585,21 @@
           }
         },
         "title": "BusinessHoursWindow",
+        "type": "object"
+      },
+      "BusinessReference": {
+        "additionalProperties": false,
+        "properties": {
+          "$ref": {
+            "pattern": "^[a-z][a-z0-9_]{0,39}$",
+            "title": "$Ref",
+            "type": "string"
+          }
+        },
+        "required": [
+          "$ref"
+        ],
+        "title": "BusinessReference",
         "type": "object"
       },
       "BusinessValidation": {
