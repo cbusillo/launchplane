@@ -8,6 +8,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.runtime_identity import RuntimeIdentity
+from control_plane.contracts.text_fields import require_text
 
 
 _DOCKER_VOLUME_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,254}")
@@ -113,11 +114,11 @@ class OdooProdRetainedVolumeBackupImportRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_request(self) -> "OdooProdRetainedVolumeBackupImportRequest":
-        self.product = _normalize_required(
+        self.product = require_text(
             self.product,
             "Odoo retained-volume backup import requires product.",
         )
-        self.context = _normalize_required(
+        self.context = require_text(
             self.context,
             "Odoo retained-volume backup import requires context.",
         ).lower()
@@ -125,7 +126,7 @@ class OdooProdRetainedVolumeBackupImportRequest(BaseModel):
             self.backup_record_id,
             "Odoo retained-volume backup import requires a path-safe backup_record_id.",
         )
-        self.expected_current_artifact_id = _normalize_required(
+        self.expected_current_artifact_id = require_text(
             self.expected_current_artifact_id,
             "Odoo retained-volume backup import requires expected_current_artifact_id.",
         )
@@ -159,7 +160,7 @@ class OdooProdRetainedVolumeBackupImportRequest(BaseModel):
             "staging_clone_volume",
         )
         for field_name in volume_fields:
-            normalized_value = _normalize_required(
+            normalized_value = require_text(
                 str(getattr(self, field_name)),
                 f"Odoo retained-volume backup import requires {field_name}.",
             )
@@ -533,15 +534,8 @@ def build_odoo_prod_retained_volume_backup_import_plan_fingerprint(
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-def _normalize_required(value: str, message: str) -> str:
-    normalized = value.strip()
-    if not normalized:
-        raise ValueError(message)
-    return normalized
-
-
 def _normalize_path_component(value: str, message: str) -> str:
-    normalized = _normalize_required(value, message)
+    normalized = require_text(value, message)
     if not _PATH_COMPONENT_PATTERN.fullmatch(normalized):
         raise ValueError(message)
     return normalized

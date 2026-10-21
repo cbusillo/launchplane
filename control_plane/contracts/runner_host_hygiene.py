@@ -12,6 +12,7 @@ from control_plane.contracts.runner_host_hygiene_idle import (
     RunnerHostHygieneIdleScope,
     RunnerHostHygieneIdleSource,
 )
+from control_plane.contracts.text_fields import require_text
 
 
 RunnerHostHygieneStatus = Literal["healthy", "attention"]
@@ -209,7 +210,7 @@ class RunnerHostHygieneRunnerWorkdirUsage(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_usage(self) -> "RunnerHostHygieneRunnerWorkdirUsage":
-        self.root_key = _required_text(
+        self.root_key = require_text(
             _normalized_token(self.root_key),
             "runner host hygiene workdir usage requires root_key",
         )
@@ -340,7 +341,7 @@ class RunnerHostHygieneCacheClassTelemetry(BaseModel):
             self.source,
             "runner host hygiene cache-class telemetry requires source",
         )
-        self.observed_at = _required_text(
+        self.observed_at = require_text(
             self.observed_at,
             "runner host hygiene cache-class telemetry requires observed_at",
         )
@@ -503,10 +504,10 @@ class RunnerHostHygieneObservation(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_observation(self) -> "RunnerHostHygieneObservation":
-        self.host_name = _required_text(
+        self.host_name = require_text(
             self.host_name, "runner host hygiene observation requires host_name"
         )
-        self.observed_at = _required_text(
+        self.observed_at = require_text(
             self.observed_at, "runner host hygiene observation requires observed_at"
         )
         self.warm_builders = _normalized_tokens(self.warm_builders)
@@ -590,7 +591,7 @@ class RunnerHostHygieneImageInventoryItem(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_item(self) -> "RunnerHostHygieneImageInventoryItem":
-        self.image_id = _required_text(
+        self.image_id = require_text(
             self.image_id, "runner host hygiene image inventory item requires image_id"
         )
         self.repository = self.repository.strip().lower()
@@ -612,10 +613,10 @@ class RunnerHostHygieneVolumeInventoryItem(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_item(self) -> "RunnerHostHygieneVolumeInventoryItem":
-        self.name = _required_text(
+        self.name = require_text(
             self.name, "runner host hygiene volume inventory item requires name"
         )
-        self.driver = _required_text(
+        self.driver = require_text(
             self.driver, "runner host hygiene volume inventory item requires driver"
         )
         self.mountpoint = self.mountpoint.strip()
@@ -631,7 +632,7 @@ class RunnerHostHygieneFinding(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_finding(self) -> "RunnerHostHygieneFinding":
-        self.message = _required_text(self.message, "runner host hygiene finding requires message")
+        self.message = require_text(self.message, "runner host hygiene finding requires message")
         return self
 
 
@@ -673,7 +674,7 @@ class RunnerHostHygieneReport(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_report(self) -> "RunnerHostHygieneReport":
-        self.host_name = _required_text(
+        self.host_name = require_text(
             self.host_name, "runner host hygiene report requires host_name"
         )
         self.observed_at = self.observed_at.strip()
@@ -705,7 +706,7 @@ class RunnerHostHygieneReport(BaseModel):
         ):
             raise ValueError("volume inventory truncation must match total count")
         self.findings = tuple(sorted(self.findings, key=lambda finding: finding.code))
-        self.summary = _required_text(self.summary, "runner host hygiene report requires summary")
+        self.summary = require_text(self.summary, "runner host hygiene report requires summary")
         self.next_steps = tuple(step.strip() for step in self.next_steps if step.strip())
         if self.status == "healthy" and self.findings:
             raise ValueError("healthy runner host hygiene report cannot include findings")
@@ -819,7 +820,7 @@ class RunnerHostHygieneApplyBlocker(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_blocker(self) -> "RunnerHostHygieneApplyBlocker":
-        self.message = _required_text(
+        self.message = require_text(
             self.message, "runner host hygiene apply blocker requires message"
         )
         return self
@@ -840,15 +841,13 @@ class RunnerHostHygieneApplyPlan(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_plan(self) -> "RunnerHostHygieneApplyPlan":
-        self.host_name = _required_text(
+        self.host_name = require_text(
             self.host_name, "runner host hygiene apply plan requires host_name"
         )
         self.audit_record_key = self.audit_record_key.strip()
         self.blockers = tuple(sorted(self.blockers, key=lambda blocker: blocker.code))
         self.next_steps = tuple(step.strip() for step in self.next_steps if step.strip())
-        self.summary = _required_text(
-            self.summary, "runner host hygiene apply plan requires summary"
-        )
+        self.summary = require_text(self.summary, "runner host hygiene apply plan requires summary")
         if self.status == "ready" and self.blockers:
             raise ValueError("ready runner host hygiene apply plan cannot include blockers")
         if self.status == "blocked" and not self.blockers:
@@ -870,7 +869,7 @@ class RunnerHostHygieneApplyAuditRecord(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_record(self) -> "RunnerHostHygieneApplyAuditRecord":
-        self.audit_record_key = _required_text(
+        self.audit_record_key = require_text(
             self.audit_record_key, "runner host hygiene apply audit record requires key"
         )
         self.message = self.message.strip()
@@ -1014,15 +1013,15 @@ class RunnerHostHygieneAuditDeliveryEnvelope(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_envelope(self) -> "RunnerHostHygieneAuditDeliveryEnvelope":
-        self.host_name = _required_text(
+        self.host_name = require_text(
             _normalized_host_name(self.host_name),
             "runner host hygiene audit delivery envelope requires host_name",
         )
-        self.audit_record_key = _required_text(
+        self.audit_record_key = require_text(
             self.audit_record_key,
             "runner host hygiene audit delivery envelope requires audit_record_key",
         )
-        self.planned_idempotency_key = _required_text(
+        self.planned_idempotency_key = require_text(
             self.planned_idempotency_key,
             "runner host hygiene audit delivery envelope requires planned idempotency key",
         )
@@ -1031,11 +1030,11 @@ class RunnerHostHygieneAuditDeliveryEnvelope(BaseModel):
             r"[0-9a-f]{64}", self.executor_intent_sha256
         ):
             raise ValueError("runner host hygiene audit delivery requires executor intent sha256")
-        self.created_at = _required_text(
+        self.created_at = require_text(
             self.created_at,
             "runner host hygiene audit delivery envelope requires created_at",
         )
-        self.updated_at = _required_text(
+        self.updated_at = require_text(
             self.updated_at,
             "runner host hygiene audit delivery envelope requires updated_at",
         )
@@ -1096,7 +1095,7 @@ class RunnerHostHygieneAuditDeliveryEnvelope(BaseModel):
                 raise ValueError("runner host hygiene terminal audit must be completed or failed")
             if self.terminal_audit.audit_record_key != self.audit_record_key:
                 raise ValueError("runner host hygiene terminal audit key must match envelope")
-            self.terminal_idempotency_key = _required_text(
+            self.terminal_idempotency_key = require_text(
                 self.terminal_idempotency_key,
                 "runner host hygiene terminal audit requires idempotency key",
             )
@@ -1146,7 +1145,7 @@ class RunnerHostHygieneAdapterPolicy(BaseModel):
         )
         self.required_pre_apply_evidence = _normalized_tokens(self.required_pre_apply_evidence)
         self.required_post_apply_evidence = _normalized_tokens(self.required_post_apply_evidence)
-        self.audit_record_key_prefix = _required_text(
+        self.audit_record_key_prefix = require_text(
             self.audit_record_key_prefix,
             "runner host hygiene adapter policy requires audit record key prefix",
         )
@@ -1184,7 +1183,7 @@ class RunnerHostHygieneAdapterProposal(BaseModel):
             tuple[RunnerHostHygienePrivilegedScope, ...],
             _normalized_values(self.privileged_scopes, _normalized_token),
         )
-        self.audit_record_key = _required_text(
+        self.audit_record_key = require_text(
             self.audit_record_key, "runner host hygiene adapter proposal requires audit_record_key"
         )
         self.rollback_plan = self.rollback_plan.strip()
@@ -1201,7 +1200,7 @@ class RunnerHostHygieneAdapterBoundaryBlocker(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_blocker(self) -> "RunnerHostHygieneAdapterBoundaryBlocker":
-        self.message = _required_text(
+        self.message = require_text(
             self.message, "runner host hygiene adapter boundary blocker requires message"
         )
         return self
@@ -1223,24 +1222,24 @@ class RunnerHostHygieneAdapterBoundaryPlan(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_plan(self) -> "RunnerHostHygieneAdapterBoundaryPlan":
-        self.host_name = _required_text(
+        self.host_name = require_text(
             self.host_name, "runner host hygiene adapter boundary plan requires host_name"
         )
-        self.execution_lane = _required_text(
+        self.execution_lane = require_text(
             self.execution_lane,
             "runner host hygiene adapter boundary plan requires execution_lane",
         )
-        self.service_user = _required_text(
+        self.service_user = require_text(
             self.service_user,
             "runner host hygiene adapter boundary plan requires service_user",
         )
-        self.audit_record_key = _required_text(
+        self.audit_record_key = require_text(
             self.audit_record_key,
             "runner host hygiene adapter boundary plan requires audit_record_key",
         )
         self.blockers = tuple(sorted(self.blockers, key=lambda blocker: blocker.code))
         self.next_steps = tuple(step.strip() for step in self.next_steps if step.strip())
-        self.summary = _required_text(
+        self.summary = require_text(
             self.summary, "runner host hygiene adapter boundary plan requires summary"
         )
         if self.status == "ready" and self.blockers:
@@ -2471,7 +2470,7 @@ def _normalized_public_token(value: str) -> str:
 
 
 def _required_public_token(value: str, message: str) -> str:
-    return _required_text(_normalized_public_token(value), message)
+    return require_text(_normalized_public_token(value), message)
 
 
 def _normalized_optional_timestamp(value: str) -> str:
@@ -2527,10 +2526,3 @@ def _normalized_repository(value: str) -> str:
     if not owner or not name:
         raise ValueError("runner host hygiene adapter requires repository formatted as owner/name")
     return normalized_repository
-
-
-def _required_text(value: str, message: str) -> str:
-    normalized_value = value.strip()
-    if not normalized_value:
-        raise ValueError(message)
-    return normalized_value

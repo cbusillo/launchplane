@@ -16,6 +16,7 @@ from urllib.request import Request, urlopen
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.contracts.text_fields import require_text
 from control_plane.integration_readback import web_held_until_integration_readback
 from control_plane.product_secret_copy import ProductSecretCopyFrom
 from control_plane.odoo_preview_import_source import PREVIEW_FISHBOWL_SOURCE_ENV_KEY
@@ -167,7 +168,7 @@ class OdooPreviewApplyInputsRequest(BaseModel):
     def _normalize_request(self) -> "OdooPreviewApplyInputsRequest":
         if self.fishbowl_source is not None and self.operation != "refresh":
             raise ValueError("Only preview refresh accepts a Fishbowl source.")
-        self.product = _required_text(self.product, "Odoo preview apply inputs requires product")
+        self.product = require_text(self.product, "Odoo preview apply inputs requires product")
         if self.preview_slug.strip():
             self.preview_slug = self.preview_slug.strip()
         self.preview_url = self.preview_url.strip()
@@ -181,7 +182,7 @@ class OdooPreviewApplyInputsRequest(BaseModel):
         self.source_git_ref = self.source_git_ref.strip()
         if self.manifest is not None and not self.source_git_ref:
             self.source_git_ref = self.manifest.source_commit
-        self.source = _required_text(self.source, "Odoo preview apply inputs requires source")
+        self.source = require_text(self.source, "Odoo preview apply inputs requires source")
         return self
 
 
@@ -196,7 +197,7 @@ class OdooPreviewApplyPlanProvenance(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_provenance(self) -> "OdooPreviewApplyPlanProvenance":
-        self.plan_id = _required_text(self.plan_id, "Odoo preview plan provenance requires plan_id")
+        self.plan_id = require_text(self.plan_id, "Odoo preview plan provenance requires plan_id")
         self.plan_sha256 = self.plan_sha256.strip().lower()
         if len(self.plan_sha256) != 64 or any(
             character not in "0123456789abcdef" for character in self.plan_sha256
@@ -242,19 +243,19 @@ class OdooPreviewApplyInputsResult(BaseModel):
         self.omitted_integration_credential_keys = tuple(
             sorted(set(self.omitted_integration_credential_keys))
         )
-        self.product = _required_text(
+        self.product = require_text(
             self.product, "Odoo preview apply inputs result requires product"
         )
-        self.context = _required_text(
+        self.context = require_text(
             self.context, "Odoo preview apply inputs result requires context"
         )
-        self.template_instance = _required_text(
+        self.template_instance = require_text(
             self.template_instance, "Odoo preview apply inputs result requires template_instance"
         )
-        self.preview_slug = _required_text(
+        self.preview_slug = require_text(
             self.preview_slug, "Odoo preview apply inputs result requires preview_slug"
         )
-        self.repository = _required_text(
+        self.repository = require_text(
             self.repository, "Odoo preview apply inputs result requires repository"
         )
         if self.plan_request.product != self.product:
@@ -851,7 +852,7 @@ class OdooPreviewDokployDryRunBlocker(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_blocker(self) -> "OdooPreviewDokployDryRunBlocker":
-        self.message = _required_text(self.message, "Odoo preview dry-run blocker requires message")
+        self.message = require_text(self.message, "Odoo preview dry-run blocker requires message")
         return self
 
 
@@ -872,7 +873,7 @@ class OdooPreviewDokployOperation(BaseModel):
         if self.method != "LOCAL" and not self.path:
             raise ValueError("Dokploy API operation requires path")
         self.alternate_paths = _normalized_optional_paths(self.alternate_paths)
-        self.target = _required_text(self.target, "Dokploy operation requires target")
+        self.target = require_text(self.target, "Dokploy operation requires target")
         self.payload_keys = _normalized_unique_texts(self.payload_keys)
         return self
 
@@ -903,25 +904,25 @@ class OdooPreviewDokployDryRunPlan(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_plan(self) -> "OdooPreviewDokployDryRunPlan":
-        self.product = _required_text(self.product, "Odoo preview dry-run plan requires product")
-        self.repository = _required_text(
+        self.product = require_text(self.product, "Odoo preview dry-run plan requires product")
+        self.repository = require_text(
             self.repository, "Odoo preview dry-run plan requires repository"
         )
-        self.preview_slug = _required_text(
+        self.preview_slug = require_text(
             self.preview_slug, "Odoo preview dry-run plan requires preview_slug"
         )
         self.preview_url = self.preview_url.strip()
         self.domain_host = self.domain_host.strip().lower()
-        self.compose_ref = _required_text(
+        self.compose_ref = require_text(
             self.compose_ref, "Odoo preview dry-run plan requires compose_ref"
         )
-        self.compose_name = _required_text(
+        self.compose_name = require_text(
             self.compose_name, "Odoo preview dry-run plan requires compose_name"
         )
         self.environment_id = self.environment_id.strip()
         self.template_compose_id = self.template_compose_id.strip()
         self.blockers = tuple(sorted(self.blockers, key=lambda blocker: blocker.code))
-        self.summary = _required_text(self.summary, "Odoo preview dry-run plan requires summary")
+        self.summary = require_text(self.summary, "Odoo preview dry-run plan requires summary")
         if self.status == "ready" and self.blockers:
             raise ValueError("ready Odoo preview dry-run plan cannot include blockers")
         if self.status == "blocked" and not self.blockers:
@@ -941,7 +942,7 @@ class OdooPreviewDokployApplyStep(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_step(self) -> "OdooPreviewDokployApplyStep":
-        self.target = _required_text(self.target, "Odoo preview apply step requires target")
+        self.target = require_text(self.target, "Odoo preview apply step requires target")
         self.detail = self.detail.strip()
         return self
 
@@ -2448,13 +2449,6 @@ def _blocker(
     return OdooPreviewDokployDryRunBlocker(code=code, message=message)
 
 
-def _required_text(value: str, message: str) -> str:
-    normalized = value.strip()
-    if not normalized:
-        raise ValueError(message)
-    return normalized
-
-
 def _artifact_image_reference(manifest: ArtifactIdentityManifest) -> str:
     return f"{manifest.image.repository}@{manifest.image.digest}"
 
@@ -2468,7 +2462,7 @@ def _resolve_manifest_image_reference(
     normalized_image_reference = image_reference.strip()
     if manifest is None:
         return _validated_immutable_image_reference(
-            _required_text(
+            require_text(
                 normalized_image_reference,
                 f"{label} requires image_reference or manifest.",
             ),
