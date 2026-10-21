@@ -68,6 +68,7 @@ from control_plane.contracts.merge_train_structural_provenance import (
     MergeTrainStructuralProvenance,
 )
 from control_plane.client_test_notes import ClientTestNotes, change_client_review
+from control_plane.contracts.text_fields import require_text
 from control_plane.dependency_update_review import pure_dependabot_update
 from control_plane.release_review_shared import repository_key
 from control_plane.client_release_repositories import (
@@ -298,13 +299,13 @@ class UrllibMergeTrainGitHubTransport:
         self.repository_private = (
             token.repository_private if isinstance(token, GitHubAppInstallationToken) else None
         )
-        self.token = _required_value(
+        self.token = require_text(
             token.token if isinstance(token, GitHubAppInstallationToken) else token,
             "GitHub token is required.",
         )
-        self.api_base_url = _required_value(
-            api_base_url, "GitHub API base URL is required."
-        ).rstrip("/")
+        self.api_base_url = require_text(api_base_url, "GitHub API base URL is required.").rstrip(
+            "/"
+        )
         self.response_headers_observer = response_headers_observer
         self._read_cache = read_cache if read_cache is not None else MERGE_TRAIN_READ_CACHE
         self._cache_namespace = sha256(f"{self.api_base_url}\0{self.token}".encode()).hexdigest()
@@ -469,7 +470,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         """Read exact merged evidence without admitting or dispatching an effect."""
         entries = landing_plan.entries
         try:
-            _required_value(observed_at, "Historical completion observation time is required.")
+            require_text(observed_at, "Historical completion observation time is required.")
             repository_path = _repository_path(landing_plan.repository)
             if not 1 <= len(entries) <= 25:
                 reason_code: HistoricalCompletionProofReason = "plan_bound"
@@ -994,7 +995,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 status="ready_for_checks",
             )
         repository_path = _repository_path(candidate.repository)
-        candidate_sha = _required_value(
+        candidate_sha = require_text(
             candidate.candidate_sha,
             "Merge train batch candidate SHA is required before observing checks.",
         )
@@ -1033,7 +1034,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             base_branch=candidate.base_branch,
         )
         encoded_sha = quote(
-            _required_value(candidate.base_sha, "Merge train candidate base SHA is required."),
+            require_text(candidate.base_sha, "Merge train candidate base SHA is required."),
             safe="",
         )
         statuses = _list_commit_statuses(
@@ -1073,7 +1074,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         """Read which checks failed on the candidate commit and whether runners caused it."""
         repository_path = _repository_path(candidate.repository)
         encoded_sha = quote(
-            _required_value(
+            require_text(
                 candidate.candidate_sha,
                 "Merge train batch candidate SHA is required before reading failures.",
             ),
@@ -1441,7 +1442,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         first_entry = landing_plan.entries[0]
         expected_base = (
             first_entry.expected_base_sha,
-            _required_value(
+            require_text(
                 first_entry.recorded_candidate_parent_tree_sha,
                 "Policy-change recovery requires the recorded base tree.",
             ),
@@ -1967,7 +1968,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         labels = pull_request.get("labels")
         if not isinstance(labels, list):
             return False
-        normalized_label = _required_value(label, "GitHub label is required.")
+        normalized_label = require_text(label, "GitHub label is required.")
         for label_payload in labels:
             if not isinstance(label_payload, dict):
                 continue
@@ -1998,7 +1999,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         )
         head = _json_object(pull_request.get("head"), "GitHub pull request head")
         head_sha = _required_text(head.get("sha"), "GitHub pull request head requires sha.")
-        if head_sha != _required_value(
+        if head_sha != require_text(
             expected_head_sha, "Expected pull request head SHA is required."
         ):
             raise MergeTrainGitHubStaleHeadError(
@@ -2011,7 +2012,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         self, *, repository: str, pull_request_number: int, body_contains: str
     ) -> str:
         repository_path = _repository_path(repository)
-        needle = _required_value(body_contains, "GitHub comment match text is required.")
+        needle = require_text(body_contains, "GitHub comment match text is required.")
         page = 1
         while True:
             path = f"/repos/{repository_path}/issues/{pull_request_number}/comments"
@@ -2042,7 +2043,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             return ""
         head = _json_object(pull_request.get("head"), "GitHub pull request head")
         head_sha = _required_text(head.get("sha"), "GitHub pull request head requires sha.")
-        if head_sha != _required_value(
+        if head_sha != require_text(
             expected_head_sha, "Expected pull request head SHA is required."
         ):
             raise MergeTrainGitHubStaleHeadError(
@@ -2056,9 +2057,9 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
 
     def branch_contains_commit(self, *, repository: str, branch_ref: str, commit_sha: str) -> bool:
         repository_path = _repository_path(repository)
-        branch_name = quote(_required_value(branch_ref, "GitHub branch ref is required."), safe="")
+        branch_name = quote(require_text(branch_ref, "GitHub branch ref is required."), safe="")
         normalized_commit_sha = quote(
-            _required_value(commit_sha, "GitHub commit SHA is required."),
+            require_text(commit_sha, "GitHub commit SHA is required."),
             safe="",
         )
         payload = _json_object(
@@ -2075,7 +2076,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         return _base_branch_sha(
             transport=self.transport,
             repository_path=repository_path,
-            base_branch=_required_value(branch_ref, "GitHub branch ref is required."),
+            base_branch=require_text(branch_ref, "GitHub branch ref is required."),
         )
 
     def _pull_request_detail(
@@ -2112,7 +2113,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             return None
         base = _json_object(pull_request.get("base"), "GitHub pull request base")
         base_ref = _required_text(base.get("ref"), "GitHub pull request base requires ref.")
-        if base_ref != _required_value(
+        if base_ref != require_text(
             expected_base_ref, "Expected pull request base ref is required."
         ):
             raise MergeTrainGitHubStaleHeadError(
@@ -2196,7 +2197,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             )
         base = _json_object(pull_request.get("base"), "GitHub pull request base")
         if _required_text(base.get("ref"), "GitHub pull request base requires ref.") != (
-            _required_value(expected_base_ref, "Expected pull request base ref is required.")
+            require_text(expected_base_ref, "Expected pull request base ref is required.")
         ):
             raise MergeTrainGitHubStaleHeadError(
                 "No-op pull request targets a different base branch than the batch landing plan.",
@@ -2301,14 +2302,14 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         base = _json_object(pull_request.get("base"), "GitHub pull request base")
         base_ref = _required_text(base.get("ref"), "GitHub pull request base requires ref.")
         base_sha = _required_text(base.get("sha"), "GitHub pull request base requires sha.")
-        if base_ref != _required_value(
+        if base_ref != require_text(
             expected_base_ref, "Expected pull request base ref is required."
         ):
             raise MergeTrainGitHubStaleHeadError(
                 "Pull request targets a different base branch than the batch landing plan.",
                 status_code=409,
             )
-        if base_sha != _required_value(
+        if base_sha != require_text(
             expected_base_sha, "Expected pull request base SHA is required."
         ):
             # PR detail may describe an older base projection. Confirm the
@@ -2389,7 +2390,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
 
     def ensure_repository_label(self, *, repository: str, label: str, mutate: bool = True) -> bool:
         repository_path = _repository_path(repository)
-        normalized_label = _required_value(label, "GitHub label is required.")
+        normalized_label = require_text(label, "GitHub label is required.")
         label_path = f"/repos/{repository_path}/labels/{quote(normalized_label, safe='')}"
         try:
             self.transport.request(method="GET", path=label_path)
@@ -2427,7 +2428,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         self, *, repository: str, pull_request_number: int, label: str
     ) -> None:
         repository_path = _repository_path(repository)
-        normalized_label = _required_value(label, "GitHub label is required.")
+        normalized_label = require_text(label, "GitHub label is required.")
         label_path = f"/repos/{repository_path}/labels/{quote(normalized_label, safe='')}"
         try:
             self.transport.request(
@@ -2512,7 +2513,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             method="PUT",
             path=f"/repos/{repository_path}/pulls/{pull_request_number}/update-branch",
             body={
-                "expected_head_sha": _required_value(
+                "expected_head_sha": require_text(
                     expected_head_sha, "Expected pull request head SHA is required."
                 )
             },
@@ -2658,7 +2659,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         merge_method: MergeTrainMergeMethod,
     ) -> str:
         repository_path = _repository_path(repository)
-        expected_head_sha = _required_value(head_sha, "Pull request head SHA is required.")
+        expected_head_sha = require_text(head_sha, "Pull request head SHA is required.")
         try:
             payload = self.transport.request(
                 method="PUT",
@@ -2707,7 +2708,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         payload = self.transport.request(
             method="POST",
             path=f"/repos/{repository_path}/issues/{pull_request_number}/comments",
-            body={"body": _required_value(body, "GitHub pull request comment body is required.")},
+            body={"body": require_text(body, "GitHub pull request comment body is required.")},
         )
         if not isinstance(payload, dict):
             raise MergeTrainGitHubError("GitHub comment response must be a JSON object.")
@@ -2718,11 +2719,11 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
     ) -> None:
         repository_path = _repository_path(repository)
         pull_request_path = f"/repos/{repository_path}/pulls/{pull_request_number}"
-        expected_sha = _required_value(
+        expected_sha = require_text(
             expected_head_sha, "Expected pull request head SHA is required."
         )
         current_head_sha = self._pull_request_head_sha(pull_request_path=pull_request_path)
-        if current_head_sha != _required_value(
+        if current_head_sha != require_text(
             expected_head_sha, "Expected pull request head SHA is required."
         ):
             raise MergeTrainGitHubStaleHeadError(
@@ -2842,10 +2843,10 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         parent_pull_request_number: int,
     ) -> str:
         repository_path = _repository_path(repository)
-        normalized_parent_ref = _required_value(
+        normalized_parent_ref = require_text(
             parent_head_ref, "Stack collapse parent head ref is required."
         )
-        if normalized_parent_ref == _required_value(
+        if normalized_parent_ref == require_text(
             protected_base_ref, "Stack collapse protected base ref is required."
         ):
             raise MergeTrainGitHubError("Stack collapse cannot mutate a protected base branch.")
@@ -2854,7 +2855,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             repository_path=repository_path,
             base_branch=normalized_parent_ref,
         )
-        expected_sha = _required_value(
+        expected_sha = require_text(
             expected_parent_head_sha, "Stack collapse expected parent SHA is required."
         )
         if current_parent_sha != expected_sha:
@@ -2892,9 +2893,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             path=f"/repos/{repository_path}/merges",
             body={
                 "base": normalized_parent_ref,
-                "head": _required_value(
-                    child_head_sha, "Stack collapse child head SHA is required."
-                ),
+                "head": require_text(child_head_sha, "Stack collapse child head SHA is required."),
                 "commit_message": _stack_collapse_commit_message(
                     collapse_id=collapse_id,
                     child_pull_request_number=child_pull_request_number,
@@ -2935,12 +2934,12 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         current_parent_sha = _base_branch_sha(
             transport=self.transport,
             repository_path=repository_path,
-            base_branch=_required_value(
+            base_branch=require_text(
                 parent_head_ref,
                 "Stack collapse parent head ref is required.",
             ),
         )
-        expected_parent_sha = _required_value(
+        expected_parent_sha = require_text(
             expected_parent_head_sha,
             "Stack collapse expected parent SHA is required.",
         )
@@ -2997,7 +2996,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             )
 
     def _create_or_reset_reference(self, *, repository_path: str, reference: str, sha: str) -> None:
-        normalized_sha = _required_value(sha, "GitHub reference SHA is required.")
+        normalized_sha = require_text(sha, "GitHub reference SHA is required.")
         try:
             self.transport.request(
                 method="POST",
@@ -3171,7 +3170,7 @@ class GitHubMergeTrainSnapshotReader:
         self._dependency_classes.clear()
         self._ready_handoffs.clear()
         repository_path = _repository_path(repository)
-        normalized_base_branch = _required_value(
+        normalized_base_branch = require_text(
             base_branch, "GitHub pull request base branch is required."
         )
         base_sha = self._base_branch_sha(
@@ -4336,8 +4335,8 @@ class MergeTrainGitHubRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_request(self) -> "MergeTrainGitHubRequest":
-        self.method = _required_value(self.method, "GitHub request method is required.").upper()
-        self.path = _required_value(self.path, "GitHub request path is required.")
+        self.method = require_text(self.method, "GitHub request method is required.").upper()
+        self.path = require_text(self.path, "GitHub request path is required.")
         if not self.path.startswith("/"):
             raise ValueError("GitHub request path must start with '/'.")
         return self
@@ -4436,7 +4435,7 @@ def _git_commit_proof(
     repository_path: str,
     commit_sha: str,
 ) -> tuple[str, str, tuple[str, ...]]:
-    encoded_sha = quote(_required_value(commit_sha, "GitHub commit SHA is required."), safe="")
+    encoded_sha = quote(require_text(commit_sha, "GitHub commit SHA is required."), safe="")
     payload = _json_object(
         transport.request(
             method="GET",
@@ -4548,11 +4547,11 @@ def _branch_contains_commit_at_pinned_base(
     pinned_base_sha: str,
 ) -> bool:
     normalized_merge_sha = quote(
-        _required_value(merge_commit_sha, "Historical completion merge SHA is required."),
+        require_text(merge_commit_sha, "Historical completion merge SHA is required."),
         safe="",
     )
     normalized_base_sha = quote(
-        _required_value(pinned_base_sha, "Historical completion pinned base SHA is required."),
+        require_text(pinned_base_sha, "Historical completion pinned base SHA is required."),
         safe="",
     )
     payload = _json_object(
@@ -4601,7 +4600,7 @@ def _on_behalf_via_app(*, event: dict[str, object], actor: dict[str, object]) ->
 
 
 def _repository_path(repository: str) -> str:
-    normalized = _required_value(repository, "GitHub repository is required.").lower()
+    normalized = require_text(repository, "GitHub repository is required.").lower()
     parts = normalized.split("/")
     if len(parts) != 2 or not all(part.strip() for part in parts):
         raise ValueError("GitHub repository must be formatted as owner/name.")
@@ -4609,7 +4608,7 @@ def _repository_path(repository: str) -> str:
 
 
 def _branch_name_from_ref(reference: str) -> str:
-    normalized = _required_value(reference, "GitHub branch ref is required.")
+    normalized = require_text(reference, "GitHub branch ref is required.")
     prefix = "refs/heads/"
     if not normalized.startswith(prefix):
         raise ValueError("GitHub branch ref must start with refs/heads/.")
@@ -4617,7 +4616,7 @@ def _branch_name_from_ref(reference: str) -> str:
 
 
 def _reference_path(reference: str) -> str:
-    normalized = _required_value(reference, "GitHub reference is required.")
+    normalized = require_text(reference, "GitHub reference is required.")
     prefix = "refs/"
     if not normalized.startswith(prefix):
         raise ValueError("GitHub reference must start with refs/.")
@@ -4639,7 +4638,7 @@ def _base_rooted_pull_requests(
     repository: str,
     base_branch: str,
 ) -> tuple[dict[str, object], ...]:
-    repository = _required_value(repository, "GitHub repository is required.").lower()
+    repository = require_text(repository, "GitHub repository is required.").lower()
     by_base_ref: dict[str, list[dict[str, object]]] = {}
     relevant_numbers: set[int] = set()
     for pull_request in pull_requests:
@@ -5832,13 +5831,6 @@ def _stack_collapse_commit_message(
         f"Launchplane stack collapse {collapse_id}: merge PR "
         f"#{child_pull_request_number} into PR #{parent_pull_request_number}"
     )
-
-
-def _required_value(value: str, message: str) -> str:
-    normalized = value.strip()
-    if not normalized:
-        raise ValueError(message)
-    return normalized
 
 
 def _github_request_route_template(path: str) -> str:
