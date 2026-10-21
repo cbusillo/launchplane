@@ -2,7 +2,7 @@ import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import cast
+from typing import Any, cast
 from unittest.mock import patch
 from urllib.parse import quote
 
@@ -591,14 +591,28 @@ class FastApiProviderHoldAttentionReadTests(unittest.IsolatedAsyncioTestCase):
         schema = response.json()
         operation = schema["paths"][PROVIDER_HOLD_ATTENTION_ROUTE]["get"]
         self.assertTrue({"200", "400", "401", "403", "503"}.issubset(operation["responses"]))
-        for name in (
-            "ProviderHoldAttentionResponse",
-            "ProviderHoldAttentionPage",
-            "ProviderHoldAttentionItem",
-            "ProviderHoldScope",
-        ):
-            self.assertFalse(schema["components"]["schemas"][name]["additionalProperties"])
-        properties = schema["components"]["schemas"]["ProviderHoldAttentionItem"]["properties"]
+
+        def resolve(value: dict[str, Any]) -> dict[str, Any]:
+            reference = value.get("$ref")
+            if isinstance(reference, str):
+                return cast(
+                    dict[str, Any], schema["components"]["schemas"][reference.rsplit("/", 1)[-1]]
+                )
+            return value
+
+        response_schema = resolve(
+            operation["responses"]["200"]["content"]["application/json"]["schema"]
+        )
+        page = resolve(response_schema["properties"]["attention"])
+        item = resolve(page["properties"]["items"]["items"])
+        scope = next(
+            resolve(value)
+            for value in item["properties"]["original_scope"]["anyOf"]
+            if "$ref" in value
+        )
+        for model in (response_schema, page, item, scope):
+            self.assertFalse(model["additionalProperties"])
+        properties = item["properties"]
         self.assertIn("operation_reference", properties)
         self.assertNotIn("reservation", properties)
 

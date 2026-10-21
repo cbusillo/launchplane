@@ -13047,7 +13047,7 @@ class RealPostgresApplicationTestingActivationTests(unittest.TestCase):
         self.fixture.test_private_same_address_monitor_recreate_and_second_generation()
 
     def test_original_intent_progress_and_native_forward_continuation(self) -> None:
-        self.fixture.test_normal_lost_maintenance_native_activation_and_ordinary_successor()
+        self.fixture.test_second_native_generation_keeps_both_original_operations_and_old_data()
 
     def test_final_bundle_rolls_back_and_reuses_original_staged_versions(self) -> None:
         self.fixture.test_failed_atomic_publication_keeps_old_delivery_and_reuses_staged_generation()

@@ -4359,6 +4359,69 @@ class ApplicationFlowTests(unittest.TestCase):
             self.original,
         )
 
+        from dataclasses import replace
+        from unittest.mock import Mock
+        from control_plane.storage.postgres import LaunchplaneIdempotencyRow
+        from control_plane.workflows.public_ingress_monitor import (
+            _deploy_fence_monitor_target,
+            check_public_ingress_target,
+        )
+
+        snapshot = self.store.read_provider_hold_snapshot(
+            product=self.product, context=self.context, instance="testing"
+        )
+        self.assertFalse(snapshot.holds)
+        profile = self.store.read_product_profile_record(self.product)
+        lane = next(lane for lane in profile.lanes if lane.instance == "testing")
+        observation = check_public_ingress_target(
+            target=replace(
+                _deploy_fence_monitor_target(profile=profile, lane=lane, fence=None),
+                provider_hold_snapshot=snapshot,
+            ),
+            checked_at=self.old.now(),
+            timeout_seconds=1,
+            http_get=Mock(),
+            tls_get=Mock(),
+        )
+        self.assertEqual(observation.status, "pass")
+        revisions = self.store.health_monitor_authority_revisions()
+        previous_observations = self.store.list_public_ingress_observation_records()
+        assert first_operation is not None
+        with self.store._session_factory() as session:
+            row = session.get(LaunchplaneIdempotencyRow, first_operation.record_id)
+            assert row is not None
+            result = first_operation.response_payload["result"]
+            self.store._sync_idempotency_row(
+                row,
+                first_operation.model_copy(
+                    update={
+                        "response_payload": {
+                            **first_operation.response_payload,
+                            "result": {**result, "separation_verified": False},
+                        }
+                    }
+                ),
+            )
+            session.commit()
+        current = self.store.read_provider_hold_snapshot(
+            product=self.product, context=self.context, instance="testing"
+        )
+        self.assertIn(
+            self.original.record_id, {hold.reservation.record_id for hold in current.holds}
+        )
+        self.assertNotEqual(snapshot.source_sha256, current.source_sha256)
+        lane_key = (self.product, self.context, "testing")
+        self.assertNotEqual(
+            revisions[lane_key], self.store.health_monitor_authority_revisions()[lane_key]
+        )
+        publication = self.store.write_public_ingress_transition_with_outbox(
+            observation=observation, incidents=(), expected_provider_hold_snapshot=snapshot
+        )
+        self.assertEqual(publication.status, "provider_source_changed")
+        self.assertEqual(
+            self.store.list_public_ingress_observation_records(), previous_observations
+        )
+
 
 class DirectApplicationContinuationTests(unittest.TestCase):
     def test_direct_original_post_and_pre_image_continue_with_own_successor_receipts(self) -> None:

@@ -1723,6 +1723,9 @@ witness. The same stuck/grace predicate classifies the original observation and
 the locked current rows at database acceptance time; a classification change,
 including elapsed grace without a row write, rejects the observation. All other
 source identity, membership, incarnation and authority checks remain exact.
+Application separation reads its captured activation history and real original
+parent completion in that same transaction. Both contribute to the source
+witness and scheduler change detection; progress alone never proves separation.
 A nonblocking shared product-authority lock avoids waiting
 behind a publisher that holds authority and needs a reservation. A changed or
 busy source leaves the observation unaccepted/skipped, with no persisted pass,

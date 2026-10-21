@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from control_plane.contracts.lane_service_restart import SERVICE_RESTART_ROUTE
+from control_plane.provider_hold_attention import PROVIDER_HOLD_ATTENTION_ROUTE
 
 import json
 from collections.abc import Callable, Mapping, Sequence
@@ -143,7 +144,7 @@ def write_canonical_openapi(output_path: Path) -> Path:
 
 
 UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
-    "/v1/operations/provider-hold-attention": "read_provider_hold_attention",
+    PROVIDER_HOLD_ATTENTION_ROUTE: "read_provider_hold_attention",
     "/v1/product-config/testing-hold": "read_testing_hold",
     "/v1/products/{product}/discussion-topics": "list_discussion_topics",
     "/v1/products/{product}/testing-rebuild/inputs": "inspect_testing_rebuild",

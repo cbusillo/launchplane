@@ -5757,31 +5757,22 @@ class PostgresRecordStore(HumanSessionStore):
                 snapshots.setdefault((context, instance), []).append(
                     ("secret-version", secret_id, version_id, status)
                 )
-        fence_snapshots: dict[tuple[str, str, str], list[object]] = {}
+        lane_keys = tuple(
+            (profile.product, lane.context, lane.instance)
+            for profile in profiles
+            for lane in profile.lanes
+        )
         try:
-            provider_holds = self.list_provider_target_holds()
+            provider_snapshots = self.read_provider_hold_snapshots(
+                lane_keys=lane_keys, references_by_lane={}
+            )
+            fence_snapshots = {
+                lane: [("provider-holds", snapshot.source_sha256)]
+                for lane, snapshot in provider_snapshots.items()
+            }
         except ValueError:
-            # Malformed provider evidence must wake/retry monitoring, without
-            # suppressing unrelated lane authority or inventing original ownership.
-            provider_holds = ()
-            for profile in profiles:
-                for lane in profile.lanes:
-                    fence_snapshots.setdefault(
-                        (profile.product, lane.context, lane.instance), []
-                    ).append(("provider-holds", "unavailable"))
-        for hold in provider_holds:
-            lanes = (hold.lane,) if hold.lane is not None else ()
-            for lane_key in lanes:
-                fence_snapshots.setdefault(lane_key, []).append(
-                    (
-                        "provider-hold",
-                        hold.reservation.record_id,
-                        str(hold.operation_nonce),
-                        hold.reservation.state,
-                        hold.attribution,
-                        hold.separated,
-                    )
-                )
+            # Malformed evidence must wake monitoring without inventing custody.
+            fence_snapshots = {lane: [("provider-holds", "unavailable")] for lane in lane_keys}
         revisions = {}
         for profile in profiles:
             for lane in profile.lanes:
@@ -13301,83 +13292,90 @@ class PostgresRecordStore(HumanSessionStore):
                 )
             session.commit()
 
+    def _testing_application_activation_evidence(
+        self,
+        session: Any,
+        *,
+        product: str | None = None,
+        context: str | None = None,
+        scope: str | None = None,
+        preparation_key: str | None = None,
+    ) -> tuple[tuple[LaunchplaneIdempotencyRecord, LaunchplaneIdempotencyRecord], ...]:
+        """Read bound activation progress and real parents in the caller's transaction."""
+        payload = LaunchplaneIdempotencyRow.payload["response_payload"]["original_intent"][
+            "testing_activation"
+        ]
+        statement = select(LaunchplaneIdempotencyRow).where(
+            LaunchplaneIdempotencyRow.route_path == ORIGINAL_MUTATION_INTENT_ROUTE,
+            payload["product"].as_string().is_not(None),
+            payload["context"].as_string().is_not(None),
+        )
+        for field, value in (("product", product), ("context", context)):
+            if value is not None:
+                statement = statement.where(payload[field].as_string() == value)
+        if scope is not None:
+            statement = statement.where(LaunchplaneIdempotencyRow.scope == scope)
+        if preparation_key is not None:
+            statement = statement.where(
+                payload["request"]["preparation_key"].as_string() == preparation_key
+            )
+        originals = tuple(
+            LaunchplaneIdempotencyRecord.model_validate(row.payload)
+            for row in session.scalars(statement.order_by(LaunchplaneIdempotencyRow.record_id))
+        )
+        parent_ids = tuple(row.response_payload["reservation_id"] for row in originals)
+        parents = {
+            row.record_id: row
+            for row in session.scalars(
+                select(LaunchplaneIdempotencyRow).where(
+                    LaunchplaneIdempotencyRow.record_id.in_(parent_ids)
+                )
+            )
+        }
+        result = []
+        for original in originals:
+            captured = original.response_payload["original_intent"]["testing_activation"]
+            parent = parents.get(original.response_payload["reservation_id"])
+            if (
+                parent is None
+                or parent.scope != original.scope
+                or parent.route_path != f"/v1/products/{captured['product']}/testing-activation"
+                or parent.payload["request_fingerprint"] != original.request_fingerprint
+            ):
+                continue
+            result.append((original, LaunchplaneIdempotencyRecord.model_validate(parent.payload)))
+        return tuple(result)
+
     def list_testing_application_activations(
         self, product: str, context: str
     ) -> tuple[dict[str, Any], ...]:
         """Progress belongs to a real retained parent, never a synthetic activation receipt."""
-        payload = LaunchplaneIdempotencyRow.payload["response_payload"]["original_intent"][
-            "testing_activation"
-        ]
         with self._session_factory() as session:
-            originals = session.scalars(
-                select(LaunchplaneIdempotencyRow).where(
-                    LaunchplaneIdempotencyRow.route_path == ORIGINAL_MUTATION_INTENT_ROUTE,
-                    payload["product"].as_string() == product,
-                    payload["context"].as_string() == context,
+            return tuple(
+                original.response_payload.get(
+                    "testing_activation",
+                    original.response_payload["original_intent"]["testing_activation"],
                 )
-            ).all()
-            result = []
-            for row in originals:
-                original = LaunchplaneIdempotencyRecord.model_validate(row.payload)
-                parent = session.scalar(
-                    select(LaunchplaneIdempotencyRow).where(
-                        LaunchplaneIdempotencyRow.record_id
-                        == original.response_payload["reservation_id"],
-                        LaunchplaneIdempotencyRow.scope == original.scope,
-                        LaunchplaneIdempotencyRow.route_path
-                        == f"/v1/products/{product}/testing-activation",
-                    )
+                for original, _parent in self._testing_application_activation_evidence(
+                    session, product=product, context=context
                 )
-                if (
-                    parent is None
-                    or parent.payload["request_fingerprint"] != original.request_fingerprint
-                ):
-                    continue
-                result.append(
-                    original.response_payload.get(
-                        "testing_activation",
-                        original.response_payload["original_intent"]["testing_activation"],
-                    )
-                )
-            return tuple(result)
+            )
 
     def read_testing_application_activation_operation(
         self, product: str, context: str, scope: str, preparation_key: str
     ) -> LaunchplaneIdempotencyRecord | None:
         """Resolve the real original parent; progress is never completion evidence."""
-        payload = LaunchplaneIdempotencyRow.payload["response_payload"]["original_intent"][
-            "testing_activation"
-        ]
         with self._session_factory() as session:
-            originals = session.scalars(
-                select(LaunchplaneIdempotencyRow).where(
-                    LaunchplaneIdempotencyRow.route_path == ORIGINAL_MUTATION_INTENT_ROUTE,
-                    LaunchplaneIdempotencyRow.scope == scope,
-                    payload["product"].as_string() == product,
-                    payload["context"].as_string() == context,
-                    payload["request"]["preparation_key"].as_string() == preparation_key,
-                )
-            ).all()
-            parents = []
-            for row in originals:
-                original = LaunchplaneIdempotencyRecord.model_validate(row.payload)
-                parent = session.scalar(
-                    select(LaunchplaneIdempotencyRow).where(
-                        LaunchplaneIdempotencyRow.record_id
-                        == original.response_payload["reservation_id"],
-                        LaunchplaneIdempotencyRow.scope == scope,
-                        LaunchplaneIdempotencyRow.route_path
-                        == f"/v1/products/{product}/testing-activation",
-                    )
-                )
-                if (
-                    parent is not None
-                    and parent.payload["request_fingerprint"] == original.request_fingerprint
-                ):
-                    parents.append(LaunchplaneIdempotencyRecord.model_validate(parent.payload))
-            if len(parents) > 1:
+            evidence = self._testing_application_activation_evidence(
+                session,
+                product=product,
+                context=context,
+                scope=scope,
+                preparation_key=preparation_key,
+            )
+            if len(evidence) > 1:
                 raise ValueError("Activation has more than one original parent operation.")
-            return parents[0] if parents else None
+            return evidence[0][1] if evidence else None
 
     def list_pending_odoo_testing_drill_alerts(
         self, product: str, context: str
@@ -33559,6 +33557,26 @@ class _ProviderHoldAuthorityView(PostgresRecordStore):
             )
         }
 
+        self._application_evidence = store._testing_application_activation_evidence(session)
+
+    def __getattr__(self, name: str) -> NoReturn:
+        if name == "_session_factory":
+            raise ValueError("Provider hold authority requires a captured same-session read.")
+        raise AttributeError(name)
+
+    def _application_evidence_for_lane(
+        self, product: str, context: str
+    ) -> tuple[tuple[LaunchplaneIdempotencyRecord, LaunchplaneIdempotencyRecord], ...]:
+        return tuple(
+            (original, parent)
+            for original, parent in self._application_evidence
+            if (
+                original.response_payload["original_intent"]["testing_activation"]["product"],
+                original.response_payload["original_intent"]["testing_activation"]["context"],
+            )
+            == (product, context)
+        )
+
     def material_for_lane(self, product: str, context: str, instance: str) -> object:
         target_ids = {
             row.target_id
@@ -33587,6 +33605,13 @@ class _ProviderHoldAuthorityView(PostgresRecordStore):
                 if (row.context, row.instance) == (context, instance)
             ],
             self._activations.get((product, context)),
+            [
+                [
+                    record.model_dump(mode="json", exclude={"updated_at", "lease_expires_at"})
+                    for record in evidence
+                ]
+                for evidence in self._application_evidence_for_lane(product, context)
+            ],
         ]
 
     def close(self) -> None:
@@ -33639,3 +33664,30 @@ class _ProviderHoldAuthorityView(PostgresRecordStore):
 
     def read_testing_activation(self, product: str, context: str) -> dict[str, Any] | None:
         return self._activations.get((product, context))
+
+    def list_testing_application_activations(
+        self, product: str, context: str
+    ) -> tuple[dict[str, Any], ...]:
+        return tuple(
+            original.response_payload.get(
+                "testing_activation",
+                original.response_payload["original_intent"]["testing_activation"],
+            )
+            for original, _parent in self._application_evidence_for_lane(product, context)
+        )
+
+    def read_testing_application_activation_operation(
+        self, product: str, context: str, scope: str, preparation_key: str
+    ) -> LaunchplaneIdempotencyRecord | None:
+        parents = tuple(
+            parent
+            for original, parent in self._application_evidence_for_lane(product, context)
+            if original.scope == scope
+            and original.response_payload["original_intent"]["testing_activation"]["request"][
+                "preparation_key"
+            ]
+            == preparation_key
+        )
+        if len(parents) > 1:
+            raise ValueError("Activation has more than one original parent operation.")
+        return parents[0] if parents else None

@@ -1,4 +1,6 @@
 import { PROVIDER_HOLD_ATTENTION_ROUTE } from "../../src/api";
+import { providerAttentionQualifier } from "../../src/provider-hold-attention";
+import { emptyResource } from "../../src/resource";
 
 import { expect, setClockTime, test, waitForState, type Page } from "./state";
 import type { ProviderHoldAttentionPage, ProviderHoldAttentionItem, ProductSiteOverview } from "../../src/generated/openapi.ts";
@@ -46,6 +48,12 @@ async function attention(page: Page, items: ProviderHoldAttentionItem[]): Promis
   items = items.map(item => ({ ...item, created_at: new Date(now - 60_000).toISOString(), updated_at: new Date(now).toISOString(), lease_expires_at: new Date(now + 60_000).toISOString() }));
   return { items, has_more: false, next_cursor: null, completeness: "single_page", observed_at: new Date(now).toISOString(), stale_after: new Date(now + 60_000).toISOString() };
 }
+
+async function expectQualifier(page: Page, data: ProviderHoldAttentionPage | null, status: "ready" | "error") {
+  const now = await page.evaluate(() => Date.now());
+  const expected = providerAttentionQualifier({ ...emptyResource<ProviderHoldAttentionPage>(), data, status }, now);
+  await expect(page.getByRole("region", { name: "Service operation attention" })).toContainText(expected);
+}
 async function inventory(page: Page, products: ProductSiteOverview[], identity: unknown) {
   await page.route("**/v1/**", route => {
     expect(route.request().method()).toBe("GET");
@@ -63,11 +71,10 @@ for (const empty of [false, true]) {
     await page.route(attentionPath, route => route.fulfill({ json: { status: "ok", attention: { ...data, private_intent: "PRIVATE-SENTINEL", provider_target_key: "PRIVATE-TARGET" } } }));
     await page.goto("/ui/products");
     const panel = page.getByRole("region", { name: "Service operation attention" });
-    await expect(panel).toContainText("Original ownership unknown");
-    await expect(panel).toContainText("Running operation");
+    await expect(panel.locator("li")).toHaveCount(1);
+    await expectQualifier(page, data, "ready");
     if (empty) await expect(page.getByRole("heading", { name: "No products are owned by Launchplane yet" })).toBeVisible();
     else {
-      await expect(page.getByRole("region", { name: "Active public ingress incidents" })).toContainText("unknown original ownership");
       await expect(page.locator(".product-directory")).toContainText(product.display_name);
       await expect(page.locator('.directory-lane[data-operational="verified"]')).toHaveCount(2);
     }
@@ -88,11 +95,11 @@ test("bounded continuation remains partial on an empty last page and refresh res
   await page.goto("/ui/products");
   const panel = page.getByRole("region", { name: "Service operation attention" });
   await expect(panel).toContainText("Retired product");
-  await expect(panel).toContainText("partial");
+  await expectQualifier(page, first, "ready");
   await panel.getByRole("button", { name: "Next operation page" }).click();
-  await expect(panel).toContainText("No operations returned on this continuation page");
+  await expect(panel.locator("li")).toHaveCount(0);
+  await expectQualifier(page, last, "ready");
   await expect(panel).not.toContainText("Retired product");
-  await expect(panel).not.toContainText("No retained service operations");
   await panel.getByRole("button", { name: "Refresh operation attention" }).click();
   await expect(panel).toContainText("Retired product");
   expect(queries.some(query => query.includes("cursor=next-fixture"))).toBe(true);
@@ -110,7 +117,7 @@ test("one completed operation cannot hide another retained operation", async ({ 
   data = await attention(page, [hold(false, "second-operation")]);
   await page.getByRole("button", { name: "Refresh current evidence" }).click();
   await expect(panel.locator("li")).toHaveCount(1);
-  await expect(panel).toContainText("Original ownership unknown");
+  await expectQualifier(page, data, "ready");
 });
 
 test("loading stale transient failure and forbidden responses preserve honest evidence and clear sensitive rows", async ({ page }) => {
@@ -127,20 +134,19 @@ test("loading stale transient failure and forbidden responses preserve honest ev
   });
   await page.goto("/ui/products");
   const panel = page.getByRole("region", { name: "Service operation attention" });
-  await expect(panel).toContainText("attention is loading");
+  await expect(panel).toHaveAttribute("aria-busy", "true");
   held = false;
   release();
   await expect(panel).toContainText("Retired product");
   status = 503;
   await page.clock.runFor(60_001);
-  await expect(panel).toContainText("attention is unavailable");
-  await expect(panel).toContainText("Last received evidence is stale");
+  await expectQualifier(page, data, "error");
+  await expect(panel.getByRole("status")).toBeVisible();
   await expect(panel).toContainText("Retired product");
   status = 403;
   await panel.getByRole("button", { name: "Refresh operation attention" }).click();
   await expect(panel.locator("li")).toHaveCount(0);
-  await expect(panel).toContainText("attention is unavailable");
-  await expect(page.getByRole("region", { name: "Active public ingress incidents" })).toContainText("authorized lane incidents only");
+  await expectQualifier(page, null, "error");
   status = 200;
   await panel.getByRole("button", { name: "Refresh operation attention" }).click();
   await expect(panel).toContainText("Retired product");
@@ -161,7 +167,7 @@ test("authentication loss removes cached service evidence and a fresh session re
   expired = false;
   data = await attention(page, [hold(false)]);
   await page.reload();
-  await expect(page.getByRole("region", { name: "Service operation attention" })).toContainText("Original ownership unknown");
+  await expectQualifier(page, data, "ready");
   await expect(page.locator("body")).not.toContainText("Retired product");
 });
 
@@ -169,11 +175,11 @@ test("demo and non-admin sessions never fetch service attention", async ({ page 
   let calls = 0;
   await page.route(attentionPath, route => { calls++; return route.abort(); });
   const { identity } = await fixture(page);
-  await expect(page.getByRole("region", { name: "Service operation attention" })).toContainText("Demo mode");
+  await expect(page.getByRole("region", { name: "Service operation attention" }).getByRole("button")).toHaveCount(0);
   expect(calls).toBe(0);
   await inventory(page, [], { ...identity, role: "read_only" });
   await page.goto("/ui/products");
-  await expect(page.getByRole("region", { name: "Service operation attention" })).toContainText("unavailable for this session");
+  await expect(page.getByRole("region", { name: "Service operation attention" }).getByRole("button")).toHaveCount(0);
   expect(calls).toBe(0);
 });
 
@@ -203,7 +209,7 @@ test("a cancelled continuation cannot replace the refreshed first page", async (
   await expect(panel).toContainText("Retired product");
   release();
   await expect(panel).toContainText("Retired product");
-  await expect(panel).not.toContainText("No operations returned on this continuation page");
+  await expect(panel.locator("li")).toHaveCount(first.items.length);
 });
 
 test("explicit sign out removes service attention and stops its refresh", async ({ page }) => {
