@@ -8,6 +8,36 @@ the only needed copy of data, production resources and live credentials remain
 protected. A label, missing staff hold, distinct volume name or distinct secret
 version is not proof of those facts.
 
+## Native generic-web testing deployment
+
+The existing `POST /v1/drivers/generic-web/deploy` accepts the authenticated
+Director agent's `local_operator` transport for an active product's exact testing
+lane without a per-product deploy grant. This alternative does not extend the
+mixed production/testing action's policy or other callers' permissions. Explicitly
+authorized administrators retain their existing manual-deployment behavior,
+including deliberate deployments during a testing hold.
+
+New standing deployments consume the existing bound, unexpired disposable-lane
+qualification for data custody and production isolation. The existing usage
+rule protects actual use and staff holds; unknown occupancy alone does not
+require an assertion that nobody uses the lane. The service rechecks the current
+profile, lane and safety facts at the first durable provider-effect checkpoint.
+Once that original execution starts, evidence capture, completion and protective
+rollback remain available after facts change. Completed replay and read-only
+original observation do not require fresh execution qualification. An unresolved
+original continues to fence another key or caller.
+
+Missing qualification returns `409 testing_deploy_safety_unknown`, rather than
+an authorization denial. Use the existing disposable-lane observations `inspect`
+and `collect` routes below to review its current binding and authoritative facts.
+The generic collector currently supplies protective holds and target-alias facts;
+positive custody and resource qualification comes from the supported Odoo
+generation inspector. A conventional application without those facts needs the
+authoritative application custody/isolation collector prerequisite tracked by
+[#3611](https://github.com/cbusillo/launchplane/issues/3611). Caller assertions,
+saved environment inputs and a failed health check cannot fill that gap. Native
+deployment has no service dry-run mode; preparation is not execution proof.
+
 ## Stable-address rebuild lifecycle
 
 `workflows/testing_rebuild.py` provides the service-side lifecycle for a testing

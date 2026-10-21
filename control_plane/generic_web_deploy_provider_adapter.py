@@ -9,9 +9,16 @@ import click
 from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.deployment_record import deployment_record_passed
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+from control_plane.disposable_lanes import (
+    DisposableLaneSafetyUnknown,
+    DisposableLaneStore,
+    require_disposable_lane,
+    resolve_disposable_observation_binding,
+)
 from control_plane.generic_web_testing_inputs import (
     TESTING_DISPATCH_REFUSED_PHASE,
     testing_input_authority,
@@ -40,6 +47,7 @@ from control_plane.generic_web_deploy_http import (
     GenericWebDeployEnvelope,
     execute_generic_web_deploy_result,
     should_store_generic_web_deploy_idempotency,
+    resolve_generic_web_deploy_lane,
 )
 from control_plane.provider_operations import (
     ProviderEvidenceLease,
@@ -111,6 +119,12 @@ class _DeploymentRecordReader(Protocol):
     def read_deployment_record(self, record_id: str) -> DeploymentRecord: ...
 
 
+class _ProviderTargetReader(Protocol):
+    def read_provider_target_record(
+        self, *, context_name: str, instance_name: str
+    ) -> ProviderTargetRecord: ...
+
+
 class _ExecutionInventoryReader(Protocol):
     def read_environment_inventory(
         self, *, context_name: str, instance_name: str
@@ -176,6 +190,7 @@ class GenericWebDeployProviderMutationAdapter:
         retain_event_request: bool = False,
         post_deploy_authority_digest: str = "",
         superseded_testing_candidate: bool = False,
+        standing_testing_permission: bool = False,
     ) -> None:
         # Recovery replays a deploy Launchplane reserved; its artifact is a record.
         self._recorded_artifact = recorded_artifact
@@ -200,6 +215,9 @@ class GenericWebDeployProviderMutationAdapter:
         self._settlement_operation = ""
         self._settlement_phase = ""
         self._settlement_no_effect_checkpoint = False
+        self._standing_testing_permission = standing_testing_permission
+        self._standing_effect_started = False
+        self._standing_binding_sha256 = ""
         self.execution_check: Callable[[], None] = lambda: None
 
     @property
@@ -360,6 +378,15 @@ class GenericWebDeployProviderMutationAdapter:
 
     def _resolve_deploy_target(self) -> GenericWebResolvedDeployTarget:
         if self._resolved_deploy_target is None:
+            if self._standing_testing_permission:
+                # Capture before target preparation. Fresh facts for a different
+                # recipient or input bundle cannot qualify this reserved work.
+                self._standing_binding_sha256 = resolve_disposable_observation_binding(
+                    cast(DisposableLaneStore, self._record_store),
+                    product=self._profile.product,
+                    context=self._lane.context,
+                    instance=self._lane.instance,
+                ).binding_sha256
             if self._lane.generic_web_cutover is not None:
                 from control_plane.generic_web_cutover import (
                     WebCutoverAuthorityStore,
@@ -1533,22 +1560,97 @@ class GenericWebDeployProviderMutationAdapter:
                 ),
             )
 
+    def _require_standing_testing_admission(self) -> None:
+        if not self._standing_testing_permission or self._standing_effect_started:
+            return
+        try:
+            profile, lane = resolve_generic_web_deploy_lane(
+                record_store=self._record_store,
+                product=self._profile.product,
+                instance=self._lane.instance,
+            )
+            if (
+                not profile.is_active
+                or lane.instance != "testing"
+                or lane.generic_web_cutover is not None
+                or profile != self._profile
+                or lane != self._lane
+            ):
+                raise DisposableLaneSafetyUnknown("The qualified testing lane changed.")
+            binding = require_disposable_lane(
+                cast(DisposableLaneStore, self._record_store),
+                product=profile.product,
+                context=lane.context,
+                instance=lane.instance,
+            )
+            target = self._resolve_deploy_target()
+            provider_target = cast(
+                _ProviderTargetReader, self._record_store
+            ).read_provider_target_record(context_name=lane.context, instance_name=lane.instance)
+            expected = target.deployed_target
+            resolved = target.resolved_target
+            lane_store = cast(DisposableLaneStore, self._record_store)
+            definition = lane_store.read_dokploy_target_record(
+                context_name=lane.context, instance_name=lane.instance
+            )
+            target_id = lane_store.read_dokploy_target_id_record(
+                context_name=lane.context, instance_name=lane.instance
+            )
+            if (
+                binding != self._standing_binding_sha256
+                or expected is None
+                or provider_target.to_deployed_target_reference() != expected
+                or resolved.target_id != expected.target_id
+                or resolved.target_id != target_id.target_id
+                or resolved.target_name != expected.display_name
+                or resolved.target_type != definition.target_type
+                or resolved.target_type
+                != (expected.provider_target_type or expected.target_category)
+            ):
+                raise DisposableLaneSafetyUnknown(
+                    "The prepared testing recipient or inputs changed."
+                )
+        except (FileNotFoundError, ValueError) as error:
+            raise DisposableLaneSafetyUnknown(
+                "Standing testing deployment lacks current lane qualification."
+            ) from error
+
     def apply(
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
         guard = (
             getattr(self._record_store, "provider_evidence_guard", None)
-            if self._application_testing(self._resolve_deploy_target())
+            if self._standing_testing_permission
+            or self._application_testing(self._resolve_deploy_target())
             else None
         )
+        if self._standing_testing_permission and guard is None:
+            raise ProviderMutationRejectedError(
+                DisposableLaneSafetyUnknown("Testing effect admission requires durable storage.")
+            )
         context = nullcontext()
         if guard is not None:
             if not isinstance(lease, ProviderEvidenceLease):
                 raise ProviderMutationUnknownError(
                     "Application evidence requires its original execution lease."
                 )
-            context = guard(lease.evidence_reservation)
+            if self._standing_testing_permission:
+                # Capture this before checkpoint_effect takes its nonreentrant
+                # heartbeat mutex. The admission callback performs reads only.
+                self._standing_effect_started = bool(
+                    lease.evidence_reservation().provider_effect_started_at
+                )
+                context = guard(
+                    lease.evidence_reservation,
+                    effect_admission_checkpoint=self._require_standing_testing_admission,
+                )
+            else:
+                context = guard(lease.evidence_reservation)
         with context:
+            try:
+                self._require_standing_testing_admission()
+            except DisposableLaneSafetyUnknown as error:
+                raise ProviderMutationRejectedError(error) from error
             return self._apply(provider_operation_key, lease)
 
     def _apply(
@@ -1602,6 +1704,9 @@ class GenericWebDeployProviderMutationAdapter:
             else:
                 lease.checkpoint_effect(phase)
                 effect_started = True
+                # Once admitted, preserve completion, evidence publication and
+                # protective rollback of this original execution after drift.
+                self._standing_effect_started = True
                 known_dispatch_refusal = phase == TESTING_DISPATCH_REFUSED_PHASE
 
         proved_pre_image_retry = self._proved_pre_image_operation == provider_operation_key
