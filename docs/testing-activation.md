@@ -16,7 +16,11 @@ the retained application, its unresolved execution and its data unchanged. The
 service creates a fresh application ID rather than claiming the old commands,
 maintenance or verifier have stopped. The strict provider/executor exclusion
 read continues to report the unresolved original. Create-only admission uses
-that exact held original's custody and execution lock; it does not weaken the
+that exact held original's custody and execution lock. Native direct callers
+retain their real caller scope and key: their exact operation-derived deployment
+and original-execution receipt bind custody alongside the event-owned family.
+An original still needs the same physical runtime and isolation proof; this does
+not claim that its remote work stopped. Create-only admission does not weaken the
 ordinary deploy fence.
 
 Use `scripts/stage-testing-separation.py resources-dry-run` and
