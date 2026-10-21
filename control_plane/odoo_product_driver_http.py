@@ -1,8 +1,8 @@
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
-from control_plane.drivers.registry import read_driver_descriptor
-
-
-ODOO_DRIVER_ID = "odoo"
+from control_plane.drivers.registry import (
+    ODOO_DRIVER_ID as ODOO_DRIVER_ID,
+    product_profile_uses_odoo_driver as product_profile_uses_odoo_driver,
+)
 
 
 class OdooProductMismatchError(ValueError):
@@ -127,14 +127,3 @@ def resolve_odoo_product_route(
             "Product profile does not own the requested Odoo driver lane."
         )
     return profile
-
-
-def product_profile_uses_odoo_driver(profile: LaunchplaneProductProfileRecord) -> bool:
-    profile_driver_id = profile.driver_id.strip()
-    if profile_driver_id == ODOO_DRIVER_ID:
-        return True
-    try:
-        descriptor = read_driver_descriptor(profile_driver_id)
-    except FileNotFoundError:
-        return False
-    return descriptor.base_driver_id == ODOO_DRIVER_ID

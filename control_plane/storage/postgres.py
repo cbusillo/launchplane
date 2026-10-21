@@ -8116,6 +8116,44 @@ class PostgresRecordStore(HumanSessionStore):
             session.commit()
             return OutboxDeliveryCompletionResult(status="updated", record=updated_record)
 
+    def read_idempotency_record_by_id(self, record_id: str) -> LaunchplaneIdempotencyRecord | None:
+        with self._session_factory() as session:
+            row = session.get(LaunchplaneIdempotencyRow, record_id)
+            return (
+                self._read_payload(model_type=LaunchplaneIdempotencyRecord, payload=row.payload)
+                if row is not None
+                else None
+            )
+
+    def find_generic_preview_refresh_receipts(
+        self, runtime_deployment_record_id: str
+    ) -> tuple[LaunchplaneIdempotencyRecord, ...]:
+        from control_plane.generic_web_preview_http import GENERIC_WEB_PREVIEW_REFRESH_ROUTE
+
+        if not runtime_deployment_record_id.strip():
+            raise ValueError("Generic preview receipt lookup requires runtime identity.")
+        statement = (
+            select(LaunchplaneIdempotencyRow)
+            .where(
+                LaunchplaneIdempotencyRow.route_path == GENERIC_WEB_PREVIEW_REFRESH_ROUTE,
+                LaunchplaneIdempotencyRow.payload["response_payload"]["result"]["runtime_identity"][
+                    "deployment_record_id"
+                ].as_string()
+                == runtime_deployment_record_id,
+            )
+            .limit(2)
+        )
+        with self._session_factory() as session:
+            records = []
+            for row in session.scalars(statement):
+                record = self._read_payload(
+                    model_type=LaunchplaneIdempotencyRecord, payload=row.payload
+                )
+                if not self._idempotency_row_matches_record(row, record):
+                    raise ValueError("Generic preview receipt storage identity is inconsistent.")
+                records.append(record)
+            return tuple(records)
+
     def read_idempotency_record(
         self,
         *,
@@ -14465,6 +14503,59 @@ class PostgresRecordStore(HumanSessionStore):
     def testing_replacement_execution_lock(
         self, operation_id: str
     ) -> Iterator[Callable[[], None] | None]:
+        with self._testing_replacement_execution_lock(operation_id) as check:
+            if check is None:
+                yield None
+                return
+            held = getattr(self._preview_execution_context, "testing_held", ())
+            self._preview_execution_context.testing_held = (*held, (operation_id, check))
+            try:
+                yield check
+            finally:
+                self._preview_execution_context.testing_held = held
+
+    def testing_replacement_execution_is_excluded(
+        self, operation_id: str, *, require_postgres: bool = False
+    ) -> bool:
+        if require_postgres and self.database_dialect_name != "postgresql":
+            return False
+        for name, check in getattr(self._preview_execution_context, "testing_held", ()):
+            if name == operation_id:
+                check()
+                return True
+        return False
+
+    @contextmanager
+    def bind_odoo_preview_execution(
+        self, *, preview_id: str, execution_lock_name: str
+    ) -> Iterator[None]:
+        """Bind the actual physical executor to its immutable logical preview."""
+        if not self.testing_replacement_execution_is_excluded(execution_lock_name):
+            raise ValueError("Odoo preview physical executor exclusion is required.")
+        if self.database_dialect_name == "postgresql" and not self.preview_refresh_is_excluded(
+            preview_id=preview_id
+        ):
+            raise ValueError("Odoo preview logical executor exclusion is required.")
+        held = getattr(self._preview_execution_context, "odoo_held", ())
+        self._preview_execution_context.odoo_held = (*held, (preview_id, execution_lock_name))
+        try:
+            yield
+        finally:
+            self._preview_execution_context.odoo_held = held
+
+    def odoo_preview_execution_is_excluded(self, *, preview_id: str) -> bool:
+        for logical_id, physical_name in getattr(self._preview_execution_context, "odoo_held", ()):
+            if logical_id == preview_id:
+                return self.testing_replacement_execution_is_excluded(physical_name) and (
+                    self.database_dialect_name != "postgresql"
+                    or self.preview_refresh_is_excluded(preview_id=preview_id)
+                )
+        return False
+
+    @contextmanager
+    def _testing_replacement_execution_lock(
+        self, operation_id: str
+    ) -> Iterator[Callable[[], None] | None]:
         if self.database_dialect_name != "postgresql":
             from control_plane.storage.testing_replacement_recovery import file_execution_lock
 
@@ -14485,9 +14576,16 @@ class PostgresRecordStore(HumanSessionStore):
                 yield None
                 return
 
+            original_transaction = connection.get_transaction()
+
             def check_connection() -> None:
-                # Never silently reconnect a lost transaction and lose exclusion.
-                if connection.invalidated or not connection.in_transaction():
+                # Never silently reconnect or autobegin after losing the actual lock.
+                if (
+                    connection.invalidated
+                    or original_transaction is None
+                    or not original_transaction.is_active
+                    or connection.get_transaction() is not original_transaction
+                ):
                     raise RuntimeError("Testing replacement execution lock was lost.")
                 connection.execute(text("select 1"))
 
@@ -17282,6 +17380,12 @@ class PostgresRecordStore(HumanSessionStore):
             old_generation = session.get(
                 LaunchplanePreviewGenerationRow, generation.generation_id, populate_existing=True
             )
+            if old_generation is not None and old_generation.preview_id != generation.preview_id:
+                from control_plane.legacy_preview_completion import LegacyPreviewRetirementConflict
+
+                raise LegacyPreviewRetirementConflict(
+                    "A generation identity cannot move to another preview."
+                )
             preview_ids.add(generation.preview_id)
             if old_generation is not None:
                 preview_ids.add(old_generation.preview_id)
@@ -17301,10 +17405,92 @@ class PostgresRecordStore(HumanSessionStore):
             )
         self._lock_landing_authority(session, *anchors)
 
+    def _preview_retirement_barrier(self, session: Any, current: PreviewRecord) -> str:
+        from control_plane.legacy_preview_completion import (
+            LegacyPreviewRetirementConflict,
+            reconciliation_receipt_time,
+        )
+
+        if current.state != "destroyed" or not current.reconciliation_receipt_id:
+            return ""
+        row = session.get(LaunchplaneIdempotencyRow, current.reconciliation_receipt_id)
+        receipt = (
+            self._read_payload(model_type=LaunchplaneIdempotencyRecord, payload=row.payload)
+            if row is not None
+            else None
+        )
+        barrier = reconciliation_receipt_time(receipt, current)
+        if not barrier:
+            raise LegacyPreviewRetirementConflict(
+                "Preview retirement evidence is unavailable; inspect its original reconciliation."
+            )
+        return barrier
+
+    def _check_preview_retirement_write(
+        self,
+        session: Any,
+        incoming: PreviewRecord,
+        generation: PreviewGenerationRecord | None = None,
+    ) -> PreviewRecord:
+        from control_plane.legacy_preview_completion import (
+            LegacyPreviewRetirementConflict,
+            requested_after_retirement,
+        )
+        from control_plane.contracts.preview_execution import odoo_preview_destroy_issued_at
+        from control_plane.workflows.launchplane import generate_preview_id
+
+        row = session.get(LaunchplanePreviewRow, incoming.preview_id)
+        if row is None:
+            return incoming
+        current = self._read_payload(model_type=PreviewRecord, payload=row.payload)
+        barrier = self._preview_retirement_barrier(session, current)
+        if not barrier or incoming == current and generation is None:
+            return incoming
+        if (incoming.context, incoming.anchor_repo, incoming.anchor_pr_number) != (
+            current.context,
+            current.anchor_repo,
+            current.anchor_pr_number,
+        ):
+            raise LegacyPreviewRetirementConflict("Preview retirement identity changed.")
+        if generation is not None:
+            existing = session.get(LaunchplanePreviewGenerationRow, generation.generation_id)
+            if existing is not None:
+                original = self._read_payload(
+                    model_type=PreviewGenerationRecord, payload=existing.payload
+                )
+                if original.requested_at != generation.requested_at:
+                    raise LegacyPreviewRetirementConflict(
+                        "An old generation cannot be redated after retirement."
+                    )
+            if generation.preview_id != current.preview_id or not requested_after_retirement(
+                generation.requested_at, barrier
+            ):
+                raise LegacyPreviewRetirementConflict(
+                    "Preview retirement supersedes this generation; request a fresh generation."
+                )
+            return incoming.model_copy(update={"reconciliation_receipt_id": ""})
+        # A later real Odoo destroy uses the actual executor and its issued-plan timestamp.
+        # Bare preview evidence has neither proof and cannot erase the terminal barrier.
+        issued = odoo_preview_destroy_issued_at(incoming.destroy_reason)
+        if incoming.state == "destroyed" and issued:
+            logical_id = generate_preview_id(
+                context_name=current.context,
+                anchor_repo=current.anchor_repo,
+                anchor_pr_number=current.anchor_pr_number,
+            )
+            if self.odoo_preview_execution_is_excluded(
+                preview_id=logical_id
+            ) and requested_after_retirement(issued, barrier):
+                return incoming.model_copy(update={"reconciliation_receipt_id": ""})
+        raise LegacyPreviewRetirementConflict(
+            "A retired preview requires fresh generation evidence before it can resume."
+        )
+
     def write_preview_record(self, record: PreviewRecord) -> None:
         with self._session_factory() as session:
             self._begin_serialized_write(session)
             self._lock_preview_authority_write(session, preview=record)
+            record = self._check_preview_retirement_write(session, record)
             session.merge(
                 LaunchplanePreviewRow(
                     preview_id=record.preview_id,
@@ -17355,6 +17541,29 @@ class PostgresRecordStore(HumanSessionStore):
         with self._session_factory() as session:
             self._begin_serialized_write(session)
             self._lock_preview_authority_write(session, generation=record)
+            preview_row = session.get(LaunchplanePreviewRow, record.preview_id)
+            existing = session.get(LaunchplanePreviewGenerationRow, record.generation_id)
+            if preview_row is not None:
+                current = self._read_payload(model_type=PreviewRecord, payload=preview_row.payload)
+                barrier = self._preview_retirement_barrier(session, current)
+                if barrier:
+                    from control_plane.legacy_preview_completion import (
+                        LegacyPreviewRetirementConflict,
+                        requested_after_retirement,
+                    )
+
+                    if existing is not None:
+                        original = self._read_payload(
+                            model_type=PreviewGenerationRecord, payload=existing.payload
+                        )
+                        if original.requested_at != record.requested_at:
+                            raise LegacyPreviewRetirementConflict(
+                                "An old generation cannot be redated after retirement."
+                            )
+                    elif not requested_after_retirement(record.requested_at, barrier):
+                        raise LegacyPreviewRetirementConflict(
+                            "Preview retirement supersedes this generation; request a fresh generation."
+                        )
             session.merge(
                 LaunchplanePreviewGenerationRow(
                     generation_id=record.generation_id,
@@ -17390,7 +17599,10 @@ class PostgresRecordStore(HumanSessionStore):
                 {"lock_name": f"launchplane-preview-refresh:{normalized_preview_id}"},
             )
             held = getattr(self._preview_execution_context, "held", ())
-            self._preview_execution_context.held = (*held, (normalized_preview_id, shared, session))
+            self._preview_execution_context.held = (
+                *held,
+                (normalized_preview_id, shared, session, session.get_transaction()),
+            )
             try:
                 yield
             finally:
@@ -17403,8 +17615,16 @@ class PostgresRecordStore(HumanSessionStore):
         SQLite rehearsals and another thread's lock cannot establish exclusion.
         Probe the original transaction so a lost connection cannot supply proof.
         """
-        for name, shared, session in getattr(self._preview_execution_context, "held", ()):
+        for name, shared, session, transaction in getattr(
+            self._preview_execution_context, "held", ()
+        ):
             if name == preview_id and not shared:
+                if (
+                    transaction is None
+                    or not transaction.is_active
+                    or session.get_transaction() is not transaction
+                ):
+                    raise ValueError("Preview executor transaction was lost.")
                 session.execute(text("SELECT 1"))
                 return True
         return False
@@ -17419,6 +17639,9 @@ class PostgresRecordStore(HumanSessionStore):
             self._begin_serialized_write(session)
             self._lock_preview_authority_write(
                 session, preview=preview_record, generation=generation_record
+            )
+            preview_record = self._check_preview_retirement_write(
+                session, preview_record, generation_record
             )
             session.merge(
                 LaunchplanePreviewGenerationRow(
@@ -28094,7 +28317,15 @@ class PostgresRecordStore(HumanSessionStore):
     ) -> None:
         """Recheck authority and atomically close exactly one preview with its replay receipt."""
         from control_plane.legacy_preview_reconciliation import bind_legacy_preview
-        from control_plane.workflows.launchplane import apply_preview_destroyed_transition
+        from control_plane.drivers.registry import product_profile_uses_odoo_driver
+        from control_plane.legacy_preview_completion import (
+            reconciled_preview,
+            reconciliation_receipt_time,
+        )
+        from control_plane.contracts.idempotency_record import (
+            build_launchplane_idempotency_record_id,
+        )
+        from control_plane.contracts.product_retirement import canonical_sha256
 
         with self._session_factory() as session:
             self._begin_serialized_write(session)
@@ -28119,13 +28350,58 @@ class PostgresRecordStore(HumanSessionStore):
                 )
                 session.execute(text(f"LOCK TABLE {tables} IN SHARE ROW EXCLUSIVE MODE"))
             current = bind_legacy_preview(self, reconciliation)
+            if current.sibling_receipt_ids and self.database_dialect_name == "postgresql":
+                # Provider recovery takes receipt rows before authority. Never wait
+                # for those rows while holding authority tables in the inverse order.
+                try:
+                    receipt_rows = tuple(
+                        session.scalars(
+                            select(LaunchplaneIdempotencyRow)
+                            .where(
+                                LaunchplaneIdempotencyRow.record_id.in_(current.sibling_receipt_ids)
+                            )
+                            .order_by(LaunchplaneIdempotencyRow.record_id)
+                            .with_for_update(read=True, nowait=True)
+                        )
+                    )
+                except SQLAlchemyError as error:
+                    raise ValueError(
+                        "Sibling operation evidence is busy; retry reconciliation."
+                    ) from error
+                if len(receipt_rows) != len(current.sibling_receipt_ids):
+                    raise ValueError("Sibling operation evidence changed before completion.")
+                # Re-read after acquiring the exact proof-row locks. Completion
+                # and retained intent stay stable through this transaction's commit.
+                current = bind_legacy_preview(self, reconciliation)
             if current.digest != expected_authority_digest:
                 raise ValueError("Legacy preview authority changed before completion.")
-            closed = apply_preview_destroyed_transition(
-                preview=current.preview,
+            closed = reconciled_preview(
+                current.preview,
                 destroyed_at=destroyed_at,
-                destroy_reason=reconciliation.reason,
+                reason=reconciliation.reason,
+                receipt_id=(
+                    completion.record_id
+                    if product_profile_uses_odoo_driver(current.profile)
+                    else ""
+                ),
             )
+            result = completion.response_payload.get("result")
+            if (
+                completion.record_id
+                != build_launchplane_idempotency_record_id(
+                    response_trace_id=completion.response_trace_id
+                )
+                or not isinstance(result, dict)
+                or result.get("terminal_preview_digest")
+                != canonical_sha256(closed.model_dump(mode="json"))
+                or not reconciliation_receipt_time(
+                    completion,
+                    closed,
+                    product=current.profile.product,
+                    allow_unpointed=not closed.reconciliation_receipt_id,
+                )
+            ):
+                raise ValueError("Terminal preview receipt does not match the atomic transition.")
             row = session.get(LaunchplanePreviewRow, closed.preview_id)
             if row is None:
                 raise ValueError("Preview disappeared before completion.")
