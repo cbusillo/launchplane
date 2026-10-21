@@ -189,11 +189,16 @@ class CiCommentRangeTests(unittest.TestCase):
             )
 
     def test_already_protected_no_op_candidate_has_no_new_contribution(self) -> None:
-        for movement in ("", "advanced"):
+        for movement in ("landed", "landed_then_advanced"):
             with self.subTest(movement=movement), TemporaryDirectory() as directory:
                 history = self._history(Path(directory), movement=movement)
-                _git(history.root, "checkout", "--detach", history.base)
-                history = replace(history, head=history.base)
+                protected = _git(
+                    history.root,
+                    "rev-parse",
+                    "trunk^1" if movement == "landed_then_advanced" else "trunk",
+                )
+                _git(history.root, "checkout", "--detach", protected)
+                history = replace(history, base=protected, head=protected)
                 result = self._exercise(history)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(self._assert_range(history, history.base), set())
@@ -203,23 +208,21 @@ class CiCommentRangeTests(unittest.TestCase):
             with self.subTest(event=event), TemporaryDirectory() as directory:
                 history = self._history(Path(directory))
                 if event == "pull_request":
-                    merge_head = _git(
-                        history.root,
-                        "commit-tree",
-                        f"{history.head}^{{tree}}",
-                        "-p",
-                        history.base,
-                        "-p",
-                        history.head,
-                        "-m",
-                        "pull request test merge",
+                    _git(history.root, "checkout", "trunk")
+                    (history.root / "base-only.py").write_text("VALUE = 5\n")
+                    _git(history.root, "add", ".")
+                    _git(history.root, "commit", "-m", "advance PR base")
+                    base = _git(history.root, "rev-parse", "HEAD")
+                    _git(history.root, "merge", "--no-ff", "-m", "PR test merge", history.head)
+                    history = replace(
+                        history, base=base, head=_git(history.root, "rev-parse", "HEAD")
                     )
-                    _git(history.root, "checkout", "--detach", merge_head)
-                    history = replace(history, head=merge_head)
                 result = self._exercise(
                     history,
                     EVENT_NAME=event,
-                    EVENT_REF="refs/heads/trunk",
+                    EVENT_REF="refs/pull/1/merge"
+                    if event == "pull_request"
+                    else "refs/heads/trunk",
                     BASE_SHA=history.base,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
