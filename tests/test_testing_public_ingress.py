@@ -10,6 +10,7 @@ from control_plane.contracts.dokploy_target_record import DokployTargetStaffTest
 from control_plane.contracts.route_binding_record import EnvironmentRouteBindingRecord
 from control_plane.npmplus import NpmplusAccessList, NpmplusCertificate
 from control_plane.outbound_http import PublicTlsProbeResult
+from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.odoo_testing_restore import FreshOdooTestingGeneration, generation_binding
 from control_plane.contracts.odoo_testing_source import (
     NativeTestingCopyCapture,
@@ -74,7 +75,8 @@ class EdgeClient(_FakeNpmplusIngressClient):
             raise ValueError("Unknown fixture certificate")
         return self.certificate
 
-    def get_access_list(self, access_list_id: int) -> NpmplusAccessList:
+    @staticmethod
+    def get_access_list(access_list_id: int) -> NpmplusAccessList:
         return NpmplusAccessList(
             id=access_list_id, name="fixture", satisfy_any=True, pass_auth=False
         )
@@ -82,6 +84,8 @@ class EdgeClient(_FakeNpmplusIngressClient):
 
 class TestingPublicIngressScenario(FreshTestingBootstrapScenario):
     database_url = ""
+    client: EdgeClient
+    store: PostgresRecordStore
 
     def setUp(self) -> None:
         self.seed(self.database_url)
