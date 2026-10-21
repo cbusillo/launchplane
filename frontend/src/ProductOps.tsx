@@ -759,12 +759,12 @@ function EnvironmentRow({
               environment.topology.desired.public_website === "none" ? "Not applicable" : domain
             )}
           </dd>
-          {attentionReasons.length
-            ? <small className="environment-attention">{attentionReasons.join(" · ")}</small>
-            : null}
-          {attentionReasons.length && !recordedPublicObservation(environment)
-            ? null
-            : <small>{ingressHeadline(environment)}</small>}
+          {attentionReasons.length ? (
+            <>
+              <small className="environment-attention">{attentionReasons.join(" · ")}</small>
+              {recordedPublicObservation(environment) ? <small>{recordedPublicObservation(environment)}</small> : null}
+            </>
+          ) : <small>{ingressHeadline(environment)}</small>}
         </div>
         <div>
           <dt>TLS evidence</dt>
@@ -1256,17 +1256,20 @@ function compareEnvironments(
   );
 }
 
-function recordedPublicObservation(environment: ProductEnvironmentSummary): boolean {
-  return environment.topology.desired.public_website === "none" && Boolean(environment.public_ingress.observed_at);
+// A no-website lane may retain an older public observation; it is history, not current health.
+function recordedPublicObservation(environment: ProductEnvironmentSummary): string | null {
+  if (environment.topology.desired.public_website !== "none" || !environment.public_ingress.observed_at) return null;
+  return `Recorded public observation: ${environment.public_ingress.summary || humanize(environment.public_ingress.status)}`;
 }
 
 function ingressHeadline(environment: ProductEnvironmentSummary): string {
-  if (recordedPublicObservation(environment)) {
-    return `Recorded public observation: ${environment.public_ingress.summary || humanize(environment.public_ingress.status)}`;
-  }
-  // A passing check summary must never stand as the headline of a red lane.
+  // No summary, current or retained, may stand as the headline of a red lane.
   if (environmentOperationalTone(environment) === "danger") {
     return "Needs attention";
+  }
+  const retained = recordedPublicObservation(environment);
+  if (retained) {
+    return retained;
   }
   if (environment.topology.desired.public_website === "none") {
     const tone = environmentOperationalTone(environment);
