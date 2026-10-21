@@ -15769,6 +15769,11 @@ class RealPostgresProviderHoldMonitorTests(unittest.TestCase):
             (
                 monitors,
                 monitors.ProviderTargetHoldMonitorTests,
+                "test_unused_application_history_cannot_block_prod_observation",
+            ),
+            (
+                monitors,
+                monitors.ProviderTargetHoldMonitorTests,
                 "test_completed_exact_reference_settles_hold_without_claiming_success",
             ),
             (
