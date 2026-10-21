@@ -1142,8 +1142,6 @@ are required whenever the bearer token is configured. The
 [standing-admission contract](authorization-authority.md#standing-agent-read-plan-and-proven-projection-permission)
 owns Director identity recognition, inherited authority and transport limits.
 Each native route retains its admission and safety checks.
-Enrollment proposal authority creates no principal,
-credential, session, grant, activation, or worker start on its own.
 
 Trusted Director terminals that need to make Launchplane-owned admin mutations
 without a browser session can use separate Director-agent bearer credentials.
@@ -1743,7 +1741,8 @@ subject model before diagnostics or downstream intent contracts consume them:
 Action names are classified for agent context as `read`, `safe_write`,
 `mutation`, `prod`, `destructive`, `secret_backed`, or `policy_admin`. This
 classification is diagnostic and contractual; native route admission is evaluated
-independently under the standing-admission contract above.
+independently. See [authorization authority](authorization-authority.md) for
+identity-specific admission.
 
 Agent-facing authorization diagnostics include an `agent_audit` envelope with
 the decision, safe reason code, agent subject, action, product, context, policy

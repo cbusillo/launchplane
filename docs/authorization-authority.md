@@ -112,6 +112,8 @@ The action catalog, [`service_auth.py`](../control_plane/service_auth.py) and
 native routes describe installed runtime admission. Native routes also recognize
 the Director-agent marker for their qualified source-owned paths; the catalog's
 standing-write declarations are not a complete inventory of those paths.
+Existing exact `terminal_agents` and `local_operators` DB policy rules remain
+operative where standing coverage or a qualified native path does not apply.
 Routes retain their principal, transport and safety checks;
 this document does not enable an undeclared write or bypass a route guard.
 [Denial Handling](#denial-handling) governs a refusal that conflicts with direction.
@@ -240,8 +242,8 @@ replace it.
 The same Director-agent first-testing path also accepts `create-application`,
 the conventional testing-lane shape: a new project, a new environment and an
 empty application on a named server, with no domain route. It may replace the
-lane's current testing target
-only with positive evidence that nobody used the lane: the setup route created
+lane's current testing target only with positive evidence that nobody used the
+lane: the setup route created
 that target empty (not adopted, not source-completed), no deploy passed there
 and no artifact was ever current. The target must carry an `isolation_staging`
 testing hold, which stops event deploys; a `staff_testing` hold refuses. Setup

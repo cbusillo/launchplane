@@ -42,16 +42,12 @@ Agent context callers are identified as compact agent consumers:
   from exact workflow, repository, event, product, context, and action policy
   rules.
 - `owner_local_agent`: trusted local terminal agent using
-  `LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN`. The service admits this identity only
-  on redacted `GET` routes, plus the inert ordinary-agent enrollment proposal
-  route after an exact managed policy installation. Policy still scopes products,
-  contexts, and read actions; enrollment authority creates no credential,
-  session, activation, or worker start.
+  `LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN`. Its agent-context projection has
+  `read_only_context=true`.
 - `owner_local_agent`: trusted local admin using
   `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN` from
-  `~/.config/launchplane/local-operator.env`. This identity is limited by exact
-  DB-backed `local_operators` authz policy rules and must include a reason for
-  write requests. Apply-shaped product-config mutations require a previously
+  `~/.config/launchplane/local-operator.env`. Write requests must include a
+  reason. Apply-shaped product-config mutations require a previously
   recorded matching dry-run.
 - `owner_local_agent`: trusted local admin using `LAUNCHPLANE_LOCAL_ADMIN_TOKEN`.
   This identity is limited by exact DB-backed `local_admins` authz policy rules
@@ -64,8 +60,9 @@ Agent context callers are identified as compact agent consumers:
   [The Admin](authorization-authority.md#the-admin)); any other admin-role rule
   still flows through exact action/product/context policy rules.
 
-These profiles are diagnostics and safety rails. They do not replace exact
-Launchplane authz policy matching.
+These profiles describe diagnostic and safety projections;
+[authorization authority](authorization-authority.md) and each native route
+define admission.
 
 ## Read Context
 

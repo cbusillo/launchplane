@@ -787,9 +787,9 @@ decryption key state denies the reveal or resolution.
   do not need a runtime key-safety target.
 - Trusted local agents that need to call the deployed service instead of a
   browser session should source `~/.config/launchplane/local-operator.env` and
-  use `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN` for routine Director-agent writes. Exact
-  authority is DB-backed by `local_operators` authz policy rules. Rare privileged
-  Director-agent writes can use `LAUNCHPLANE_LOCAL_ADMIN_TOKEN` only when matching
+  use `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN` for routine Director-agent writes. See
+  [authorization authority](authorization-authority.md) for admission. Rare
+  privileged Director-agent writes can use `LAUNCHPLANE_LOCAL_ADMIN_TOKEN` only when matching
   `local_admins` authz policy rules grant the action. Write requests sent with
   either token must include a reason. Product-config apply also requires a
   previously recorded matching dry-run. They must still send plaintext secret
