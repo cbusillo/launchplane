@@ -2228,7 +2228,9 @@ class ApplicationFlowTests(unittest.TestCase):
         )
         self.store.write_edge_endpoint_record(edge)
         from control_plane.npmplus import NpmplusClient
+        from control_plane.workflows.ingress_provider import NPMPLUS_BASE_URL_ENV_KEY
 
+        self.enterContext(patch.dict(os.environ, {NPMPLUS_BASE_URL_ENV_KEY: "http://10.21.0.9:81"}))
         client = EdgeClient()
         client.certificate = client.certificate.model_copy(
             update={"domain_names": ("*.example.invalid",)}
