@@ -139,6 +139,12 @@ def require_candidate_configuration(
         or compose.compose_file_sha256(str(payload.get("composeFile") or ""))
         != compose.compose_file_sha256(inputs.compose_file)
         or api.parse_dokploy_env_text(str(payload.get("env") or "")) != inputs.runtime_environment
+        or (
+            api.compose_environment_is_encoded(str(payload.get("env") or ""))
+            and api.compose_unqualified_keys(
+                str(payload.get("env") or ""), inputs.runtime_environment
+            )
+        )
     ):
         raise ValueError("Candidate configuration has not retained its exact admitted inputs.")
 
@@ -161,6 +167,13 @@ def candidate_configuration_sha256(payload: api.JsonObject) -> str:
             },
             "composeFile": compose.compose_file_sha256(str(payload.get("composeFile") or "")),
             "env": api.parse_dokploy_env_text(str(payload.get("env") or "")),
+            # Keep historical unmarked custody hashes recoverable. New literal
+            # transport must also bind its wire form, which changes consumption.
+            **(
+                {"env_wire_sha256": canonical_json_sha256(str(payload.get("env") or ""))}
+                if api.compose_environment_is_encoded(str(payload.get("env") or ""))
+                else {}
+            ),
         }
     )
 
@@ -331,7 +344,11 @@ def prepare_candidate_application(
                 )
             ):
                 raise ValueError("Candidate is no longer unused.")
-            environment = api.serialize_dokploy_env_text(inputs.runtime_environment)
+            environment = api.serialize_dokploy_env_text(
+                inputs.runtime_environment,
+                target_type="compose",
+                compose_type=str(current.get("composeType") or "docker-compose"),
+            )
             api.refuse_app_runtime_env_write(
                 env_text=environment, current_env_text="", target="testing candidate"
             )

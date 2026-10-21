@@ -18,6 +18,7 @@ import time
 from typing import Any
 import unittest
 from tests import test_product_retirement_previews as integrated_retirement_tests
+from tests import test_legacy_preview_sibling_ownership as generic_sibling_tests
 from tests import test_odoo_secret_transport as secret_transport_tests
 from tests import test_testing_runtime_separation as testing_separation
 from tests import test_testing_separation_resources as independent_storage
@@ -26,6 +27,8 @@ from tests import test_testing_hold_rehearsal as testing_hold_rehearsal
 from tests import test_application_state_volume as application_volume_tests
 from tests import test_testing_rebuild as testing_rebuild_tests
 from tests import test_testing_retry as testing_retry_tests
+from tests import test_browser_route_repair as browser_repair_tests
+from tests import test_release_review_http as release_review_http_tests
 from control_plane.contracts.testing_rebuild import TestingRebuildRecord
 from tests import test_merge_train_historical_completion_storage as historical_storage_tests
 from unittest.mock import Mock, patch
@@ -70,6 +73,7 @@ from control_plane.contracts.dokploy_target_record import (
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from tests import test_http_app_product_retirement as retirement_tests
 from tests import test_legacy_preview_reconciliation as legacy_preview_tests
+from tests import test_legacy_odoo_preview_reconciliation as legacy_odoo_tests
 from tests.http_app_test_support import _asgi_request
 from control_plane import authz_grant_service, authz_policy_activation
 from control_plane.authz_candidate_preparation import (
@@ -1891,198 +1895,6 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
 
         with _store_for_fresh_head_database() as store:
             assert_committed_reservation_survives_unknown_delete(self, store)
-
-    def test_browser_domain_repair_atomic_receipt_rollback_and_retry(self) -> None:
-        from tests.test_browser_route_repair import BrowserRouteRepairTests
-
-        with _store_for_fresh_head_database() as store:
-            fixture = BrowserRouteRepairTests()
-            try:
-                with patch(
-                    "tests.test_browser_route_repair.PostgresRecordStore", return_value=store
-                ):
-                    fixture.setUp()
-                store.seed_authz_policy_if_absent(
-                    LaunchplaneAuthzPolicyRecord(
-                        record_id=build_authz_policy_record_id(
-                            revision=1, policy_sha256=authz_policy_sha256(fixture.policy)
-                        ),
-                        source="test:browser-route-repair",
-                        updated_at=fixture.target.updated_at,
-                        policy=fixture.policy,
-                    )
-                )
-                asyncio.run(
-                    fixture.test_domain_receipt_failure_rolls_back_records_and_retry_can_complete()
-                )
-                asyncio.run(fixture.test_domain_apply_and_immutable_replay_precede_source_drift())
-            finally:
-                fixture.doCleanups()
-
-    def test_browser_binding_commit_rejects_intervening_domain_repair(self) -> None:
-        from tests.test_browser_route_repair import BrowserRouteRepairTests
-
-        with _store_for_fresh_head_database() as store:
-            fixture = BrowserRouteRepairTests()
-            try:
-                with patch(
-                    "tests.test_browser_route_repair.PostgresRecordStore", return_value=store
-                ):
-                    fixture.setUp()
-                store.seed_authz_policy_if_absent(
-                    LaunchplaneAuthzPolicyRecord(
-                        record_id=build_authz_policy_record_id(
-                            revision=1, policy_sha256=authz_policy_sha256(fixture.policy)
-                        ),
-                        source="test:browser-route-repair",
-                        updated_at=fixture.target.updated_at,
-                        policy=fixture.policy,
-                    )
-                )
-                asyncio.run(fixture.test_binding_commit_rejects_intervening_domain_repair())
-            finally:
-                fixture.doCleanups()
-
-    def test_browser_same_key_concurrent_retries_preserve_original_receipts(self) -> None:
-        from tests.test_browser_route_repair import BrowserRouteRepairTests
-
-        for kind in ("domain", "binding"):
-            with self.subTest(kind=kind), _store_for_fresh_head_database() as store:
-                fixture = BrowserRouteRepairTests()
-                try:
-                    with patch(
-                        "tests.test_browser_route_repair.PostgresRecordStore", return_value=store
-                    ):
-                        fixture.setUp()
-                    store.seed_authz_policy_if_absent(
-                        LaunchplaneAuthzPolicyRecord(
-                            record_id=build_authz_policy_record_id(
-                                revision=1, policy_sha256=authz_policy_sha256(fixture.policy)
-                            ),
-                            source="test:browser-route-repair",
-                            updated_at=fixture.target.updated_at,
-                            policy=fixture.policy,
-                        )
-                    )
-                    for winner in ("stale", "success"):
-                        asyncio.run(fixture.assert_atomic_terminal_winner(kind, winner))
-                finally:
-                    fixture.doCleanups()
-
-    def test_browser_binding_and_authority_publisher_do_not_invert_locks(self) -> None:
-        from control_plane.route_binding_reconcile import (
-            RouteBindingExpectedCurrent,
-            RouteBindingReconcileRequest,
-            plan_route_binding_reconcile,
-        )
-        from control_plane.workflows.ship import utc_now_timestamp
-        from tests.test_browser_route_repair import BrowserRouteRepairTests
-
-        with _store_for_fresh_head_database() as store:
-            fixture = BrowserRouteRepairTests()
-            publisher = PostgresRecordStore(database_url=store.database_url)
-            try:
-                with patch(
-                    "tests.test_browser_route_repair.PostgresRecordStore", return_value=store
-                ):
-                    fixture.setUp()
-                fixture.seed_binding()
-                plan = plan_route_binding_reconcile(
-                    record_store=store,
-                    request=RouteBindingReconcileRequest(
-                        product="example-product",
-                        context="example-testing",
-                        instance="web",
-                        expected_current=RouteBindingExpectedCurrent(state="absent"),
-                        evaluated_at=utc_now_timestamp(),
-                    ),
-                )
-                self.assertEqual(plan.status, "ready")
-                candidate, sources = plan.record, plan.review_sources
-                assert candidate is not None and sources is not None
-                mutation = DbOnlyMutationRequest(
-                    scope="browser-lock-order-fixture",
-                    route_path="/v1/route-bindings/reconcile",
-                    idempotency_key="reviewed-binding",
-                    request_fingerprint="reviewed-binding-request",
-                    lease_owner="browser",
-                    response_status_code=202,
-                    response_trace_id="browser-trace",
-                    response_payload={"status": "accepted", "trace_id": "browser-trace"},
-                )
-                held, proceed, connected = (threading.Event(), threading.Event(), threading.Event())
-                browser_pid: list[int] = []
-
-                def observe_connection(connection: Any, _record: Any, _proxy: Any) -> None:
-                    if threading.current_thread().name.startswith("reviewed-binding"):
-                        browser_pid.append(int(connection.info.backend_pid))
-                        connected.set()
-
-                def publish_authority() -> None:
-                    # Existing authority publishers take the bundle before the binding.
-                    with publisher._session_factory() as session:
-                        publisher._begin_serialized_write(session)
-                        publisher._lock_product_authority_bundle_write(session)
-                        held.set()
-                        if not proceed.wait(30):
-                            raise AssertionError("Browser did not reach its database lock wait.")
-                        publisher._lock_route_binding_write(
-                            session, binding_key=candidate.binding_key
-                        )
-                        session.commit()
-
-                def reconcile_binding() -> str:
-                    if not held.wait(30):
-                        raise AssertionError("Competing publisher did not acquire authority.")
-                    return store.reconcile_route_binding_record(
-                        expected_record=None,
-                        replacement_record=candidate,
-                        mutation=mutation,
-                        reviewed_sources=sources,
-                        reviewed_product=candidate.product,
-                    ).status
-
-                event.listen(store._engine, "checkout", observe_connection)
-                try:
-                    with ThreadPoolExecutor(
-                        max_workers=2, thread_name_prefix="reviewed-binding"
-                    ) as executor:
-                        publishing = executor.submit(publish_authority)
-                        browser = executor.submit(reconcile_binding)
-                        try:
-                            self.assertTrue(connected.wait(30))
-                            deadline = time.monotonic() + 30
-                            with publisher._engine.connect().execution_options(
-                                isolation_level="AUTOCOMMIT"
-                            ) as observer:
-                                while True:
-                                    waiting = observer.execute(
-                                        text(
-                                            "select wait_event_type, wait_event "
-                                            "from pg_stat_activity where pid=:pid"
-                                        ),
-                                        {"pid": browser_pid[0]},
-                                    ).first()
-                                    if waiting is not None and tuple(waiting) == (
-                                        "Lock",
-                                        "advisory",
-                                    ):
-                                        break
-                                    self.assertLess(
-                                        time.monotonic(),
-                                        deadline,
-                                        "Browser did not enter its advisory-lock wait.",
-                                    )
-                                    proceed.wait(0.01)
-                        finally:
-                            proceed.set()
-                        publishing.result(timeout=30)
-                        self.assertEqual(browser.result(timeout=30), "created")
-                finally:
-                    event.remove(store._engine, "checkout", observe_connection)
-            finally:
-                publisher.close()
-                fixture.doCleanups()
 
     def test_profile_cas_and_final_allocation_publication_serialize_in_both_orders(self) -> None:
         from contextlib import nullcontext
@@ -4190,7 +4002,7 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                 self.assertEqual(_current_alembic_version(engine), migration.down_revision)
                 with engine.begin() as connection:
                     connection.execute(text("DROP VIEW retained_preview_dependency"))
-                self.assertEqual(migrate_schema(database_url=url), migration.revision)
+                self.assertEqual(migrate_schema(database_url=url), SCHEMA_MIGRATION_TARGET_REVISION)
                 verify_postgres_schema_invariants(engine)
             finally:
                 engine.dispose()
@@ -5630,6 +5442,32 @@ def _owner_control_shadow_envelope(
 
 
 class RealPostgresStorageConcurrencyTests(unittest.TestCase):
+    def test_discussion_topic_retries_are_atomic_on_independent_connections(self) -> None:
+        from control_plane.contracts.discussion_topic import DiscussionTopicInput
+
+        topic = DiscussionTopicInput(
+            title="Decide: Contact links", issue_url="https://git.example.test/issues/7"
+        )
+        with _store_for_fresh_head_database() as store:
+            barrier = threading.Barrier(2)
+
+            def add(_: int) -> object:
+                barrier.wait(timeout=10)
+                return store.add_discussion_topic("site-a", "contact", topic)
+
+            def close(_: int) -> object:
+                barrier.wait(timeout=10)
+                return store.close_discussion_topic("site-a", "contact")
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                added = list(pool.map(add, range(2)))
+                closed = list(pool.map(close, range(2)))
+            self.assertEqual(added[0], added[1])
+            self.assertEqual(closed[0], closed[1])
+            self.assertNotEqual(added[0], closed[0])
+            self.assertEqual(store.list_discussion_topics("site-b"), ())
+            self.assertEqual(len(store.list_discussion_topics("site-a", include_closed=True)), 1)
+
     def test_delivery_projection_uses_canonical_times_and_candidate_identities(self) -> None:
         from tests.test_delivery_evidence_index import DeliveryEvidenceIndexTests
         from control_plane.storage.postgres import LaunchplaneDeploymentRow
@@ -6851,101 +6689,6 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                 self.assertEqual(store.list_deployment_records(), ())
             finally:
                 store.close()
-
-    def test_release_publication_lock_timeout_returns_pending_and_retry_recovers(self) -> None:
-        from control_plane.release_review import RELEASE_RECORD_PENDING
-        from control_plane.release_review_record import publish_release_decision
-        from tests.test_release_review import decision, profile, seed
-        from tests.test_release_review_http import ReleaseReviewHttpTests
-        from tests.test_release_review_record import FakeReleaseIssues
-
-        with _head_postgres_database() as url:
-            holder_store = PostgresRecordStore(database_url=url)
-            waiter_store = PostgresRecordStore(
-                database_url=url, postgres_statement_timeout_milliseconds=100
-            )
-            http = ReleaseReviewHttpTests()
-            http.setUp()
-            http.store = waiter_store  # type: ignore[assignment]
-            try:
-                seed(holder_store)
-                holder_store.seed_authz_policy_if_absent(
-                    LaunchplaneAuthzPolicyRecord(
-                        record_id="release-publication-test-policy",
-                        source="test",
-                        updated_at="2026-10-07T00:00:00Z",
-                        policy=LaunchplaneAuthzPolicy(
-                            github_humans=(
-                                GitHubHumanPolicyRule(
-                                    logins=("site-owner",),
-                                    roles=("read_only",),
-                                    products=("example-site",),
-                                    contexts=("launchplane",),
-                                    actions=("product_profile.read",),
-                                ),
-                            )
-                        ),
-                    )
-                )
-                saved = decision(holder_store).model_copy(update={"release_issue_url": ""})
-                holder_store.create_release_review_decision_record_if_absent(saved)
-                github = FakeReleaseIssues()
-                github.continue_lookup.clear()
-                with (
-                    patch(
-                        "control_plane.release_review_record.github_api_request",
-                        side_effect=github.request,
-                    ),
-                    patch(
-                        "control_plane.release_review_record.resolve_launchplane_github_token",
-                        return_value="test-token",
-                    ),
-                    patch(
-                        "control_plane.http_app.publish_release_decision",
-                        wraps=publish_release_decision,
-                    ),
-                    ThreadPoolExecutor(max_workers=1) as workers,
-                ):
-                    holder = workers.submit(
-                        publish_release_decision,
-                        store=holder_store,
-                        control_plane_root=Path("."),
-                        profile=profile(),
-                        decision=saved,
-                    )
-                    try:
-                        self.assertTrue(github.lookup_started.wait(10))
-                        pending = asyncio.run(http.post())
-                        self.assertEqual(pending.status_code, 200, pending.text)
-                        self.assertIn(RELEASE_RECORD_PENDING, pending.json()["review"]["blockers"])
-                        self.assertFalse(pending.json()["review"]["approved"])
-                        self.assertEqual(
-                            waiter_store.read_release_review_decision_record(
-                                product=saved.product, record_id=saved.record_id
-                            ),
-                            saved,
-                        )
-                    finally:
-                        github.continue_lookup.set()
-                    published_url = holder.result(timeout=10)
-                    retry = asyncio.run(http.post())
-                self.assertEqual(retry.status_code, 200, retry.text)
-                self.assertTrue(retry.json()["review"]["approved"])
-                self.assertEqual(len(github.issues), 1)
-                self.assertEqual(
-                    retry.json()["review"]["latest_decision"]["release_issue_url"], published_url
-                )
-                self.assertEqual(
-                    waiter_store.list_release_review_decision_records(product=saved.product)[
-                        0
-                    ].record_id,
-                    saved.record_id,
-                )
-                self.assertEqual(waiter_store.list_deployment_records(), ())
-            finally:
-                http.doCleanups()
-                holder_store.close()
-                waiter_store.close()
 
     def test_source_scan_delivery_has_one_lease_and_recovers_without_stale_publication(
         self,
@@ -9602,6 +9345,156 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
         self.assertEqual(stored_restore.status, "running")
         self.assertEqual(stored_import.status, "pending")
 
+    def test_standing_acceptance_and_first_effect_serialize_in_both_orders(self) -> None:
+        from control_plane import client_release as releases
+        from control_plane.generic_web_promotion_http import GENERIC_WEB_PROD_PROMOTION_ROUTE
+        from control_plane.storage.postgres import MutationEffectAdmissionRefusedError
+        from tests.test_generic_web_client_release import GenericWebClientReleaseTests
+
+        for effect_first in (True, False):
+            with self.subTest(effect_first=effect_first), _head_postgres_database() as database_url:
+                fixture = GenericWebClientReleaseTests()
+                with patch(
+                    "tests.test_generic_web_client_release.PostgresRecordStore",
+                    side_effect=lambda **_: PostgresRecordStore(database_url=database_url),
+                ):
+                    fixture.setUp()
+                try:
+                    store = fixture.store
+                    fixture.switch("director_standing")
+                    decision = fixture.accept()
+                    next_decision = decision.model_copy(
+                        update={
+                            "record_id": decision.record_id + "-next",
+                            "acceptance_source": "director_standing",
+                            "decided_at": (
+                                datetime.now(timezone.utc) + timedelta(seconds=1)
+                            ).isoformat(),
+                        }
+                    )
+                    key = releases._step_key(decision, releases.ClientReleaseStep("promote", 1))
+                    reserved = store.reserve_mutation(
+                        scope=releases.CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
+                        route_path=GENERIC_WEB_PROD_PROMOTION_ROUTE,
+                        idempotency_key=key,
+                        request_fingerprint="f" * 64,
+                        lease_owner="admitted-A",
+                        provider_target_key="production-A",
+                        reconciliation_key="production-A",
+                    ).record
+                    assert reserved is not None
+                    grant = releases.client_release_grant(
+                        decision=decision,
+                        action="generic_web_prod_promotion.execute",
+                        context=fixture.context,
+                        authorized_at=decision.decided_at,
+                    )
+                    url = make_url(database_url)
+                    second = PostgresRecordStore(
+                        database_url=url.set(
+                            query={**url.query, "application_name": "release-admission-contender"}
+                        ).render_as_string(hide_password=False)
+                    )
+                    try:
+                        entered, proceed = threading.Event(), threading.Event()
+                        original_lock = store._lock_product_authority_bundle_write
+
+                        def held_lock(session: Any) -> None:
+                            original_lock(session)
+                            entered.set()
+                            if not proceed.wait(10):
+                                raise RuntimeError("release admission barrier timed out")
+
+                        def authority(active: PostgresRecordStore) -> None:
+                            if not releases._generic_web_release_authority_allows(active, grant):
+                                raise releases.ClientReleaseNotReady("newer_decision")
+
+                        def checkpoint(active: PostgresRecordStore) -> Any:
+                            with active.provider_evidence_guard(
+                                lambda: reserved,
+                                effect_admission_checkpoint=lambda: authority(active),
+                            ):
+                                return active.checkpoint_mutation_provider_effect(
+                                    reservation=reserved, effect_phase="first_production_effect"
+                                )
+
+                        def create(active: PostgresRecordStore) -> Any:
+                            return active.create_release_review_decision_record_if_absent(
+                                next_decision,
+                                validate_before_insert=lambda: (
+                                    releases._require_standing_release_available(
+                                        active, fixture.profile.product
+                                    )
+                                ),
+                            )
+
+                        with (
+                            patch.object(
+                                store, "_lock_product_authority_bundle_write", side_effect=held_lock
+                            ),
+                            ThreadPoolExecutor(max_workers=2) as executor,
+                        ):
+                            first = executor.submit(checkpoint if effect_first else create, store)
+                            self.assertTrue(entered.wait(5))
+                            contender = executor.submit(
+                                create if effect_first else checkpoint, second
+                            )
+                            try:
+                                waiting = 0
+                                deadline = time.monotonic() + 5
+                                with store._engine.connect().execution_options(
+                                    isolation_level="AUTOCOMMIT"
+                                ) as connection:
+                                    while time.monotonic() < deadline:
+                                        waiting = int(
+                                            connection.scalar(
+                                                text(
+                                                    "SELECT count(*) FROM pg_stat_activity WHERE application_name='release-admission-contender' AND wait_event_type='Lock'"
+                                                )
+                                            )
+                                            or 0
+                                        )
+                                        if waiting:
+                                            break
+                                        time.sleep(0.01)
+                                self.assertGreater(
+                                    waiting,
+                                    0,
+                                    "The contender must reach the shared PostgreSQL authority lock",
+                                )
+                            finally:
+                                proceed.set()
+                            first.result(timeout=10)
+                            if effect_first:
+                                with self.assertRaises(releases.ClientReleaseNotReady):
+                                    contender.result(timeout=10)
+                            else:
+                                with self.assertRaises(
+                                    MutationEffectAdmissionRefusedError
+                                ) as refused:
+                                    contender.result(timeout=10)
+                                self.assertIsInstance(
+                                    refused.exception.cause, releases.ClientReleaseNotReady
+                                )
+                        current = store.read_idempotency_record(
+                            scope=reserved.scope,
+                            route_path=reserved.route_path,
+                            idempotency_key=reserved.idempotency_key,
+                        )
+                        assert current is not None
+                        self.assertEqual(bool(current.provider_effect_started_at), effect_first)
+                        latest = store.list_release_review_decision_records(
+                            product=fixture.profile.product
+                        )[0]
+                        self.assertEqual(
+                            latest.record_id,
+                            decision.record_id if effect_first else next_decision.record_id,
+                        )
+                    finally:
+                        second.close()
+                finally:
+                    fixture.doCleanups()
+
 
 def _attempt_stale_owner_completion(
     database_url: str,
@@ -10180,7 +10073,9 @@ class RealPostgresChangeImpactAuditTests(unittest.TestCase):
                 )
             finally:
                 engine.dispose()
-            alembic_command.upgrade(config, PRE_RETIREMENT_ALEMBIC_REVISION)
+            # Historical data is checked by the current runtime only after the
+            # additive release migrations have supplied its required tables.
+            alembic_command.upgrade(config, SCHEMA_MIGRATION_TARGET_REVISION)
             store = PostgresRecordStore(database_url=database_url)
             try:
                 store.verify_schema()
@@ -11290,14 +11185,11 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
     def _fresh_resource_preparation_case(
         self, fault: str, *, initial_generation: bool = False
     ) -> None:
-        from tests.test_testing_replacement_resources import TestingReplacementResourceHttpTests
+        from tests.test_testing_replacement_resources import TestingReplacementResourceFixture
         from control_plane.odoo_testing_resources import OdooTestingResources
 
         with _head_postgres_database() as url:
-            fixture = TestingReplacementResourceHttpTests()
-            fixture.database_url = url
-            fixture.setUp()
-            self.addCleanup(fixture.doCleanups)
+            fixture = TestingReplacementResourceFixture(self, database_url=url)
             if initial_generation:
                 from control_plane.odoo_testing_usage import OdooTestingUsage
 
@@ -12103,10 +11995,7 @@ class RealPostgresInitialTestingGenerationTests(unittest.TestCase):
 
         for failure in ("use", "drift", "unknown-placement", "dispatched"):
             with self.subTest(failure=failure), _head_postgres_database() as url:
-                fixture = resource_tests.TestingReplacementResourceHttpTests()
-                fixture.database_url = url
-                fixture.setUp()
-                self.addCleanup(fixture.doCleanups)
+                fixture = resource_tests.TestingReplacementResourceFixture(self, database_url=url)
                 successful = fixture.operation.model_copy(
                     update={
                         "status": "pass",
@@ -12313,10 +12202,7 @@ class RealPostgresInitialTestingGenerationTests(unittest.TestCase):
         from tests import test_testing_replacement_resources as resource_tests
 
         with _head_postgres_database() as url:
-            fixture = resource_tests.TestingReplacementResourceHttpTests()
-            fixture.database_url = url
-            fixture.setUp()
-            self.addCleanup(fixture.doCleanups)
+            fixture = resource_tests.TestingReplacementResourceFixture(self, database_url=url)
             successful = fixture.operation.model_copy(
                 update={
                     "status": "pass",
@@ -12723,7 +12609,7 @@ class RealPostgresExistingPreviewQualificationTests(unittest.TestCase):
             DokployTargetStaffTestingHold,
             DokployTargetPolicies,
         )
-        from tests.test_director_bounded_writes import DirectorBoundedWritesTests
+        from tests.test_director_bounded_writes import DirectorBoundedWritesFixture
         from tests.support.disposable_lanes import record_safety
 
         for change in (
@@ -12736,9 +12622,7 @@ class RealPostgresExistingPreviewQualificationTests(unittest.TestCase):
             "preview",
         ):
             with self.subTest(change=change), _head_postgres_database() as url:
-                fixture = DirectorBoundedWritesTests()
-                fixture.setUp()
-                self.addCleanup(fixture.doCleanups)
+                fixture = DirectorBoundedWritesFixture(self)
                 with (
                     closing(PostgresRecordStore(database_url=url)) as first,
                     closing(PostgresRecordStore(database_url=url)) as second,
@@ -12924,6 +12808,323 @@ class RealPostgresTestingActivationTests(testing_activation.ActivationTests):
         self.assertEqual(
             self.store.list_held_provider_target_reservations(), (self.preparation.original,)
         )
+
+
+def _application_testing_fixture(case: unittest.TestCase, *, direct_original: bool = False) -> Any:
+    from tests.test_testing_application_flow import ApplicationFlowTests
+
+    database = _head_postgres_database()
+    fixture = ApplicationFlowTests()
+    fixture.direct_original = direct_original
+    fixture.database_url = database.__enter__()
+    case.addCleanup(database.__exit__, None, None, None)
+    fixture.setUp()
+    case.addCleanup(fixture.doCleanups)
+
+    policy = testing_activation.activation_hold_policy(fixture.product, fixture.context)
+    fixture.store.seed_authz_policy_if_absent(
+        LaunchplaneAuthzPolicyRecord(
+            record_id=build_authz_policy_record_id(
+                revision=1, policy_sha256=authz_policy_sha256(policy)
+            ),
+            revision=1,
+            status="active",
+            source="test:application-activation",
+            updated_at=fixture.old.now(),
+            policy=policy,
+        )
+    )
+    return fixture
+
+
+class RealPostgresDirectApplicationTestingActivationTests(unittest.TestCase):
+    def test_direct_original_continuation_uses_native_operation_custody(self) -> None:
+        fixture = _application_testing_fixture(self, direct_original=True)
+        fixture.test_normal_lost_maintenance_native_activation_and_ordinary_successor()
+
+
+class RealPostgresApplicationTestingActivationTests(unittest.TestCase):
+    """Application custody lives in the real original intent, including JSONB progress."""
+
+    def setUp(self) -> None:
+        self.fixture = _application_testing_fixture(self)
+
+    def test_private_publication_serializes_edge_audit_and_new_reservation(self) -> None:
+        from control_plane.storage.postgres import PostgresRecordStore
+        from control_plane.contracts.ingress_route_audit_record import (
+            TESTING_PRIVATE_INGRESS_AUDIT_PREFIX,
+        )
+        from contextlib import ExitStack
+
+        fixture = self.fixture
+        _, ingress, _ = fixture.private_addressed()
+        fixture.prepare()
+        store = fixture.store
+        edge = store.read_edge_endpoint_record(ingress.request.edge_endpoint_key)
+        audit = store.list_ingress_route_audit_records(
+            product=fixture.product, context_name=fixture.context
+        )[0]
+        writers = [PostgresRecordStore(database_url=store.database_url) for _ in range(3)]
+        for writer in writers:
+            self.addCleanup(writer.close)
+        publishing, locked, release = threading.Event(), threading.Event(), threading.Event()
+        attempted = [threading.Event() for _ in writers]
+        backend_pids: list[int] = []
+        original_write, publication_lock = (
+            store.write_testing_activation,
+            store._lock_product_authority_bundle_write,
+        )
+
+        def write(**kwargs: Any) -> None:
+            if kwargs["replacement"]["published"]:
+                publishing.set()
+                try:
+                    original_write(**kwargs)
+                finally:
+                    publishing.clear()
+            else:
+                original_write(**kwargs)
+
+        deadline = 0.0
+
+        def remaining() -> float:
+            return max(0.0, deadline - time.monotonic())
+
+        def hold_publication(session: Any) -> None:
+            publication_lock(session)
+            if publishing.is_set():
+                locked.set()
+                if not release.wait(remaining()):
+                    raise TimeoutError(
+                        "Shared concurrency budget expired before the test released publication."
+                    )
+
+        def blocked_writer(index: int, session: Any) -> None:
+            backend_pids.append(session.scalar(text("SELECT pg_backend_pid()")))
+            attempted[index].set()
+            locks[index](session)
+
+        locks = [writer._lock_product_authority_bundle_write for writer in writers]
+        actions = [
+            lambda: writers[0].write_edge_endpoint_record(
+                edge.model_copy(update={"source_label": "test:concurrent-edge"})
+            ),
+            lambda: writers[1].write_ingress_route_audit_record(
+                audit.model_copy(
+                    update={
+                        "record_id": TESTING_PRIVATE_INGRESS_AUDIT_PREFIX + "concurrent-audit",
+                        "recorded_at": fixture.old.now(1),
+                    }
+                )
+            ),
+            lambda: writers[2].reserve_mutation(
+                scope="private-concurrent",
+                route_path="/fixture-private-reservation",
+                idempotency_key="private-concurrent",
+                request_fingerprint="private-concurrent",
+                lease_owner="private-concurrent",
+                reconciliation_key="private-concurrent",
+                provider_target_key=ingress.target_key(),
+            ),
+        ]
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(store, "write_testing_activation", side_effect=write))
+            stack.enter_context(
+                patch.object(
+                    store, "_lock_product_authority_bundle_write", side_effect=hold_publication
+                )
+            )
+            for index, writer in enumerate(writers):
+                stack.enter_context(
+                    patch.object(
+                        writer,
+                        "_lock_product_authority_bundle_write",
+                        side_effect=lambda session, index=index: blocked_writer(index, session),
+                    )
+                )
+            with ThreadPoolExecutor(max_workers=4) as workers:
+                deadline = time.monotonic() + 60
+                publication = workers.submit(fixture.activate)
+
+                def require_publication_pending(stage: str) -> None:
+                    if publication.done():
+                        outcome = publication.result()
+                        self.fail(
+                            "Publication finished "
+                            + stage
+                            + ": status="
+                            + str(outcome.status)
+                            + "; phase="
+                            + fixture.adapter.current().phase
+                        )
+
+                try:
+                    while not locked.wait(min(0.05, remaining())):
+                        require_publication_pending("before its checkpoint")
+                        if not remaining():
+                            self.fail(
+                                "Shared concurrency budget expired before the publication checkpoint; phase="
+                                + fixture.adapter.current().phase
+                            )
+                    require_publication_pending("before contender observation")
+                    contenders = [workers.submit(action) for action in actions]
+                    while not all(event.is_set() for event in attempted):
+                        require_publication_pending("before all writer lock callbacks")
+                        for contender in contenders:
+                            if contender.done():
+                                contender.result()
+                                self.fail(
+                                    "A private writer completed before the held publication was released."
+                                )
+                        if not remaining():
+                            self.fail(
+                                "Shared concurrency budget expired before all private writer lock callbacks."
+                            )
+                        time.sleep(min(0.01, remaining()))
+                    blocked = False
+                    while remaining():
+                        require_publication_pending("before PostgreSQL blocking witnesses")
+                        with store._engine.connect() as connection:
+                            blocked = all(
+                                bool(
+                                    connection.scalar(
+                                        text("SELECT cardinality(pg_blocking_pids(:pid)) > 0"),
+                                        {"pid": pid},
+                                    )
+                                )
+                                for pid in backend_pids
+                            )
+                        if blocked:
+                            break
+                        time.sleep(min(0.01, remaining()))
+                    self.assertTrue(
+                        blocked,
+                        "Shared concurrency budget expired before all three PostgreSQL blocking witnesses.",
+                    )
+                    require_publication_pending("while private writers were blocked")
+                    self.assertFalse(any(contender.done() for contender in contenders))
+                finally:
+                    release.set()
+                try:
+                    self.assertEqual(publication.result(timeout=remaining()).status, "completed")
+                except TimeoutError:
+                    if publication.done():
+                        raise
+                    self.fail("Shared concurrency budget expired while publication committed.")
+                for contender in contenders:
+                    try:
+                        contender.result(timeout=remaining())
+                    except TimeoutError:
+                        if contender.done():
+                            raise
+                        self.fail(
+                            "Shared concurrency budget expired while a private writer committed."
+                        )
+        self.assertTrue(fixture.adapter.current().published)
+        self.assertEqual(
+            store.read_edge_endpoint_record(edge.endpoint_key).source_label, "test:concurrent-edge"
+        )
+        self.assertIsNotNone(
+            store.read_ingress_route_audit_record(
+                TESTING_PRIVATE_INGRESS_AUDIT_PREFIX + "concurrent-audit"
+            )
+        )
+        self.assertTrue(
+            any(
+                row.provider_target_key == ingress.target_key()
+                for row in store.list_held_provider_target_reservations()
+            )
+        )
+
+    def test_unfinished_preparing_forward_refusal_and_fresh_successor(self) -> None:
+        self.fixture.assert_unfinished_private_forward_recovers_and_successor("preparing")
+
+    def test_excluded_private_forward_refusal_and_fresh_successor(self) -> None:
+        self.fixture.assert_excluded_private_forward_refuses_and_successor("no-container")
+
+    def test_private_same_address_lineage_monitor_and_second_generation(self) -> None:
+        self.fixture.test_private_same_address_monitor_recreate_and_second_generation()
+
+    def test_original_intent_progress_and_native_forward_continuation(self) -> None:
+        self.fixture.test_normal_lost_maintenance_native_activation_and_ordinary_successor()
+
+    def test_final_bundle_rolls_back_and_reuses_original_staged_versions(self) -> None:
+        self.fixture.test_failed_atomic_publication_keeps_old_delivery_and_reuses_staged_generation()
+
+    def test_expired_execution_cannot_publish_target_or_runtime_bindings(self) -> None:
+        self.fixture.test_final_publication_expired_execution_rolls_back_target_and_delivery()
+
+    def test_replaced_execution_cannot_publish_target_or_runtime_bindings(self) -> None:
+        self.fixture.test_final_publication_replaced_execution_rolls_back_target_and_delivery()
+
+    def test_later_supported_hold_correction_prevents_publication(self) -> None:
+        self.fixture.test_later_supported_hold_correction_refuses_final_publication()
+
+    def test_new_staff_use_prevents_fresh_creation(self) -> None:
+        self.fixture.test_new_staff_use_refuses_before_fresh_creation()
+
+    def test_supported_application_route_original_intent_and_key_replay(self) -> None:
+        self.fixture.assert_supported_http_activation(native_apply=True)
+
+    def test_interrupted_http_apply_reuses_immutable_original_intent(self) -> None:
+        self.fixture.assert_supported_http_activation(native_apply=True, interrupted=True)
+
+    def test_in_progress_http_apply_reuses_immutable_original_intent(self) -> None:
+        self.fixture.assert_supported_http_activation(native_apply=True, in_progress=True)
+
+    def test_refused_http_apply_readback_and_receipt_remain_unqualified(self) -> None:
+        self.fixture.assert_supported_http_activation(native_apply=True, failed=True)
+
+    def test_pre_effect_refusal_releases_for_fresh_review(self) -> None:
+        self.fixture.test_pre_checkpoint_review_drift_releases_for_a_fresh_review_and_key()
+
+    def test_post_inspector_permanent_refusal_keeps_custody_and_continues(self) -> None:
+        self.fixture.test_post_inspector_permanent_configuration_refusal_keeps_custody_and_continues()
+
+    def test_failed_private_candidate_retains_resources_for_distinct_generation(self) -> None:
+        self.fixture.test_lost_failed_private_application_keeps_resources_and_new_generation()
+
+    def test_publication_refusal_restores_route_before_next_generation(self) -> None:
+        self.fixture.test_addressed_publication_correction_restores_route_and_allows_fresh_generation()
+
+    def test_terminal_private_job_correction_before_health_keeps_original_custody(self) -> None:
+        self.fixture.test_terminal_private_candidate_correction_does_not_require_passing_health()
+
+    def test_answered_unused_placement_correction_keeps_original_custody(self) -> None:
+        self.fixture.test_answered_placement_correction_retains_unused_candidate()
+
+    def test_staged_private_inputs_correction_keeps_original_custody(self) -> None:
+        self.fixture.test_staged_private_inputs_correction_retains_unused_candidate()
+
+    def test_answered_mount_correction_keeps_original_custody(self) -> None:
+        self.fixture.test_answered_mount_correction_retains_unused_candidate()
+
+    def test_answered_configuration_correction_keeps_original_custody(self) -> None:
+        self.fixture.test_answered_configuration_correction_retains_unused_candidate()
+
+    def test_generic_publication_error_continues_original_forward(self) -> None:
+        self.fixture.test_addressed_generic_publication_error_retries_forward_without_route_rewrite()
+
+    def test_staff_use_pauses_forward_until_reviewed_clear(self) -> None:
+        self.fixture.test_addressed_staff_use_pauses_then_original_key_publishes_without_inverse()
+
+    def test_verified_public_failure_restores_original(self) -> None:
+        self.fixture.test_verified_public_http_failure_restores_original_and_allows_successor()
+
+    def test_verified_private_failure_retains_candidate(self) -> None:
+        self.fixture.test_verified_private_http_failure_retains_candidate_and_allows_successor()
+
+    def test_proxy_restart_before_inverse_preserves_original_directions(self) -> None:
+        self.fixture.test_proxy_restart_before_inverse_retains_distinct_inverse_custody()
+
+    def test_proxy_restart_after_lost_inverse_preserves_original_child(self) -> None:
+        self.fixture.test_proxy_restart_after_lost_inverse_reply_reuses_original_child()
+
+    def test_staff_use_pauses_persisted_inverse_until_reviewed_clear(self) -> None:
+        self.fixture.test_persisted_inverse_pauses_for_staff_use_then_restores_original()
+
+    def test_route_restores_before_foreign_job_holds_negative_receipt(self) -> None:
+        self.fixture.test_inverse_restores_before_unrelated_candidate_job_holds_negative_receipt()
 
 
 class RealPostgresRecipientRecoveryTests(unittest.TestCase):
@@ -14431,27 +14632,37 @@ class RealPostgresTestingGenerationRetirementTests(unittest.TestCase):
             self.assertIsNone(superseded.cancellation)
             self.assertTrue(current.reconcile_requested_at)
 
-    def test_retirement_custody_survives_schema_downgrade_and_reupgrade(self) -> None:
+    def test_retirement_custody_survives_its_migration_downgrade_and_reupgrade(self) -> None:
+        from alembic.migration import MigrationContext
+        from alembic.operations import Operations
         from tests.test_testing_generation_retirement import TestingGenerationRetirementTests
         from control_plane.storage.migrations.versions import (
             cd192c59f009_retained_testing_generations as migration,
         )
 
-        with _isolated_postgres_database() as url:
-            alembic_command.upgrade(_alembic_config(url), PRE_RETIREMENT_ALEMBIC_REVISION)
+        with _head_postgres_database() as url:
             fixture = TestingGenerationRetirementTests()
             fixture.database_url = url
             fixture.setUp()
             self.addCleanup(fixture.doCleanups)
             fixture.apply()
             before = fixture.store.read_retained_testing_generation(fixture.operation.operation_id)
-            config = _alembic_config(url)
-            alembic_command.downgrade(config, migration.down_revision)
+            # Exercise this history-preserving migration itself. Unrelated later
+            # irreversible migrations deliberately refuse a whole-chain downgrade.
+            with (
+                fixture.store._engine.begin() as connection,
+                Operations.context(MigrationContext.configure(connection)),
+            ):
+                migration.downgrade()
             self.assertEqual(
                 fixture.store.read_retained_testing_generation(fixture.operation.operation_id),
                 before,
             )
-            alembic_command.upgrade(config, PRE_RETIREMENT_ALEMBIC_REVISION)
+            with (
+                fixture.store._engine.begin() as connection,
+                Operations.context(MigrationContext.configure(connection)),
+            ):
+                migration.upgrade()
             fixture.store.verify_schema()
             self.assertEqual(
                 fixture.store.read_retained_testing_generation(fixture.operation.operation_id),
@@ -14750,6 +14961,24 @@ class PostgresOdooSecretTransportTests(secret_transport_tests.OdooSecretTranspor
 
 @unittest.skipUnless(os.environ.get(POSTGRES_TEST_URL_ENV), "PostgreSQL integration URL required")
 class RealPostgresOdooUpgradeRehearsalTests(unittest.TestCase):
+    def test_checkpointed_rehearsal_resumes_original_job_on_postgres(self) -> None:
+        from tests.test_odoo_upgrade_rehearsal import RehearsalScenario
+
+        fixture = RehearsalScenario()
+        fixture.database_url = self.enterContext(_head_postgres_database())
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.test_deploy_checkpoints_exact_remote_execute_and_worker_resumes_without_replay()
+
+    def test_checkpoint_executor_exclusion_and_original_binding_on_postgres(self) -> None:
+        from tests.test_odoo_upgrade_rehearsal import RehearsalScenario
+
+        fixture = RehearsalScenario()
+        fixture.database_url = self.enterContext(_head_postgres_database())
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.test_rehearsal_checkpoint_preserves_live_executor_and_original_binding()
+
     def test_rehearsal_record_compare_and_write_and_native_alias_fence(self) -> None:
         from tests.test_odoo_upgrade_rehearsal import RehearsalScenario
 
@@ -15224,3 +15453,540 @@ class RealPostgresNativeTestingWorkerTests(unittest.TestCase):
         self.run_worker_case(
             "test_unknown_dispatched_stop_is_not_excluded_or_repeated_when_health_recovers"
         )
+
+
+class RealPostgresBrowserRouteRepairTests(browser_repair_tests._BrowserRouteRepairFixture):
+    def setUp(self) -> None:
+        from control_plane.dokploy import source
+        from control_plane import dokploy_target_setup_http
+
+        self.original_config_reader = source.read_dokploy_config
+        self.original_target_reader = (
+            dokploy_target_setup_http.fetch_dokploy_target_payload_for_setup
+        )
+        self.original_domain_reader = (
+            dokploy_target_setup_http.fetch_dokploy_target_domains_for_setup
+        )
+        self.addCleanup(self.assert_fixture_callbacks_restored)
+
+        store = self.enterContext(_store_for_fresh_head_database())
+        with patch("tests.test_browser_route_repair.PostgresRecordStore", return_value=store):
+            super().setUp()
+        store.seed_authz_policy_if_absent(
+            LaunchplaneAuthzPolicyRecord(
+                record_id=build_authz_policy_record_id(
+                    revision=1, policy_sha256=authz_policy_sha256(self.policy)
+                ),
+                source="test:browser-route-repair",
+                updated_at=self.target.updated_at,
+                policy=self.policy,
+            )
+        )
+
+    def assert_fixture_callbacks_restored(self) -> None:
+        from control_plane.dokploy import source
+        from control_plane import dokploy_target_setup_http
+
+        self.assertIs(source.read_dokploy_config, self.original_config_reader)
+        self.assertIs(
+            dokploy_target_setup_http.fetch_dokploy_target_payload_for_setup,
+            self.original_target_reader,
+        )
+        self.assertIs(
+            dokploy_target_setup_http.fetch_dokploy_target_domains_for_setup,
+            self.original_domain_reader,
+        )
+
+    async def test_browser_domain_repair_atomic_receipt_rollback_and_retry(self) -> None:
+        await self.assert_domain_receipt_failure_rolls_back_records_and_retry_can_complete()
+        await self.assert_domain_apply_and_immutable_replay_precede_source_drift()
+
+    async def test_browser_binding_commit_rejects_intervening_domain_repair(self) -> None:
+        await self.assert_binding_commit_rejects_intervening_domain_repair()
+
+    async def test_browser_same_key_concurrent_retries_preserve_original_receipts(self) -> None:
+        for winner in ("stale", "success"):
+            await self.assert_atomic_terminal_winner("domain", winner)
+
+    async def test_browser_binding_same_key_concurrent_retries_preserve_original_receipts(
+        self,
+    ) -> None:
+        for winner in ("stale", "success"):
+            await self.assert_atomic_terminal_winner("binding", winner)
+
+    def test_browser_binding_and_authority_publisher_do_not_invert_locks(self) -> None:
+        from control_plane.route_binding_reconcile import (
+            RouteBindingExpectedCurrent,
+            RouteBindingReconcileRequest,
+            plan_route_binding_reconcile,
+        )
+        from control_plane.workflows.ship import utc_now_timestamp
+
+        store = self.store
+        publisher = PostgresRecordStore(database_url=store.database_url)
+        try:
+            self.seed_binding()
+            plan = plan_route_binding_reconcile(
+                record_store=store,
+                request=RouteBindingReconcileRequest(
+                    product="example-product",
+                    context="example-testing",
+                    instance="web",
+                    expected_current=RouteBindingExpectedCurrent(state="absent"),
+                    evaluated_at=utc_now_timestamp(),
+                ),
+            )
+            self.assertEqual(plan.status, "ready")
+            candidate, sources = plan.record, plan.review_sources
+            assert candidate is not None and sources is not None
+            mutation = DbOnlyMutationRequest(
+                scope="browser-lock-order-fixture",
+                route_path="/v1/route-bindings/reconcile",
+                idempotency_key="reviewed-binding",
+                request_fingerprint="reviewed-binding-request",
+                lease_owner="browser",
+                response_status_code=202,
+                response_trace_id="browser-trace",
+                response_payload={"status": "accepted", "trace_id": "browser-trace"},
+            )
+            held, proceed, connected = (threading.Event(), threading.Event(), threading.Event())
+            browser_pid: list[int] = []
+
+            def observe_connection(connection: Any, _record: Any, _proxy: Any) -> None:
+                if threading.current_thread().name.startswith("reviewed-binding"):
+                    browser_pid.append(int(connection.info.backend_pid))
+                    connected.set()
+
+            def publish_authority() -> None:
+                # Existing authority publishers take the bundle before the binding.
+                with publisher._session_factory() as session:
+                    publisher._begin_serialized_write(session)
+                    publisher._lock_product_authority_bundle_write(session)
+                    held.set()
+                    if not proceed.wait(30):
+                        raise AssertionError("Browser did not reach its database lock wait.")
+                    publisher._lock_route_binding_write(session, binding_key=candidate.binding_key)
+                    session.commit()
+
+            def reconcile_binding() -> str:
+                if not held.wait(30):
+                    raise AssertionError("Competing publisher did not acquire authority.")
+                return store.reconcile_route_binding_record(
+                    expected_record=None,
+                    replacement_record=candidate,
+                    mutation=mutation,
+                    reviewed_sources=sources,
+                    reviewed_product=candidate.product,
+                ).status
+
+            event.listen(store._engine, "checkout", observe_connection)
+            try:
+                with ThreadPoolExecutor(
+                    max_workers=2, thread_name_prefix="reviewed-binding"
+                ) as executor:
+                    publishing = executor.submit(publish_authority)
+                    browser = executor.submit(reconcile_binding)
+                    try:
+                        self.assertTrue(connected.wait(30))
+                        deadline = time.monotonic() + 30
+                        with publisher._engine.connect().execution_options(
+                            isolation_level="AUTOCOMMIT"
+                        ) as observer:
+                            while True:
+                                waiting = observer.execute(
+                                    text(
+                                        "select wait_event_type, wait_event "
+                                        "from pg_stat_activity where pid=:pid"
+                                    ),
+                                    {"pid": browser_pid[0]},
+                                ).first()
+                                if waiting is not None and tuple(waiting) == (
+                                    "Lock",
+                                    "advisory",
+                                ):
+                                    break
+                                self.assertLess(
+                                    time.monotonic(),
+                                    deadline,
+                                    "Browser did not enter its advisory-lock wait.",
+                                )
+                                proceed.wait(0.01)
+                    finally:
+                        proceed.set()
+                    publishing.result(timeout=30)
+                    self.assertEqual(browser.result(timeout=30), "created")
+            finally:
+                event.remove(store._engine, "checkout", observe_connection)
+        finally:
+            publisher.close()
+
+
+class RealPostgresReleaseReviewHttpTests(release_review_http_tests._ReleaseReviewHttpFixture):
+    def setUp(self) -> None:
+        from control_plane import http_app
+
+        self.original_review_reader = getattr(http_app, "current_release_review")
+        self.original_decision_publisher = getattr(http_app, "publish_release_decision")
+        self.addCleanup(self.assert_fixture_callbacks_restored)
+
+    def assert_fixture_callbacks_restored(self) -> None:
+        from control_plane import http_app
+
+        self.assertIs(getattr(http_app, "current_release_review"), self.original_review_reader)
+        self.assertIs(
+            getattr(http_app, "publish_release_decision"), self.original_decision_publisher
+        )
+
+    def test_release_publication_lock_timeout_returns_pending_and_retry_recovers(self) -> None:
+        from control_plane.release_review import RELEASE_RECORD_PENDING
+        from control_plane.release_review_record import publish_release_decision
+        from tests.test_release_review import decision, profile, seed
+        from tests.test_release_review_record import FakeReleaseIssues
+
+        url = self.enterContext(_head_postgres_database())
+        holder_store = self.enterContext(closing(PostgresRecordStore(database_url=url)))
+        waiter_store = self.enterContext(
+            closing(
+                PostgresRecordStore(database_url=url, postgres_statement_timeout_milliseconds=100)
+            )
+        )
+        http = self
+        release_review_http_tests._ReleaseReviewHttpFixture.setUp(http)
+        http.store = waiter_store  # type: ignore[assignment]
+        seed(holder_store)
+        holder_store.seed_authz_policy_if_absent(
+            LaunchplaneAuthzPolicyRecord(
+                record_id="release-publication-test-policy",
+                source="test",
+                updated_at="2026-10-07T00:00:00Z",
+                policy=LaunchplaneAuthzPolicy(
+                    github_humans=(
+                        GitHubHumanPolicyRule(
+                            logins=("site-owner",),
+                            roles=("read_only",),
+                            products=("example-site",),
+                            contexts=("launchplane",),
+                            actions=("product_profile.read",),
+                        ),
+                    )
+                ),
+            )
+        )
+        saved = decision(holder_store).model_copy(update={"release_issue_url": ""})
+        holder_store.create_release_review_decision_record_if_absent(saved)
+        github = FakeReleaseIssues()
+        github.continue_lookup.clear()
+        with (
+            patch(
+                "control_plane.release_review_record.github_api_request",
+                side_effect=github.request,
+            ),
+            patch(
+                "control_plane.release_review_record.resolve_launchplane_github_token",
+                return_value="test-token",
+            ),
+            patch(
+                "control_plane.http_app.publish_release_decision",
+                wraps=publish_release_decision,
+            ),
+            ThreadPoolExecutor(max_workers=1) as workers,
+        ):
+            holder = workers.submit(
+                publish_release_decision,
+                store=holder_store,
+                control_plane_root=Path("."),
+                profile=profile(),
+                decision=saved,
+            )
+            try:
+                self.assertTrue(github.lookup_started.wait(10))
+                pending = asyncio.run(http.post())
+                self.assertEqual(pending.status_code, 200, pending.text)
+                self.assertIn(RELEASE_RECORD_PENDING, pending.json()["review"]["blockers"])
+                self.assertFalse(pending.json()["review"]["approved"])
+                self.assertEqual(
+                    waiter_store.read_release_review_decision_record(
+                        product=saved.product, record_id=saved.record_id
+                    ),
+                    saved,
+                )
+            finally:
+                github.continue_lookup.set()
+            published_url = holder.result(timeout=10)
+            retry = asyncio.run(http.post())
+        self.assertEqual(retry.status_code, 200, retry.text)
+        self.assertTrue(retry.json()["review"]["approved"])
+        self.assertEqual(len(github.issues), 1)
+        self.assertEqual(
+            retry.json()["review"]["latest_decision"]["release_issue_url"], published_url
+        )
+        self.assertEqual(
+            waiter_store.list_release_review_decision_records(product=saved.product)[0].record_id,
+            saved.record_id,
+        )
+        self.assertEqual(waiter_store.list_deployment_records(), ())
+
+
+class RealPostgresGenericSiblingOwnershipTests(
+    generic_sibling_tests.LegacyGenericSiblingOwnershipTests
+):
+    def database_url(self) -> str:
+        return self.enterContext(_head_postgres_database())
+
+    async def test_http_ownership_receipt_contention_refuses_and_recovers(self) -> None:
+        from control_plane.storage.postgres import LaunchplaneIdempotencyRow
+
+        runtime = await self.produced_sibling()
+        receipt = self.store.find_generic_preview_refresh_receipts(runtime.deployment_record_id)[0]
+        peer = PostgresRecordStore(database_url=self.store.database_url)
+        self.addCleanup(peer.close)
+        with self.provider_inventory():
+            plan = await self.plan()
+            with peer._session_factory() as session:
+                session.scalar(
+                    select(LaunchplaneIdempotencyRow)
+                    .where(LaunchplaneIdempotencyRow.record_id == receipt.record_id)
+                    .with_for_update()
+                )
+                blocked = await asyncio.wait_for(self.apply(plan), 5)
+                self.assertEqual(blocked.status_code, 409, blocked.text)
+                self.assertEqual(
+                    self.store.read_preview_record(self.preview.preview_id), self.preview
+                )
+                peer.write_preview_record(self.preview)
+                session.rollback()
+            self.assertEqual((await self.apply(plan)).status_code, 202)
+
+
+class RealPostgresLegacyOdooPreviewReconciliationTests(
+    legacy_odoo_tests.LegacyOdooPreviewReconciliationTests
+):
+    def database_url(self) -> str:
+        return self.enterContext(_head_postgres_database())
+
+    async def test_sibling_receipt_contention_refuses_without_authority_lock_cycle(self) -> None:
+        from control_plane.legacy_preview_reconciliation import (
+            bind_legacy_preview,
+            LegacyPreviewReconciliationRequest,
+        )
+        from control_plane.storage.postgres import LaunchplaneIdempotencyRow
+
+        runtime = self.produced_sibling()
+        self.compose(name=runtime.instance, image=self.profile.image.repository + ":current")
+        plan = await self.plan()
+        request = LegacyPreviewReconciliationRequest(
+            product=self.profile.product, preview_id=self.preview.preview_id, reason="fixture"
+        )
+        bound = bind_legacy_preview(self.store, request)
+        self.assertIn(runtime.deployment_record_id, bound.sibling_receipt_ids)
+        peer = PostgresRecordStore(database_url=self.store.database_url)
+        self.addCleanup(peer.close)
+        for identifier in bound.sibling_receipt_ids:
+            with self.subTest(receipt=identifier), peer._session_factory() as session:
+                session.scalar(
+                    select(LaunchplaneIdempotencyRow)
+                    .where(LaunchplaneIdempotencyRow.record_id == identifier)
+                    .with_for_update()
+                )
+                # A writer that owns the receipt can need authority next. Apply
+                # must fail immediately rather than waiting in the inverse order.
+                blocked = await asyncio.wait_for(self.apply(plan), 5)
+                self.assertEqual(blocked.status_code, 409, blocked.text)
+                self.assertEqual(
+                    self.store.read_preview_record(self.preview.preview_id), self.preview
+                )
+                peer.write_preview_record(self.preview)
+                session.rollback()
+        response = await self.apply(plan)
+        self.assertEqual(response.status_code, 202, response.text)
+
+    async def test_pointed_legacy_verifying_history_is_retained_under_actual_exclusion(
+        self,
+    ) -> None:
+        original = self.historical_generation().model_copy(
+            update={
+                "runtime_identity": None,
+                "state": "verifying",
+                "finished_at": "",
+                "ready_at": "",
+            }
+        )
+        latest = original.model_copy(update={"generation_id": "latest-interrupted", "sequence": 2})
+        for generation in (original, latest):
+            self.store.write_preview_generation_record(generation)
+        self.store.write_preview_record(
+            self.preview.model_copy(
+                update={
+                    "state": "pending",
+                    "active_generation_id": latest.generation_id,
+                    "serving_generation_id": "",
+                    "latest_generation_id": latest.generation_id,
+                }
+            )
+        )
+        closed = await self.closed_preview()
+        self.assertEqual(closed.state, "destroyed")
+        self.assertEqual(closed.active_generation_id, "")
+        self.assertEqual(closed.serving_generation_id, "")
+        self.assertEqual(closed.latest_generation_id, latest.generation_id)
+        for generation in (original, latest):
+            self.assertEqual(
+                self.store.read_preview_generation_record(generation.generation_id), generation
+            )
+
+    async def test_actual_odoo_executor_held_elsewhere_blocks_before_provider_observation(
+        self,
+    ) -> None:
+        from control_plane.legacy_preview_reconciliation import (
+            bind_legacy_preview,
+            LegacyPreviewReconciliationRequest,
+        )
+        from control_plane.contracts.preview_execution import (
+            odoo_preview_target_key,
+            preview_execution_lock_name,
+        )
+
+        bound = bind_legacy_preview(
+            self.store,
+            LegacyPreviewReconciliationRequest(
+                product=self.profile.product,
+                preview_id=self.preview.preview_id,
+                reason="fixture",
+            ),
+        )
+        peer = PostgresRecordStore(database_url=self.store.database_url)
+        self.addCleanup(peer.close)
+        name = preview_execution_lock_name(
+            odoo_preview_target_key(
+                context=self.profile.preview.context,
+                compose_name=bound.application_name,
+            )
+        )
+        with peer.testing_replacement_execution_lock(name) as check:
+            self.assertIsNotNone(check)
+            response = await self.call("inspect")
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertFalse(self.reads)
+        self.assertTrue((await self.plan())["apply_eligible"])
+
+    async def test_custom_physical_executor_shares_logical_preview_fence(self) -> None:
+        from tests.test_product_reconcile import FakePreviewProvider
+        from datetime import datetime, timedelta, timezone
+        from control_plane.workflows.launchplane import generate_preview_id
+
+        now = datetime.now(timezone.utc)
+        await self.closed_preview(completed_at=(now - timedelta(seconds=3)).isoformat())
+        self.reads.clear()
+        fake = FakePreviewProvider()
+        operation = self.prepared_operation(fake, "actual-custom-executor", now)
+        entered = threading.Event()
+        release = threading.Event()
+        execute = fake.execute_apply
+        logical = generate_preview_id(
+            context_name=self.profile.preview.context,
+            anchor_repo=self.preview.anchor_repo,
+            anchor_pr_number=self.preview.anchor_pr_number,
+        )
+        owner_pid: list[int] = []
+
+        def blocked_execute(**kwargs: Any) -> dict[str, object]:
+            entry = next(
+                item
+                for item in self.store._preview_execution_context.held
+                if item[0] == logical and not item[1]
+            )
+            owner_pid.append(entry[2].scalar(text("SELECT pg_backend_pid()")))
+            entered.set()
+            if not release.wait(10):
+                raise RuntimeError("Test provider release was not delivered.")
+            return execute(**kwargs)
+
+        operation.adapter._execute_apply = blocked_execute
+        with patch.object(operation.adapter, "capture_schedule_binding"):
+            execution = asyncio.create_task(asyncio.to_thread(operation.run, self.store))
+            inspection = None
+            try:
+                self.assertTrue(await asyncio.to_thread(entered.wait, 5))
+                inspection = asyncio.create_task(self.call("inspect"))
+                waiting = False
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    with self.store._engine.connect() as connection:
+                        waiting = bool(
+                            connection.scalar(
+                                text(
+                                    "SELECT count(*) FROM pg_locks owner JOIN pg_locks waiter "
+                                    "ON waiter.locktype = owner.locktype AND waiter.database = owner.database "
+                                    "AND waiter.classid = owner.classid AND waiter.objid = owner.objid "
+                                    "AND waiter.objsubid = owner.objsubid "
+                                    "WHERE owner.locktype = 'advisory' AND owner.granted "
+                                    "AND owner.pid = :owner_pid AND NOT waiter.granted"
+                                ),
+                                {"owner_pid": owner_pid[0]},
+                            )
+                        )
+                    if waiting:
+                        break
+                    await asyncio.sleep(0.01)
+                self.assertTrue(
+                    waiting, "Reconciliation never waited for the actual logical executor"
+                )
+                self.assertFalse(self.reads)
+            finally:
+                release.set()
+                tasks = [execution] + ([inspection] if inspection is not None else [])
+                outcomes = await asyncio.wait_for(
+                    asyncio.gather(*tasks, return_exceptions=True), 10
+                )
+            result = outcomes[0]
+            if isinstance(result, BaseException):
+                raise result
+            self.assertEqual(result.response_status_code, 202, result.response_payload)
+            self.assertEqual(result.response_payload["result"]["status"], "pass")
+            self.assertEqual(
+                result.response_payload["records"]["lifecycle_evidence_status"], "applied"
+            )
+            runtime = operation.adapter._runtime_identity
+            assert runtime is not None
+            preview = self.store.read_preview_record(self.preview.preview_id)
+            self.assertEqual(preview.state, "active")
+            self.assertEqual(preview.serving_generation_id, runtime.preview_generation_id)
+            generation = self.store.read_preview_generation_record(runtime.preview_generation_id)
+            self.assertEqual(generation.state, "ready")
+            self.assertEqual(generation.runtime_identity, runtime)
+            response = outcomes[1]
+            if isinstance(response, BaseException):
+                raise response
+            self.assertEqual(response.status_code, 409, response.text)
+            self.assertFalse(self.reads)
+
+    def test_lost_logical_transaction_cannot_reacquire_proof_after_autobegin(self) -> None:
+        from control_plane.workflows.launchplane import generate_preview_id
+        from control_plane.legacy_preview_reconciliation import (
+            serialize_legacy_preview_operation,
+            LegacyPreviewReconciliationRequest,
+            bind_legacy_preview,
+        )
+
+        logical = generate_preview_id(
+            context_name=self.profile.preview.context,
+            anchor_repo=self.preview.anchor_repo,
+            anchor_pr_number=self.preview.anchor_pr_number,
+        )
+        request = LegacyPreviewReconciliationRequest(
+            product=self.profile.product,
+            preview_id=self.preview.preview_id,
+            reason="fixture",
+        )
+        with serialize_legacy_preview_operation(self.store, request):
+            entry = next(
+                value for value in self.store._preview_execution_context.held if value[0] == logical
+            )
+            session = entry[2]
+            session.rollback()
+            session.execute(text("SELECT 1"))
+            with self.assertRaises(ValueError):
+                self.store.preview_refresh_is_excluded(preview_id=logical)
+            with self.assertRaises(ValueError):
+                bind_legacy_preview(self.store, request)
+        self.assertFalse(self.reads)

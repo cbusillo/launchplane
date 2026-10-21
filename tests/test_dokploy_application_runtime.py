@@ -277,6 +277,9 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
         self.assertFalse(self.read().task_evidence_complete)
 
     def test_shutdown_desired_task_still_running_keeps_rollout_unready(self) -> None:
+        self.task["DesiredState"] = "shutdown"
+        self.assertFalse(self.read().ready)
+        self.task["DesiredState"] = "running"
         old_id = "e" * 64
         task = deepcopy(self.task)
         task.update(ID="old-task", DesiredState="shutdown")
@@ -293,6 +296,18 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
         observed = self.read()
         self.assertFalse(observed.ready)
         self.assertEqual(len(observed.running_container_images), 2)
+
+    def test_ready_replacement_keeps_completed_service_unready_until_running(self) -> None:
+        replacement = deepcopy(self.task)
+        replacement.update(ID="replacement-task", DesiredState="ready")
+        self.tasks.append({"containerId": "replacement-task"})
+        self.extra_inspections["replacement-task"] = replacement
+        for state in ("new", "ready"):
+            with self.subTest(state=state):
+                replacement["Status"] = {"State": state}
+                self.assertFalse(self.read().ready)
+        replacement.update(DesiredState="shutdown", Status={"State": "shutdown"})
+        self.assertTrue(self.read().ready)
 
     def test_transient_new_task_before_completed_rollout_does_not_qualify(self) -> None:
         rollout = self.service["UpdateStatus"]
@@ -463,7 +478,6 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
                         target=target,
                         observation=job,
                         deployment_record_id="deployment-1",
-                        original_deadline_expired=True,
                     )
                 self.assertEqual(result.outcome, expected)
                 if expected == "present":

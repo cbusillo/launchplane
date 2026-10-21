@@ -243,7 +243,6 @@ from control_plane.http_routes import (
     GovernanceProjectionRouteDependencies,
     ProductReadRouteDependencies,
     ReadRouteDependencies,
-    WorkGraphReadRouteDependencies,
     accepted_evidence_response,
     build_generic_web_write_route_handlers,
     idempotency_capable_store,
@@ -298,8 +297,6 @@ from control_plane.http_routes import (
     register_tenant_admission_write_routes,
     register_topology_read_routes,
     register_tracked_target_log_read_routes,
-    register_work_graph_issue_inbox_read_routes,
-    register_work_graph_snapshot_read_routes,
     replay_idempotent_response,
     request_fingerprint as build_request_fingerprint,
     require_product_profile_read_store,
@@ -720,9 +717,6 @@ from control_plane.workflows.odoo_prod_backup_restore import (
 from control_plane.workflows.odoo_preview_runtime import (
     OdooPreviewApplyInputsResult,
 )
-from control_plane.contracts.product_environment_read_model import (
-    ActionAllowed,
-)
 from control_plane.contracts.product_onboarding_manifest import ProductOnboardingManifest
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
@@ -764,6 +758,11 @@ from control_plane.contracts.preview_pr_feedback_remediation import (
     PreviewPrFeedbackRemediationRequest,
 )
 from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
+from control_plane.contracts.testing_route_refresh import (
+    TestingRouteRefreshSources,
+    is_native_testing_binding,
+)
+from control_plane.native_testing_route_refresh import plan_native_testing_route_refresh
 from control_plane.contracts.route_binding_record import (
     route_binding_record_sha256,
     EnvironmentRouteBindingRecord,
@@ -841,6 +840,7 @@ from control_plane.disposable_lane_collection import (
 from control_plane.odoo_testing_usage import read_odoo_testing_usage, OdooTestingUsage
 from control_plane.testing_never_served import read_never_served_testing_usage
 from control_plane.testing_rebuild_service import TestingRebuildRefused
+from control_plane.dokploy.network_capacity import BridgeNetworkCapacityRefused
 from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 
 from control_plane.disposable_lanes import (
@@ -907,6 +907,7 @@ from control_plane.health_monitor_scheduler import HealthMonitorScheduler
 from control_plane.odoo_testing_drill import OdooTestingDrillScheduler
 from control_plane.preview_lifecycle_scheduler import PreviewLifecycleScheduler
 from control_plane.release_digest import ReleaseDigestScheduler
+from control_plane.discussion_reminders import DiscussionReminderScheduler
 from control_plane.health_monitor_status import (
     HealthMonitorSlotRangeError,
     HealthMonitorStatusResponse,
@@ -922,6 +923,7 @@ from control_plane.storage.postgres import (
     DbOnlyMutationRequest,
     MutationReservationCompletionResult,
     MutationReservationResult,
+    MutationReservationUpdateResult,
     OutboxWithIdempotencyRequest,
     PostgresRecordStore,
     RouteBindingReconcileWriteResult,
@@ -982,6 +984,7 @@ from control_plane.http_routes.product_generic_web_transition import (
     register_product_generic_web_transition_routes,
 )
 from control_plane.http_routes.product_display_name import register_product_display_name_routes
+from control_plane.http_routes.discussion_topics import register_discussion_topic_routes
 from control_plane.http_routes.product_testing_restore_policy import (
     register_testing_restore_policy_routes,
 )
@@ -1009,20 +1012,6 @@ from control_plane.workflows.launchplane import (
     github_api_request,
     resolve_launchplane_github_token,
     launchplane_github_token,
-)
-from control_plane.work_graph_issue_inbox import (
-    GitHubIssueInboxReconcileRequest,
-)
-from control_plane.work_graph_service import (
-    WorkGraphIssueInboxProvider,
-    WorkGraphIssueInboxReconcileProvider,
-    WorkGraphIssueInboxReconcileResponse,
-    WorkGraphIssueInboxReconcileResponseResult,
-    WorkGraphPlanningFactsProvider,
-    WorkGraphRankEnvelope,
-    WorkGraphRankResponse,
-    WorkGraphRankResult,
-    build_work_graph_rank_result,
 )
 
 TrustedMaintenanceGitHubWebhookHandler = Callable[
@@ -2968,6 +2957,7 @@ class _RouteBindingMutationStore(_RouteBindingReconcileStore, Protocol):
         expected_record: EnvironmentRouteBindingRecord | None,
         replacement_record: EnvironmentRouteBindingRecord,
         mutation: DbOnlyMutationRequest,
+        native_sources: TestingRouteRefreshSources | None = None,
     ) -> RouteBindingReconcileWriteResult: ...
 
 
@@ -2994,6 +2984,14 @@ class _RouteBindingRefreshControllerStore(
         reconciliation_key: str = "",
         provider_target_key: str = "",
     ) -> MutationReservationResult: ...
+
+    def renew_mutation_reservation(
+        self, *, reservation: LaunchplaneIdempotencyRecord, lease_seconds: int = 300
+    ) -> MutationReservationUpdateResult: ...
+
+    def release_mutation_reservation(
+        self, *, reservation: LaunchplaneIdempotencyRecord
+    ) -> MutationReservationUpdateResult: ...
 
     def complete_mutation_reservation(
         self,
@@ -3344,6 +3342,8 @@ def require_route_binding_refresh_controller_store(
     required_methods = (
         "prepare_db_only_mutation",
         "reserve_mutation",
+        "renew_mutation_reservation",
+        "release_mutation_reservation",
         "complete_mutation_reservation",
         "reconcile_route_binding_record",
     )
@@ -4356,9 +4356,6 @@ def create_launchplane_fastapi_app(
     oauth_login_state_store: OAuthLoginStateRepository | None = None,
     control_plane_root_path: FilePath | None = None,
     state_dir: FilePath | None = None,
-    work_graph_planning_facts_provider: WorkGraphPlanningFactsProvider | None = None,
-    work_graph_issue_inbox_provider: WorkGraphIssueInboxProvider | None = None,
-    work_graph_issue_inbox_reconcile_provider: WorkGraphIssueInboxReconcileProvider | None = None,
     repository_evidence_provider: (RepositoryEvidenceProvider | None) = None,
     every_code_discord_sender: Callable[[str, dict[str, object]], object] = post_discord_webhook,
     preview_pr_feedback_discord_sender: Callable[
@@ -4374,6 +4371,7 @@ def create_launchplane_fastapi_app(
     testing_drill_scheduler: OdooTestingDrillScheduler | None = None,
     preview_lifecycle_scheduler: PreviewLifecycleScheduler | None = None,
     release_digest_scheduler: ReleaseDigestScheduler | None = None,
+    discussion_reminder_scheduler: DiscussionReminderScheduler | None = None,
     odoo_cutover_provider_factory: Callable[[OdooCutoverPlan], OdooCutoverProvider] | None = None,
 ) -> FastAPI:
     resolved_control_plane_root = (
@@ -4452,6 +4450,8 @@ def create_launchplane_fastapi_app(
         try:
             if release_digest_scheduler is not None:
                 await run_in_threadpool(release_digest_scheduler.start)
+            if discussion_reminder_scheduler is not None:
+                await run_in_threadpool(discussion_reminder_scheduler.start)
             if health_monitor_scheduler is not None:
                 await run_in_threadpool(health_monitor_scheduler.start)
             if testing_drill_scheduler is not None:
@@ -4469,6 +4469,8 @@ def create_launchplane_fastapi_app(
         finally:
             if release_digest_scheduler is not None:
                 await run_in_threadpool(release_digest_scheduler.stop)
+            if discussion_reminder_scheduler is not None:
+                await run_in_threadpool(discussion_reminder_scheduler.stop)
             if preview_lifecycle_scheduler is not None:
                 await run_in_threadpool(preview_lifecycle_scheduler.stop)
             if testing_drill_scheduler is not None:
@@ -5155,8 +5157,8 @@ def create_launchplane_fastapi_app(
             allow_owner=False,
         )
 
-    # Only the Owner review routes accept a product Owner's session; each route
-    # still checks that the viewer is the named Owner of the requested product.
+    # Client-facing routes accept a Client session and check the requested
+    # product against its recorded Client identity.
     def read_owner_review_identity(
         request: Request,
         response: Response,
@@ -5324,36 +5326,6 @@ def create_launchplane_fastapi_app(
         if not human_session_manager.csrf_token_is_valid(session, csrf_token):
             reject_browser_mutation()
         return session.identity
-
-    def read_work_graph_rank_identity(
-        request: Request,
-        response: Response,
-        authorization: Annotated[str, Header(alias="Authorization")] = "",
-        cookie: Annotated[str, Header(alias="Cookie")] = "",
-    ) -> LaunchplaneIdentity:
-        return read_identity(
-            request=request, response=response, authorization=authorization, cookie=cookie
-        )
-
-    def read_browser_work_graph_rank_identity(
-        request: Request,
-        response: Response,
-        authorization: Annotated[str, Header(alias="Authorization")] = "",
-        cookie: Annotated[str, Header(alias="Cookie")] = "",
-    ) -> LaunchplaneIdentity:
-        identity = read_work_graph_rank_identity(
-            request=request,
-            response=response,
-            authorization=authorization,
-            cookie=cookie,
-        )
-        if not isinstance(identity, GitHubHumanIdentity):
-            return identity
-        session: object = getattr(request.state, "launchplane_human_session", None)
-        if not isinstance(session, LaunchplaneHumanSession):
-            reject_browser_mutation()
-        consume_browser_mutation_request(request=request, session=session)
-        return identity
 
     def every_code_worker_token_authorized(authorization: str) -> bool:
         if bearer_identity_config is None:
@@ -5681,7 +5653,6 @@ def create_launchplane_fastapi_app(
     product_read_route_dependencies = ProductReadRouteDependencies(
         common=read_route_dependencies,
         read_product_profile_list_identity=read_product_profile_list_identity,
-        work_graph_planning_facts_provider=work_graph_planning_facts_provider,
         workflow_credentials_ready=lambda context, repository: delivery_github_credentials_ready(
             control_plane_root=resolved_control_plane_root,
             repository=repository,
@@ -5699,34 +5670,6 @@ def create_launchplane_fastapi_app(
         common=read_route_dependencies,
         control_plane_root=resolved_control_plane_root,
         database_url=database_url,
-    )
-
-    def work_graph_product_action_allowed(*, identity: LaunchplaneIdentity) -> ActionAllowed:
-        def action_allowed(
-            requested_action: str,
-            requested_product: str,
-            requested_context: str,
-            requested_instances: tuple[str, ...],
-        ) -> bool:
-            return resolved_authz_policy_runtime.allows(
-                identity=identity,
-                action=requested_action,
-                product=requested_product,
-                context=requested_context,
-                target=(
-                    AuthorizationTarget(scope="instance", instances=requested_instances)
-                    if requested_instances
-                    else AuthorizationTarget(scope="context")
-                ),
-            )
-
-        return action_allowed
-
-    work_graph_read_route_dependencies = WorkGraphReadRouteDependencies(
-        common=read_route_dependencies,
-        action_allowed_for_identity=work_graph_product_action_allowed,
-        planning_facts_provider=work_graph_planning_facts_provider,
-        issue_inbox_provider=work_graph_issue_inbox_provider,
     )
 
     def require_launchplane_service_read_authorization(
@@ -6173,40 +6116,6 @@ def create_launchplane_fastapi_app(
             ),
         )
 
-    def require_work_graph_rank_authorization(
-        *, identity: LaunchplaneIdentity, trace_id: str, message: str
-    ) -> None:
-        if resolved_authz_policy_runtime.allows(
-            identity=identity,
-            action="work_graph.rank",
-            product="launchplane",
-            context=_LAUNCHPLANE_SERVICE_CONTEXT,
-        ):
-            return
-        raise _launchplane_http_error(
-            status_code=403,
-            trace_id=trace_id,
-            code="authorization_denied",
-            message=message,
-        )
-
-    def require_work_graph_issue_inbox_reconcile_authorization(
-        *, identity: LaunchplaneIdentity, trace_id: str, action: str
-    ) -> None:
-        if resolved_authz_policy_runtime.allows(
-            identity=identity,
-            action=action,
-            product="launchplane",
-            context=_LAUNCHPLANE_SERVICE_CONTEXT,
-        ):
-            return
-        raise _launchplane_http_error(
-            status_code=403,
-            trace_id=trace_id,
-            code="authorization_denied",
-            message="Workflow cannot reconcile the Launchplane GitHub issue inbox.",
-        )
-
     def require_every_code_read_methods(
         record_store: object,
         *,
@@ -6506,61 +6415,6 @@ def create_launchplane_fastapi_app(
             capability="Every Code preview gate writes",
         )
         return cast(_EveryCodePreviewGateWriteStore, record_store)
-
-    def rank_work_graph_snapshot(
-        payload: WorkGraphRankEnvelope,
-        identity: Annotated[
-            LaunchplaneIdentity,
-            Depends(read_browser_work_graph_rank_identity),
-        ],
-    ) -> WorkGraphRankResponse:
-        trace_id = next_trace_id()
-        require_work_graph_rank_authorization(
-            identity=identity,
-            trace_id=trace_id,
-            message="Workflow cannot rank the Launchplane work graph.",
-        )
-        _summary, driver_result = build_work_graph_rank_result(payload)
-        return WorkGraphRankResponse(
-            trace_id=trace_id,
-            records={},
-            result=WorkGraphRankResult.model_validate(driver_result),
-        )
-
-    def reconcile_work_graph_issue_inbox(
-        payload: GitHubIssueInboxReconcileRequest,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
-    ) -> WorkGraphIssueInboxReconcileResponse:
-        trace_id = next_trace_id()
-        required_action = (
-            "work_graph.rank" if payload.mode == "dry_run" else "work_graph.issue_inbox.reconcile"
-        )
-        require_work_graph_issue_inbox_reconcile_authorization(
-            identity=identity,
-            trace_id=trace_id,
-            action=required_action,
-        )
-        if work_graph_issue_inbox_reconcile_provider is None:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_request",
-                message="GitHub issue inbox reconciliation is not configured.",
-            )
-        try:
-            reconcile_result = work_graph_issue_inbox_reconcile_provider(payload)
-        except ValueError as error:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_request",
-                message=str(error) or "Request could not be completed.",
-            ) from error
-        return WorkGraphIssueInboxReconcileResponse(
-            trace_id=trace_id,
-            records={},
-            result=WorkGraphIssueInboxReconcileResponseResult(reconcile=reconcile_result),
-        )
 
     def merge_train_policy_not_configured_error(
         *, trace_id: str, error: MergeTrainPolicyStoreMissingError
@@ -7555,6 +7409,17 @@ def create_launchplane_fastapi_app(
                 records=response.records,
             )
             return response
+        except BridgeNetworkCapacityRefused as error:
+            raise _launchplane_http_error(
+                status_code=409, trace_id=trace_id, code=error.code, message=str(error)
+            ) from None
+        except NativeSourceAuthorizationDenied:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="The provider denied the read.",
+            ) from None
         except OdooPreviewPlanProvenanceError as error:
             raise _launchplane_http_error(
                 status_code=409,
@@ -9035,7 +8900,7 @@ def create_launchplane_fastapi_app(
             ) from error
 
     async def read_testing_hold(
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         product: Annotated[str, Query()] = "",
         context: Annotated[str, Query()] = "",
@@ -9089,9 +8954,23 @@ def create_launchplane_fastapi_app(
             result=result.model_dump(mode="json"),
         )
 
+    def read_testing_hold_mutation_identity(
+        identity: Annotated[LaunchplaneIdentity, Depends(read_operator_mutation_identity)],
+    ) -> LaunchplaneIdentity:
+        if isinstance(identity, GitHubHumanIdentity) and not (
+            resolved_authz_policy_runtime.policy.names_administrator(identity)
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=next_trace_id(),
+                code="authorization_denied",
+                message="Testing hold controls require the signed-in administrator.",
+            )
+        return identity
+
     async def apply_testing_hold(
         request: Request,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_testing_hold_mutation_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
@@ -11916,6 +11795,7 @@ def create_launchplane_fastapi_app(
                 ServiceDeployOutcomeUnknown,
                 ServiceDeployPreEffectRefused,
             )
+            from control_plane.contracts.service_deploy_drain import operation_reference
 
             if isinstance(error, ServiceDeployDrainTimeout):
                 raise _launchplane_http_error(
@@ -11923,7 +11803,12 @@ def create_launchplane_fastapi_app(
                     trace_id=trace_id,
                     code="self_deploy_drain_timeout",
                     message=str(error),
-                    records={"running_operation_ids": json.dumps(error.blockers)},
+                    records={
+                        "running_operation_ids": json.dumps(error.blockers),
+                        "blocking_operation_refs": json.dumps(
+                            [operation_reference(item) for item in error.blockers]
+                        ),
+                    },
                 ) from error
             elif isinstance(error, ServiceDeployDispatchBusy):
                 driver_result = LaunchplaneSelfDeployResult(
@@ -17044,7 +16929,7 @@ def create_launchplane_fastapi_app(
                 message=_provider_mutation_failure_message(payload),
             )
 
-        if result.status in {"completed", "unstored", "adopted"}:
+        if result.status in {"completed", "unstored", "adopted", "checkpointed"}:
             if result.response_status_code >= 400:
                 terminal_failure(result.response_payload, result.response_status_code)
             return AcceptedEvidenceResponse.model_validate(result.response_payload)
@@ -17133,6 +17018,7 @@ def create_launchplane_fastapi_app(
         reservation_scope: str = "",
         target_supersession: ProviderTargetSupersession | None = None,
         public_failure_messages: Mapping[str, str] | None = None,
+        original_intent: dict[str, object] | None = None,
     ) -> AcceptedEvidenceResponse:
         def operation(store: PostgresRecordStore) -> DurableProviderOperationResult:
             return run_durable_provider_operation(
@@ -17145,6 +17031,7 @@ def create_launchplane_fastapi_app(
                 response_trace_id=trace_id,
                 adapter=adapter,
                 target_supersession=target_supersession,
+                original_intent=original_intent,
             )
 
         return await run_provider_operation_http(
@@ -17179,8 +17066,12 @@ def create_launchplane_fastapi_app(
             asyncio.to_thread(execute),
             name=f"provider-mutation:{trace_id}",
         )
+        from control_plane.service_deploy_drain import ServiceDeployDraining
+
         try:
             result = await asyncio.shield(operation_task)
+        except ServiceDeployDraining:
+            raise _service_deploy_draining_error(trace_id) from None
         except asyncio.CancelledError as cancellation:
             while not operation_task.done():
                 try:
@@ -22003,6 +21894,7 @@ def create_launchplane_fastapi_app(
                     disposable_runtime_checkpoint if director_disposable_apply else None
                 ),
                 allow_owned_preview=director_disposable_apply,
+                requalify_literal_keys=live_target_runtime_request.requalify_literal_keys,
                 deploy_trigger=(
                     control_plane_live_target_runtime.trigger_and_wait_for_dokploy_target_deploy
                 ),
@@ -23316,6 +23208,25 @@ def create_launchplane_fastapi_app(
                 message=str(error),
             ) from error
 
+        def refresh_native_binding(
+            current: EnvironmentRouteBindingRecord,
+        ) -> control_plane_route_binding_reconcile.RouteBindingReconcilePlan:
+            if not isinstance(record_store, PostgresRecordStore):
+                raise TypeError("Native testing route refresh requires database-backed custody.")
+            try:
+                return plan_native_testing_route_refresh(
+                    record_store,
+                    root=resolved_control_plane_root,
+                    current=current,
+                )
+            except NativeSourceAuthorizationDenied as error:
+                raise _launchplane_http_error(
+                    status_code=403,
+                    trace_id=trace_id,
+                    code="authorization_denied",
+                    message="The managed testing route observation was denied.",
+                ) from error
+
         try:
             if remaining:
                 stable_store = cast(
@@ -23478,189 +23389,236 @@ def create_launchplane_fastapi_app(
                     f"{reservation_result.status}"
                 )
 
-        result_outcomes: list[dict[str, object]] = []
-        for outcome in controller_plan.outcomes:
-            outcome_payload = outcome.model_dump(mode="json", exclude_none=True)
-            outcome_payload.pop("reconcile_plan", None)
-            if refresh_request.mode == "dry-run" or outcome.status != "planned_refresh":
-                result_outcomes.append(outcome_payload)
-                continue
-            reconcile_plan = outcome.reconcile_plan
-            if (
-                reconcile_plan is None
-                or reconcile_plan.current_record is None
-                or reconcile_plan.record is None
-                or reconcile_plan.operation != "refresh"
-            ):
-                outcome_payload["status"] = "conflict"
-                outcome_payload["findings"] = [
-                    {
-                        "code": "route_binding_refresh_plan_invalid",
-                        "detail": (
-                            "Odoo refresh controller received a non-refresh plan for "
-                            "an enrolled binding."
-                        ),
-                    }
-                ]
-                result_outcomes.append(outcome_payload)
-                continue
-            if mutation_store is None:
-                raise RuntimeError("Odoo route binding refresh apply requires a mutation store.")
-            binding_key = reconcile_plan.current_record.binding_key
-            binding_token = hashlib.sha256(binding_key.encode()).hexdigest()[:16]
-            binding_idempotency_key = f"{normalized_key}:{binding_token}"
-            binding_response_payload: dict[str, object] = {
-                "status": "accepted",
-                "trace_id": trace_id,
-                "records": {
-                    "product": outcome.product,
-                    "context": outcome.context,
-                    "instance": outcome.instance,
-                    "route_binding_status": "refreshed",
-                },
-                "result": outcome_payload,
-            }
-            mutation_result = mutation_store.reconcile_route_binding_record(
-                expected_record=reconcile_plan.current_record,
-                replacement_record=reconcile_plan.record,
-                mutation=DbOnlyMutationRequest(
-                    scope=idempotency_scope(identity),
-                    route_path=route_path,
-                    idempotency_key=binding_idempotency_key,
-                    request_fingerprint=idempotency_request_fingerprint(
-                        route_path=route_path,
-                        payload={
-                            "controller_request_fingerprint": payload_fingerprint,
-                            "binding_key": binding_key,
-                            "current_record_sha256": outcome.current_record_sha256,
-                            "candidate_record_sha256": outcome.candidate_record_sha256,
-                        },
-                    ),
-                    lease_owner=f"{trace_id}:{binding_token}",
-                    response_status_code=202,
-                    response_trace_id=trace_id,
-                    response_payload=binding_response_payload,
-                    lease_seconds=int(_DB_ONLY_MUTATION_LEASE.total_seconds()),
-                ),
+        def renew_controller_reservation() -> None:
+            nonlocal controller_reservation
+            if controller_reservation is None or mutation_store is None:
+                return
+            renewed = mutation_store.renew_mutation_reservation(
+                reservation=controller_reservation,
+                lease_seconds=int(_DB_ONLY_MUTATION_LEASE.total_seconds()),
             )
-            if mutation_result.status == "refreshed":
-                outcome_payload["status"] = "refreshed"
-            elif mutation_result.status == "unchanged":
-                outcome_payload["status"] = "unchanged"
-            elif mutation_result.status == "replayed":
-                outcome_payload["status"] = "replayed"
-            else:
-                outcome_payload["status"] = "conflict"
-                outcome_payload["findings"] = [
-                    {
-                        "code": f"route_binding_refresh_{mutation_result.status}",
-                        "detail": (
-                            "The route binding changed or another refresh owns the current "
-                            "mutation. Read current authority and retry after it settles with "
-                            "a new Idempotency-Key."
-                        ),
-                    }
-                ]
-            result_outcomes.append(outcome_payload)
+            if renewed.status != "updated" or renewed.record is None:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="mutation_reservation_lost",
+                    message="The route refresh no longer owns its batch reservation.",
+                )
+            controller_reservation = renewed.record
 
-        attention_statuses = {"blocked", "conflict"}
-        response_status = (
-            "empty"
-            if not result_outcomes
-            else (
-                "attention"
-                if any(
-                    string_value(outcome.get("status") or "") in attention_statuses
-                    for outcome in result_outcomes
+        try:
+            result_outcomes: list[dict[str, object]] = []
+            for outcome in controller_plan.outcomes:
+                renew_controller_reservation()
+                native_current = (
+                    outcome.reconcile_plan.current_record if outcome.reconcile_plan else None
                 )
-                else "ok"
-            )
-        )
-        response = accepted_evidence_response(
-            trace_id=trace_id,
-            records={
-                "route_binding_refresh_status": response_status,
-                "route_binding_refresh_target_count": len(result_outcomes),
-            },
-            result={
-                "status": response_status,
-                "mode": refresh_request.mode,
-                "evaluated_at": controller_plan.evaluated_at,
-                "target_count": len(result_outcomes),
-                "unchanged_count": sum(
-                    1 for outcome in result_outcomes if outcome.get("status") == "unchanged"
-                ),
-                "planned_refresh_count": sum(
-                    1 for outcome in result_outcomes if outcome.get("status") == "planned_refresh"
-                ),
-                "refreshed_count": sum(
-                    1 for outcome in result_outcomes if outcome.get("status") == "refreshed"
-                ),
-                "replayed_count": sum(
-                    1 for outcome in result_outcomes if outcome.get("status") == "replayed"
-                ),
-                "blocked_count": sum(
-                    1 for outcome in result_outcomes if outcome.get("status") == "blocked"
-                ),
-                "conflict_count": sum(
-                    1 for outcome in result_outcomes if outcome.get("status") == "conflict"
-                ),
-                "outcomes": result_outcomes,
-            },
-        )
-        if refresh_request.mode == "apply":
-            if mutation_store is None or controller_reservation is None:
-                raise RuntimeError(
-                    "Odoo route binding refresh apply requires a parent reservation."
-                )
-            completion_result = mutation_store.complete_mutation_reservation(
-                completion=complete_launchplane_mutation_reservation(
-                    controller_reservation,
-                    response_status_code=202,
-                    response_trace_id=trace_id,
-                    completed_at=utc_now_timestamp(),
-                    response_payload=response.model_dump(mode="json", exclude_none=True),
-                )
-            )
-            if completion_result.status == "completed":
-                return response
-            if completion_result.status == "replayed":
-                if completion_result.record is None:
-                    raise RuntimeError("Replayed Odoo route-binding refresh requires evidence.")
-                return replay_idempotent_response(
-                    trace_id=trace_id,
-                    stored_record=completion_result.record,
-                    route_path=route_path,
-                )
-            if completion_result.status == "conflict":
-                raise _launchplane_http_error(
-                    status_code=409,
-                    trace_id=trace_id,
-                    code="idempotency_key_reused",
-                    message=(
-                        "Idempotency-Key was already used for a different "
-                        "Launchplane request payload on this route."
+                if native_current is not None and is_native_testing_binding(native_current):
+                    native_plan = await run_in_threadpool(refresh_native_binding, native_current)
+                    outcome = control_plane_route_binding_refresh_controller.route_binding_refresh_outcome(
+                        native_current, native_plan
+                    )
+                outcome_payload = outcome.model_dump(mode="json", exclude_none=True)
+                outcome_payload.pop("reconcile_plan", None)
+                if refresh_request.mode == "dry-run" or outcome.status != "planned_refresh":
+                    result_outcomes.append(outcome_payload)
+                    continue
+                reconcile_plan = outcome.reconcile_plan
+                if (
+                    reconcile_plan is None
+                    or reconcile_plan.current_record is None
+                    or reconcile_plan.record is None
+                    or reconcile_plan.operation != "refresh"
+                ):
+                    outcome_payload["status"] = "conflict"
+                    outcome_payload["findings"] = [
+                        {
+                            "code": "route_binding_refresh_plan_invalid",
+                            "detail": (
+                                "Odoo refresh controller received a non-refresh plan for "
+                                "an enrolled binding."
+                            ),
+                        }
+                    ]
+                    result_outcomes.append(outcome_payload)
+                    continue
+                if mutation_store is None:
+                    raise RuntimeError(
+                        "Odoo route binding refresh apply requires a mutation store."
+                    )
+                binding_key = reconcile_plan.current_record.binding_key
+                binding_token = hashlib.sha256(binding_key.encode()).hexdigest()[:16]
+                binding_idempotency_key = f"{normalized_key}:{binding_token}"
+                binding_response_payload: dict[str, object] = {
+                    "status": "accepted",
+                    "trace_id": trace_id,
+                    "records": {
+                        "product": outcome.product,
+                        "context": outcome.context,
+                        "instance": outcome.instance,
+                        "route_binding_status": "refreshed",
+                    },
+                    "result": outcome_payload,
+                }
+                renew_controller_reservation()
+                mutation_result = mutation_store.reconcile_route_binding_record(
+                    expected_record=reconcile_plan.current_record,
+                    replacement_record=reconcile_plan.record,
+                    native_sources=reconcile_plan.native_review_sources
+                    if isinstance(
+                        reconcile_plan,
+                        control_plane_route_binding_reconcile.RouteBindingReconcilePlan,
+                    )
+                    else None,
+                    mutation=DbOnlyMutationRequest(
+                        scope=idempotency_scope(identity),
+                        route_path=route_path,
+                        idempotency_key=binding_idempotency_key,
+                        request_fingerprint=idempotency_request_fingerprint(
+                            route_path=route_path,
+                            payload={
+                                "controller_request_fingerprint": payload_fingerprint,
+                                "binding_key": binding_key,
+                                "current_record_sha256": outcome.current_record_sha256,
+                                "candidate_record_sha256": outcome.candidate_record_sha256,
+                            },
+                        ),
+                        lease_owner=f"{trace_id}:{binding_token}",
+                        response_status_code=202,
+                        response_trace_id=trace_id,
+                        response_payload=binding_response_payload,
+                        lease_seconds=int(_DB_ONLY_MUTATION_LEASE.total_seconds()),
                     ),
                 )
-            if completion_result.status == "reconcile_required":
-                raise _launchplane_http_error(
-                    status_code=409,
-                    trace_id=trace_id,
-                    code="mutation_reconciliation_required",
-                    message=(
-                        "The Odoo route-binding refresh requires reconciliation before retry."
-                    ),
+                if mutation_result.status == "refreshed":
+                    outcome_payload["status"] = "refreshed"
+                elif mutation_result.status == "unchanged":
+                    outcome_payload["status"] = "unchanged"
+                elif mutation_result.status == "replayed":
+                    outcome_payload["status"] = "replayed"
+                else:
+                    outcome_payload["status"] = "conflict"
+                    outcome_payload["findings"] = [
+                        {
+                            "code": f"route_binding_refresh_{mutation_result.status}",
+                            "detail": (
+                                "The route binding changed or another refresh owns the current "
+                                "mutation. Read current authority and retry after it settles with "
+                                "a new Idempotency-Key."
+                            ),
+                        }
+                    ]
+                result_outcomes.append(outcome_payload)
+
+            attention_statuses = {"blocked", "conflict"}
+            response_status = (
+                "empty"
+                if not result_outcomes
+                else (
+                    "attention"
+                    if any(
+                        string_value(outcome.get("status") or "") in attention_statuses
+                        for outcome in result_outcomes
+                    )
+                    else "ok"
                 )
-            raise _launchplane_http_error(
-                status_code=409,
+            )
+            response = accepted_evidence_response(
                 trace_id=trace_id,
-                code="mutation_completion_conflict",
-                message=(
-                    "The Odoo route-binding refresh could not complete its parent "
-                    "reservation. Retry with the same Idempotency-Key."
-                ),
+                records={
+                    "route_binding_refresh_status": response_status,
+                    "route_binding_refresh_target_count": len(result_outcomes),
+                },
+                result={
+                    "status": response_status,
+                    "mode": refresh_request.mode,
+                    "evaluated_at": controller_plan.evaluated_at,
+                    "target_count": len(result_outcomes),
+                    "unchanged_count": sum(
+                        1 for outcome in result_outcomes if outcome.get("status") == "unchanged"
+                    ),
+                    "planned_refresh_count": sum(
+                        1
+                        for outcome in result_outcomes
+                        if outcome.get("status") == "planned_refresh"
+                    ),
+                    "refreshed_count": sum(
+                        1 for outcome in result_outcomes if outcome.get("status") == "refreshed"
+                    ),
+                    "replayed_count": sum(
+                        1 for outcome in result_outcomes if outcome.get("status") == "replayed"
+                    ),
+                    "blocked_count": sum(
+                        1 for outcome in result_outcomes if outcome.get("status") == "blocked"
+                    ),
+                    "conflict_count": sum(
+                        1 for outcome in result_outcomes if outcome.get("status") == "conflict"
+                    ),
+                    "outcomes": result_outcomes,
+                },
             )
-        return response
+            if refresh_request.mode == "apply":
+                if mutation_store is None or controller_reservation is None:
+                    raise RuntimeError(
+                        "Odoo route binding refresh apply requires a parent reservation."
+                    )
+                renew_controller_reservation()
+                completion_result = mutation_store.complete_mutation_reservation(
+                    completion=complete_launchplane_mutation_reservation(
+                        controller_reservation,
+                        response_status_code=202,
+                        response_trace_id=trace_id,
+                        completed_at=utc_now_timestamp(),
+                        response_payload=response.model_dump(mode="json", exclude_none=True),
+                    )
+                )
+                if completion_result.status == "completed":
+                    controller_reservation = None
+                    return response
+                if completion_result.status == "replayed":
+                    if completion_result.record is None:
+                        raise RuntimeError("Replayed Odoo route-binding refresh requires evidence.")
+                    controller_reservation = None
+                    return replay_idempotent_response(
+                        trace_id=trace_id,
+                        stored_record=completion_result.record,
+                        route_path=route_path,
+                    )
+                if completion_result.status == "conflict":
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="idempotency_key_reused",
+                        message=(
+                            "Idempotency-Key was already used for a different "
+                            "Launchplane request payload on this route."
+                        ),
+                    )
+                if completion_result.status == "reconcile_required":
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="mutation_reconciliation_required",
+                        message=(
+                            "The Odoo route-binding refresh requires reconciliation before retry."
+                        ),
+                    )
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="mutation_completion_conflict",
+                    message=(
+                        "The Odoo route-binding refresh could not complete its parent "
+                        "reservation. Retry with the same Idempotency-Key."
+                    ),
+                )
+            return response
+        finally:
+            if controller_reservation is not None and mutation_store is not None:
+                try:
+                    mutation_store.release_mutation_reservation(reservation=controller_reservation)
+                except Exception:
+                    _LOGGER.exception("Route refresh parent cleanup failed; trace_id=%s", trace_id)
 
     async def run_odoo_testing_route_binding_refresh(
         request: Request,
@@ -27141,6 +27099,17 @@ def create_launchplane_fastapi_app(
                     if disposable_rebuild_setup or first_testing_setup
                     else None,
                 )
+        except BridgeNetworkCapacityRefused as error:
+            raise _launchplane_http_error(
+                status_code=409, trace_id=trace_id, code=error.code, message=str(error)
+            ) from None
+        except NativeSourceAuthorizationDenied:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="The provider denied the read.",
+            ) from None
         except DokployComposeDomainPartialError as error:
             raise LaunchplaneHTTPException(
                 status_code=502,
@@ -29265,6 +29234,15 @@ def create_launchplane_fastapi_app(
             read_human_mutation_identity=read_owner_review_browser_mutation_identity,
         ),
     )
+    from control_plane.http_routes.product_review_withdrawal import (
+        register_product_review_withdrawal_route,
+    )
+
+    register_product_review_withdrawal_route(
+        app,
+        dependencies=replace(read_route_dependencies, read_identity=read_browser_mutation_identity),
+        control_plane_root=resolved_control_plane_root,
+    )
     register_product_review_routes(
         app,
         dependencies=ProductReviewRouteDependencies(
@@ -29318,30 +29296,7 @@ def create_launchplane_fastapi_app(
         app,
         dependencies=product_read_route_dependencies,
     )
-    register_work_graph_snapshot_read_routes(
-        app,
-        dependencies=work_graph_read_route_dependencies,
-    )
 
-    app.add_api_route(
-        "/v1/work-graph/rank",
-        rank_work_graph_snapshot,
-        methods=["POST"],
-        status_code=202,
-        response_model=WorkGraphRankResponse,
-        operation_id="rank_work_graph_snapshot",
-        summary="Rank Launchplane work graph snapshot",
-        responses={
-            400: {"model": LaunchplaneErrorResponse},
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-        },
-    )
-
-    register_work_graph_issue_inbox_read_routes(
-        app,
-        dependencies=work_graph_read_route_dependencies,
-    )
     register_tenant_admission_read_routes(
         app,
         dependencies=TenantAdmissionReadRouteDependencies(
@@ -29386,21 +29341,6 @@ def create_launchplane_fastapi_app(
             mutation_identity=read_operator_mutation_identity,
             root=resolved_control_plane_root,
         ),
-    )
-
-    app.add_api_route(
-        "/v1/work-graph/github/issues/reconcile",
-        reconcile_work_graph_issue_inbox,
-        methods=["POST"],
-        status_code=202,
-        response_model=WorkGraphIssueInboxReconcileResponse,
-        operation_id="reconcile_work_graph_issue_inbox",
-        summary="Reconcile Launchplane GitHub issue inbox",
-        responses={
-            400: {"model": LaunchplaneErrorResponse},
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-        },
     )
 
     register_merge_train_read_routes(app, dependencies=read_route_dependencies)
@@ -30819,6 +30759,11 @@ def create_launchplane_fastapi_app(
     register_product_display_name_routes(
         app, dependencies=read_route_dependencies, mutation_identity=read_browser_mutation_identity
     )
+    register_discussion_topic_routes(
+        app,
+        dependencies=owner_review_route_dependencies,
+        mutation_identity=read_browser_mutation_identity,
+    )
     register_testing_restore_policy_routes(
         app, dependencies=read_route_dependencies, mutation_identity=read_browser_mutation_identity
     )
@@ -31280,6 +31225,17 @@ def merge_train_controller_fence_http_error(
         trace_id=trace_id,
         code=code,
         message=str(error),
+    )
+
+
+def _service_deploy_draining_error(trace_id: str) -> LaunchplaneHTTPException:
+    return _launchplane_http_error(
+        status_code=409,
+        trace_id=trace_id,
+        code="service_deploy_draining",
+        message="Launchplane is draining provider operations. Retry after the deploy with "
+        "the original request and key; preserve any existing operation custody.",
+        headers={"Retry-After": "10"},
     )
 
 

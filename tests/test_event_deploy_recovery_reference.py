@@ -36,6 +36,7 @@ from tests.test_generic_web_deploy_recovery import (
     _generic_web_recovery_target,
     _generic_web_deploy_result,
     _write_generic_web_recovery_reservation,
+    _write_recovery_target_authority,
     _RecoveryObservationProvider,
 )
 from tests.test_service import _invoke_app
@@ -55,6 +56,7 @@ class EventDeployRecoveryReferenceTests(unittest.TestCase):
         self.store.write_product_profile_record(
             LaunchplaneProductProfileRecord.model_validate(product_profile_payload())
         )
+        _write_recovery_target_authority(self.store)
         self.manifest = ArtifactIdentityManifest(
             artifact_id="recorded-build",
             source_commit="abc123",
@@ -168,7 +170,7 @@ class EventDeployRecoveryReferenceTests(unittest.TestCase):
 
     def test_read_and_unknown_dry_run_do_not_write_or_disclose_coordinates(self) -> None:
         provider = _RecoveryObservationProvider(
-            GenericWebProviderDeploymentObservation(outcome="unknown")
+            GenericWebProviderDeploymentObservation(outcome="unknown"), reservation=self.reservation
         )
         before = self.store.list_held_provider_target_reservations()
         with (
@@ -307,7 +309,8 @@ class EventDeployRecoveryReferenceTests(unittest.TestCase):
                 deployment_id="provider-deployment",
                 started_at="2026-08-15T12:00:00Z",
                 finished_at="2026-08-15T12:05:00Z",
-            )
+            ),
+            reservation=self.reservation,
         )
         _, read = self.read()
         with (
@@ -467,7 +470,7 @@ class EventDeployRecoveryReferenceTests(unittest.TestCase):
 
     def test_retry_preserves_retained_request_and_completes_existing_reservation(self) -> None:
         provider = _RecoveryObservationProvider(
-            GenericWebProviderDeploymentObservation(outcome="absent")
+            GenericWebProviderDeploymentObservation(outcome="absent"), reservation=self.reservation
         )
         _, read = self.read()
         result = _generic_web_deploy_result().model_dump(mode="json")
@@ -544,7 +547,7 @@ class EventDeployRecoveryReferenceTests(unittest.TestCase):
             status="found", record=self.reservation, observed_at=expired_observation.isoformat()
         )
         provider = _RecoveryObservationProvider(
-            GenericWebProviderDeploymentObservation(outcome="absent")
+            GenericWebProviderDeploymentObservation(outcome="absent"), reservation=self.reservation
         )
         with (
             patch.object(self.store, "lookup_existing_mutation_reservation", return_value=lookup),

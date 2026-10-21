@@ -26,7 +26,108 @@ from tests.test_product_review import _human
 from tests.test_release_review import github_read, profile, seed
 
 
-class ReleaseReviewHttpTests(unittest.IsolatedAsyncioTestCase):
+class _ReleaseReviewHttpFixture(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        directory = TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.store = FilesystemRecordStore(Path(directory.name))
+        seed(self.store)
+        self.sessions = HumanSessionManager(
+            config=_github_oauth_config(), session_store=InMemoryHumanSessionStore()
+        )
+        self.app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            record_store_factory=lambda: self.store,
+            human_session_manager=self.sessions,
+            authz_policy=LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_humans": [
+                        {
+                            "logins": ["operator"],
+                            "roles": ["read_only"],
+                            "products": ["example-site"],
+                            "contexts": ["launchplane"],
+                            "actions": ["product_profile.read", "product_profile.write"],
+                        }
+                    ]
+                }
+            ),
+        )
+        replacement = patch(
+            "control_plane.http_app.current_release_review",
+            side_effect=lambda **kwargs: build_release_review(
+                store=self.store, profile=kwargs["profile"], read=github_read
+            ),
+        )
+        replacement.start()
+        self.addCleanup(replacement.stop)
+        publisher = patch(
+            "control_plane.http_app.publish_release_decision",
+            return_value="https://github.com/example/site/issues/99",
+        )
+        self.publisher = publisher.start()
+        self.addCleanup(publisher.stop)
+
+    async def post(
+        self,
+        *,
+        actor: str = "site-owner",
+        github_id: int = 9001,
+        outcome: str = "accepted",
+        reason: str = "",
+        digest: str = "",
+        csrf: bool = True,
+        release_now: bool = False,
+    ) -> Response:
+        session = self.sessions.issue(_human(login=actor, github_id=github_id))
+        headers = _browser_mutation_headers(self.sessions, session)
+        if not csrf:
+            headers.pop("X-CSRF-Token", None)
+        current = build_release_review(store=self.store, profile=profile(), read=github_read)
+        return await _asgi_request(
+            self.app,
+            "POST",
+            "/v1/release-review/decisions",
+            headers=headers,
+            payload={
+                "product": "example-site",
+                "checklist_digest": digest or current.checklist_digest,
+                "decision": outcome,
+                "reason": reason,
+                "release_during_business_hours": release_now,
+            },
+        )
+
+    async def open_urgent(
+        self,
+        *,
+        actor: str = "operator",
+        github_id: int = 9003,
+        reason: str = "",
+        digest: str = "",
+        adopt_issue_number: int | None = None,
+        adopt_comment_id: int | None = None,
+        dry_run: bool = False,
+    ) -> Response:
+        session = self.sessions.issue(_human(login=actor, github_id=github_id))
+        current = build_release_review(store=self.store, profile=profile(), read=github_read)
+        return await _asgi_request(
+            self.app,
+            "POST",
+            "/v1/release-review/urgent-openings",
+            headers=_browser_mutation_headers(self.sessions, session),
+            payload={
+                "product": "example-site",
+                "checklist_digest": digest or current.checklist_digest,
+                "reason": reason,
+                "adopt_issue_number": adopt_issue_number,
+                "adopt_comment_id": adopt_comment_id,
+                "dry_run": dry_run,
+            },
+        )
+
+
+class ReleaseReviewHttpTests(_ReleaseReviewHttpFixture):
     async def test_progress_belongs_to_the_current_release_not_a_previous_invitation(self) -> None:
         from control_plane.client_release import ClientReleaseRunView
         from tests.test_release_review import HEAD
@@ -254,77 +355,6 @@ class ReleaseReviewHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(previous.record_id, latest.record_id)
         self.assertEqual(latest.checklist_digest, previous.checklist_digest)
 
-    def setUp(self) -> None:
-        directory = TemporaryDirectory()
-        self.addCleanup(directory.cleanup)
-        self.store = FilesystemRecordStore(Path(directory.name))
-        seed(self.store)
-        self.sessions = HumanSessionManager(
-            config=_github_oauth_config(), session_store=InMemoryHumanSessionStore()
-        )
-        self.app = create_launchplane_fastapi_app(
-            verifier=_RejectingVerifier(),
-            record_store_factory=lambda: self.store,
-            human_session_manager=self.sessions,
-            authz_policy=LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_humans": [
-                        {
-                            "logins": ["operator"],
-                            "roles": ["read_only"],
-                            "products": ["example-site"],
-                            "contexts": ["launchplane"],
-                            "actions": ["product_profile.read", "product_profile.write"],
-                        }
-                    ]
-                }
-            ),
-        )
-        replacement = patch(
-            "control_plane.http_app.current_release_review",
-            side_effect=lambda **kwargs: build_release_review(
-                store=self.store, profile=kwargs["profile"], read=github_read
-            ),
-        )
-        replacement.start()
-        self.addCleanup(replacement.stop)
-        publisher = patch(
-            "control_plane.http_app.publish_release_decision",
-            return_value="https://github.com/example/site/issues/99",
-        )
-        self.publisher = publisher.start()
-        self.addCleanup(publisher.stop)
-
-    async def post(
-        self,
-        *,
-        actor: str = "site-owner",
-        github_id: int = 9001,
-        outcome: str = "accepted",
-        reason: str = "",
-        digest: str = "",
-        csrf: bool = True,
-        release_now: bool = False,
-    ) -> Response:
-        session = self.sessions.issue(_human(login=actor, github_id=github_id))
-        headers = _browser_mutation_headers(self.sessions, session)
-        if not csrf:
-            headers.pop("X-CSRF-Token", None)
-        current = build_release_review(store=self.store, profile=profile(), read=github_read)
-        return await _asgi_request(
-            self.app,
-            "POST",
-            "/v1/release-review/decisions",
-            headers=headers,
-            payload={
-                "product": "example-site",
-                "checklist_digest": digest or current.checklist_digest,
-                "decision": outcome,
-                "reason": reason,
-                "release_during_business_hours": release_now,
-            },
-        )
-
     async def test_business_hours_escape_requires_human_acceptance_and_audits_the_reason(
         self,
     ) -> None:
@@ -525,34 +555,6 @@ class ReleaseReviewHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(csrf.status_code, 403, csrf.text)
         self.assertEqual(
             self.store.list_release_review_decision_records(product="example-site"), ()
-        )
-
-    async def open_urgent(
-        self,
-        *,
-        actor: str = "operator",
-        github_id: int = 9003,
-        reason: str = "",
-        digest: str = "",
-        adopt_issue_number: int | None = None,
-        adopt_comment_id: int | None = None,
-        dry_run: bool = False,
-    ) -> Response:
-        session = self.sessions.issue(_human(login=actor, github_id=github_id))
-        current = build_release_review(store=self.store, profile=profile(), read=github_read)
-        return await _asgi_request(
-            self.app,
-            "POST",
-            "/v1/release-review/urgent-openings",
-            headers=_browser_mutation_headers(self.sessions, session),
-            payload={
-                "product": "example-site",
-                "checklist_digest": digest or current.checklist_digest,
-                "reason": reason,
-                "adopt_issue_number": adopt_issue_number,
-                "adopt_comment_id": adopt_comment_id,
-                "dry_run": dry_run,
-            },
         )
 
     async def test_receipt_adoption_reuses_admin_gate_and_never_opens_a_second_invitation(

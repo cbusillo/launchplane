@@ -695,8 +695,7 @@ release, supersede, retry, adopt, or write deployment, inventory, idempotency,
 or provider state. The bounded response reports only reservation state and
 timestamps, hashed identifiers, provider outcome/status, retry safety, one of
 `replay_completed`, `wait_for_active_lease`, `adopt_observed`,
-`retry_original_operation`, `close_out_observed`, `settle_testing_failure`, or
-`hold_unknown`, and a
+`retry_original_operation`, `settle_testing_failure`, `close_out_observed`, or `hold_unknown`, and a
 canonical recovery digest.
 Recovery apply recomputes that evidence and rejects a stale digest. After a
 Launchplane deployment changes provider observation or reconciliation behavior,
@@ -860,18 +859,79 @@ Apply never creates a new reservation, releases a reservation, or supersedes a
 provider target. If the reviewed reservation is an expired `running` mutation,
 apply first CAS-transitions that exact reservation to `reconcile_required` via
 the durable mutation store, then uses the existing exact-match adoption or retry
-methods. `adopt_observed` stores deployment/inventory evidence from the reviewed
-inspection without re-observing the provider. `retry_original_operation` resumes
+methods. For in-place application testing, `adopt_observed` reacquires the
+original lease and rechecks the reviewed execution, captured authority, image
+and exact inventory before publication. It runs no deploy, maintenance,
+canary or activation. For receipt-bearing attempts, a provider observation never
+supplies a missing passing application-testing result. A saved final result
+completes as recorded unless exact original terminal image-failure evidence
+invalidates a saved pass. That contradiction uses failure settlement without
+repeating product work. Terminal work without a durable aggregate result also
+uses failure settlement, including an image-only attempt interrupted before its
+final write. A normal attempt's unobserved image marker is unfinished evidence:
+exact original terminal image proof permits failed settlement and an ordinary
+successor, while a conflicting real saved image ID remains fenced. Receiptless
+legacy image-only attempts retain guarded image adoption only
+when the inspected configuration, lifecycle and phase declare no post-deploy
+obligation; missing proof for required work remains unknown.
+Missing current-lane publication can complete only against missing inventory or
+the exact pre-attempt inventory bound before dispatch.
+Already final deployment evidence and independently corrected inventory are
+preserved. If another inventory is now current, recovery can complete the
+truthful historical original result while leaving that inventory unchanged.
+Automatic observation is read-only and can adopt only an already saved qualified
+result with matching durable inventory; adoption compares both again in the
+reservation transaction. Other scopes retain direct reviewed-evidence adoption.
+`settle_testing_failure` requires attributable terminal execution and runs only
+the original schedule hold before publishing truthful failure. Its HTTP 202
+recovery envelope preserves the original failed HTTP 502 result and replays
+without effects. An unqualified healthy image retains its separate image fact;
+settlement never creates a successful lane projection. Missing execution proof
+stays `hold_unknown` even if cleanup is the last saved phase. Receiptless legacy
+`records_commit` alone does not prove image-only work: a current configuration
+without an executor does not establish what the original required. Such originals
+need attributable terminal proof. Where the provider cannot supply it,
+application-side isolation or verified cessation of the original work is a
+prerequisite for a safe continuation; deploying another image does not provide
+that proof.
+A schedule inspection failure before any write can be reviewed again on the
+same original operation. An acknowledged schedule write remains terminal even
+if its later readback fails; review the original again to finish its failed
+settlement. A lost write reply remains unknown even when a later read shows the
+schedule disabled or absent. Foreign schedule evidence triggers the captured
+schedule hold but never supplies terminal proof for the disputed run.
+When current inventory already points at that original, restarted settlement
+preserves it exactly and writes the truthful failed deployment it references.
+Its copied fields can remain pending until an ordinary successor replaces it;
+the joined source qualifier rejects the failed referenced deployment. A final
+saved pass with corrected inventory is preserved without rebuilding either.
+An answered failed qualification after successful image execution updates the
+unchanged original inventory baseline to failed qualification, through the same
+locked publisher used by ordinary completion. A failed image creates no fresh
+inventory. Durable terminal execution facts are not re-derived from later cron
+history; only unresolved original entries require provider observation.
+When post-image maintenance, an executor or schedule activation is required, the
+ordinary application-testing producer first publishes image success with
+qualification pending under its original lease, exact deployment/inventory CAS
+and current target binding. Input or profile metadata drift does not suppress
+that unqualified projection while the binding remains current. After committing
+it, the producer rechecks the full current profile and captured input authority
+before any further work. A refusal retains the fence and dispatches no
+post-image maintenance, executor or activation. Terminal work can use reviewed
+original recovery above, never another guessed provider call.
+A completed native post-image failure settlement ends the original reservation.
+When ordinary planning selects a deploy, a return to the settled predecessor's
+exact inputs receives a deterministic event successor, including on a fresh lane.
+Repeated sweeps reuse that successor. If it becomes unknown, it needs its own
+native settlement before another successor can start. Settlement does not itself
+select a same-artifact deploy when inventory already points at the desired image;
+existing already-deployed and failed-qualification decisions still apply. A newer
+build, changed lane or deliberate new-key deploy can supply the next attempt.
+An ordinary recorded failure retains the existing newer-build or changed-lane
+retry policy.
+`retry_original_operation` resumes
 the already-acquired reservation path and preserves `reconcile_required` for
 pre-effect rejection, lease loss, uncertain, or non-durable outcomes.
-`settle_testing_failure` is the explicit hold-only action for a proved failed
-application testing attempt with its exact captured lifecycle baseline. It acquires
-the original recovery lease, preserves its effect checkpoint and repeats only the
-idempotent hold, then stores the failed deployment and completes with 502. The
-provider outcome remains `present` and `retry_safe` remains false. It never invokes
-image, reset, capture, maintenance, schedule activation or post-deploy execution.
-Unknown effects, missing/malformed baseline, changed target or lost lease stay
-fenced. See the [native hold-only recovery steps](private-testing-transport.md).
 `close_out_observed` settles the exact reservation from the reinspected runtime
 evidence without any provider call. The recovery action accepts an apply
 response only when it settles the reservation without retry: `adopt_observed`
@@ -1072,7 +1132,7 @@ logs, issue comments, or published evidence merely to use this route.
 The caller needs the separate `authz_repository_scope.read` action and must be
 an authenticated GitHub human, `local_operator`, or local administrator. The
 route performs runtime-policy preflight, reloads the single active DB policy,
-and reauthorizes before reading product, repository, and work-graph records.
+and reauthorizes before reading product, repository, and retained work-request records.
 GitHub Actions and terminal agents cannot use the route; do not borrow a
 workflow identity or dispatch a protected workflow as a workaround.
 
@@ -2039,6 +2099,10 @@ The Launchplane container entrypoint now fails closed unless one of
 `LAUNCHPLANE_POLICY_FILE` is supplied. It also refuses to start from the
 checked-in `.example` policy path.
 
+Inline text and base64 inputs are rendered to `launchplane-authz.toml` in
+`TMPDIR` (default `/tmp`). The explicit `LAUNCHPLANE_POLICY_FILE` input is
+read in place and is not rewritten.
+
 ## Launchplane Service Deploy Posture
 
 The first real Launchplane service deployment should be GitHub-driven and
@@ -2098,7 +2162,7 @@ absolute claims cutoff. Recovery is a normal interactive GitHub sign-in.
   fail closed on Docker Hub anonymous pull limits before Launchplane code is
   built or scanned.
 - Before adding or controlling self-hosted runner lanes, use
-  `uv run launchplane work-graph runner-inventory --repository owner/name` to
+  `uv run launchplane runner-inventory --repository owner/name` to
   read GitHub's current repository runner list. The command is read-only and
   reports lane count, online/busy/idle/offline counts, labels, host hints, and a
   capacity-constrained heuristic from the observation timestamp.
@@ -3509,7 +3573,20 @@ mark-apply` require `--allow-direct-db-mutation` before they persist local DB
   deploy timeout. Other data workflows use the target's deploy timeout. When the trigger times out, fails with an
   unclear outcome, or gets a 5xx, Launchplane reads back the schedule
   deployment created after the trigger and watches that exact deployment ID to
-  a terminal state. It never sends a second trigger. The recorded causes are:
+  a terminal state. Before dispatch, the shared helper reads all visible schedule
+  deployments and retains their IDs. Timeout recovery excludes that entire
+  baseline, including older completed runs inside the clock-skew window.
+  Missing timestamps on unseen runs do not resolve ambiguity; several unseen
+  candidates still refuse. An acknowledged trigger uses the same candidate
+  selection and exact-job observation as a timed-out trigger. Synchronous failure
+  diagnostics never attach a deployment ID when several unseen jobs exist.
+  It never sends a second trigger. The recorded causes are:
+  - `trigger_baseline_unavailable`: the pre-trigger history could not be read
+    or contained malformed entries. This call sent no trigger. Restore the
+    history read before starting a new operation; this does not clear an
+    existing operation's original-key recovery hold. Existing caller retry budgets
+    still recognize a transient pre-dispatch read failure; an uncertain trigger
+    outcome is never made retryable by that rule.
   - `trigger_rejected`: a 4xx refusal with no new deployment. Nothing started.
   - `trigger_outcome_unknown`: the read-back failed, found no new deployment,
     or found several new deployments. Inspect the provider schedule before
@@ -4716,12 +4793,92 @@ URLs with `preview-<reservation-id>` as the environment selector and the existin
 reservation or recorded fence incident history; an arbitrary preview name is
 not an environment. Original intent absent in legacy records stays unavailable:
 current plans and provider idleness cannot reconstruct the original proof.
-Separately,
-a typed `self_deploy_drain_timeout` uses the existing deploy-failure Discord
-reporter and manual break-glass link. It explicitly reports zero replacement
+### Self-deploy drain timeout and continuation
+
+A typed `self_deploy_drain_timeout` uses the existing deploy-failure Discord
+reporter once in the failed deploy run. It explicitly reports zero replacement
 dispatch; the rollback dispatch classifier still treats that refusal as
-pre-effect. Installation and later live settlement remain separate proof from
-source tests or a merge.
+pre-effect. The absolute ten-minute drain budget survives polls and service
+restarts. For a legacy drain without a saved budget, its first updated poll anchors
+the budget to the prior stored observation. This budget is independent of the
+worker stop, provider deployment and health-verification budgets after dispatch.
+New Client-release/event effects and agent-started rehearsal operations
+wait behind the active drain; rehearsal HTTP calls receive `409/service_deploy_draining`
+with `Retry-After`. Original-key observation, admitted heartbeats and completion
+remain available. Constant fresh traffic cannot extend the drain deadline.
+At timeout the request stops before provider writes and releases its admission
+pause, leaving supported recovery available. It never kills or settles a blocker.
+
+The alert includes bounded opaque blocker references. Match each reference to
+`runtime.release_drain.operation_details[].operation_ref` for its operation ID
+and ownership evidence. Raw operation IDs, keys and private coordinates are not
+sent to Discord. If the alert lists more blockers than fit, inspect the runtime
+status; its detail count and truncation flag report coverage.
+
+Let blockers finish or use their own supported recovery. Then dispatch a fresh
+normal Deploy Launchplane run on the default branch, with a new self-deploy key
+and marker (the workflow normally supplies both). A fresh normal request checks
+the remaining blockers before any provider write; the old timed-out request
+stays non-dispatchable even after blockers clear. A dispatched replacement fences
+new admission until matching startup. This continuation does not authorize an
+operation replay, clear a product recovery fence or supply a missing checkpoint.
+Installation and later live settlement remain separate proof from source tests
+or a merge.
+
+An expired rehearsal reservation can stop blocking replacement only when the
+original rehearsal execution lock proves the API executor has exited. Execution
+and incomplete retirement share that lock. This preserves the journal and custody;
+it does not prove a remote provider job stopped or authorize replay. Other provider
+families keep their existing admission and recovery boundaries. Broader top-level
+admission must preserve admitted child work; provider-target keys alone do not
+prove a live executor. A fresh
+normal request can still time out while a real blocker remains. If supported
+recovery cannot settle it, the existing approved manual break-glass path remains
+the emergency recovery route; this alert does not dispatch it or grant approval.
+
+Service rollback and marker-bound repair use this same drain. If a rehearsal
+starts on a confirmed replacement before verification fails, automated rollback
+can wait for that rehearsal and reach the bounded refusal. The existing approved
+manual break-glass route remains available for that emergency; a repair marker
+does not authorize killing an operation.
+
+#### Cooperative rehearsal execute continuation
+
+An agent rehearsal `execute` can yield its API observer after the provider has
+identified the exact independently running schedule job. While draining, the
+observer stops its lease and atomically records that job, the reviewed rehearsal
+and original journal identity. The HTTP request returns accepted with
+`result.state: checkpointed` and `original_key_required: true`. The remote job
+continues under its existing host lock and custody. No capture, upgrade or
+provider trigger is repeated, and no remote process is cancelled. The drain
+checks executor exclusion and can dispatch replacement without waiting for that
+job to finish or for new traffic to become idle.
+If checkpoint admission loses its lease or cannot store the continuation, the
+request instead retains the original journal with the existing typed
+`mutation_reconciliation_required` refusal. Preserve its key and use supported
+original-operation recovery; an uncommitted handoff supplies no resume authority.
+
+The existing Odoo worker schedules these persisted checkpoints from startup,
+on a separate sweep paced by its poll interval so observation cannot delay queued
+production operations. Each host observation has a one-minute execution budget.
+After matching-image API startup confirms the replacement, it observes the exact
+original provider job. Once that job is terminal, the existing original-operation
+host observation validates the result and settles the same journal. Replica
+exclusion and original reservation checks preserve custody; interruption between
+publishing the verified rehearsal result and journal settlement also converges.
+An expired pre-effect drain pause permits observation on the existing instance
+as well. Runtime `release_drain.rehearsal_checkpoints` lists unresolved checkpoint
+operation IDs and states without request fields or provider coordinates.
+
+Missing jobs, changed bindings and terminal jobs without a verified result are
+marked `recovery_required` once, preserving original-key custody without an
+automatic observation loop. Transient read failures remain pending for a later
+sweep. Unreadable checkpoint rows are reported as `unreadable` without hiding
+drain diagnostics. Only newly written execute checkpoints participate;
+historical interrupted journals, including C10, are not adopted by this worker.
+Prepare, retirement and other long-operation families retain their existing
+bounded drain/recovery behavior. Broader top-level admission and checkpoints for
+those families remain separate source work.
 
 ### Fishbowl import proof on an exact PR artifact
 
@@ -4940,24 +5097,30 @@ health-alert policies and historical delivery evidence intact.
 ### Prepared retired-delivery table migration
 
 Issue #2437's migration `e7c1d5e9a3b6` removes only the 22 tables named by
-`RETIRED_TABLES` in that revision. Normal service startup applies the separately
-approved Q533 preview-enablement drop, `e8d2f6a0b4c7`, which branches from
+`RETIRED_TABLES` in that revision. Normal service startup targets discussion-topic
+revision `b81ca763d924`, which follows the separately approved Q533
+preview-enablement drop, `e8d2f6a0b4c7`. That preview branch starts at
 `e6b0c4d8f2a5` alongside the held migration. This is an explicit expand/contract hold: source delivery
 and a green PR do not authorize applying the drop to the shared database.
 The candidate runtime accepts the common predecessor, either branch revision,
-or their empty merge revision, `e9e3a7b1c5d8`, and retains expiry/key-retirement,
+their original empty merge revision, `e9e3a7b1c5d8`, the additive topics revision,
+or the new empty join `da72490fce13`, and retains expiry/key-retirement,
 activation/history/policy maintenance, custody evidence and native train fences.
+These are recognized revision paths; the HTTP service also requires the topics
+table and starts only after the release migration has added it.
 While this hold is active, schema initialization refuses a migration graph whose
-head has advanced beyond the reviewed join of these two paths. A later schema change must
+head has advanced beyond the reviewed topics/retirement join. A later schema change must
 reconcile the hold, runtime compatibility and supported migration targets in the
 same change. Keep an independently approved application path for the destructive
 step; advancing an unrelated additive migration does not authorize it. Lifting
 the hold requires the shared-data/release approval below.
 
 The release default never traverses the held branch. If a database has already
-applied the held drop, startup applies only the preview drop and joins the paths.
+applied the held drop or the original join, startup applies the missing preview
+and topic migrations and joins the paths at `da72490fce13`.
 After explicit approval, requesting the held revision on a database already at
-the preview revision applies the held drop and the empty join. Both routes leave
+the preview or topics revision applies the held drop, adds topics if missing,
+and joins at `da72490fce13`. These routes leave
 one recorded Alembic revision; startup never mistakes incomparable branches for
 ordered versions. Do not substitute Alembic `head` for the release migration
 target: `head` includes the held drop and is reserved for disposable rehearsals
@@ -4969,6 +5132,10 @@ across that boundary requires the pre-deploy database backup or host snapshot
 and its matching image; restoring that recovery point also discards later writes.
 The preview migration does not create a backup, and its downgrade cannot recover
 the retired rows.
+
+Although the topics migration is additive, older images reject its revision.
+Rolling back across it requires a compatible image or the pre-deploy database
+backup and matching image; downgrade does not erase discussion history.
 
 Before application, obtain the Director's explicit shared-data/release approval
 on #2437. From the approved Launchplane host and exact reviewed image, verify

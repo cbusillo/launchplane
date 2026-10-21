@@ -355,6 +355,60 @@ class NativeTestingWorkerTests(unittest.TestCase):
             lease_owner="native-worker-fixture",
         )
 
+    def test_capacity_refusal_releases_fresh_reservation_and_preserves_serving_copy(self) -> None:
+        from control_plane.dokploy import native_copy_stream, network_capacity
+        from control_plane.dokploy.network_capacity import (
+            BridgeNetworkCapacity,
+            BridgeNetworkCapacityRefused,
+        )
+        from control_plane import testing_candidate_allocation as allocation_service
+
+        self.operation = self.operation.model_copy(
+            update={"operation_id": self.operation.operation_id + "-capacity"}
+        )
+        self.intent = self.intent.model_copy(update={"operation_id": self.operation.operation_id})
+        self.capture.return_value = self.intent
+        namespace = testing_candidate_namespace(
+            self.operation.product, self.operation.context, self.operation.operation_id
+        )
+        denial = native_copy_stream.NativeSourceAuthorizationDenied("fixture capacity denial")
+        for observation in (BridgeNetworkCapacity(total_slots=0, free_slots=0), denial):
+            with self.subTest(observation=observation):
+                with (
+                    patch.object(
+                        allocation_service, "created_placement", return_value=("", "", "")
+                    ),
+                    patch.object(
+                        network_capacity,
+                        "read_bridge_network_capacity",
+                        return_value=observation,
+                        side_effect=denial if observation is denial else None,
+                    ) as read,
+                    patch.object(allocation_service, "create_isolated_placement") as create,
+                    patch.object(allocation_service, "run_resource_schedule") as storage,
+                    self.assertRaises(
+                        native_copy_stream.NativeSourceAuthorizationDenied
+                        if observation is denial
+                        else BridgeNetworkCapacityRefused
+                    ),
+                ):
+                    self.execute()
+                create.assert_not_called()
+                storage.assert_not_called()
+                self.assertEqual(read.call_args.kwargs["server_id"], self.intent.server_id)
+                self.assertIsNone(self.store.read_testing_candidate(namespace))
+                self.assertFalse(service.native_rebuild_effects_started(self.store, self.operation))
+                self.assertEqual(
+                    self.store.lookup_existing_mutation_reservation(
+                        route_path=REBUILD_ROUTE,
+                        idempotency_key=self.operation.operation_id,
+                        request_fingerprint=self.operation.request_fingerprint,
+                    ).status,
+                    "missing",
+                )
+                self.assertEqual(self.current(), self.fixture.before)
+                self.assertEqual(self.effects, [])
+
     def assert_failed_checkpoint(self, result: Any) -> None:
         from control_plane.testing_rebuild_storage import RecordTestingRebuildStore
 
@@ -1783,13 +1837,146 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertEqual(self.current().target.policies.staff_testing_hold, hold)
         self.assertFalse(self.retained["stopped"])
 
+    def test_legacy_refresh_during_first_rebuild_preserves_preparation_and_publication(
+        self,
+    ) -> None:
+        from tests.test_route_binding_refresh_controller import _service_binding
+
+        candidate = self.fixture.candidate
+        binding = _service_binding().model_copy(
+            update={"product": candidate.product, "context": candidate.context}
+        )
+        binding = binding.model_copy(
+            update={
+                "domains": (
+                    binding.domains[0].model_copy(update={"domain_name": self.fixture.route.host}),
+                )
+            }
+        )
+        self.store.write_route_binding_record(binding)
+        self.fixture.before = self.current()
+        self.intent = self.intent.model_copy(update={"before": self.fixture.before})
+        self.capture.return_value = self.intent
+        prepare = service.NativeTestingRebuildExecution.prepare
+        switch = self.switch
+
+        def refresh_evidence() -> None:
+            current = self.current().binding
+            assert current is not None
+            self.store.write_route_binding_record(
+                current.model_copy(
+                    update={
+                        "source": current.source.model_copy(
+                            update={
+                                "refreshed_at": datetime.now(UTC).isoformat(),
+                                "source_versions": {
+                                    **current.source.source_versions,
+                                    "observation": "new-evidence",
+                                },
+                            }
+                        ),
+                        "updated_at": datetime.now(UTC).isoformat(),
+                    }
+                )
+            )
+
+        def interleave_prepare(execution: Any, *args: Any, **kwargs: Any) -> Any:
+            refresh_evidence()
+            return prepare(execution, *args, **kwargs)
+
+        def interleave_switch(*args: Any, **kwargs: Any) -> Any:
+            result = switch(*args, **kwargs)
+            refresh_evidence()
+            return result
+
+        with (
+            patch.object(service.NativeTestingRebuildExecution, "prepare", new=interleave_prepare),
+            patch.object(DokployTestingRouteTransport, "publish", side_effect=interleave_switch),
+        ):
+            self.assertEqual(self.execute().deploy_status, "pass")
+        self.assertEqual(self.effects, ["switch-new", "stop-old"])
+
+    def refresh_through_http(self, key: str) -> dict[str, Any]:
+        import asyncio
+        from tests.test_native_testing_route_refresh import refresh_testing_binding_http
+
+        from control_plane.contracts.authz_policy_record import (
+            LaunchplaneAuthzPolicyRecord,
+            authz_policy_sha256,
+            build_authz_policy_record_id,
+        )
+        from tests.test_route_binding_refresh_controller import _controller_policy
+
+        # Only refresh scenarios own this policy. Other worker scenarios seed
+        # their own identities, including the cancellation boundary.
+        policy = _controller_policy(
+            mode="apply", products=(self.operation.product,), contexts=(self.operation.context,)
+        )
+        digest = authz_policy_sha256(policy)
+        seeded = self.store.seed_authz_policy_if_absent(
+            LaunchplaneAuthzPolicyRecord(
+                record_id=build_authz_policy_record_id(revision=1, policy_sha256=digest),
+                source="test:native-testing-refresh",
+                updated_at=self.operation.updated_at,
+                policy=policy,
+            )
+        )
+        self.assertEqual(seeded.policy_sha256, digest)
+
+        current = self.current()
+        publication = published_testing_copy(
+            self.store, product=self.operation.product, context=self.operation.context
+        )
+        assert publication is not None and current.inventory is not None
+        assert current.inventory.runtime_identity is not None
+        frame = {
+            "raw": deepcopy(self.raw),
+            "owned_file": json.dumps(self.owned),
+            "old_endpoints": (publication.plan.route.new_backend,),
+            "old_identity": current.inventory.runtime_identity.model_dump(mode="json"),
+        }
+        with patch.object(DokployTestingRouteTransport, "read", return_value=frame):
+            response = asyncio.run(
+                refresh_testing_binding_http(
+                    self.store,
+                    self.root,
+                    self.operation.product,
+                    self.operation.context,
+                    datetime.now(UTC),
+                    key,
+                )
+            )
+        self.assertEqual(response.status_code, 202, response.text)
+        return dict(response.json()["result"])
+
+    def test_refresh_between_publication_and_retirement_does_not_interrupt_rebuild(self) -> None:
+        publish = service.NativeTestingRebuildExecution.publish
+
+        def interleave(execution: Any, *args: Any, **kwargs: Any) -> None:
+            publish(execution, *args, **kwargs)
+            result = self.refresh_through_http("during-publication")
+            self.assertEqual(result["refreshed_count"], 1, result)
+
+        with patch.object(service.NativeTestingRebuildExecution, "publish", new=interleave):
+            self.assertEqual(self.execute().deploy_status, "pass")
+        self.assertEqual(self.effects, ["switch-new", "stop-old"])
+
     def test_second_rebuild_uses_published_copy_and_preserves_later_deployment_route(self) -> None:
-        self.complete_second_rebuild()
+        self.complete_second_rebuild(refresh_during_prepare=True)
+        before = self.current()
+        result = self.refresh_through_http("after-second-rebuild")
+        self.assertEqual(result["refreshed_count"], 1, result)
+        result = self.refresh_through_http("after-second-rebuild-again")
+        self.assertEqual(result["unchanged_count"], 1, result)
+        self.assertEqual(self.current().binding.domains, before.binding.domains)
+        self.assertEqual(self.current().target_id, before.target_id)
 
     def test_next_rebuild_moves_to_desired_port_without_reverting_the_profile(self) -> None:
         self.complete_second_rebuild(change_port=True)
 
-    def complete_second_rebuild(self, *, change_port: bool = False) -> None:
+    def complete_second_rebuild(
+        self, *, change_port: bool = False, refresh_during_prepare: bool = False
+    ) -> None:
         import yaml
 
         self.assertEqual(self.execute().deploy_status, "pass")
@@ -1912,7 +2099,17 @@ class NativeTestingWorkerTests(unittest.TestCase):
                 return app_fixture.configure(**kw)
             return self.provider_request(**kw)
 
+        prepare = service.NativeTestingRebuildExecution.prepare
+
+        def interleave_prepare(execution: Any, *args: Any, **kwargs: Any) -> Any:
+            result = prepare(execution, *args, **kwargs)
+            if refresh_during_prepare:
+                refresh = self.refresh_through_http("during-next-preparation")
+                self.assertEqual(refresh["refreshed_count"], 1, refresh)
+            return result
+
         with (
+            patch.object(service.NativeTestingRebuildExecution, "prepare", new=interleave_prepare),
             patch.object(api, "dokploy_request", side_effect=request),
             patch.object(candidate_application, "candidate_private_readiness", side_effect=ready),
             patch.object(service, "candidate_private_readiness", side_effect=ready),
@@ -1977,6 +2174,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
     ) -> None:
         import logging
         from contextlib import nullcontext
+        from control_plane.contracts.provider_schedule import ScheduleMaterializationTooLarge
         from control_plane.contracts.durable_operation_authorization import (
             DurableOperationAuthorization,
         )
@@ -2011,11 +2209,13 @@ class NativeTestingWorkerTests(unittest.TestCase):
             post_deploy_status="pass",
             health_status="pass",
         )
-        for response in (
-            success,
-            service.NativeTestingRebuildPending("fixture observation pending"),
-            RuntimeError("Fixture execution lock lost after dispatch"),
-            KeyError("Fixture malformed frame after dispatch"),
+        for response, effects_started in (
+            (success, False),
+            (service.NativeTestingRebuildPending("fixture observation pending"), True),
+            (RuntimeError("Fixture execution lock lost after dispatch"), True),
+            (KeyError("Fixture malformed frame after dispatch"), True),
+            (ScheduleMaterializationTooLarge(), True),
+            (ScheduleMaterializationTooLarge(), False),
         ):
             with (
                 self.subTest(pending=isinstance(response, Exception)),
@@ -2034,7 +2234,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
                 patch.object(
                     worker,
                     "native_rebuild_effects_started",
-                    return_value=isinstance(response, Exception),
+                    return_value=effects_started,
                 ),
                 patch.object(
                     self.store,
@@ -2058,6 +2258,13 @@ class NativeTestingWorkerTests(unittest.TestCase):
             execute.assert_called_once()
             legacy.assert_not_called()
             terminal = complete.call_args.kwargs["record"]
+            if isinstance(response, ScheduleMaterializationTooLarge):
+                self.assertEqual(
+                    terminal.status, "reconciliation_required" if effects_started else "fail"
+                )
+                self.assertEqual(terminal.error_code, response.code)
+                self.assertEqual(bool(terminal.finished_at), not effects_started)
+                continue
             self.assertEqual(
                 terminal.status, "pending" if isinstance(response, Exception) else "pass"
             )
@@ -2299,6 +2506,12 @@ class NativeTestingWorkerTests(unittest.TestCase):
             self.assertRaises(service.NativeTestingRebuildPending),
         ):
             self.execute()
+        previous_reservation = self.store.read_idempotency_record(
+            scope=REBUILD_SCOPE,
+            route_path=REBUILD_ROUTE,
+            idempotency_key=self.operation.operation_id,
+        )
+        assert previous_reservation is not None
         authorization = durable_operation_authorization_payload(
             action="odoo_target_replacement_apply.execute",
             managed_rule_id="native-testing-fixture",
@@ -2334,7 +2547,10 @@ class NativeTestingWorkerTests(unittest.TestCase):
                     )
                     assert original is not None
                     self.assertGreater(original.attempt, 1)
-                    self.assertFalse(original.provider_effect_started_at)
+                    self.assertEqual(
+                        original.provider_effect_started_at,
+                        previous_reservation.provider_effect_started_at,
+                    )
                     raise denial
 
             return service.execute_native_testing_rebuild(**{**kwargs, "authorize": checkpoint})

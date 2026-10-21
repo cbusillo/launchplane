@@ -1,6 +1,41 @@
 """Fixed host disposal for an idle incomplete standalone rehearsal."""
 
 INCOMPLETE_REHEARSAL_RETIREMENT_LIBRARY = r"""
+def incomplete_initial_snapshot(spec,root,*,allow_partial):
+    names=database_names(spec)
+    for role in ('upgrade','final_source','final_upgrade'):
+        path=root/names[role]
+        if path.exists() or path.is_symlink():
+            raise RuntimeError('A later recovery snapshot cannot be disposed as initial failure')
+    path=root/names['source']
+    if not path.exists() and not path.is_symlink(): return None
+    if not stat.S_ISDIR(path.lstat().st_mode):
+        raise RuntimeError('Initial snapshot directory is aliased')
+    receipt_path=path/'receipt.json'
+    if allow_partial and not receipt_path.exists() and not receipt_path.is_symlink():
+        return None
+    for item in (root/'capture.json',path/'receipt.json',path/'database.dump',path/'filestore.tar'):
+        if not stat.S_ISREG(item.lstat().st_mode):
+            raise RuntimeError('Initial snapshot custody is aliased')
+    if (path/'receipt.json').stat().st_size>16384:
+        raise RuntimeError('Initial snapshot receipt is unbounded')
+    receipt=json.loads((path/'receipt.json').read_text())
+    if (not isinstance(receipt,dict) or set(receipt)!={'database','witness_sha256',
+            'database_sha256','filestore_sha256','source_capture_sha256',
+            'sanitized','odoo_version','captured_at'}
+            or receipt['database']!=names['source'] or receipt['sanitized'] is not True
+            or not isinstance(receipt['odoo_version'],str)
+            or not re.fullmatch(r'[0-9]+(?:\.[0-9]+)*',receipt['odoo_version'])
+            or receipt['odoo_version'].split('.')[0]!=spec['record']['source_odoo_version'].split('.')[0]
+            or not isinstance(receipt['captured_at'],str)
+            or datetime.fromisoformat(receipt['captured_at']).utcoffset() is None
+            or any(not isinstance(receipt[key],str) or not re.fullmatch('[a-f0-9]{64}',receipt[key])
+                for key in ('witness_sha256','database_sha256','filestore_sha256','source_capture_sha256'))):
+        raise RuntimeError('Initial snapshot receipt is unverified')
+    validate_snapshots(spec,root,{},[receipt],retired=True)
+    return receipt
+
+
 def incomplete_retirement(spec, root):
     record=spec['record']
     namespace=record['rehearsal_id']
@@ -58,7 +93,22 @@ def incomplete_retirement_locked(spec,root):
     else:
         if not (root/'execute.started').is_file() or (root/'execute.started').is_symlink() or (root/'execute.json').exists():
             raise RuntimeError('Original execute is not incomplete')
-        database,image=current(spec)
+        names=database_names(spec)
+        runners=[item for item in all_containers if
+            (item.get('Config',{}).get('Labels') or {}).get('com.docker.compose.project')==namespace
+            and (item.get('Config',{}).get('Labels') or {}).get('com.docker.compose.service')=='script-runner']
+        if len(runners)!=1: raise RuntimeError('Incomplete runtime selection is unverified')
+        environment=dict(value.split('=',1) for value in runners[0]['Config'].get('Env',[]) if '=' in value)
+        database=environment.get('ODOO_DB_NAME')
+        snapshot=incomplete_initial_snapshot(spec,root,allow_partial=database==names['source'])
+        if database==names['source']:
+            image=spec['source_image']
+        elif database==names['upgrade'] and snapshot is not None:
+            image=spec['target_image']
+            if (root/'capture.pending').exists() or (root/'capture.pending').is_symlink():
+                raise RuntimeError('Initial capture is still pending')
+        else:
+            raise RuntimeError('Incomplete runtime selection is unverified')
         containers=inspection(spec,database,image)
         if containers['web'][1].get('State',{}).get('Running') is not False:
             raise RuntimeError('An active rehearsal writer cannot be retired as incomplete')
@@ -70,7 +120,8 @@ def incomplete_retirement_locked(spec,root):
         network=one_inspection(network_name)
         manifest={'binding':binding,'containers':sorted(own),'volumes':backings,
             'network_name':network_name,'network_id':network['Id'],
-            'root':[root.stat().st_dev,root.stat().st_ino]}
+            'root':[root.stat().st_dev,root.stat().st_ino],
+            'initial_source_snapshot':snapshot}
     if manifest['root']!=[root.stat().st_dev,root.stat().st_ino]:
         raise RuntimeError('Custody directory changed')
     binding_sha256=hashlib.sha256(json.dumps(manifest,sort_keys=True,separators=(',',':')).encode()).hexdigest()
@@ -112,6 +163,15 @@ def incomplete_retirement_locked(spec,root):
         # Docker refuses volumes still in use; never force removal or prune.
         for name in sorted(volumes): docker('volume','rm',name)
         if network_present: docker('network','rm',manifest['network_id'])
+        # Retained recovery material outlives uncertain provider deletion. A
+        # successful deletion reply is insufficient; observe all resources gone
+        # before touching the raw capture or the verified initial snapshot.
+        if (any(item['Id'] in manifest['containers'] or
+                (item.get('Config',{}).get('Labels') or {}).get('com.docker.compose.project')==namespace
+                for item in inventory())
+                or set(manifest['volumes']) & set(docker('volume','ls','--format','{{.Name}}').decode().splitlines())
+                or manifest['network_name'] in set(docker('network','ls','--format','{{.Name}}').decode().splitlines())):
+            raise RuntimeError('Resource absence is unverified; preserve recovery custody')
         for path in root.iterdir():
             if path.name in {'.execution.lock',marker.name,refusals.name}: continue
             if path.is_symlink(): path.unlink()
@@ -131,6 +191,7 @@ def incomplete_retirement_locked(spec,root):
         'refused_reviews':rejected['reviews'],'disposal_started':marker.exists(),
         'containers_absent':containers_absent,'volumes_absent':volumes_absent,
         'network_absent':network_absent,'raw_source_absent':raw_absent,
+        'initial_source_snapshot':manifest.get('initial_source_snapshot'),
         'public_route':False,'business_host_frozen':False}
     emit_rehearsal_result(result)
     return result

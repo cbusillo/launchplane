@@ -134,3 +134,27 @@ def _dedupe_non_empty(values: tuple[str, ...]) -> tuple[str, ...]:
         if value and value not in normalized:
             normalized.append(value)
     return tuple(normalized)
+
+
+def build_repo_product_mapping_service_payload(
+    *,
+    generated_at: str,
+    product_store: RepoProductMappingProductStore,
+    work_request_store: RepoProductMappingWorkRequestStore,
+) -> dict[str, object]:
+    product_profiles = tuple(
+        profile for profile in product_store.list_product_profile_records() if profile.is_active
+    )
+    work_requests = work_request_store.list_every_code_work_request_records(limit=None)
+    mapping = build_repo_product_mapping_from_records(
+        generated_at=generated_at,
+        product_profiles=product_profiles,
+        work_requests=work_requests,
+    )
+    return {
+        "mapping": mapping.model_dump(mode="json"),
+        "source": {
+            "product_count": len(product_profiles),
+            "work_request_count": len(work_requests),
+        },
+    }

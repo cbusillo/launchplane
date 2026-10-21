@@ -52,6 +52,7 @@ from control_plane.launchplane_mutations import (
     apply_launchplane_generation_evidence,
 )
 from control_plane.service_auth import AuthorizationTarget, LaunchplaneIdentity
+from control_plane.legacy_preview_completion import LegacyPreviewRetirementConflict
 from control_plane.workflows.evidence_ingestion import (
     EvidenceIngestionStore,
     PromotionEvidenceValidationError,
@@ -711,6 +712,13 @@ def register_evidence_write_routes(
                     )
                 ).items()
             }
+        except LegacyPreviewRetirementConflict as error:
+            raise dependencies.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="preview_retirement_conflict",
+                message=str(error),
+            ) from error
         except click.ClickException as error:
             raise dependencies.http_error(
                 status_code=400,
@@ -815,6 +823,13 @@ def register_evidence_write_routes(
                     )
                 ).items()
             }
+        except LegacyPreviewRetirementConflict as error:
+            raise dependencies.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="preview_retirement_conflict",
+                message=str(error),
+            ) from error
         except click.ClickException as error:
             raise dependencies.http_error(
                 status_code=400,

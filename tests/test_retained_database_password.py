@@ -6,6 +6,7 @@ from unittest.mock import Mock, patch
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.live_target_runtime import (
     LiveTargetRuntimeError,
+    LiveTargetRuntimeApplyEnvelope,
     apply_live_target_runtime_environment,
 )
 from control_plane.storage.postgres import PostgresRecordStore
@@ -13,9 +14,33 @@ from tests.support.stores import _seed_tracked_target_records, _sqlite_database_
 
 
 class RetainedDatabasePasswordSyncTests(unittest.TestCase):
+    def test_literal_qualification_preserves_separation_authority_boundary(self) -> None:
+        payload = dict(
+            mode="dry-run",
+            product="example",
+            context="example",
+            instance="testing",
+            requalify_literal_keys=["SMTP_PASSWORD", "APP", "APP"],
+        )
+        envelope = LiveTargetRuntimeApplyEnvelope.model_validate(payload)
+        self.assertEqual(envelope.requalify_literal_keys, ("APP", "SMTP_PASSWORD"))
+        with self.assertRaises(ValueError):
+            LiveTargetRuntimeApplyEnvelope.model_validate({**payload, "separation_only": True})
+        with self.assertRaises(ValueError):
+            LiveTargetRuntimeApplyEnvelope.model_validate(
+                {**payload, "requalify_literal_keys": ["APP=value"]}
+            )
+
     # 2026-10-17: OPW testing's local passwords were regenerated while its
     # database volume, created with the old password, stayed in place.
-    def _sync(self, *, live_password: str) -> tuple[list[object], Mock]:
+    def _sync(
+        self,
+        *,
+        live_password: str,
+        desired_password: str = "generated-local-password",
+        literal_keys: tuple[str, ...] = (),
+        instance_name: str = "testing",
+    ) -> tuple[list[object], Mock]:
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             database_url = _sqlite_database_url(root / "records.sqlite3")
@@ -26,8 +51,8 @@ class RetainedDatabasePasswordSyncTests(unittest.TestCase):
                 RuntimeEnvironmentRecord(
                     scope="instance",
                     context="example-site",
-                    instance="testing",
-                    env={"ODOO_DB_PASSWORD": "generated-local-password"},
+                    instance=instance_name,
+                    env={"ODOO_DB_PASSWORD": desired_password},
                     updated_at="2026-10-17T00:00:00Z",
                     source_label="test",
                 )
@@ -35,7 +60,7 @@ class RetainedDatabasePasswordSyncTests(unittest.TestCase):
             _seed_tracked_target_records(
                 database_url=database_url,
                 context="example-site",
-                instance="testing",
+                instance=instance_name,
                 target_id="test-compose",
                 target_type="compose",
                 target_name="example-site-testing",
@@ -63,12 +88,13 @@ class RetainedDatabasePasswordSyncTests(unittest.TestCase):
                     control_plane_root=root,
                     database_url=database_url,
                     context_name="example-site",
-                    instance_name="testing",
+                    instance_name=instance_name,
                     apply_changes=True,
                     deploy=True,
                     no_cache=False,
                     deploy_timeout_seconds=None,
                     deploy_trigger=deploy,
+                    requalify_literal_keys=literal_keys,
                 )
             return updates, deploy
 
@@ -85,6 +111,25 @@ class RetainedDatabasePasswordSyncTests(unittest.TestCase):
 
         self.assertEqual(updates, [])
         deploy.assert_called_once()
+
+    def test_equal_first_stage_password_cannot_be_reinterpreted_for_retained_database(self) -> None:
+        with self.assertRaises(LiveTargetRuntimeError) as refusal:
+            self._sync(
+                live_password="password$NAME",
+                desired_password="password$NAME",
+                literal_keys=("ODOO_DB_PASSWORD",),
+            )
+        self.assertEqual(refusal.exception.code, "retained_database_credential_changed")
+
+    def test_production_retained_password_cannot_be_reinterpreted(self) -> None:
+        with self.assertRaises(LiveTargetRuntimeError) as refusal:
+            self._sync(
+                live_password="password$NAME",
+                desired_password="password$NAME",
+                literal_keys=("ODOO_DB_PASSWORD",),
+                instance_name="prod",
+            )
+        self.assertEqual(refusal.exception.code, "retained_database_credential_changed")
 
 
 if __name__ == "__main__":

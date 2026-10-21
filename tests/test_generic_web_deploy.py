@@ -11,7 +11,11 @@ from control_plane.contracts.dokploy_target_id_record import DokployTargetIdReco
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.environment_inventory import EnvironmentInventory
-from control_plane.contracts.promotion_record import HealthcheckEvidence, PostDeployUpdateEvidence
+from control_plane.contracts.promotion_record import (
+    DeploymentEvidence,
+    HealthcheckEvidence,
+    PostDeployUpdateEvidence,
+)
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductImageProfile,
@@ -42,6 +46,7 @@ from control_plane.generic_web_deploy_provider_adapter import (
     GenericWebDeployProviderMutationAdapter,
 )
 from control_plane.workflows.generic_web_deploy import (
+    GENERIC_WEB_UNOBSERVED_DEPLOYMENT_ID,
     GenericWebDeployResult,
     GenericWebDeployRequest,
     GenericWebDeployStore,
@@ -679,6 +684,51 @@ class GenericWebDeployTests(unittest.TestCase):
                 self.assertFalse(store.inventories)
                 sleeper.assert_not_called()
 
+    def test_failed_application_job_cannot_settle_while_runtime_is_updating(self) -> None:
+        from dataclasses import replace
+        from control_plane.workflows.generic_web_deploy_provider import (
+            GenericWebProviderDeploymentFailed,
+        )
+
+        for state in ("updating", "completed"):
+            with self.subTest(state=state):
+                store = _GenericWebDeployStore(_profile())
+                provider = _FakeGenericWebDeployProvider()
+                execute = provider.execute_artifact_deploy
+                failed = GenericWebProviderDeploymentObservation(
+                    outcome="present",
+                    deployment_status="error",
+                    deployment_id="failed-job",
+                    started_at="2026-10-20T03:08:20Z",
+                    finished_at="2026-10-20T03:08:25Z",
+                )
+
+                def fail(**kwargs: object) -> None:
+                    execute(**kwargs)  # type: ignore[arg-type]
+                    assert provider.application_runtime is not None
+                    provider.application_runtime = replace(
+                        provider.application_runtime, rollout_state=state
+                    )
+                    raise GenericWebProviderDeploymentFailed(failed)
+
+                with (
+                    patch.object(provider, "execute_artifact_deploy", side_effect=fail),
+                    patch("control_plane.workflows.generic_web_deploy.monotonic", return_value=0),
+                    patch(
+                        "control_plane.workflows.generic_web_deploy_provider.monotonic",
+                        return_value=1e30,
+                    ),
+                ):
+                    result = execute_generic_web_deploy(
+                        control_plane_root=Path("."),
+                        record_store=store,
+                        request=_request(),
+                        deploy_provider=provider,
+                    )
+                self.assertEqual(result.deploy_status, "fail")
+                self.assertEqual(result.provider_failure_proved, state == "completed")
+                self.assertFalse(store.inventories)
+
     def test_lost_publication_authority_writes_no_deployment_or_inventory(self) -> None:
         for provider_error in (None, click.ClickException("provider wait failed")):
             with self.subTest(provider_error=provider_error):
@@ -1080,11 +1130,12 @@ class GenericWebDeployTests(unittest.TestCase):
     def test_execute_generic_web_deploy_writes_pass_record_for_profile_lane(self) -> None:
         store = _GenericWebDeployStore(_profile())
         deploy_provider = _FakeGenericWebDeployProvider()
+        request = _request().model_copy(update={"source_git_ref": "a" * 40})
 
         result = execute_generic_web_deploy(
             control_plane_root=Path("."),
             record_store=store,
-            request=_request(),
+            request=request,
             deploy_provider=deploy_provider,
         )
 
@@ -1101,7 +1152,7 @@ class GenericWebDeployTests(unittest.TestCase):
         self.assertEqual(len(store.inventories), 1)
         self.assertEqual(store.inventories[0].context, "sellyouroutboard-testing")
         self.assertEqual(store.inventories[0].instance, "testing")
-        self.assertEqual(store.inventories[0].source_git_ref, "abc123")
+        self.assertEqual(store.inventories[0].source_git_ref, request.source_git_ref)
         self.assertEqual(
             store.inventories[0].deployment_record_id,
             store.deployments[0].record_id,
@@ -1116,8 +1167,29 @@ class GenericWebDeployTests(unittest.TestCase):
             runtime_identity.artifact_id,
             "ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
         )
-        self.assertEqual(runtime_identity.source_git_ref, "abc123")
+        self.assertEqual(runtime_identity.source_git_ref, request.source_git_ref)
         self.assertEqual(store.inventories[0].runtime_identity, runtime_identity)
+        from control_plane.generic_web_source_qualification import (
+            qualified_generic_web_source_inventory,
+        )
+
+        qualified = qualified_generic_web_source_inventory(
+            store=store,
+            profile=store.profile,
+            lane=next(lane for lane in store.profile.lanes if lane.instance == "testing"),
+        )
+        self.assertEqual(qualified.deployment_record_id, result.deployment_record_id)
+        self.assertEqual(qualified.runtime_identity, runtime_identity)
+        from control_plane.release_review import ReleaseReviewStore, release_version
+
+        # The real producer fake supplies this branch's three record readers.
+        version = release_version(
+            store=cast(ReleaseReviewStore, cast(object, store)),
+            profile=store.profile,
+            instance="testing",
+        )
+        self.assertEqual(version.artifact_id, runtime_identity.artifact_id)
+        self.assertEqual(version.source_commit, runtime_identity.source_git_ref)
         artifact_identity = store.deployments[0].artifact_identity
         assert artifact_identity is not None
         self.assertEqual(
@@ -1736,47 +1808,101 @@ class GenericWebDeployTests(unittest.TestCase):
         self.assertEqual(store.deployments, [])
 
     def test_record_observed_generic_web_deploy_repairs_missing_records(self) -> None:
-        profile = _profile(driver_id="odoo")
-        lane = profile.lanes[0]
-        store = _GenericWebDeployStore(profile)
-        provider = _FakeGenericWebDeployProvider()
-        request = _request()
-        resolved_target = provider.resolve_deploy_target(
-            control_plane_root=Path("."),
-            request_artifact_id=request.artifact_id,
-            request_source_git_ref=request.source_git_ref,
-            request_timeout_seconds=request.timeout_seconds,
-            request_no_cache=request.no_cache,
-            record_store=store,
-            profile=profile,
-            lane=lane,
-            normalized_artifact_id=request.artifact_id,
-            fallback_target_name="unused",
-        )
-
-        records, result = record_observed_generic_web_deploy(
-            record_store=store,
-            profile=profile,
-            lane=lane,
-            resolved_deploy_target=resolved_target,
-            observation=GenericWebProviderDeploymentObservation(
-                outcome="present",
-                deployment_status="success",
-                deployment_id="deployment-observed",
-                started_at="2026-07-13T12:00:00Z",
-                finished_at="2026-07-13T12:01:00Z",
-            ),
-            deployment_record_id="deployment-recovered",
-            post_deploy_unobserved=True,
-        )
-
-        self.assertEqual(records, {"deployment_record_id": "deployment-recovered"})
-        self.assertEqual(result["deploy_status"], "pass")
-        self.assertEqual(result["post_deploy_status"], "fail")
-        self.assertEqual(len(store.deployments), 1)
-        self.assertEqual(store.deployments[0].record_id, "deployment-recovered")
-        self.assertEqual(store.deployments[0].post_deploy_update.status, "fail")
-        self.assertEqual(len(store.inventories), 1)
+        for instance, target_type in (
+            ("testing", "compose"),
+            ("preview", "application"),
+            ("prod", "application"),
+        ):
+            for partial in (False, True):
+                with self.subTest(instance=instance, target_type=target_type, partial=partial):
+                    profile = _profile(driver_id="odoo")
+                    lane = profile.lanes[0].model_copy(update={"instance": instance})
+                    profile = profile.model_copy(update={"lanes": (lane,)})
+                    store = _GenericWebDeployStore(profile)
+                    provider = _FakeGenericWebDeployProvider()
+                    request = _request()
+                    target = provider.resolve_deploy_target(
+                        control_plane_root=Path("."),
+                        request_artifact_id=request.artifact_id,
+                        request_source_git_ref=request.source_git_ref,
+                        request_timeout_seconds=request.timeout_seconds,
+                        request_no_cache=request.no_cache,
+                        record_store=store,
+                        profile=profile,
+                        lane=lane,
+                        normalized_artifact_id=request.artifact_id,
+                        fallback_target_name="unused",
+                    )
+                    if target_type == "compose":
+                        assert target.deployed_target is not None
+                        target = target.model_copy(
+                            update={
+                                "ship_request": target.ship_request.model_copy(
+                                    update={
+                                        "target_type": target_type,
+                                        "target_category": target_type,
+                                        "provider_target_type": target_type,
+                                    }
+                                ),
+                                "resolved_target": target.resolved_target.model_copy(
+                                    update={"target_type": target_type}
+                                ),
+                                "deployed_target": target.deployed_target.model_copy(
+                                    update={
+                                        "target_category": target_type,
+                                        "provider_target_type": target_type,
+                                    }
+                                ),
+                            }
+                        )
+                    if partial:
+                        store.write_deployment_record(
+                            DeploymentRecord(
+                                record_id="deployment-recovered",
+                                context=lane.context,
+                                instance=lane.instance,
+                                source_git_ref=request.source_git_ref,
+                                deploy=DeploymentEvidence(
+                                    target_name=target.resolved_target.target_name,
+                                    target_type=target.ship_request.target_type,
+                                    provider_id=target.ship_request.provider_id,
+                                    target_category=target.ship_request.target_category,
+                                    provider_target_type=target.ship_request.provider_target_type,
+                                    deploy_mode=target.ship_request.deploy_mode,
+                                    status="pending",
+                                ),
+                            )
+                        )
+                    records, result = record_observed_generic_web_deploy(
+                        record_store=store,
+                        profile=profile,
+                        lane=lane,
+                        resolved_deploy_target=target,
+                        observation=GenericWebProviderDeploymentObservation(
+                            outcome="present",
+                            deployment_status="success",
+                            deployment_id="deployment-observed",
+                            started_at="2026-07-13T12:00:00Z",
+                            finished_at="2026-07-13T12:01:00Z",
+                        ),
+                        deployment_record_id="deployment-recovered",
+                        post_deploy_unobserved=True,
+                    )
+                    self.assertEqual(records, {"deployment_record_id": "deployment-recovered"})
+                    self.assertEqual(result["deploy_status"], "pass")
+                    self.assertEqual(result["post_deploy_status"], "fail")
+                    self.assertEqual(len(store.deployments), 1)
+                    saved = store.deployments[0]
+                    self.assertEqual(saved.record_id, "deployment-recovered")
+                    self.assertEqual(saved.post_deploy_update.status, "fail")
+                    self.assertEqual(saved.resolved_target, target.resolved_target)
+                    self.assertEqual(saved.deployed_target, target.deployed_target)
+                    assert saved.artifact_identity is not None
+                    self.assertEqual(saved.artifact_identity.artifact_id, request.artifact_id)
+                    self.assertEqual(len(store.inventories), 1)
+                    self.assertEqual(
+                        store.inventories[0].artifact_identity, saved.artifact_identity
+                    )
 
     def test_record_observed_generic_web_deploy_preserves_existing_post_deploy_evidence(
         self,
@@ -1895,7 +2021,7 @@ class GenericWebDeployTests(unittest.TestCase):
         self.assertEqual(replacement_provider.observed_target_ids, ["target-original"])
         self.assertEqual(recovered_adapter.reconciliation_key(), original_key)
 
-    def test_provider_adapter_repairs_failed_terminal_deployment_as_502(self) -> None:
+    def test_testing_observation_keeps_unpublished_terminal_failure_unknown(self) -> None:
         profile = _profile()
         store = _GenericWebDeployStore(profile)
         provider = _FakeGenericWebDeployProvider(
@@ -1922,15 +2048,11 @@ class GenericWebDeployTests(unittest.TestCase):
             reconciliation_key,
         )
 
-        self.assertEqual(observation.outcome, "present")
-        self.assertEqual(observation.response_status_code, 502)
-        result = cast(dict[str, object], observation.response_payload["result"])
-        self.assertEqual(result["deploy_status"], "fail")
-        self.assertEqual(result["error_message"], "provider deployment failed")
-        self.assertEqual(len(store.deployments), 1)
-        self.assertEqual(store.deployments[0].deploy.status, "fail")
+        self.assertEqual(observation.outcome, "unknown")
+        self.assertEqual(store.deployments, [])
+        self.assertEqual(store.inventories, [])
 
-    def test_provider_adapter_repairs_placeholder_failure_with_observed_evidence(
+    def test_testing_observation_preserves_placeholder_until_explicit_recovery(
         self,
     ) -> None:
         profile = _profile()
@@ -1958,7 +2080,7 @@ class GenericWebDeployTests(unittest.TestCase):
             build_deployment_record(
                 request=resolved_target.ship_request,
                 record_id=deployment_record_id,
-                deployment_id="control-plane-dokploy",
+                deployment_id=GENERIC_WEB_UNOBSERVED_DEPLOYMENT_ID,
                 deployment_status="fail",
                 started_at="2026-07-13T11:59:00Z",
                 finished_at="2026-07-13T11:59:30Z",
@@ -1974,12 +2096,11 @@ class GenericWebDeployTests(unittest.TestCase):
             adapter.reconciliation_key(),
         )
 
-        self.assertEqual(observation.outcome, "present")
-        self.assertEqual(observation.response_status_code, 502)
-        repaired = store.read_deployment_record(deployment_record_id)
-        self.assertEqual(repaired.deploy.deployment_id, "deployment-failed-exact")
-        self.assertEqual(repaired.deploy.started_at, "2026-07-13T12:00:00Z")
-        self.assertEqual(repaired.deploy.finished_at, "2026-07-13T12:01:00Z")
+        self.assertEqual(observation.outcome, "unknown")
+        retained = store.read_deployment_record(deployment_record_id)
+        self.assertEqual(retained.deploy.deployment_id, GENERIC_WEB_UNOBSERVED_DEPLOYMENT_ID)
+        self.assertEqual(retained.deploy.finished_at, "2026-07-13T11:59:30Z")
+        self.assertEqual(store.inventories, [])
 
     def test_provider_adapter_keeps_post_deploy_phase_unknown_until_record_exists(
         self,
@@ -2013,7 +2134,7 @@ class GenericWebDeployTests(unittest.TestCase):
         self.assertEqual(observation.outcome, "unknown")
         self.assertEqual(store.deployments, [])
 
-    def test_provider_adapter_legacy_correlation_is_adoption_only_and_marks_post_deploy(
+    def test_provider_adapter_legacy_correlation_with_required_post_work_stays_unknown(
         self,
     ) -> None:
         profile = _profile(driver_id="odoo")
@@ -2033,13 +2154,15 @@ class GenericWebDeployTests(unittest.TestCase):
             legacy_provider_effect_started_at="2026-08-15T12:00:00Z",
         )
 
-        self.assertEqual(inspection.observation.outcome, "present")
+        self.assertEqual(inspection.observation.outcome, "unknown")
         self.assertEqual(inspection.provider_evidence, "deployment_correlated_legacy")
         self.assertFalse(inspection.retry_safe)
         self.assertTrue(inspection.post_deploy_unobserved)
         self.assertIsNotNone(inspection.legacy_correlation_digest_evidence)
         self.assertEqual(len(provider.observed_target_ids), 1)
         self.assertEqual(provider.legacy_observation_calls, 1)
+        self.assertEqual(store.deployments, [])
+        self.assertEqual(store.inventories, [])
 
     def test_provider_adapter_observe_uses_effect_start_for_legacy_correlation(self) -> None:
         profile = _profile()
@@ -2059,10 +2182,10 @@ class GenericWebDeployTests(unittest.TestCase):
             "2026-08-15T12:00:00Z",
         )
 
-        self.assertEqual(observation.outcome, "present")
-        self.assertEqual(observation.response_status_code, 202)
+        self.assertEqual(observation.outcome, "unknown")
         self.assertEqual(provider.legacy_observation_calls, 1)
-        self.assertEqual(len(store.deployments), 1)
+        self.assertEqual(store.deployments, [])
+        self.assertEqual(store.inventories, [])
 
     def test_present_provider_observation_requires_exact_terminal_evidence(self) -> None:
         with self.assertRaisesRegex(ValueError, "deployment_id, started_at, finished_at"):

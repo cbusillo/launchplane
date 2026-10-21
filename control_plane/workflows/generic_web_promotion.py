@@ -8,6 +8,11 @@ from typing import Literal, Protocol, cast
 from urllib.parse import quote
 
 import click
+from control_plane.generic_web_source_qualification import (
+    GenericWebSourceUnqualified,
+    GenericWebPromotionSourceRefused,
+    qualified_generic_web_source_inventory,
+)
 from control_plane.release_review import require_release_approval
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -364,6 +369,7 @@ def execute_generic_web_prod_promotion(
             error_message=str(error),
         )
 
+    original_deployment_record_id = deployment_record_id
     if destination_lane.generic_web_cutover is not None and not deployment_record_id:
         from control_plane.workflows.ship import generate_deployment_record_id
 
@@ -403,11 +409,41 @@ def execute_generic_web_prod_promotion(
             }
         ),
     ) as backup_checkpoint:
+        source_admitted = False
+        forward_effect_admitted = False
+        # A saved preparing phase can already contain an uncertain provider
+        # dispatch. Only an explicitly new record plus this invocation's first
+        # checkpoint refusal proves that no forward effect was admitted.
+        fresh_deployment = False
+        source_refusal: GenericWebPromotionSourceRefused | None = None
+        if original_deployment_record_id:
+            try:
+                record_store.read_deployment_record(original_deployment_record_id)
+            except FileNotFoundError:
+                fresh_deployment = True
+
+        def admit_source() -> None:
+            nonlocal source_admitted, source_refusal
+            # Admit this accepted artifact after health/backup waits. Once its
+            # production attempt starts, testing may advance to another build.
+            if not source_admitted:
+                try:
+                    _resolve_source_inventory_inputs(
+                        record_store=record_store,
+                        profile=profile,
+                        request=request,
+                        source_lane=source_lane,
+                    )
+                except GenericWebPromotionSourceRefused as refusal:
+                    source_refusal = refusal
+                    raise
+                source_admitted = True
 
         def promotion_checkpoint(phase: str) -> None:
-            backup_checkpoint(phase)
-            if provider_effect_checkpoint is not None:
-                provider_effect_checkpoint(phase)
+            nonlocal forward_effect_admitted
+            admit_source()
+            backup_checkpoint.before_provider_effect(phase, provider_effect_checkpoint)
+            forward_effect_admitted = True
 
         try:
             deploy_result = execute_generic_web_deploy(
@@ -429,9 +465,12 @@ def execute_generic_web_prod_promotion(
                 provider_operation_title=provider_operation_title,
                 deployment_record_id=deployment_record_id,
                 provider_effect_checkpoint=promotion_checkpoint,
+                before_deployment_records=admit_source,
             )
         except (ValueError, TimeoutError, click.ClickException) as error:
             if destination_lane.generic_web_cutover is None or not deployment_record_id:
+                raise
+            if fresh_deployment and not forward_effect_admitted:
                 raise
             try:
                 failed_cutover = record_store.read_deployment_record(deployment_record_id)
@@ -455,6 +494,11 @@ def execute_generic_web_prod_promotion(
                     "error_message": type(error).__name__,
                 }
             )
+        # The ordinary deploy records checkpoint refusals as failed results.
+        # Restore their typed admission meaning only for this explicitly fresh,
+        # never-admitted invocation; prior or uncertain effects stay conservative.
+        if source_refusal is not None and fresh_deployment and not forward_effect_admitted:
+            raise source_refusal
     backup_gate.evidence.update(backup_checkpoint.evidence)
     deployment_record = _read_deployment_record(
         record_store=record_store,
@@ -850,15 +894,11 @@ def _resolve_source_inventory_inputs(
     source_lane: ProductLaneProfile,
 ) -> GenericWebProdPromotionRequest:
     try:
-        source_inventory = record_store.read_environment_inventory(
-            context_name=source_lane.context,
-            instance_name=source_lane.instance,
+        source_inventory = qualified_generic_web_source_inventory(
+            store=record_store, profile=profile, lane=source_lane
         )
-    except FileNotFoundError as exc:
-        raise click.ClickException(
-            "Generic web prod promotion requires current source environment inventory. "
-            f"No inventory was found for {source_lane.context}/{source_lane.instance}."
-        ) from exc
+    except GenericWebSourceUnqualified as exc:
+        raise GenericWebPromotionSourceRefused(str(exc)) from exc
     inventory_artifact_id = ""
     if source_inventory.artifact_identity is not None:
         inventory_artifact_id = source_inventory.artifact_identity.artifact_id.strip()
@@ -886,7 +926,7 @@ def _resolve_source_inventory_inputs(
         inventory_source_git_ref,
     )
     if not artifact_matches or not source_matches:
-        raise click.ClickException(
+        raise GenericWebPromotionSourceRefused(
             "Generic web prod promotion request does not match current source inventory. "
             f"Inventory artifact={normalized_inventory_artifact_id} "
             f"source_ref={inventory_source_git_ref}; "

@@ -46,6 +46,20 @@ application testing lanes. Q453 accepted this topology instead of the
 Compose-only upstream binding and its host firewall requirement. It does not
 change the restrictions on the Compose path below or any production record.
 
+Independent application activation can preserve an existing private hostname
+through its [native same-address route continuation](testing-activation.md).
+The original edge marker, certificate, access list and provider domain remain
+unchanged. The canonical replacement has no copied provider domain or managed
+public route binding. Private health and a create/readback no-op verify the
+original receipt, completed activation lineage and actual winning native route.
+A second generation reuses that original template. An unhealthy predecessor does
+not require hand repair: exact physical custody and independent candidate/private
+edge identity are still required. Endpoint, edge and current receipt updates and
+new private-ingress reservations share the existing publication authority fence.
+A concurrent unresolved private operation stays unknown; activation never
+re-enables an intentionally disabled edge. Actual authenticated WSS and product
+qualification remain separate post-delivery proof.
+
 ### Continue a freshly allocated application
 
 Keep the `isolation_staging` hold through endpoint and private-route preparation.
@@ -119,11 +133,13 @@ a write or a value in the error. For example, dotenv does not unescape quote
 delimiters, so a multiline value containing all three quote delimiters may not
 be representable. This is the shared provider storage codec. It qualifies
 application delivery, where Dokploy passes the parsed values to the container.
-It does not qualify Compose's later environment-file processing: provider
-versions that write parsed values as raw assignments can change them again.
-Odoo Compose target replacement retains its single-line, no-trailing-whitespace
-preflight; the application codec fix does not widen that boundary. Compose
-consumer compatibility is tracked separately in [#4174](https://github.com/cbusillo/launchplane/issues/4174).
+Compose uses a separate two-stage wire codec, including for Odoo target
+replacement and fresh testing candidates. It preserves new or changed literal
+inputs through Dokploy's generated `.env` and final Compose consumption; it no
+longer imposes the former single-line/no-trailing-whitespace restriction.
+Untouched legacy values keep their existing effective meaning. See the
+[environment wire contract](dokploy-service-deployments.md#environment-wire-formats)
+for preservation, provider edits and actual-consumer qualification.
 The application consumer follows Dokploy's
 [dotenv parsing and service substitution](https://github.com/Dokploy/dokploy/blob/1c4414165d4aedbf6e28afab7a94c8fb7c053373/packages/server/src/utils/docker/utils.ts)
 and the [dotenv value grammar](https://github.com/motdotla/dotenv/blob/v16.4.5/lib/main.js).
@@ -153,6 +169,41 @@ may restore and settle an obsolete pre-image attempt as failed instead of
 deploying it. The reviewed recovery digest binds current input authority and
 that disposition; changes between dry-run and apply require a fresh review.
 The ordinary testing reconciler uses the same settlement automatically.
+For in-place applications, image completion alone does not prove maintenance,
+canary, activation or product-executor completion. Original execution receipts
+must prove every dispatched effect terminal before a reservation can finish or
+become eligible for another deployment. Lost replies, active or ambiguous
+history, generic provider error rows and a later disabled schedule readback
+leave the original operation fenced. A hold cannot prove that an earlier lost
+enable request has stopped.
+
+The native deploy-recovery API offers `settle_testing_failure` for attributable
+terminal work that did not qualify, including a healthy image. After a fresh
+digest review it reacquires the original lease, rechecks the captured evidence,
+runs only the captured schedule hold and stores the original failed result.
+The recovery envelope returns HTTP 202; the original deploy result remains
+HTTP 502. Replay runs no effects. A deliberate normal request with a new key
+can then proceed and inherits held originals. Unknown original work remains
+held; neither commands nor product data cleanup are retried through settlement.
+
+Schedule completion accepts an exact acknowledged job identifier with complete
+matching history marked done, or an original successful synchronous reply with
+nonempty complete new history all marked done. A lost reply plus a unique new
+row is insufficient. This contract makes no claim about a live provider's
+version or capabilities. Product verification records one executor-level
+intent and completion. Its synchronous boundary waits for known dynamic page,
+signup, server-action and maintenance responses, including response completion
+and product assertions. Interrupted dispatched exchanges remain unknown and
+skip data cleanup; browser teardown does not prove remote completion. These
+boundaries do not promise termination of arbitrary asynchronous product jobs.
+Actual browser request events open exchanges, so a local click failure that
+dispatches nothing can remain a truthful failure. An observed QR server action
+still requires its product success evidence; HTTP 200 alone is insufficient.
+Production source admission during an unknown testing attempt is a separate
+gate tracked in [#4259](https://github.com/cbusillo/launchplane/issues/4259).
+It must account for the current original-operation fence before a fresh
+production release; retaining old inventory does not qualify unknown work.
+
 An exact original reservation with no effect checkpoint may settle before any
 lifecycle receipt was captured. Its renewed lease verifies that no-effect
 evidence again; it restores nothing and keeps the effect journal empty, even
@@ -163,155 +214,29 @@ A successful deployment retains a keyed, value-free receipt for those captured
 inputs. Missing legacy evidence or changed site inputs makes the same verified
 image eligible for one normal testing deployment; an unchanged receipt settles
 without another deployment only when the actual application runtime also agrees.
-Dokploy job completion and saved environment readback do not prove Swarm rollout:
-the service may still be updating or may have rolled back. Application testing
-completion, including lanes without managed inputs, uses the remaining deployment
-timeout after the provider job to wait for completed rollout, desired running
-replicas, and independently inspected image digests and deployment identities.
-Transient inspect errors retry within that same budget; recovery reads once and
-keeps unreadable effects fenced. Each container's inspected image can carry
-multiple repository digests; its candidates must include the expected artifact.
-Container health, when configured, must also pass; private health and authenticated
-WSS retain their separate qualification. The reader binds the exact application
-and recorded server to its service, tasks and inspected containers, retaining no
-environment values. A terminal rollback or paused rollout is reported as failure
-when an inspected task binds its image and deployment identity to that attempt,
-or its start belongs to the exact provider job's recorded time window. This avoids
-assuming that the asynchronous Swarm updater and provider job share a clock.
-Ambiguous or pending effects
-retain the original operation's recovery fence. Recovery uses the same runtime
-qualification before crediting a provider job, without enabling production adoption.
-At the original normal-deploy deadline, the original service image and deployment
-identity with a settled update
-(completed or initial creation without update status) prove a qualification
-timeout at that deadline. Replacement tasks and reaped task history do not erase
-that settled service proof. An updater still running, an unreadable service or a
-foreign service specification remains unknown for a successful provider job.
-An exact terminal `error` or `failed` job can instead fail before it updates the
-service. Dokploy's pinned [application deploy](https://github.com/Dokploy/dokploy/blob/1c4414165d4aedbf6e28afab7a94c8fb7c053373/packages/server/src/services/application.ts)
-awaits the [Docker-source login and pull](https://github.com/Dokploy/dokploy/blob/1c4414165d4aedbf6e28afab7a94c8fb7c053373/packages/server/src/utils/providers/docker.ts)
-before the service update; a failed pull leaves the older service installed.
-That exact failed job plus a fresh stable service read (no update status,
-`completed`, `rollback_completed`, `paused` or `rollback_paused`) proves a currently settled failure even
-when the old image and deployment identity remain. It does not prove absence,
-permit provider retry or credit successful deployment/inventory. An interrupted
-lifecycle attempt that retains its reservation completes the captured hold through
-the reviewed recovery action. Normal execution settles the failed attempt directly
-when its hold completes. Updating or unreadable services and canceled/killed jobs
-remain unknown. Failed jobs use
-the remaining original deployment budget for transient runtime reads; a failure
-already proved by the qualification loop is preserved without a second read.
+A completed provider job alone does not prove Swarm convergence: application
+testing checks the exact service, tasks, inspected immutable container images,
+deployment-record identity, replica count and configured container health. This
+also applies to application lanes without managed inputs. The provider job and
+runtime wait share the original deployment timeout. Unknown or updating runtime
+remains fenced; a correlated terminal rollback or failed qualification never
+receives delivery credit. Recovery adds the same current-runtime check while
+retaining exact-original execution receipts, reviewed settlement and publication
+CAS. A healthy image cannot prove that earlier product work has stopped.
 
-The supported generic-web recovery dry-run/apply can establish that same timeout
-once the original lease is inactive. It compares the database observation time with
-the latest database provider-effect checkpoint plus the original timeout saved in
-the reservation, rather than current target settings or provider clocks. Later
-hold or record checkpoints can delay that proof; they never shorten the original
-budget. Automatic observation without that deadline proof retains the fence; use
-the reviewed native recovery operation.
-
-For an unfinished lifecycle attempt that retains its reservation after a proved
-failed job or qualification failure, use the explicit `settle_testing_failure`
-recovery action. A normal attempt whose hold completed already settles as failed
-without recovery. The service retains the truthful `present` provider outcome and
-`retry_safe: false`. Adoption remains write-free.
-The reviewed action acquires the original recovery lease and repeats only the
-idempotent schedule hold from the exact original artifact-bound receipt. It never
-captures a new baseline, saves or deploys an image, resets data, runs maintenance,
-activates schedules or runs post-deploy work. Capture-time `prepared` receipts,
-partially applied holds and older `held` receipts can resume from their complete
-original baseline. An exact failed lifecycle record keeps the original attempt
-failed even if its runtime becomes healthy later; recovery still completes the
-hold. A crash while publishing the failed record can resume the same hold. Failure
-publication checks the original lease without replacing its last recoverable phase,
-including application testing lanes without managed inputs. At `records_commit`,
-a lost final write is recovered from current runtime evidence. A successful job
-with the exact healthy runtime can be adopted without provider writes; its
-capture-only lifecycle receipt remains unqualified and post-deploy status is
-`fail`, even though inventory records the proved running image. A later deliberate
-deployment inherits that original baseline. A failed job, including one against a
-stable paused or rollback-paused service from an earlier attempt, can complete
-only its captured hold. If the final successful record was saved before inventory
-or reservation completion was interrupted, its pass verdict and qualified receipt
-do not override fresh proof of a settled runtime failure at the original deadline.
-Recovery can hold that exact captured baseline and record failure without adding
-inventory credit. Any existing inventory still points to the now-failed record.
-An exact saved pass plus fresh healthy runtime for that original deployment can
-instead be adopted when only Dokploy's auxiliary job status changed to `error` or
-`failed`. Recovery retains that provider status in its bounded observation detail;
-missing, pending, failed or differently bound records cannot supply that proof.
-Dokploy can publish `done` before a later notification
-failure changes that job to `error`; the final status does not authorize rerunning
-data or post-deploy effects.
-The schedule-configuration checkpoints `application_maintenance_prepare` and
-`application_schedule_prepare` or `application_schedule_remove` can use this same
-failure recovery: they only disable or remove schedules, and any preceding
-maintenance, canary or post-deploy call returned before that next checkpoint.
-An interrupted `application_maintenance_execute`, `application_schedule_canary`,
-`application_schedule_activate` or `post_deploy_*` call can still execute or
-re-enable work. A deployment timeout or healthy image cannot prove that call has
-stopped, so failure settlement at those checkpoints keeps the original fence.
-Missing or malformed baseline, changed target authority, an active updater,
-unknown service/provider effects or lost lease keep the original operation fenced.
-A failed cleanup also keeps the fence and a durable hold-only checkpoint, so a new
-review can resume cleanup instead of replaying the image operation.
-
-To use that action through the deployed service API:
-
-1. For an event-driven testing deploy, read
-   `GET /v1/admin/generic-web/deploy-recovery/{product}/testing` and retain its
-   exact `recovery_reference` privately.
-2. Send `POST /v1/admin/generic-web/deploy-recovery/dry-run` with the product,
-   `instance: "testing"`, that `recovery_reference`, and the reason. Do not send
-   an `Idempotency-Key` for this reference request. For a legacy original-deploy
-   request, retain its existing exact envelope and original key instead.
-3. Review `proposed_action: "settle_testing_failure"`, `provider_outcome: "present"`,
-   `retry_safe: false` and the returned `recovery_digest`. Send the identical
-   request to `POST /v1/admin/generic-web/deploy-recovery/apply`, adding
-   `expected_recovery_digest` with that digest. Use the same scoped service
-   identity; this action adds no grant. A helper version that does not accept
-   this new action cannot apply it; the native service API is supported.
-   Helper support is tracked in [codex-skills#2395](https://github.com/cbusillo/codex-skills/issues/2395).
-4. Confirm the reservation completed with the failed deployment record, schedules
-   held and no new inventory credit. A lost-response retry of the identical apply
-   replays the saved result without provider work. Changed receipts or runtime
-   evidence require a fresh review.
-
-The original schedule baseline remains in the held receipt. The next deliberate
-deployment uses the existing resume-from-hold path and qualifies before activating
-schedules. Settling the failed operation releases its reservation fence but never
-releases the lifecycle hold.
-
-An ordinary sweep also checks every application testing runtime before skipping
-saved deployment evidence, including legacy false inventory and lanes without inputs.
-Proved stable drift in service image or deployment identity permits one normal
-same-artifact repair bound to the desired artifact, current authority and inputs,
-and starting inventory. The observed drift fingerprint is audit evidence, not a
-new operation identity: a failed repair replays its original result even when its
-own service specification remains installed. A successful repair advances inventory,
-so later drift can receive its own repair. Changed builds, inputs or authority also
-form new intents. Changing task IDs, timestamps or replica churn never mint another repair. Unavailable or pending
-observations wait for the ordinary periodic sweep instead of requesting an immediate
-reconcile loop. Paused or rollback-paused stable drift replays the same repair intent.
-Staff/staging holds and unresolved operations still
+Ordinary sweeps check current application runtime before returning
+`already_deployed`. Positively stable service drift permits one normal
+same-artifact repair bound to existing artifact, authority, managed inputs and
+starting inventory. Pending or unreadable observations wait. Failed repairs
+replay the same operation; successful repairs advance inventory so later drift
+can be repaired again. Explicit settlement and changed authority retain the
+supported continuation rules above. Staff/staging holds and unresolved operations still
 prevent dispatch. Recovery preserves only the original readback-verified receipt
 and never credits current inputs to an earlier attempt. An old operation without
 that receipt can settle, then the next normal sweep repairs its inputs. Removing
 a declaration or binding alone does not delete provider-only values; explicit
 retirement remains the deletion contract. Production, preview and Compose
 delivery paths are unchanged.
-After fixing a transient host failure, an explicit retry of a terminal failed
-generic-web testing deployment remains available through the deployed service's
-`POST /v1/drivers/generic-web/deploy` (`apply_generic_web_deploy`). Use the exact
-verified artifact/source and existing exact-lane deploy authority with a new
-Idempotency-Key for that deliberate retry. Retain that key for uncertain replies;
-an unresolved original target fence still refuses another operation. This does
-not grant access, invoke a provider directly, or use the Odoo-only testing-retry
-control. A repeated automatic sweep alone is not a new retry instruction.
-Reaped task history cannot prove convergence or task failure, but stable exact
-service and application placement reads can still prove drift and permit the
-normal repair. A completed historical rollback can match its healthy original
-baseline only through that baseline's expected artifact and deployment identity.
 Rotating Launchplane's active master encryption key changes the delivery
 fingerprint, so each managed-input testing lane receives one normal repair
 deployment. Before image save, an in-flight attempt refuses changed input

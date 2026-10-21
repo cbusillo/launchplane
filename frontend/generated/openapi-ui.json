@@ -1676,6 +1676,136 @@
         ]
       }
     },
+    "/v1/product-config/testing-hold": {
+      "get": {
+        "operationId": "read_testing_hold",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "product",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "context",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Context",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "instance",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Instance",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read a testing lane's staff-testing hold"
+      }
+    },
     "/v1/product-profiles": {
       "get": {
         "operationId": "list_product_profiles",
@@ -3157,6 +3287,118 @@
         "summary": "Read exact operational enrollment readiness"
       }
     },
+    "/v1/products/{product}/discussion-topics": {
+      "get": {
+        "operationId": "list_discussion_topics",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_closed",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Closed",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DiscussionTopicsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "List Topics"
+      }
+    },
     "/v1/products/{product}/environments": {
       "get": {
         "operationId": "list_product_environments",
@@ -3362,6 +3604,16 @@
               "pattern": "^\\S+$",
               "title": "Environment",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_host_network_capacity",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Host Network Capacity",
+              "type": "boolean"
             }
           },
           {
@@ -4520,86 +4772,6 @@
         "summary": "Read service GitHub delivery selectors and managed binding metadata"
       }
     },
-    "/v1/work-graph/github/issues": {
-      "get": {
-        "operationId": "read_work_graph_issue_inbox",
-        "parameters": [
-          {
-            "in": "header",
-            "name": "Authorization",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Authorization",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "Cookie",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Cookie",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/WorkGraphIssueInboxResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "401": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Unauthorized"
-          },
-          "403": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Forbidden"
-          },
-          "409": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Conflict"
-          },
-          "503": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Service Unavailable"
-          }
-        },
-        "summary": "Read Launchplane GitHub issue inbox"
-      }
-    },
     "/v1/work-graph/merge-train/controller/status": {
       "get": {
         "operationId": "read_merge_train_controller_status",
@@ -4798,86 +4970,6 @@
           }
         },
         "summary": "Read merge train policy targets"
-      }
-    },
-    "/v1/work-graph/snapshot": {
-      "get": {
-        "operationId": "read_work_graph_snapshot",
-        "parameters": [
-          {
-            "in": "header",
-            "name": "Authorization",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Authorization",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "Cookie",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Cookie",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/WorkGraphSnapshotResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "401": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Unauthorized"
-          },
-          "403": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Forbidden"
-          },
-          "409": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Conflict"
-          },
-          "503": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Service Unavailable"
-          }
-        },
-        "summary": "Read Launchplane work graph snapshot"
       }
     },
     "/v1/work-graph/tenant-admission/evaluation": {
@@ -6063,6 +6155,197 @@
         "tags": [
           "privileged-operations"
         ]
+      }
+    },
+    "/v1/product-config/testing-hold/apply": {
+      "post": {
+        "operationId": "apply_testing_hold",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "activation_plan_sha256": {
+                    "default": "",
+                    "pattern": "^(?:[a-f0-9]{64})?$",
+                    "title": "Activation Plan Sha256",
+                    "type": "string"
+                  },
+                  "context": {
+                    "title": "Context",
+                    "type": "string"
+                  },
+                  "hold": {
+                    "title": "Hold",
+                    "type": "boolean"
+                  },
+                  "instance": {
+                    "title": "Instance",
+                    "type": "string"
+                  },
+                  "mode": {
+                    "default": "dry-run",
+                    "enum": [
+                      "dry-run",
+                      "apply"
+                    ],
+                    "title": "Mode",
+                    "type": "string"
+                  },
+                  "product": {
+                    "title": "Product",
+                    "type": "string"
+                  },
+                  "purpose": {
+                    "default": "staff_testing",
+                    "enum": [
+                      "staff_testing",
+                      "isolation_staging"
+                    ],
+                    "title": "Purpose",
+                    "type": "string"
+                  },
+                  "reason": {
+                    "title": "Reason",
+                    "type": "string"
+                  },
+                  "rehearsal": {
+                    "default": false,
+                    "title": "Rehearsal",
+                    "type": "boolean"
+                  },
+                  "reviewed_plan_sha256": {
+                    "default": "",
+                    "title": "Reviewed Plan Sha256",
+                    "type": "string"
+                  },
+                  "schema_version": {
+                    "const": 1,
+                    "default": 1,
+                    "title": "Schema Version",
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "product",
+                  "context",
+                  "instance",
+                  "hold",
+                  "reason"
+                ],
+                "title": "TestingHoldApplyRequest",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Content Too Large"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Dry-run or apply a testing lane's staff-testing hold"
       }
     },
     "/v1/product-profiles/expected-config/apply": {
@@ -9596,106 +9879,6 @@
         },
         "summary": "Disable individually selected obsolete service GITHUB_TOKEN records"
       }
-    },
-    "/v1/work-graph/rank": {
-      "post": {
-        "operationId": "rank_work_graph_snapshot",
-        "parameters": [
-          {
-            "in": "header",
-            "name": "Authorization",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Authorization",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "Cookie",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Cookie",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/WorkGraphRankEnvelope"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "202": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/WorkGraphRankResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "400": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Bad Request"
-          },
-          "401": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Unauthorized"
-          },
-          "403": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Forbidden"
-          },
-          "409": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Conflict"
-          },
-          "503": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Service Unavailable"
-          }
-        },
-        "summary": "Rank Launchplane work graph snapshot"
-      }
     }
   },
   "components": {
@@ -11761,6 +11944,27 @@
           "run_status"
         ]
       },
+      "BridgeNetworkCapacity": {
+        "additionalProperties": false,
+        "properties": {
+          "free_slots": {
+            "minimum": 0,
+            "title": "Free Slots",
+            "type": "integer"
+          },
+          "total_slots": {
+            "minimum": 0,
+            "title": "Total Slots",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "free_slots",
+          "total_slots"
+        ],
+        "title": "BridgeNetworkCapacity",
+        "type": "object"
+      },
       "BrowserRouteRepairRequest": {
         "additionalProperties": false,
         "properties": {
@@ -12733,6 +12937,99 @@
           "wait_for_completion"
         ],
         "title": "DeploymentRecord",
+        "type": "object"
+      },
+      "DiscussionTopicRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "added_at": {
+            "title": "Added At",
+            "type": "string"
+          },
+          "closed_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Closed At"
+          },
+          "issue_url": {
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "Issue Url",
+            "type": "string"
+          },
+          "product": {
+            "minLength": 1,
+            "title": "Product",
+            "type": "string"
+          },
+          "title": {
+            "maxLength": 240,
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          },
+          "topic_id": {
+            "maxLength": 96,
+            "minLength": 1,
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$",
+            "title": "Topic Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "added_at",
+          "closed_at",
+          "issue_url",
+          "product",
+          "title",
+          "topic_id"
+        ],
+        "title": "DiscussionTopicRecord",
+        "type": "object"
+      },
+      "DiscussionTopicsResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "topics": {
+            "items": {
+              "$ref": "#/components/schemas/DiscussionTopicRecord"
+            },
+            "title": "Topics",
+            "type": "array"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "display_name",
+          "product",
+          "status",
+          "topics",
+          "trace_id"
+        ],
+        "title": "DiscussionTopicsResponse",
         "type": "object"
       },
       "DokployDomainRepairReview": {
@@ -15253,197 +15550,6 @@
         "title": "GitHubHumanIdentityResponse",
         "type": "object"
       },
-      "GitHubIssueInboxIssue": {
-        "additionalProperties": false,
-        "properties": {
-          "author": {
-            "default": "",
-            "title": "Author",
-            "type": "string"
-          },
-          "created_at": {
-            "default": "",
-            "title": "Created At",
-            "type": "string"
-          },
-          "key": {
-            "title": "Key",
-            "type": "string"
-          },
-          "labels": {
-            "default": [],
-            "items": {
-              "type": "string"
-            },
-            "title": "Labels",
-            "type": "array"
-          },
-          "number": {
-            "minimum": 1,
-            "title": "Number",
-            "type": "integer"
-          },
-          "present_in_project": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Present In Project"
-          },
-          "project_status": {
-            "default": "unconfigured",
-            "enum": [
-              "present",
-              "missing",
-              "stale",
-              "closed",
-              "unconfigured"
-            ],
-            "title": "Project Status",
-            "type": "string"
-          },
-          "repository": {
-            "title": "Repository",
-            "type": "string"
-          },
-          "state": {
-            "default": "open",
-            "title": "State",
-            "type": "string"
-          },
-          "title": {
-            "default": "",
-            "title": "Title",
-            "type": "string"
-          },
-          "updated_at": {
-            "default": "",
-            "title": "Updated At",
-            "type": "string"
-          },
-          "url": {
-            "default": "",
-            "title": "Url",
-            "type": "string"
-          }
-        },
-        "required": [
-          "author",
-          "created_at",
-          "key",
-          "labels",
-          "number",
-          "present_in_project",
-          "project_status",
-          "repository",
-          "state",
-          "title",
-          "updated_at",
-          "url"
-        ],
-        "title": "GitHubIssueInboxIssue",
-        "type": "object"
-      },
-      "GitHubIssueInboxReadModel": {
-        "additionalProperties": false,
-        "properties": {
-          "generated_at": {
-            "title": "Generated At",
-            "type": "string"
-          },
-          "issue_count": {
-            "minimum": 0,
-            "title": "Issue Count",
-            "type": "integer"
-          },
-          "project_configured": {
-            "default": false,
-            "title": "Project Configured",
-            "type": "boolean"
-          },
-          "repositories": {
-            "default": [],
-            "items": {
-              "$ref": "#/components/schemas/GitHubIssueInboxRepositoryGroup"
-            },
-            "title": "Repositories",
-            "type": "array"
-          },
-          "repository_count": {
-            "minimum": 0,
-            "title": "Repository Count",
-            "type": "integer"
-          },
-          "schema_version": {
-            "default": 1,
-            "minimum": 1,
-            "title": "Schema Version",
-            "type": "integer"
-          },
-          "stale_project_item_count": {
-            "default": 0,
-            "minimum": 0,
-            "title": "Stale Project Item Count",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "generated_at",
-          "issue_count",
-          "project_configured",
-          "repositories",
-          "repository_count",
-          "schema_version",
-          "stale_project_item_count"
-        ],
-        "title": "GitHubIssueInboxReadModel",
-        "type": "object"
-      },
-      "GitHubIssueInboxRepositoryGroup": {
-        "additionalProperties": false,
-        "properties": {
-          "issue_count": {
-            "minimum": 0,
-            "title": "Issue Count",
-            "type": "integer"
-          },
-          "issues": {
-            "default": [],
-            "items": {
-              "$ref": "#/components/schemas/GitHubIssueInboxIssue"
-            },
-            "title": "Issues",
-            "type": "array"
-          },
-          "missing_from_project_count": {
-            "minimum": 0,
-            "title": "Missing From Project Count",
-            "type": "integer"
-          },
-          "present_in_project_count": {
-            "minimum": 0,
-            "title": "Present In Project Count",
-            "type": "integer"
-          },
-          "repository": {
-            "title": "Repository",
-            "type": "string"
-          }
-        },
-        "required": [
-          "issue_count",
-          "issues",
-          "missing_from_project_count",
-          "present_in_project_count",
-          "repository"
-        ],
-        "title": "GitHubIssueInboxRepositoryGroup",
-        "type": "object"
-      },
       "GovernanceAdvisoryObservation": {
         "additionalProperties": false,
         "properties": {
@@ -15998,6 +16104,66 @@
           "urls",
           "verified"
         ]
+      },
+      "HostNetworkCapacityObservation": {
+        "additionalProperties": false,
+        "properties": {
+          "capacity": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BridgeNetworkCapacity"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "observed_at": {
+            "title": "Observed At",
+            "type": "string"
+          },
+          "reason": {
+            "default": "",
+            "title": "Reason",
+            "type": "string"
+          },
+          "required_networks": {
+            "minimum": 1,
+            "title": "Required Networks",
+            "type": "integer"
+          },
+          "safety_margin": {
+            "minimum": 0,
+            "title": "Safety Margin",
+            "type": "integer"
+          },
+          "server_id": {
+            "default": "",
+            "title": "Server Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "available",
+              "short",
+              "unavailable",
+              "denied"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "capacity",
+          "observed_at",
+          "reason",
+          "required_networks",
+          "safety_margin",
+          "server_id",
+          "status"
+        ],
+        "title": "HostNetworkCapacityObservation",
+        "type": "object"
       },
       "IntegrationKeyReadbackEvidence": {
         "additionalProperties": false,
@@ -26097,6 +26263,12 @@
             "title": "Preview Label",
             "type": "string"
           },
+          "reconciliation_receipt_id": {
+            "default": "",
+            "title": "Reconciliation Receipt Id",
+            "type": "string",
+            "x-launchplane-optional-response": true
+          },
           "schema_version": {
             "default": 1,
             "minimum": 1,
@@ -29294,6 +29466,21 @@
           "environment": {
             "$ref": "#/components/schemas/ProductEnvironmentDetail"
           },
+          "host_network_capacity": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HostNetworkCapacityObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "host_network_capacity_available": {
+            "default": false,
+            "title": "Host Network Capacity Available",
+            "type": "boolean"
+          },
           "status": {
             "const": "ok",
             "default": "ok",
@@ -29307,6 +29494,8 @@
         },
         "required": [
           "environment",
+          "host_network_capacity",
+          "host_network_capacity_available",
           "status",
           "trace_id"
         ],
@@ -29755,6 +29944,17 @@
             "default": "",
             "title": "Summary",
             "type": "string"
+          },
+          "sync": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SyncCycleHealthEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
           },
           "trust_state": {
             "default": "missing",
@@ -40350,6 +40550,154 @@
           "version"
         ]
       },
+      "SyncCycleHealth": {
+        "additionalProperties": false,
+        "properties": {
+          "cycle_finished_at": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cycle Finished At"
+          },
+          "cycle_id": {
+            "anyOf": [
+              {
+                "maxLength": 36,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cycle Id"
+          },
+          "cycle_started_at": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cycle Started At"
+          },
+          "freshness_status": {
+            "enum": [
+              "unknown",
+              "unavailable",
+              "fresh",
+              "stale",
+              "overdue",
+              "failed"
+            ],
+            "title": "Freshness Status",
+            "type": "string"
+          },
+          "is_stale": {
+            "title": "Is Stale",
+            "type": "boolean"
+          },
+          "last_heartbeat": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Heartbeat"
+          },
+          "mode": {
+            "anyOf": [
+              {
+                "enum": [
+                  "full",
+                  "incremental"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mode"
+          },
+          "next_cycle_overdue": {
+            "title": "Next Cycle Overdue",
+            "type": "boolean"
+          },
+          "stale_threshold_seconds": {
+            "minimum": 0,
+            "title": "Stale Threshold Seconds",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "idle",
+              "running",
+              "success",
+              "failed",
+              "unknown",
+              "unavailable"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "cycle_finished_at",
+          "cycle_id",
+          "cycle_started_at",
+          "freshness_status",
+          "is_stale",
+          "last_heartbeat",
+          "mode",
+          "next_cycle_overdue",
+          "stale_threshold_seconds",
+          "status"
+        ],
+        "title": "SyncCycleHealth",
+        "type": "object"
+      },
+      "SyncCycleHealthEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "cycle": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SyncCycleHealth"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "enum": [
+              "recorded",
+              "malformed"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "cycle",
+          "status"
+        ],
+        "title": "SyncCycleHealthEvidence",
+        "type": "object"
+      },
       "TenantAdmissionControllerRunOnceResult": {
         "additionalProperties": false,
         "properties": {
@@ -41641,608 +41989,6 @@
           "warmed_request_ms"
         ],
         "title": "WebSlotReadiness",
-        "type": "object"
-      },
-      "WorkGraphIssueInboxResponse": {
-        "additionalProperties": false,
-        "properties": {
-          "configured": {
-            "title": "Configured",
-            "type": "boolean"
-          },
-          "inbox": {
-            "$ref": "#/components/schemas/GitHubIssueInboxReadModel"
-          },
-          "status": {
-            "const": "ok",
-            "default": "ok",
-            "title": "Status",
-            "type": "string"
-          },
-          "trace_id": {
-            "title": "Trace Id",
-            "type": "string"
-          }
-        },
-        "required": [
-          "configured",
-          "inbox",
-          "status",
-          "trace_id"
-        ],
-        "title": "WorkGraphIssueInboxResponse",
-        "type": "object"
-      },
-      "WorkGraphIssueSnapshot": {
-        "additionalProperties": false,
-        "properties": {
-          "blocked_by": {
-            "default": 0,
-            "minimum": 0,
-            "title": "Blocked By",
-            "type": "integer"
-          },
-          "blocking": {
-            "default": 0,
-            "minimum": 0,
-            "title": "Blocking",
-            "type": "integer"
-          },
-          "check_state": {
-            "default": "unknown",
-            "enum": [
-              "success",
-              "pending",
-              "failure",
-              "unknown"
-            ],
-            "title": "Check State",
-            "type": "string"
-          },
-          "deploy_state": {
-            "default": "unknown",
-            "enum": [
-              "success",
-              "pending",
-              "failure",
-              "unknown"
-            ],
-            "title": "Deploy State",
-            "type": "string"
-          },
-          "finish_line": {
-            "default": "",
-            "title": "Finish Line",
-            "type": "string"
-          },
-          "focus": {
-            "default": "Unknown",
-            "enum": [
-              "Now",
-              "Next",
-              "Waiting",
-              "Later",
-              "Done",
-              "Unknown"
-            ],
-            "title": "Focus",
-            "type": "string"
-          },
-          "is_pull_request": {
-            "default": false,
-            "title": "Is Pull Request",
-            "type": "boolean"
-          },
-          "labels": {
-            "default": [],
-            "items": {
-              "type": "string"
-            },
-            "title": "Labels",
-            "type": "array"
-          },
-          "manager": {
-            "default": "",
-            "title": "Manager",
-            "type": "string"
-          },
-          "number": {
-            "minimum": 1,
-            "title": "Number",
-            "type": "integer"
-          },
-          "repository": {
-            "title": "Repository",
-            "type": "string"
-          },
-          "state": {
-            "default": "open",
-            "enum": [
-              "open",
-              "closed"
-            ],
-            "title": "State",
-            "type": "string"
-          },
-          "subissues_completed": {
-            "default": 0,
-            "minimum": 0,
-            "title": "Subissues Completed",
-            "type": "integer"
-          },
-          "subissues_total": {
-            "default": 0,
-            "minimum": 0,
-            "title": "Subissues Total",
-            "type": "integer"
-          },
-          "title": {
-            "title": "Title",
-            "type": "string"
-          },
-          "updated_at": {
-            "default": "",
-            "title": "Updated At",
-            "type": "string"
-          },
-          "url": {
-            "title": "Url",
-            "type": "string"
-          }
-        },
-        "required": [
-          "blocked_by",
-          "blocking",
-          "check_state",
-          "deploy_state",
-          "finish_line",
-          "focus",
-          "is_pull_request",
-          "labels",
-          "manager",
-          "number",
-          "repository",
-          "state",
-          "subissues_completed",
-          "subissues_total",
-          "title",
-          "updated_at",
-          "url"
-        ],
-        "title": "WorkGraphIssueSnapshot",
-        "type": "object"
-      },
-      "WorkGraphQueue": {
-        "additionalProperties": false,
-        "properties": {
-          "generated_at": {
-            "title": "Generated At",
-            "type": "string"
-          },
-          "hidden_count": {
-            "default": 0,
-            "minimum": 0,
-            "title": "Hidden Count",
-            "type": "integer"
-          },
-          "items": {
-            "items": {
-              "$ref": "#/components/schemas/WorkGraphQueueItem"
-            },
-            "title": "Items",
-            "type": "array"
-          },
-          "schema_version": {
-            "default": 1,
-            "minimum": 1,
-            "title": "Schema Version",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "generated_at",
-          "hidden_count",
-          "items",
-          "schema_version"
-        ],
-        "title": "WorkGraphQueue",
-        "type": "object"
-      },
-      "WorkGraphQueueEvidence": {
-        "additionalProperties": false,
-        "properties": {
-          "code": {
-            "title": "Code",
-            "type": "string"
-          },
-          "detail": {
-            "title": "Detail",
-            "type": "string"
-          },
-          "source_url": {
-            "default": "",
-            "title": "Source Url",
-            "type": "string"
-          },
-          "state": {
-            "enum": [
-              "verified",
-              "recorded",
-              "stale",
-              "missing",
-              "unsupported"
-            ],
-            "title": "State",
-            "type": "string"
-          }
-        },
-        "required": [
-          "code",
-          "detail",
-          "source_url",
-          "state"
-        ],
-        "title": "WorkGraphQueueEvidence",
-        "type": "object"
-      },
-      "WorkGraphQueueItem": {
-        "additionalProperties": false,
-        "properties": {
-          "blocked_by_count": {
-            "default": 0,
-            "minimum": 0,
-            "title": "Blocked By Count",
-            "type": "integer"
-          },
-          "evidence": {
-            "default": [],
-            "items": {
-              "$ref": "#/components/schemas/WorkGraphQueueEvidence"
-            },
-            "title": "Evidence",
-            "type": "array"
-          },
-          "finish_line": {
-            "default": "",
-            "title": "Finish Line",
-            "type": "string"
-          },
-          "focus": {
-            "enum": [
-              "Now",
-              "Next",
-              "Waiting",
-              "Later",
-              "Done",
-              "Unknown"
-            ],
-            "title": "Focus",
-            "type": "string"
-          },
-          "handoff_url": {
-            "default": "",
-            "title": "Handoff Url",
-            "type": "string"
-          },
-          "manager": {
-            "default": "",
-            "title": "Manager",
-            "type": "string"
-          },
-          "next_action": {
-            "title": "Next Action",
-            "type": "string"
-          },
-          "number": {
-            "title": "Number",
-            "type": "integer"
-          },
-          "product": {
-            "default": "",
-            "title": "Product",
-            "type": "string"
-          },
-          "product_display_name": {
-            "default": "",
-            "title": "Product Display Name",
-            "type": "string"
-          },
-          "reasons": {
-            "items": {
-              "$ref": "#/components/schemas/WorkGraphRecommendationReason"
-            },
-            "title": "Reasons",
-            "type": "array"
-          },
-          "recommendation": {
-            "enum": [
-              "quick_win",
-              "deep_work",
-              "switch_projects",
-              "blocked_cleanup",
-              "attention_needed",
-              "watch"
-            ],
-            "title": "Recommendation",
-            "type": "string"
-          },
-          "repo_classification": {
-            "enum": [
-              "managed_runtime",
-              "active_awareness",
-              "support_dependency",
-              "out_of_scope"
-            ],
-            "title": "Repo Classification",
-            "type": "string"
-          },
-          "repository": {
-            "title": "Repository",
-            "type": "string"
-          },
-          "safe_to_start": {
-            "title": "Safe To Start",
-            "type": "boolean"
-          },
-          "score": {
-            "title": "Score",
-            "type": "integer"
-          },
-          "source_of_truth_url": {
-            "title": "Source Of Truth Url",
-            "type": "string"
-          },
-          "state": {
-            "enum": [
-              "ready",
-              "waiting",
-              "blocked",
-              "done",
-              "hidden"
-            ],
-            "title": "State",
-            "type": "string"
-          },
-          "title": {
-            "title": "Title",
-            "type": "string"
-          },
-          "updated_at": {
-            "default": "",
-            "title": "Updated At",
-            "type": "string"
-          },
-          "url": {
-            "title": "Url",
-            "type": "string"
-          },
-          "why_now": {
-            "title": "Why Now",
-            "type": "string"
-          }
-        },
-        "required": [
-          "blocked_by_count",
-          "evidence",
-          "finish_line",
-          "focus",
-          "handoff_url",
-          "manager",
-          "next_action",
-          "number",
-          "product",
-          "product_display_name",
-          "reasons",
-          "recommendation",
-          "repo_classification",
-          "repository",
-          "safe_to_start",
-          "score",
-          "source_of_truth_url",
-          "state",
-          "title",
-          "updated_at",
-          "url",
-          "why_now"
-        ],
-        "title": "WorkGraphQueueItem",
-        "type": "object"
-      },
-      "WorkGraphRankEnvelope": {
-        "additionalProperties": false,
-        "properties": {
-          "limit": {
-            "default": 25,
-            "maximum": 100,
-            "minimum": 1,
-            "title": "Limit",
-            "type": "integer"
-          },
-          "schema_version": {
-            "default": 1,
-            "minimum": 1,
-            "title": "Schema Version",
-            "type": "integer"
-          },
-          "snapshot": {
-            "$ref": "#/components/schemas/WorkGraphSnapshot"
-          }
-        },
-        "required": [
-          "snapshot"
-        ],
-        "title": "WorkGraphRankEnvelope",
-        "type": "object"
-      },
-      "WorkGraphRankResponse": {
-        "additionalProperties": false,
-        "properties": {
-          "records": {
-            "additionalProperties": {
-              "type": "string"
-            },
-            "title": "Records",
-            "type": "object"
-          },
-          "result": {
-            "$ref": "#/components/schemas/WorkGraphRankResult"
-          },
-          "status": {
-            "const": "accepted",
-            "default": "accepted",
-            "title": "Status",
-            "type": "string"
-          },
-          "trace_id": {
-            "title": "Trace Id",
-            "type": "string"
-          }
-        },
-        "required": [
-          "records",
-          "result",
-          "status",
-          "trace_id"
-        ],
-        "title": "WorkGraphRankResponse",
-        "type": "object"
-      },
-      "WorkGraphRankResult": {
-        "additionalProperties": false,
-        "properties": {
-          "queue": {
-            "$ref": "#/components/schemas/WorkGraphQueue"
-          }
-        },
-        "required": [
-          "queue"
-        ],
-        "title": "WorkGraphRankResult",
-        "type": "object"
-      },
-      "WorkGraphRecommendationReason": {
-        "additionalProperties": false,
-        "properties": {
-          "code": {
-            "title": "Code",
-            "type": "string"
-          },
-          "detail": {
-            "title": "Detail",
-            "type": "string"
-          }
-        },
-        "required": [
-          "code",
-          "detail"
-        ],
-        "title": "WorkGraphRecommendationReason",
-        "type": "object"
-      },
-      "WorkGraphRepoSnapshot": {
-        "additionalProperties": false,
-        "properties": {
-          "classification": {
-            "enum": [
-              "managed_runtime",
-              "active_awareness",
-              "support_dependency",
-              "out_of_scope"
-            ],
-            "title": "Classification",
-            "type": "string"
-          },
-          "display_name": {
-            "default": "",
-            "title": "Display Name",
-            "type": "string"
-          },
-          "product": {
-            "default": "",
-            "title": "Product",
-            "type": "string"
-          },
-          "repository": {
-            "title": "Repository",
-            "type": "string"
-          }
-        },
-        "required": [
-          "classification",
-          "display_name",
-          "product",
-          "repository"
-        ],
-        "title": "WorkGraphRepoSnapshot",
-        "type": "object"
-      },
-      "WorkGraphSnapshot": {
-        "additionalProperties": false,
-        "properties": {
-          "generated_at": {
-            "title": "Generated At",
-            "type": "string"
-          },
-          "issues": {
-            "items": {
-              "$ref": "#/components/schemas/WorkGraphIssueSnapshot"
-            },
-            "title": "Issues",
-            "type": "array"
-          },
-          "repos": {
-            "default": [],
-            "items": {
-              "$ref": "#/components/schemas/WorkGraphRepoSnapshot"
-            },
-            "title": "Repos",
-            "type": "array"
-          },
-          "schema_version": {
-            "default": 1,
-            "minimum": 1,
-            "title": "Schema Version",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "generated_at",
-          "issues",
-          "repos",
-          "schema_version"
-        ],
-        "title": "WorkGraphSnapshot",
-        "type": "object"
-      },
-      "WorkGraphSnapshotResponse": {
-        "additionalProperties": false,
-        "properties": {
-          "snapshot": {
-            "$ref": "#/components/schemas/WorkGraphSnapshot"
-          },
-          "source": {
-            "additionalProperties": true,
-            "title": "Source",
-            "type": "object"
-          },
-          "status": {
-            "const": "ok",
-            "default": "ok",
-            "title": "Status",
-            "type": "string"
-          },
-          "trace_id": {
-            "title": "Trace Id",
-            "type": "string"
-          }
-        },
-        "required": [
-          "snapshot",
-          "source",
-          "status",
-          "trace_id"
-        ],
-        "title": "WorkGraphSnapshotResponse",
         "type": "object"
       },
       "WriterObservation": {

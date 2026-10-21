@@ -169,7 +169,6 @@ class RunnerLaneInventoryCliTests(unittest.TestCase):
             result = CliRunner().invoke(
                 CLI_MAIN,
                 [
-                    "work-graph",
                     "runner-inventory",
                     "--repository",
                     "cbusillo/repo",
@@ -186,7 +185,7 @@ class RunnerLaneInventoryCliTests(unittest.TestCase):
         with patch.dict("os.environ", {}, clear=True):
             result = CliRunner().invoke(
                 CLI_MAIN,
-                ["work-graph", "runner-inventory", "--repository", "cbusillo/repo"],
+                ["runner-inventory", "--repository", "cbusillo/repo"],
             )
 
         self.assertNotEqual(result.exit_code, 0)

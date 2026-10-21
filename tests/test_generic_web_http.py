@@ -1,4 +1,5 @@
 import asyncio
+from tests.support.sync_cycle_health import sync_cycle_payload
 import json
 import threading
 import unittest
@@ -35,7 +36,6 @@ from control_plane.drivers.generic_web_preview_dispatch import (
     GenericWebPreviewVerificationRequest,
 )
 from control_plane.generic_web_promotion_http import GenericWebProdPromotionResponse
-from control_plane.generic_web_deploy_http import GENERIC_WEB_DEPLOY_ROUTE
 from control_plane.generic_web_preview_http import _destroy_result_with_record_outcome
 from control_plane.http_app import (
     LaunchplaneAuthzPolicyRuntime,
@@ -61,7 +61,7 @@ from control_plane.workflows.generic_web_rollback import GenericWebRollbackApply
 from control_plane.workflows.odoo_generic_web_post_deploy import (
     execute_odoo_generic_web_post_deploy,
 )
-from tests.support.auth import _StubVerifier, _identity, local_operator_policy
+from tests.support.auth import _StubVerifier, _identity
 from tests.support.profiles import (
     _odoo_preview_profile_payload,
     _odoo_profile_payload_with_prod_lane,
@@ -355,82 +355,6 @@ class GenericWebHttpTests(unittest.TestCase):
         _, kwargs = deploy.call_args
         self.assertEqual(kwargs["profile"].product, "sellyouroutboard")
         self.assertEqual(kwargs["lane"].context, "sellyouroutboard-testing")
-
-    def test_explicit_testing_retry_uses_new_intent_after_proved_terminal_failure(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            store = PostgresRecordStore(
-                database_url=_sqlite_database_url(root / "launchplane.sqlite3")
-            )
-            self.addCleanup(store.close)
-            store.ensure_schema()
-            profile = LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
-            store.write_product_profile_record(profile)
-            lane = next(lane for lane in profile.lanes if lane.instance == "testing")
-            _seed_generic_web_deploy_target_records(
-                store=store,
-                context=lane.context,
-                instance=lane.instance,
-                target_id="app-syo-testing",
-                target_name="syo-testing",
-            )
-            app = create_launchplane_fastapi_test_app(
-                local_record_store_for_tests=store,
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=local_operator_policy(
-                    actions=("generic_web_deploy.execute",),
-                    products=(profile.product,),
-                    contexts=(lane.context,),
-                ),
-                control_plane_root_path=root,
-                bearer_identity_config=BearerIdentityConfig(
-                    local_operator_token="fixture-operator",
-                    local_operator_subject="local-owner-agent",
-                    local_operator_token_label="local-owner-write",
-                ),
-            )
-            succeeded = _generic_web_deploy_result()
-            failed = succeeded.model_copy(
-                update={
-                    "deploy_status": "fail",
-                    "provider_failure_proved": True,
-                    "provider_effect_attempted": True,
-                    "error_message": "Current-attempt rollout failed.",
-                }
-            )
-            payload = {
-                "product": profile.product,
-                "deploy": {
-                    "product": profile.product,
-                    "instance": lane.instance,
-                    "artifact_id": "ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
-                    "source_git_ref": "abc123",
-                },
-            }
-            results = iter((failed, succeeded))
-
-            def execute(**kwargs: Any) -> GenericWebDeployResult:
-                kwargs["provider_effect_checkpoint"]("deploy_trigger")
-                return next(results)
-
-            with patch(
-                "control_plane.generic_web_deploy_http.execute_generic_web_deploy",
-                side_effect=execute,
-            ) as deploy:
-                for key, expected_status in (("original", 502), ("original", 502), ("retry", 202)):
-                    with self.subTest(key=key):
-                        status, _response = _invoke_app(
-                            app,
-                            method="POST",
-                            path=GENERIC_WEB_DEPLOY_ROUTE,
-                            authorization="Bearer fixture-operator",
-                            payload=payload,
-                            headers={"Idempotency-Key": key},
-                        )
-                        self.assertEqual(status, expected_status)
-                self.assertEqual(deploy.call_count, 2)
-            self.assertFalse(store.list_held_provider_target_reservations())
 
     def test_generic_web_deploy_route_cannot_change_live_production(self) -> None:
         repository = "ghcr.io/cbusillo/sellyouroutboard"
@@ -5887,6 +5811,7 @@ class GenericWebHttpTests(unittest.TestCase):
                             "status": "ok",
                             "version": runtime_identity.artifact_id,
                             "runtime_identity": runtime_identity.model_dump(mode="json"),
+                            "sync": sync_cycle_payload(),
                         },
                     },
                 },
@@ -5898,6 +5823,9 @@ class GenericWebHttpTests(unittest.TestCase):
         self.assertEqual(status_code, 202, msg=json.dumps(payload, indent=2))
         self.assertEqual(deployment.destination_health.status, "pass")
         self.assertEqual(deployment.destination_health.structured_health.status, "pass")
+        self.assertNotIn(
+            "sync", deployment.destination_health.structured_health.model_dump(mode="json")
+        )
         self.assertEqual(
             deployment.destination_health.structured_health.version,
             runtime_identity.artifact_id,

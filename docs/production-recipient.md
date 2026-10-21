@@ -424,6 +424,11 @@ survive. Any changed owned row refuses the whole inverse; no shared guest is
 restored and no data volume is deleted. Backup history receives a new inverse
 revision rather than being rewritten. The release worker and reviewed recovery
 path retain both recipients when a deploy or writer outcome remains uncertain.
+The worker inverse checks release authority before dispatching its replacement
+writer pause. After that pause is dispatched, the running operation finishes its
+bound restore or abort cleanup under its lease and owned-row checks; a later
+release hold does not leave both writer sets paused. This does not change the
+acceptance requirement on a separate release-recovery Apply request.
 `--release-recovery` reviews and resumes an existing Client release step with its
 original decision, kind and attempt. Planning returns the existing original
 idempotency key; apply takes it from the saved review rather than minting a key. It cannot invent a

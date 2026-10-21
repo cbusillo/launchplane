@@ -341,6 +341,65 @@ def _patched_apply_inputs_runtime(*, dokploy_side_effect: object) -> Iterator[No
 
 
 class OdooPreviewDokployDryRunTests(unittest.TestCase):
+    def test_fresh_preview_provider_read_denial_propagates_before_any_effect(self) -> None:
+        from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
+
+        plan = build_odoo_preview_dokploy_dry_run(
+            request=OdooPreviewDokployDryRunRequest(
+                runtime_plan=_runtime_plan(),
+                environment_id="preview-environment",
+                template_compose_id="template",
+            )
+        )
+        checkpoint = Mock()
+        refusal = NativeSourceAuthorizationDenied("Fixture provider denial")
+        with (
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
+                return_value=("https://provider.invalid", "fixture"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.dokploy_api.fetch_dokploy_target_payload",
+                return_value={"serverId": "preview-server"},
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime._find_compose_id_by_environment_and_name",
+                return_value="",
+            ),
+            patch(
+                "control_plane.dokploy.network_capacity.read_bridge_network_capacity",
+                side_effect=refusal,
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.dokploy_api.dokploy_request"
+            ) as mutate,
+        ):
+            with self.assertRaises(NativeSourceAuthorizationDenied) as denied:
+                execute_odoo_preview_dokploy_apply(
+                    control_plane_root=Path("."),
+                    request=OdooPreviewDokployApplyRequest(
+                        dry_run_plan=plan,
+                        image_reference="ghcr.io/example/site@sha256:" + "a" * 64,
+                        environment_values=_environment_values(),
+                        wait_for_deploy=False,
+                        smoke_check=False,
+                    ),
+                    provider_effect_checkpoint=checkpoint,
+                )
+            self.assertIs(denied.exception, refusal)
+            checkpoint.assert_not_called()
+            mutate.assert_not_called()
+
+    def setUp(self) -> None:
+        from control_plane.contracts.host_network_capacity import BridgeNetworkCapacity
+
+        self.enterContext(
+            patch(
+                "control_plane.dokploy.network_capacity.read_bridge_network_capacity",
+                return_value=BridgeNetworkCapacity(total_slots=16, free_slots=16),
+            )
+        )
+
     def test_apply_rejects_timeout_beyond_destroy_supersession_bound(self) -> None:
         dry_run = build_odoo_preview_dokploy_dry_run(
             request=OdooPreviewDokployDryRunRequest(

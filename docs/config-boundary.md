@@ -111,11 +111,11 @@ through managed secret records scoped to Launchplane/Every Code. Do not add a
 service-host env var or checked-in file containing the webhook URL, channel, or
 real destination authority.
 
-The work graph no longer consumes a GitHub Project or issue-inbox environment
-bundle ([Q543](https://github.com/cbusillo/launchplane/issues/2436#issuecomment-6273441298)).
+The removed chooser no longer consumes a GitHub Project or issue-inbox
+environment bundle ([Q545](https://github.com/cbusillo/launchplane/issues/2436#issuecomment-6274378052)).
 Self-deploy removes the former source settings and `GH_TOKEN` from the service
-target environment. These retired keys are accepted for removal only. Existing
-product/work-request records still supply Engineering > Work graph.
+target environment. These retired keys are accepted for removal only; this
+cleanup does not activate a Project, inbox or chooser provider.
 
 
 ### DB Authoritative

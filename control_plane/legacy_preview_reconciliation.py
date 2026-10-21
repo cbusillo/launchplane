@@ -1,6 +1,8 @@
 """Reviewed reconciliation of one legacy preview after complete provider absence proof."""
 
 from dataclasses import dataclass
+from contextlib import contextmanager, ExitStack
+from collections.abc import Iterator
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Literal
@@ -17,14 +19,23 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.contracts.product_retirement import canonical_sha256
 from control_plane.dokploy import api as dokploy_api, source as dokploy_source
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.drivers.registry import product_profile_uses_odoo_driver
+from control_plane.contracts.preview_execution import (
+    odoo_preview_reconciliation_key,
+    odoo_preview_target_key,
+    preview_execution_lock_name,
+)
+from control_plane.legacy_preview_completion import (
+    LEGACY_PREVIEW_RECONCILIATION_ROUTE as LEGACY_PREVIEW_RECONCILIATION_ROUTE,
+)
+from control_plane.legacy_odoo_preview import _repository_matches
+from control_plane.workflows.launchplane import generate_preview_id
 from control_plane.workflows.generic_web_preview import (
     effective_preview_app_name_prefix,
     preview_application_name,
     resolve_generic_web_preview_slug,
     serialize_generic_web_preview_operation,
 )
-
-LEGACY_PREVIEW_RECONCILIATION_ROUTE = "/v1/previews/legacy-generic-web/reconciliation"
 
 
 class LegacyPreviewReconciliationRequest(BaseModel):
@@ -68,6 +79,9 @@ class LegacyPreviewAuthority:
     digest: str
     known_other_target_ids: frozenset[str]
     preview_target_ids: frozenset[str]
+    known_other_application_ids: frozenset[str] = frozenset()
+    sibling_target_names: tuple[tuple[str, str], ...] = ()
+    sibling_receipt_ids: tuple[str, ...] = ()
 
 
 def bind_legacy_preview(
@@ -76,6 +90,35 @@ def bind_legacy_preview(
     *,
     allow_tracked: bool = False,
 ) -> LegacyPreviewAuthority:
+    if allow_tracked and product_profile_uses_odoo_driver(
+        store.read_product_profile_record(request.product)
+    ):
+        raise ValueError("Integrated product retirement requires generic-web previews.")
+    with serialize_legacy_preview_operation(store, request):
+        return _bind_legacy_preview(store, request, allow_tracked=allow_tracked)
+
+
+def _preview_name(profile: LaunchplaneProductProfileRecord, slug: str) -> str:
+    return preview_application_name(
+        app_name_prefix=effective_preview_app_name_prefix(profile=profile), preview_slug=slug
+    )
+
+
+def _odoo_lock_name(profile: LaunchplaneProductProfileRecord, slug: str) -> str:
+    return preview_execution_lock_name(
+        odoo_preview_target_key(
+            context=profile.preview.context, compose_name=_preview_name(profile, slug)
+        )
+    )
+
+
+@contextmanager
+def serialize_legacy_preview_operation(
+    store: PostgresRecordStore,
+    request: LegacyPreviewReconciliationRequest,
+    *,
+    product_mutation: bool = False,
+) -> Iterator[None]:
     profile = store.read_product_profile_record(request.product)
     preview = store.read_preview_record(request.preview_id)
     slug = resolve_generic_web_preview_slug(
@@ -84,15 +127,47 @@ def bind_legacy_preview(
         anchor_pr_number=preview.anchor_pr_number,
         label="Reconciliation",
     )
-    if _execution_excluded(store, profile, slug):
-        return _bind_legacy_preview(store, request, allow_tracked=allow_tracked)
-    with serialize_generic_web_preview_operation(
-        record_store=store, profile=profile, preview_slug=slug, product_mutation=False
-    ):
-        return _bind_legacy_preview(store, request, allow_tracked=allow_tracked)
+    if product_profile_uses_odoo_driver(profile):
+        name = _odoo_lock_name(profile, slug)
+        if not store.testing_replacement_execution_is_excluded(name):
+            # Take the actual Odoo executor BEFORE generic preview/authority locks.
+            with store.testing_replacement_execution_lock(name) as check:
+                if check is None:
+                    raise ValueError(
+                        "Preview executor is active; resume original preview recovery."
+                    )
+                check()
+                with serialize_legacy_preview_operation(
+                    store, request, product_mutation=product_mutation
+                ):
+                    yield
+                check()
+            return
+    logical_id = generate_preview_id(
+        context_name=profile.preview.context,
+        anchor_repo=profile.repository.partition("/")[2],
+        anchor_pr_number=preview.anchor_pr_number,
+    )
+    with ExitStack() as locks:
+        if product_profile_uses_odoo_driver(profile) and not store.preview_refresh_is_excluded(
+            preview_id=logical_id
+        ):
+            locks.enter_context(
+                store.serialize_preview_refresh(preview_id=logical_id, dedicated=True)
+            )
+        if not _generic_execution_excluded(store, profile, slug):
+            locks.enter_context(
+                serialize_generic_web_preview_operation(
+                    record_store=store,
+                    profile=profile,
+                    preview_slug=slug,
+                    product_mutation=product_mutation,
+                )
+            )
+        yield
 
 
-def _execution_excluded(
+def _generic_execution_excluded(
     store: PostgresRecordStore, profile: LaunchplaneProductProfileRecord, slug: str
 ) -> bool:
     return store.preview_refresh_is_excluded(
@@ -100,6 +175,98 @@ def _execution_excluded(
     ) or store.preview_refresh_is_excluded(
         preview_id=f"{profile.product}:{profile.preview.context}:{slug}"
     )
+
+
+def _execution_excluded(
+    store: PostgresRecordStore,
+    profile: LaunchplaneProductProfileRecord,
+    slug: str,
+    anchor_pr_number: int,
+) -> bool:
+    if product_profile_uses_odoo_driver(profile):
+        logical_id = generate_preview_id(
+            context_name=profile.preview.context,
+            anchor_repo=profile.repository.partition("/")[2],
+            anchor_pr_number=anchor_pr_number,
+        )
+        return store.preview_refresh_is_excluded(
+            preview_id=logical_id
+        ) and store.testing_replacement_execution_is_excluded(
+            _odoo_lock_name(profile, slug), require_postgres=True
+        )
+    return _generic_execution_excluded(store, profile, slug)
+
+
+def _physical_dokploy_targets(
+    targets: tuple[ProviderTargetRecord, ...],
+    ids: tuple[DokployTargetIdRecord, ...],
+    configs: tuple[DokployTargetRecord, ...],
+) -> tuple[ProviderTargetRecord, ...]:
+    physical = [t for t in targets if t.provider_id == "dokploy"]
+    for legacy in ids:
+        config = next(
+            (c for c in configs if (c.context, c.instance) == (legacy.context, legacy.instance)),
+            None,
+        )
+        if config is None:
+            # An untyped ID without its config cannot exclude any provider category.
+            continue
+        joined = ProviderTargetRecord.from_dokploy_records(
+            target_record=config, target_id_record=legacy
+        )
+        physical.append(joined)
+    return tuple(physical)
+
+
+def _require_no_held_odoo_work(
+    store: PostgresRecordStore,
+    profile: LaunchplaneProductProfileRecord,
+    slug: str,
+    previews: tuple[PreviewRecord, ...],
+) -> None:
+    key = odoo_preview_reconciliation_key(
+        context=profile.preview.context, compose_name=_preview_name(profile, slug)
+    )
+    target_key = odoo_preview_target_key(
+        context=profile.preview.context, compose_name=_preview_name(profile, slug)
+    )
+    from control_plane.preview_reservation_recovery import original_preview_intent
+
+    other_numbers = {
+        preview.anchor_pr_number
+        for preview in previews
+        if preview.state != "destroyed"
+        and preview.anchor_repo == profile.repository.partition("/")[2]
+        and resolve_generic_web_preview_slug(
+            profile=profile,
+            preview_slug="",
+            anchor_pr_number=preview.anchor_pr_number,
+            label="Reconciliation",
+        )
+        != slug
+        and sum(p.anchor_pr_number == preview.anchor_pr_number for p in previews) == 1
+    }
+    prefix = f"dokploy:compose:{profile.preview.context.strip()}:"
+    for held in store.list_held_provider_target_reservations():
+        relevant = (
+            held.provider_target_key in {key, target_key}
+            or held.reconciliation_key == key
+            or held.reconciliation_key.startswith(prefix)
+        )
+        if not relevant:
+            continue
+        if held.provider_target_key not in {key, target_key} and held.reconciliation_key != key:
+            try:
+                intent = original_preview_intent(held, profile=profile, store=store)
+            except ValueError:
+                pass
+            else:
+                if intent.issued_plan.plan_request.pr_number in other_numbers:
+                    continue
+        if relevant:
+            raise ValueError(
+                "Held preview work needs original-operation recovery before reconciliation."
+            )
 
 
 def _bind_legacy_preview(
@@ -110,13 +277,26 @@ def _bind_legacy_preview(
 ) -> LegacyPreviewAuthority:
     profile = store.read_product_profile_record(request.product)
     preview = store.read_preview_record(request.preview_id)
-    if profile.driver_id != "generic-web" or not profile.preview.context:
-        raise ValueError("Reconciliation requires a generic-web preview profile.")
+    odoo = product_profile_uses_odoo_driver(profile)
+    if (profile.driver_id != "generic-web" and not odoo) or not profile.preview.context:
+        raise ValueError("Reconciliation requires a supported preview profile.")
+    if allow_tracked and odoo:
+        raise ValueError("Integrated product retirement requires generic-web previews.")
     if preview.context != profile.preview.context or preview.anchor_repo not in {
         profile.repository,
         profile.repository.partition("/")[2],
     }:
         raise ValueError("Preview does not belong to the requested product.")
+    if odoo and (
+        preview.anchor_repo != profile.repository.partition("/")[2]
+        or preview.preview_id
+        != generate_preview_id(
+            context_name=profile.preview.context,
+            anchor_repo=profile.repository.partition("/")[2],
+            anchor_pr_number=preview.anchor_pr_number,
+        )
+    ):
+        raise ValueError("Odoo preview identity does not match its lifecycle producer.")
     profiles = store.list_product_profile_records()
     if any(
         other.product != profile.product
@@ -139,8 +319,12 @@ def _bind_legacy_preview(
         anchor_pr_number=preview.anchor_pr_number,
         label="Reconciliation",
     )
-    prefix = effective_preview_app_name_prefix(profile=profile)
-    application_name = preview_application_name(app_name_prefix=prefix, preview_slug=slug)
+    application_name = _preview_name(profile, slug)
+    category = "compose" if odoo else "application"
+    if odoo:
+        if not store.testing_replacement_execution_is_excluded(_odoo_lock_name(profile, slug)):
+            raise ValueError("Odoo preview executor exclusion was lost.")
+        _require_no_held_odoo_work(store, profile, slug, previews)
     generations = tuple(
         sorted(
             store.list_preview_generation_records(preview_id=preview.preview_id),
@@ -158,7 +342,7 @@ def _bind_legacy_preview(
             runtime.product
             and runtime.product != profile.product
             or runtime.context != preview.context
-            or runtime.instance != slug
+            or runtime.instance != (application_name if odoo else slug)
             or runtime.preview_id
             and runtime.preview_id not in {preview.preview_id, slug}
         ):
@@ -172,9 +356,11 @@ def _bind_legacy_preview(
         if deployment.deployed_target is not None:
             if (
                 deployment.deployed_target.provider_id != "dokploy"
-                or deployment.deployed_target.target_category != "application"
+                or deployment.deployed_target.target_category != category
             ):
                 raise ValueError("Historical deployment has unsupported provider evidence.")
+            if odoo and deployment.deployed_target.display_name != application_name:
+                raise ValueError("Historical compose naming evidence changed.")
             preview_target_ids.add(deployment.deployed_target.target_id)
     pointers = {
         preview.active_generation_id,
@@ -183,6 +369,12 @@ def _bind_legacy_preview(
     } - {""}
     nonterminal = tuple(
         g for g in generations if g.state in {"resolving", "building", "deploying", "verifying"}
+    )
+    qualified_legacy_odoo = (
+        odoo
+        and bool(pointers)
+        and all(g.runtime_identity is None for g in nonterminal)
+        and _execution_excluded(store, profile, slug, preview.anchor_pr_number)
     )
     if any(
         pointer and pointer not in generation_ids
@@ -193,10 +385,11 @@ def _bind_legacy_preview(
         )
     ) or (
         nonterminal
+        and not qualified_legacy_odoo
         and (
             not pointers
             or any(g.generation_id in pointers for g in nonterminal)
-            or not _execution_excluded(store, profile, slug)
+            or not _execution_excluded(store, profile, slug, preview.anchor_pr_number)
         )
     ):
         raise ValueError("Preview generation evidence is incomplete or still running.")
@@ -205,14 +398,45 @@ def _bind_legacy_preview(
     targets = store.list_provider_target_records()
     target_ids = store.list_dokploy_target_id_records()
     target_configs = store.list_dokploy_target_records()
+    own_scopes = {(lane.context, lane.instance) for lane in profile.lanes} | {
+        (
+            preview.context,
+            resolve_generic_web_preview_slug(
+                profile=profile,
+                preview_slug="",
+                anchor_pr_number=p.anchor_pr_number,
+                label="Reconciliation",
+            ),
+        )
+        for p in previews
+    }
+    for legacy in target_ids:
+        if (
+            (legacy.context, legacy.instance) in own_scopes
+            and any(
+                other.target_id == legacy.target_id
+                and (other.context, other.instance) != (legacy.context, legacy.instance)
+                for other in target_ids
+            )
+            and not any(
+                (c.context, c.instance) == (legacy.context, legacy.instance) for c in target_configs
+            )
+        ):
+            raise ValueError("Untyped provider target ownership is ambiguous.")
     # Any authority for this preview must first be resolved through its tracked teardown.
     scoped_targets: tuple[
         ProviderTargetRecord | DokployTargetIdRecord | DokployTargetRecord, ...
     ] = (*targets, *target_ids, *target_configs)
-    physical_targets: tuple[ProviderTargetRecord | DokployTargetIdRecord, ...] = (
-        *targets,
-        *target_ids,
-    )
+    all_physical_targets = _physical_dokploy_targets(targets, target_ids, target_configs)
+    for context, instance in own_scopes:
+        identities = {
+            (t.target_category, t.target_id)
+            for t in all_physical_targets
+            if (t.context, t.instance) == (context, instance)
+        }
+        if len(identities) > 1:
+            raise ValueError("Provider target category or identity is ambiguous.")
+    physical_targets = tuple(t for t in all_physical_targets if t.target_category == category)
     if not allow_tracked and any(
         t.context == preview.context and t.instance == slug for t in scoped_targets
     ):
@@ -247,21 +471,87 @@ def _bind_legacy_preview(
         and sum(p.anchor_pr_number == other.anchor_pr_number for p in previews) == 1
     }
     other_scopes = lane_scopes | sibling_scopes
-    other_target_ids = frozenset(
-        t.target_id
-        for t in targets
-        if (t.context, t.instance) in other_scopes and t.provider_id == "dokploy"
-    ) | frozenset(t.target_id for t in target_ids if (t.context, t.instance) in other_scopes)
-    for target_id in other_target_ids:
-        owners = {(t.context, t.instance) for t in physical_targets if t.target_id == target_id}
-        if len(owners) != 1 or not owners <= other_scopes:
-            raise ValueError("Provider target ownership is shared.")
+
+    def other_ids(target_category: str) -> frozenset[str]:
+        category_targets = tuple(
+            t for t in all_physical_targets if t.target_category == target_category
+        )
+        identifiers = frozenset(
+            t.target_id for t in category_targets if (t.context, t.instance) in other_scopes
+        )
+        for identifier in identifiers:
+            owners = {
+                (t.context, t.instance) for t in category_targets if t.target_id == identifier
+            }
+            if len(owners) != 1 or not owners <= other_scopes:
+                raise ValueError("Provider target ownership is shared.")
+        return identifiers
+
+    other_target_ids = other_ids(category)
+    other_application_ids = other_ids("application") if odoo else other_target_ids
+    sibling_evidence: list[dict[str, object]] = []
+    sibling_names: dict[str, str] = {}
+    sibling_receipt_ids: set[str] = set()
+    if sibling_scopes:
+        from control_plane.legacy_odoo_preview_ownership import current_odoo_sibling_ownership
+        from control_plane.legacy_preview_sibling_ownership import current_generic_sibling_ownership
+
+        sibling_owners: dict[str, tuple[str, str]] = {}
+        for other in sorted(previews, key=lambda p: p.preview_id):
+            other_slug = resolve_generic_web_preview_slug(
+                profile=profile,
+                preview_slug="",
+                anchor_pr_number=other.anchor_pr_number,
+                label="Reconciliation",
+            )
+            owner = (other.context, other_slug)
+            if other.preview_id == preview.preview_id or owner not in sibling_scopes:
+                continue
+            # A typed catalog target independently proves its physical category
+            # and owner, including older producers without durable Odoo receipts.
+            if any((target.context, target.instance) == owner for target in physical_targets):
+                continue
+            proof = (
+                current_odoo_sibling_ownership(store, profile, other)
+                if odoo
+                else current_generic_sibling_ownership(store, profile, other, other_slug)
+            )
+            if proof is None:
+                continue
+            typed_owners = {
+                (target.context, target.instance)
+                for target in physical_targets
+                if target.target_id == proof.target_id
+            }
+            untyped_conflict = any(
+                target.target_id == proof.target_id
+                and (target.context, target.instance) != owner
+                and not any(
+                    (config.context, config.instance) == (target.context, target.instance)
+                    for config in target_configs
+                )
+                for target in target_ids
+            )
+            if (
+                proof.target_id in preview_target_ids
+                or typed_owners - {owner}
+                or untyped_conflict
+                or proof.target_id in sibling_owners
+                and sibling_owners[proof.target_id] != owner
+            ):
+                raise ValueError("Sibling target has conflicting physical ownership.")
+            sibling_owners[proof.target_id] = owner
+            sibling_names[proof.target_id] = proof.target_name
+            sibling_evidence.append(proof.evidence)
+            sibling_receipt_ids.update(proof.receipt_ids)
+        other_target_ids = other_target_ids | frozenset(sibling_names)
     digest = canonical_sha256(
         {
             "profile": profile.model_dump(mode="json"),
             "preview": preview.model_dump(mode="json"),
             "generations": [g.model_dump(mode="json") for g in generations],
             "deployments": deployment_evidence,
+            "sibling_evidence": sibling_evidence,
             "known_other_target_ids": sorted(other_target_ids),
             "targets": [
                 t.model_dump(mode="json")
@@ -289,6 +579,9 @@ def _bind_legacy_preview(
         digest,
         other_target_ids,
         frozenset(preview_target_ids),
+        other_application_ids,
+        tuple(sorted(sibling_names.items())),
+        tuple(sorted(sibling_receipt_ids)),
     )
 
 
@@ -299,6 +592,10 @@ def observe_legacy_preview(
     retirement_peers: tuple[LegacyPreviewAuthority, ...] = (),
 ) -> dict[str, object]:
     """Enumerate twice; inspect payloads and domains, including renamed candidates."""
+    if product_profile_uses_odoo_driver(bound.profile):
+        from control_plane.legacy_odoo_preview import observe_legacy_odoo_preview
+
+        return observe_legacy_odoo_preview(control_plane_root=control_plane_root, bound=bound)
     host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
     applications = dokploy_api.search_dokploy_applications(host=host, token=token)
     seen: dict[str, dict[str, object]] = {}
@@ -322,6 +619,9 @@ def observe_legacy_preview(
         app_name = str(app.get("appName") or "").strip()
         if not name or not app_name:
             raise ValueError("Provider application naming evidence is incomplete.")
+        sibling_name = dict(bound.sibling_target_names).get(target_id)
+        if sibling_name is not None and sibling_name != name:
+            raise ValueError("Sibling application naming disagrees with its physical receipt.")
         domains = dokploy_api.fetch_dokploy_application_domains(
             host=host, token=token, application_id=target_id, strict=True
         )
@@ -371,12 +671,7 @@ def observe_legacy_preview(
             if (
                 retirement_peers
                 and target_id not in bound.preview_target_ids
-                and not any(
-                    value == repository
-                    or value.endswith("/" + repository)
-                    or value == repository.partition("/")[2]
-                    for value in repository_values
-                )
+                and not _repository_matches(app, repository)
                 and not (
                     image == image_repository
                     or image.startswith((image_repository + ":", image_repository + "@"))

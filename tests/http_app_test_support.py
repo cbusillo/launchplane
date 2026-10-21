@@ -382,61 +382,6 @@ def _product_environment_read_policy(
     )
 
 
-def _work_graph_read_policy(
-    *,
-    products: tuple[str, ...] = ("launchplane", "example-site"),
-    contexts: tuple[str, ...] = ("launchplane", "example-site"),
-) -> LaunchplaneAuthzPolicy:
-    return LaunchplaneAuthzPolicy.model_validate(
-        {
-            "github_actions": [
-                {
-                    "repository": "every/verireel",
-                    "workflow_refs": [
-                        "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                    ],
-                    "event_names": ["pull_request"],
-                    "products": list(products),
-                    "contexts": list(contexts),
-                    "actions": ["work_graph.rank", "product_environment.read"],
-                }
-            ],
-        }
-    )
-
-
-def _github_human_work_graph_rank_policy() -> LaunchplaneAuthzPolicy:
-    return LaunchplaneAuthzPolicy.model_validate(
-        {
-            "github_humans": [
-                {
-                    "logins": ["example-operator"],
-                    "roles": ["admin"],
-                    "products": ["launchplane"],
-                    "contexts": ["launchplane"],
-                    "actions": ["work_graph.rank"],
-                }
-            ],
-        }
-    )
-
-
-def _terminal_agent_work_graph_rank_policy() -> LaunchplaneAuthzPolicy:
-    return LaunchplaneAuthzPolicy.model_validate(
-        {
-            "terminal_agents": [
-                {
-                    "subjects": ["local-owner-agent"],
-                    "token_labels": ["local-owner-read"],
-                    "products": ["launchplane"],
-                    "contexts": ["launchplane"],
-                    "actions": ["work_graph.rank"],
-                }
-            ],
-        }
-    )
-
-
 def _terminal_agent_merge_train_pr_feedback_policy() -> LaunchplaneAuthzPolicy:
     return LaunchplaneAuthzPolicy.model_validate(
         {
@@ -465,38 +410,6 @@ def _terminal_agent_merge_train_run_once_policy() -> LaunchplaneAuthzPolicy:
                     "actions": ["merge_train.run_once"],
                 }
             ],
-        }
-    )
-
-
-def _local_operator_work_graph_rank_policy() -> LaunchplaneAuthzPolicy:
-    return LaunchplaneAuthzPolicy.model_validate(
-        {
-            "local_operators": [
-                {
-                    "subjects": ["local-owner-agent"],
-                    "token_labels": ["local-owner-read"],
-                    "products": ["launchplane"],
-                    "contexts": ["launchplane"],
-                    "actions": ["work_graph.rank"],
-                }
-            ],
-        }
-    )
-
-
-def _local_admin_work_graph_rank_policy() -> LaunchplaneAuthzPolicy:
-    return LaunchplaneAuthzPolicy.model_validate(
-        {
-            "local_admins": [
-                {
-                    "subjects": ["local-owner-agent"],
-                    "token_labels": ["local-owner-admin"],
-                    "products": ["launchplane"],
-                    "contexts": ["launchplane"],
-                    "actions": ["work_graph.rank"],
-                }
-            ]
         }
     )
 
@@ -1858,12 +1771,6 @@ def _seed_dokploy_target_inspect_records(database_url: str) -> None:
         store.close()
 
 
-def _seed_empty_agent_context_read_store(database_url: str) -> None:
-    store = PostgresRecordStore(database_url=database_url)
-    store.ensure_schema()
-    store.close()
-
-
 def _seed_agent_context_read_records(database_url: str) -> None:
     store = PostgresRecordStore(database_url=database_url)
     store.ensure_schema()
@@ -3087,59 +2994,6 @@ def _local_operator_bearer_config(*, token_label: str = "local-owner-read") -> B
 
 
 type _AsgiResponse = Response
-
-
-async def _get_work_graph_snapshot(
-    app: FastAPI,
-    *,
-    authorization: str = "Bearer valid-token",
-) -> _AsgiResponse:
-    headers = {"Authorization": authorization} if authorization else {}
-    return await _asgi_get(app, "/v1/work-graph/snapshot", headers=headers)
-
-
-async def _post_work_graph_rank(
-    app: FastAPI,
-    *,
-    payload: dict[str, object],
-    authorization: str = "Bearer valid-token",
-    headers: dict[str, str] | None = None,
-) -> _AsgiResponse:
-    request_headers = dict(headers or {})
-    if authorization:
-        request_headers["Authorization"] = authorization
-    return await _asgi_request(
-        app,
-        "POST",
-        "/v1/work-graph/rank",
-        headers=request_headers,
-        payload=payload,
-    )
-
-
-async def _get_work_graph_issue_inbox(
-    app: FastAPI,
-    *,
-    authorization: str = "Bearer valid-token",
-) -> _AsgiResponse:
-    headers = {"Authorization": authorization} if authorization else {}
-    return await _asgi_get(app, "/v1/work-graph/github/issues", headers=headers)
-
-
-async def _post_work_graph_issue_inbox_reconcile(
-    app: FastAPI,
-    *,
-    payload: dict[str, object],
-    authorization: str = "Bearer valid-token",
-) -> _AsgiResponse:
-    headers = {"Authorization": authorization} if authorization else {}
-    return await _asgi_request(
-        app,
-        "POST",
-        "/v1/work-graph/github/issues/reconcile",
-        headers=headers,
-        payload=payload,
-    )
 
 
 async def _get_every_code_summary(

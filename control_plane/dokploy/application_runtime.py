@@ -358,8 +358,12 @@ def _fetch_application_runtime(
                 task_image, task_record_id = "", ""
             task_observations.append(ApplicationTaskObservation(task_image, task_record_id, state))
             if state != "running":
-                pending += desired == "running"
+                pending += desired in {"ready", "running"}
                 continue
+            if desired != "running":
+                # A draining process is not a converged desired replica, even
+                # when it is the only healthy container still running.
+                pending += 1
             node_id = _identifier(task.get("NodeID"))
             container_id = _object(status.get("ContainerStatus")).get("ContainerID")
             if (

@@ -24,7 +24,8 @@ Launchplane requests review when a pull request has real `Client test notes`
 (`Owner test notes` remains a supported heading). No label is needed. The
 product's review label remains an explicit override requiring real test notes.
 `Nothing for the Client to test: <reason>` with a nonempty reason marks an
-engineering-only change; it cannot be used with the review label. Missing notes,
+engineering-only change; it cannot be used with the review label. When the
+Director reroutes an already labeled request, use [pending request withdrawal](#withdrawing-a-pending-request). Missing notes,
 empty template comments, or a malformed engineering-only declaration visibly
 refuse preview readiness and merge admission for repositories feeding a Client
 release. Shared inputs are resolved from recorded production/testing artifacts,
@@ -60,8 +61,11 @@ Client's acceptance.
 
 Editing the PR body re-plans its preview and review intent without needing a
 push or label change.
-The preview reconciler refreshes the Client-review check even while waiting for
-a verified build or after a failed preview apply. Valid engineering-only notes
+The preview reconciler refreshes the Client-review check independently of
+preview planning and delivery, including a deferred operation, an unknown
+provider outcome, or a failure to recover the original preview proof. The
+publisher rereads the PR and saved decisions, even when there is no new preview
+comment to post. Valid engineering-only notes
 publish a neutral check, replacing any earlier missing-notes failure, saying no
 Client preview review is required, without
 recording a Client decision or sending a review invitation. A later review label,
@@ -235,3 +239,71 @@ by this code deletion.
 The `product-owner-policy`, change-impact, manager/delegate, and ordinary-agent
 machinery still have separate remaining deletion work under [DIRECTION.md](../DIRECTION.md).
 Their historical presence grants no authority to the current review flows.
+
+## Withdrawing a pending request
+
+When the Director records a decision to reroute a change as engineering, use
+`POST /v1/product-review/withdrawal` through the bounded write-action helper's
+`product-review-withdrawal-dry-run`, `product-review-withdrawal-apply` and
+`product-review-withdrawal-readback` commands. Do not remove the review label by
+hand. Supply the product, repository, PR number, exact current head, a reason,
+and the recorded Director-decision comment URL. The authenticated Director
+agent or admin attests that the citation records that decision; a citation is
+not a Client decision or an authorization grant. Apply requires the reviewed
+plan digest and an original idempotency key. The helper binds saved dry-run
+evidence and follows apply with service readback.
+
+The service serializes with Client decision saves and refuses withdrawal if
+any Client decision for this product already names the current head. It
+removes only the product's configured review label, confirms the removal,
+and adds a withdrawal entry to the PR history. Its durable operation retains
+the actor, head, reason and Director-decision citation. An uncertain response
+keeps the same request, digest and key; read back before recovery. Recovery can
+finish undelivered history after the label is absent, but never removes a label
+again. A pre-dispatch failure can resume the same reviewed operation. If a
+request is present after an uncertain dispatch, or the head or review authority
+changed, recovery settles the original key with `applied=false` and
+`replan_required=true`, preserving any unknown prior effects. It neither removes
+the current label nor claims withdrawal. Review a fresh dry run and use a new
+key to withdraw that request; the old operation no longer holds the PR busy.
+Unsettled calls report `product_review_withdrawal_unsettled`, distinct from a
+definite refusal. A completed-key replay returns its original receipt; readback reports
+whether it still matches current state. Replay and readback validate the saved
+original intent, so later unrelated profile edits do not invalidate receipts.
+
+Withdrawal records no acceptance or rejection, changes no saved Client decision,
+and changes no release acceptance. It does not rewrite test notes or publish a
+successful Client-review check. Set truthful engineering notes separately; real
+test notes or a later review label request review normally, including on the
+same head. The normal preview reconciler refreshes the check after those edits.
+
+An unlabeled request needs no label withdrawal: edit its notes truthfully and
+the next event reconcile or open-PR sweep refreshes the check. A held preview
+operation remains held; check reclassification neither retries it nor records
+Client acceptance. Withdrawal still requires a labeled pending request.
+
+Recovery and readback can observe a closed PR; a new withdrawal still requires
+an open PR. A published history receipt remains historical proof after closure.
+A closed request without a receipt settles the original intent as needing a new
+plan, preserving uncertainty about prior effects, without deleting any label.
+A competing operation returns `product_review_withdrawal_target_busy`: the new
+call dispatched nothing and its key cannot recover the original caller's work.
+`product_review_withdrawal_in_progress` names a still-running original call;
+`product_review_withdrawal_conflict` names a key/request conflict.
+
+Provider evidence failures are unavailable evidence, not eligibility refusals.
+Dry-run and fresh apply check authenticated history before removing a label.
+A permanent history bound or ambiguous receipt returns
+`product_review_withdrawal_history_unverifiable` before dispatch and releases a
+fresh reservation. Resolve history verification before retrying; changing keys
+cannot fix it. Recovery after an uncertain effect settles the original operation
+with `history_unverifiable=true`, preserving prior-effect uncertainty. That key
+is terminal: after resolving history verification, review a fresh dry-run and use
+a new key. Completed
+readback retains its applied receipt and reports `readback_matches=false` when
+history cannot be verified. A missing original operation returns
+`product_review_withdrawal_not_started`; resubmit the exact original apply with
+the same caller and key. Invalid keys and stale reviewed plans return distinct
+not-dispatched statuses; refresh and review a dry-run for a stale plan. The durable operation
+retains the full caller identity; the public history contains the reviewed head,
+reason and Director citation without internal identity labels.

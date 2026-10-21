@@ -23,7 +23,7 @@ from control_plane.contracts.deploy_target import (
 from control_plane.contracts.deploy_reference import validate_provider_deploy_reference
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
-from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
+from control_plane.contracts.deployment_record import ResolvedTargetEvidence
 from control_plane.contracts.idempotency_record import parse_launchplane_mutation_timestamp
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
@@ -95,6 +95,13 @@ class GenericWebProviderReconciliationTarget(BaseModel):
     deploy_mode: str
     provider_deploy_mode: str
     deploy_timeout_seconds: int = Field(ge=1)
+
+
+@runtime_checkable
+class GenericWebApplicationExecutionProvider(Protocol):
+    def application_execution_history(
+        self, *, control_plane_root: Path, application_id: str, schedule_id: str
+    ) -> tuple[dokploy_api.JsonObject, ...]: ...
 
 
 _GENERIC_WEB_RECONCILIATION_KEY_PREFIX = "generic-web-provider-target:"
@@ -635,8 +642,6 @@ def qualify_testing_application_observation(
     deployment_record_id: str,
     wait: bool = False,
     deadline: float | None = None,
-    original_deadline_expired: bool = False,
-    recovered_record: DeploymentRecord | None = None,
 ) -> GenericWebProviderDeploymentObservation:
     """A provider job is insufficient proof of application testing convergence."""
     if (
@@ -661,48 +666,6 @@ def qualify_testing_application_observation(
             )
             if runtime.application_id != target.resolved_target.target_id:
                 raise ValueError("Runtime observation belongs to another target.")
-            if (
-                observation.deployment_status in {"error", "failed"}
-                and recovered_record is not None
-                and recovered_record.deploy.status == "pass"
-                and recovered_record.artifact_identity is not None
-                and recovered_record.resolved_target is not None
-                and (
-                    recovered_record.record_id,
-                    recovered_record.context,
-                    recovered_record.instance,
-                    recovered_record.artifact_identity.artifact_id,
-                    recovered_record.source_git_ref,
-                    recovered_record.resolved_target.target_type,
-                    recovered_record.resolved_target.target_id,
-                )
-                == (
-                    deployment_record_id,
-                    target.ship_request.context,
-                    target.ship_request.instance,
-                    target.ship_request.artifact_id,
-                    target.ship_request.source_git_ref,
-                    "application",
-                    target.resolved_target.target_id,
-                )
-                and application_runtime_matches(
-                    runtime,
-                    artifact_reference=target.ship_request.artifact_id,
-                    provider_reference=dokploy_deploy_artifact_reference(
-                        ship_request=target.ship_request, target_type="application"
-                    ),
-                    deployment_record_id=deployment_record_id,
-                )
-            ):
-                return observation.model_copy(
-                    update={
-                        "deployment_status": "done",
-                        "error_message": (
-                            "Original saved deployment pass and fresh runtime agree; "
-                            f"provider job status={observation.deployment_status}."
-                        ),
-                    }
-                )
             if observation.deployment_status in {"error", "failed"} and runtime.rollout_state in {
                 "",
                 "completed",
@@ -761,7 +724,6 @@ def qualify_testing_application_observation(
                 runtime is not None
                 and (
                     wait
-                    or original_deadline_expired
                     or not generic_web_provider_deployment_succeeded(observation.deployment_status)
                 )
                 and application_runtime_settled_spec_matches(
@@ -850,6 +812,32 @@ class DokployGenericWebDeployProvider:
             checkpoint=checkpoint,
             effect_started=effect_started,
         )
+
+    def application_execution_history(
+        self, *, control_plane_root: Path, application_id: str, schedule_id: str
+    ) -> tuple[dokploy_api.JsonObject, ...]:
+        host, token = self._read_provider_config(control_plane_root=control_plane_root)
+        schedules = dokploy_api.list_dokploy_schedules(
+            host=host, token=token, target_id=application_id, schedule_type="application"
+        )
+        matching = tuple(
+            item for item in schedules if dokploy_api.schedule_key(item) == schedule_id
+        )
+        if len(matching) != 1 or matching[0].get("applicationId") != application_id:
+            raise click.ClickException(
+                "Original application execution schedule binding is unavailable."
+            )
+        history = tuple(
+            dokploy_api._read_schedule_deployments(host=host, token=token, schedule_id=schedule_id)
+        )
+        from control_plane.workflows.generic_web_execution import require_schedule_history_binding
+
+        require_schedule_history_binding(
+            history,
+            schedule_id=schedule_id,
+            application_id=application_id,
+        )
+        return history
 
     def _read_provider_config(self, *, control_plane_root: Path) -> tuple[str, str]:
         if self.provider_id != "dokploy":

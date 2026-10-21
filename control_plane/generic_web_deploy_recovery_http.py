@@ -1,6 +1,5 @@
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import timedelta
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -36,9 +35,9 @@ from control_plane.generic_web_deploy_http import (
     GenericWebDeployRouteDependencyError,
     resolve_generic_web_deploy_lane,
 )
-from control_plane.generic_web_testing_failure_settlement import TESTING_FAILURE_SETTLEMENT_PHASES
 from control_plane.generic_web_deploy_provider_adapter import (
     GenericWebDeployProviderMutationAdapter,
+    _GenericWebDeployProviderInspection,
 )
 from control_plane.http_routes.support import AuthorizationAllows, HttpErrorFactory
 from control_plane.provider_operations import (
@@ -208,19 +207,19 @@ class _GenericWebRecoveryApplyAdapter:
         *,
         delegate: GenericWebDeployProviderMutationAdapter,
         recovery_metadata: dict[str, object],
-        failure_inspection: Any | None = None,
-        failure_phase: str = "",
+        execution_inspection: _GenericWebDeployProviderInspection | None = None,
+        original_reconciliation_key: str = "",
     ) -> None:
         self._delegate = delegate
         self._recovery_metadata = recovery_metadata
-        self._failure_inspection = failure_inspection
-        self._failure_phase = failure_phase
+        self._execution_inspection = execution_inspection
+        self._original_reconciliation_key = original_reconciliation_key
 
     def target_key(self) -> str:
         return self._delegate.target_key()
 
     def reconciliation_key(self) -> str:
-        return self._delegate.reconciliation_key()
+        return self._original_reconciliation_key or self._delegate.reconciliation_key()
 
     def observe(
         self,
@@ -252,13 +251,13 @@ class _GenericWebRecoveryApplyAdapter:
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
         outcome = (
-            self._delegate.settle_testing_failure(
+            self._delegate.recover_execution(
                 provider_operation_key,
                 lease,
-                inspection=self._failure_inspection,
-                phase=self._failure_phase,
+                self._execution_inspection,
+                settle=self._recovery_metadata.get("recovery_action") == "settle_testing_failure",
             )
-            if self._failure_inspection is not None
+            if self._execution_inspection is not None
             else self._delegate.apply(provider_operation_key, lease)
         )
         response_payload = dict(outcome.response_payload)
@@ -833,17 +832,6 @@ async def _inspect_generic_web_deploy_recovery(
                 recorded_artifact=True,
                 retain_event_request=retain_event_request,
             )
-            original_deadline_expired = False
-            if reservation.provider_effect_phase in TESTING_FAILURE_SETTLEMENT_PHASES:
-                try:
-                    original_deadline_expired = parse_launchplane_mutation_timestamp(
-                        lookup.observed_at, field_name="observed_at"
-                    ) >= parse_launchplane_mutation_timestamp(
-                        reservation.provider_effect_started_at,
-                        field_name="provider_effect_started_at",
-                    ) + timedelta(seconds=stored_target.deploy_timeout_seconds)
-                except ValueError:
-                    pass
             provider_inspection = adapter.inspect(
                 provider_operation_key=provider_operation_key,
                 provider_effect_phase=reservation.provider_effect_phase,
@@ -852,7 +840,6 @@ async def _inspect_generic_web_deploy_recovery(
                 legacy_provider_effect_started_at=legacy_provider_effect_started_at,
                 no_effect_checkpoint=not reservation.provider_effect_phase
                 and not reservation.provider_effect_started_at,
-                original_deadline_expired=original_deadline_expired,
             )
             if not provider_inspection.identity_matches:
                 raise dependencies.http_error(
@@ -903,17 +890,34 @@ async def _inspect_generic_web_deploy_recovery(
                     testing_pre_image_settlement=adapter.testing_settlement_pending,
                     testing_settlement_disposition=adapter.testing_settlement_disposition,
                 )
-            if provider_inspection.testing_failure_receipt:
-                provider_observation_payload["testing_failure_receipt"] = (
-                    provider_inspection.testing_failure_receipt
+            if provider_outcome == "present":
+                proposed_action = (
+                    "settle_testing_failure"
+                    if provider_inspection.post_deploy_unobserved
+                    else "adopt_observed"
                 )
-                proposed_action = "settle_testing_failure"
-            elif provider_outcome == "present":
-                proposed_action = "adopt_observed"
             elif provider_outcome == "absent" and retry_safe:
                 proposed_action = "retry_original_operation"
             else:
                 proposed_action = "hold_unknown"
+            if provider_inspection.execution is not None:
+                provider_observation_payload["execution_proof"] = (
+                    provider_inspection.execution.digest_evidence
+                )
+            if (
+                provider_inspection.resolved_deploy_target is not None
+                and adapter._application_testing(provider_inspection.resolved_deploy_target)
+            ):
+                provider_observation_payload["execution_record"] = (
+                    provider_inspection.execution_record.model_dump(mode="json")
+                    if provider_inspection.execution_record
+                    else None
+                )
+                provider_observation_payload["publication_inventory"] = (
+                    provider_inspection.execution_inventory.model_dump(mode="json")
+                    if provider_inspection.execution_inventory
+                    else None
+                )
             if (
                 proposed_action == "hold_unknown"
                 and reservation.state == "reconcile_required"
@@ -1110,7 +1114,7 @@ def build_generic_web_deploy_recovery_apply_handler(
             raise RuntimeError("Generic web deploy recovery apply requires an adapter.")
         recovery_metadata = _recovery_metadata(inspection)
         if (
-            inspection.proposed_action in {"retry_original_operation", "settle_testing_failure"}
+            inspection.proposed_action == "retry_original_operation"
             and inspection.adapter.reconciliation_key().strip()
             != inspection.reservation.reconciliation_key
         ):
@@ -1137,7 +1141,15 @@ def build_generic_web_deploy_recovery_apply_handler(
                 dependencies=dependencies,
             )
 
-        if inspection.proposed_action == "adopt_observed":
+        execution_recovery = (
+            inspection.proposed_action in {"adopt_observed", "settle_testing_failure"}
+            and action_inspection.provider_inspection is not None
+            and action_inspection.provider_inspection.resolved_deploy_target is not None
+            and inspection.adapter._application_testing(
+                action_inspection.provider_inspection.resolved_deploy_target
+            )
+        )
+        if inspection.proposed_action == "adopt_observed" and not execution_recovery:
             if action_inspection.provider_inspection is None:
                 raise RuntimeError("Generic web deploy recovery adoption requires inspection.")
             provider_observation = inspection.adapter.provider_observation_from_inspection(
@@ -1158,6 +1170,7 @@ def build_generic_web_deploy_recovery_apply_handler(
                 response_status_code=provider_observation.response_status_code,
                 response_trace_id=trace_id,
                 response_payload=response_payload,
+                expected_binding_evidence=provider_observation.expected_binding_evidence,
             )
             if adoption.status == "replayed" and adoption.record is not None:
                 return _apply_response(
@@ -1181,8 +1194,9 @@ def build_generic_web_deploy_recovery_apply_handler(
         retry = record_store.retry_reconciled_mutation(
             reservation=action_inspection.reservation,
             lease_owner=trace_id,
-            preserve_effect_checkpoint=inspection.proposed_action == "settle_testing_failure"
-            or (
+            preserve_effect_checkpoint=True
+            if execution_recovery
+            else (
                 inspection.adapter.provider_observation_from_inspection(
                     provider_operation_key=inspection.provider_operation_key,
                     inspection=action_inspection.provider_inspection,
@@ -1211,12 +1225,12 @@ def build_generic_web_deploy_recovery_apply_handler(
             adapter=_GenericWebRecoveryApplyAdapter(
                 delegate=inspection.adapter,
                 recovery_metadata=recovery_metadata,
-                failure_inspection=(
-                    action_inspection.provider_inspection
-                    if inspection.proposed_action == "settle_testing_failure"
-                    else None
-                ),
-                failure_phase=action_inspection.reservation.provider_effect_phase,
+                execution_inspection=action_inspection.provider_inspection
+                if execution_recovery
+                else None,
+                original_reconciliation_key=action_inspection.reservation.reconciliation_key
+                if execution_recovery
+                else "",
             ),
         )
         if result.status in {"completed", "adopted", "replayed"} and result.record is not None:

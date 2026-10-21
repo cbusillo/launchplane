@@ -4369,6 +4369,27 @@
         "title": "BootstrapEvidence",
         "type": "object"
       },
+      "BridgeNetworkCapacity": {
+        "additionalProperties": false,
+        "properties": {
+          "free_slots": {
+            "minimum": 0.0,
+            "title": "Free Slots",
+            "type": "integer"
+          },
+          "total_slots": {
+            "minimum": 0.0,
+            "title": "Total Slots",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total_slots",
+          "free_slots"
+        ],
+        "title": "BridgeNetworkCapacity",
+        "type": "object"
+      },
       "BrowserRouteRepairRequest": {
         "additionalProperties": false,
         "properties": {
@@ -5923,6 +5944,144 @@
           "related_issue"
         ],
         "title": "DetachedApplicationRetirementRequest",
+        "type": "object"
+      },
+      "DiscussionTopicInput": {
+        "additionalProperties": false,
+        "properties": {
+          "issue_url": {
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "Issue Url",
+            "type": "string"
+          },
+          "title": {
+            "maxLength": 240,
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "title",
+          "issue_url"
+        ],
+        "title": "DiscussionTopicInput",
+        "type": "object"
+      },
+      "DiscussionTopicRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "added_at": {
+            "title": "Added At",
+            "type": "string"
+          },
+          "closed_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Closed At"
+          },
+          "issue_url": {
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "Issue Url",
+            "type": "string"
+          },
+          "product": {
+            "minLength": 1,
+            "title": "Product",
+            "type": "string"
+          },
+          "title": {
+            "maxLength": 240,
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          },
+          "topic_id": {
+            "maxLength": 96,
+            "minLength": 1,
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$",
+            "title": "Topic Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "title",
+          "issue_url",
+          "product",
+          "topic_id",
+          "added_at"
+        ],
+        "title": "DiscussionTopicRecord",
+        "type": "object"
+      },
+      "DiscussionTopicResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "topic": {
+            "$ref": "#/components/schemas/DiscussionTopicRecord"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "topic"
+        ],
+        "title": "DiscussionTopicResponse",
+        "type": "object"
+      },
+      "DiscussionTopicsResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "topics": {
+            "items": {
+              "$ref": "#/components/schemas/DiscussionTopicRecord"
+            },
+            "title": "Topics",
+            "type": "array"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "product",
+          "display_name",
+          "topics"
+        ],
+        "title": "DiscussionTopicsResponse",
         "type": "object"
       },
       "DisposableLaneObservationRequest": {
@@ -13211,346 +13370,6 @@
         "title": "GitHubHumanPolicyRule",
         "type": "object"
       },
-      "GitHubIssueInboxIssue": {
-        "additionalProperties": false,
-        "properties": {
-          "author": {
-            "default": "",
-            "title": "Author",
-            "type": "string"
-          },
-          "created_at": {
-            "default": "",
-            "title": "Created At",
-            "type": "string"
-          },
-          "key": {
-            "title": "Key",
-            "type": "string"
-          },
-          "labels": {
-            "default": [],
-            "items": {
-              "type": "string"
-            },
-            "title": "Labels",
-            "type": "array"
-          },
-          "number": {
-            "minimum": 1.0,
-            "title": "Number",
-            "type": "integer"
-          },
-          "present_in_project": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Present In Project"
-          },
-          "project_status": {
-            "default": "unconfigured",
-            "enum": [
-              "present",
-              "missing",
-              "stale",
-              "closed",
-              "unconfigured"
-            ],
-            "title": "Project Status",
-            "type": "string"
-          },
-          "repository": {
-            "title": "Repository",
-            "type": "string"
-          },
-          "state": {
-            "default": "open",
-            "title": "State",
-            "type": "string"
-          },
-          "title": {
-            "default": "",
-            "title": "Title",
-            "type": "string"
-          },
-          "updated_at": {
-            "default": "",
-            "title": "Updated At",
-            "type": "string"
-          },
-          "url": {
-            "default": "",
-            "title": "Url",
-            "type": "string"
-          }
-        },
-        "required": [
-          "key",
-          "repository",
-          "number"
-        ],
-        "title": "GitHubIssueInboxIssue",
-        "type": "object"
-      },
-      "GitHubIssueInboxReadModel": {
-        "additionalProperties": false,
-        "properties": {
-          "generated_at": {
-            "title": "Generated At",
-            "type": "string"
-          },
-          "issue_count": {
-            "minimum": 0.0,
-            "title": "Issue Count",
-            "type": "integer"
-          },
-          "project_configured": {
-            "default": false,
-            "title": "Project Configured",
-            "type": "boolean"
-          },
-          "repositories": {
-            "default": [],
-            "items": {
-              "$ref": "#/components/schemas/GitHubIssueInboxRepositoryGroup"
-            },
-            "title": "Repositories",
-            "type": "array"
-          },
-          "repository_count": {
-            "minimum": 0.0,
-            "title": "Repository Count",
-            "type": "integer"
-          },
-          "schema_version": {
-            "default": 1,
-            "minimum": 1.0,
-            "title": "Schema Version",
-            "type": "integer"
-          },
-          "stale_project_item_count": {
-            "default": 0,
-            "minimum": 0.0,
-            "title": "Stale Project Item Count",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "generated_at",
-          "repository_count",
-          "issue_count"
-        ],
-        "title": "GitHubIssueInboxReadModel",
-        "type": "object"
-      },
-      "GitHubIssueInboxReconcileItem": {
-        "additionalProperties": false,
-        "properties": {
-          "action": {
-            "enum": [
-              "would_add",
-              "added",
-              "already_present",
-              "failed",
-              "skipped"
-            ],
-            "title": "Action",
-            "type": "string"
-          },
-          "detail": {
-            "default": "",
-            "title": "Detail",
-            "type": "string"
-          },
-          "error_code": {
-            "default": "",
-            "title": "Error Code",
-            "type": "string"
-          },
-          "error_correlation_id": {
-            "default": "",
-            "title": "Error Correlation Id",
-            "type": "string"
-          },
-          "key": {
-            "title": "Key",
-            "type": "string"
-          },
-          "number": {
-            "minimum": 1.0,
-            "title": "Number",
-            "type": "integer"
-          },
-          "repository": {
-            "title": "Repository",
-            "type": "string"
-          },
-          "title": {
-            "default": "",
-            "title": "Title",
-            "type": "string"
-          },
-          "url": {
-            "default": "",
-            "title": "Url",
-            "type": "string"
-          }
-        },
-        "required": [
-          "key",
-          "repository",
-          "number",
-          "action"
-        ],
-        "title": "GitHubIssueInboxReconcileItem",
-        "type": "object"
-      },
-      "GitHubIssueInboxReconcileRequest": {
-        "additionalProperties": false,
-        "properties": {
-          "mode": {
-            "default": "dry_run",
-            "enum": [
-              "dry_run",
-              "apply"
-            ],
-            "title": "Mode",
-            "type": "string"
-          },
-          "schema_version": {
-            "default": 1,
-            "minimum": 1.0,
-            "title": "Schema Version",
-            "type": "integer"
-          }
-        },
-        "title": "GitHubIssueInboxReconcileRequest",
-        "type": "object"
-      },
-      "GitHubIssueInboxReconcileResult": {
-        "additionalProperties": false,
-        "properties": {
-          "added_count": {
-            "default": 0,
-            "minimum": 0.0,
-            "title": "Added Count",
-            "type": "integer"
-          },
-          "already_present_count": {
-            "default": 0,
-            "minimum": 0.0,
-            "title": "Already Present Count",
-            "type": "integer"
-          },
-          "failed_count": {
-            "default": 0,
-            "minimum": 0.0,
-            "title": "Failed Count",
-            "type": "integer"
-          },
-          "generated_at": {
-            "title": "Generated At",
-            "type": "string"
-          },
-          "issue_count": {
-            "minimum": 0.0,
-            "title": "Issue Count",
-            "type": "integer"
-          },
-          "items": {
-            "default": [],
-            "items": {
-              "$ref": "#/components/schemas/GitHubIssueInboxReconcileItem"
-            },
-            "title": "Items",
-            "type": "array"
-          },
-          "mode": {
-            "enum": [
-              "dry_run",
-              "apply"
-            ],
-            "title": "Mode",
-            "type": "string"
-          },
-          "repository_count": {
-            "minimum": 0.0,
-            "title": "Repository Count",
-            "type": "integer"
-          },
-          "schema_version": {
-            "default": 1,
-            "minimum": 1.0,
-            "title": "Schema Version",
-            "type": "integer"
-          },
-          "skipped_count": {
-            "default": 0,
-            "minimum": 0.0,
-            "title": "Skipped Count",
-            "type": "integer"
-          },
-          "would_add_count": {
-            "default": 0,
-            "minimum": 0.0,
-            "title": "Would Add Count",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "generated_at",
-          "mode",
-          "repository_count",
-          "issue_count"
-        ],
-        "title": "GitHubIssueInboxReconcileResult",
-        "type": "object"
-      },
-      "GitHubIssueInboxRepositoryGroup": {
-        "additionalProperties": false,
-        "properties": {
-          "issue_count": {
-            "minimum": 0.0,
-            "title": "Issue Count",
-            "type": "integer"
-          },
-          "issues": {
-            "default": [],
-            "items": {
-              "$ref": "#/components/schemas/GitHubIssueInboxIssue"
-            },
-            "title": "Issues",
-            "type": "array"
-          },
-          "missing_from_project_count": {
-            "minimum": 0.0,
-            "title": "Missing From Project Count",
-            "type": "integer"
-          },
-          "present_in_project_count": {
-            "minimum": 0.0,
-            "title": "Present In Project Count",
-            "type": "integer"
-          },
-          "repository": {
-            "title": "Repository",
-            "type": "string"
-          }
-        },
-        "required": [
-          "repository",
-          "issue_count",
-          "present_in_project_count",
-          "missing_from_project_count"
-        ],
-        "title": "GitHubIssueInboxRepositoryGroup",
-        "type": "object"
-      },
       "GovernanceAdvisoryObservation": {
         "additionalProperties": false,
         "properties": {
@@ -14548,6 +14367,63 @@
           "historical_completion_preflight"
         ],
         "title": "HistoricalCompletionPreflightResult",
+        "type": "object"
+      },
+      "HostNetworkCapacityObservation": {
+        "additionalProperties": false,
+        "properties": {
+          "capacity": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BridgeNetworkCapacity"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "observed_at": {
+            "title": "Observed At",
+            "type": "string"
+          },
+          "reason": {
+            "default": "",
+            "title": "Reason",
+            "type": "string"
+          },
+          "required_networks": {
+            "minimum": 1.0,
+            "title": "Required Networks",
+            "type": "integer"
+          },
+          "safety_margin": {
+            "minimum": 0.0,
+            "title": "Safety Margin",
+            "type": "integer"
+          },
+          "server_id": {
+            "default": "",
+            "title": "Server Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "available",
+              "short",
+              "unavailable",
+              "denied"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "observed_at",
+          "status",
+          "required_networks",
+          "safety_margin"
+        ],
+        "title": "HostNetworkCapacityObservation",
         "type": "object"
       },
       "ImportDiagnosticResult": {
@@ -25113,6 +24989,7 @@
               "prepare",
               "execute",
               "simulate-final",
+              "validate-business",
               "verify",
               "retire",
               "retire-incomplete"
@@ -29952,6 +29829,12 @@
             "title": "Preview Label",
             "type": "string"
           },
+          "reconciliation_receipt_id": {
+            "default": "",
+            "title": "Reconciliation Receipt Id",
+            "type": "string",
+            "x-launchplane-optional-response": true
+          },
           "schema_version": {
             "default": 1,
             "minimum": 1.0,
@@ -33733,6 +33616,21 @@
           "environment": {
             "$ref": "#/components/schemas/ProductEnvironmentDetail"
           },
+          "host_network_capacity": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HostNetworkCapacityObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "host_network_capacity_available": {
+            "default": false,
+            "title": "Host Network Capacity Available",
+            "type": "boolean"
+          },
           "status": {
             "const": "ok",
             "default": "ok",
@@ -34173,6 +34071,17 @@
             "default": "",
             "title": "Summary",
             "type": "string"
+          },
+          "sync": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SyncCycleHealthEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
           },
           "trust_state": {
             "default": "missing",
@@ -44828,6 +44737,68 @@
         "title": "RestartContainerIdentity",
         "type": "object"
       },
+      "ReviewWithdrawalRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "director_decision_url": {
+            "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/(?:issues|pull)/[1-9][0-9]*#issuecomment-[1-9][0-9]*$",
+            "title": "Director Decision Url",
+            "type": "string"
+          },
+          "expected_head_sha": {
+            "pattern": "^[0-9a-f]{40}$",
+            "title": "Expected Head Sha",
+            "type": "string"
+          },
+          "mode": {
+            "default": "dry-run",
+            "enum": [
+              "dry-run",
+              "apply",
+              "readback"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "product": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Product",
+            "type": "string"
+          },
+          "pull_request": {
+            "minimum": 1.0,
+            "title": "Pull Request",
+            "type": "integer"
+          },
+          "reason": {
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "repository": {
+            "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+            "title": "Repository",
+            "type": "string"
+          },
+          "reviewed_plan_sha256": {
+            "default": "",
+            "title": "Reviewed Plan Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "repository",
+          "pull_request",
+          "expected_head_sha",
+          "reason",
+          "director_decision_url"
+        ],
+        "title": "ReviewWithdrawalRequest",
+        "type": "object"
+      },
       "RollbackExecutionEvidence": {
         "additionalProperties": false,
         "properties": {
@@ -49391,6 +49362,16 @@
       "SeparationResourcesRequest": {
         "additionalProperties": false,
         "properties": {
+          "application": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TestingApplicationSpecification"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "context": {
             "minLength": 1,
             "title": "Context",
@@ -49982,6 +49963,148 @@
           }
         },
         "title": "StructuredHealthEvidence",
+        "type": "object"
+      },
+      "SyncCycleHealth": {
+        "additionalProperties": false,
+        "properties": {
+          "cycle_finished_at": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cycle Finished At"
+          },
+          "cycle_id": {
+            "anyOf": [
+              {
+                "maxLength": 36,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cycle Id"
+          },
+          "cycle_started_at": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cycle Started At"
+          },
+          "freshness_status": {
+            "enum": [
+              "unknown",
+              "unavailable",
+              "fresh",
+              "stale",
+              "overdue",
+              "failed"
+            ],
+            "title": "Freshness Status",
+            "type": "string"
+          },
+          "is_stale": {
+            "title": "Is Stale",
+            "type": "boolean"
+          },
+          "last_heartbeat": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Heartbeat"
+          },
+          "mode": {
+            "anyOf": [
+              {
+                "enum": [
+                  "full",
+                  "incremental"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mode"
+          },
+          "next_cycle_overdue": {
+            "title": "Next Cycle Overdue",
+            "type": "boolean"
+          },
+          "stale_threshold_seconds": {
+            "minimum": 0.0,
+            "title": "Stale Threshold Seconds",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "idle",
+              "running",
+              "success",
+              "failed",
+              "unknown",
+              "unavailable"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "is_stale",
+          "next_cycle_overdue",
+          "freshness_status",
+          "stale_threshold_seconds"
+        ],
+        "title": "SyncCycleHealth",
+        "type": "object"
+      },
+      "SyncCycleHealthEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "cycle": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SyncCycleHealth"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "enum": [
+              "recorded",
+              "malformed"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "SyncCycleHealthEvidence",
         "type": "object"
       },
       "TenantAdmissionControllerRunOnceEnvelope": {
@@ -51431,6 +51554,16 @@
       "TestingActivationRequest": {
         "additionalProperties": false,
         "properties": {
+          "application": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TestingApplicationSpecification"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "context": {
             "minLength": 1,
             "title": "Context",
@@ -51504,6 +51637,94 @@
           "reason"
         ],
         "title": "TestingActivationRequest",
+        "type": "object"
+      },
+      "TestingApplicationCredential": {
+        "additionalProperties": false,
+        "properties": {
+          "binding_key": {
+            "pattern": "^[A-Z][A-Z0-9_]{0,127}$",
+            "title": "Binding Key",
+            "type": "string"
+          },
+          "encoding": {
+            "enum": [
+              "urlsafe",
+              "base64",
+              "hex"
+            ],
+            "title": "Encoding",
+            "type": "string"
+          }
+        },
+        "required": [
+          "binding_key",
+          "encoding"
+        ],
+        "title": "TestingApplicationCredential",
+        "type": "object"
+      },
+      "TestingApplicationSpecification": {
+        "additionalProperties": false,
+        "properties": {
+          "health_path": {
+            "pattern": "^/[^\\s?#]*$",
+            "title": "Health Path",
+            "type": "string"
+          },
+          "local_credentials": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/TestingApplicationCredential"
+            },
+            "title": "Local Credentials",
+            "type": "array"
+          },
+          "network_name": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
+            "title": "Network Name",
+            "type": "string"
+          },
+          "runtime_port": {
+            "maximum": 65535.0,
+            "minimum": 1.0,
+            "title": "Runtime Port",
+            "type": "integer"
+          },
+          "state": {
+            "$ref": "#/components/schemas/TestingApplicationState"
+          }
+        },
+        "required": [
+          "runtime_port",
+          "health_path",
+          "network_name",
+          "state"
+        ],
+        "title": "TestingApplicationSpecification",
+        "type": "object"
+      },
+      "TestingApplicationState": {
+        "additionalProperties": false,
+        "properties": {
+          "container_path": {
+            "default": "",
+            "title": "Container Path",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "none",
+              "volume"
+            ],
+            "title": "Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "title": "TestingApplicationState",
         "type": "object"
       },
       "TestingCredentialAudit": {
@@ -52193,7 +52414,10 @@
             "enum": [
               "dry-run",
               "apply",
-              "readback"
+              "readback",
+              "route-repair-dry-run",
+              "route-repair-apply",
+              "route-repair-readback"
             ],
             "title": "Mode",
             "type": "string"
@@ -53830,620 +54054,6 @@
           "retained_previous_assets"
         ],
         "title": "WebSlotReadiness",
-        "type": "object"
-      },
-      "WorkGraphIssueInboxReconcileResponse": {
-        "additionalProperties": false,
-        "properties": {
-          "records": {
-            "additionalProperties": {
-              "type": "string"
-            },
-            "title": "Records",
-            "type": "object"
-          },
-          "result": {
-            "$ref": "#/components/schemas/WorkGraphIssueInboxReconcileResponseResult"
-          },
-          "status": {
-            "const": "accepted",
-            "default": "accepted",
-            "title": "Status",
-            "type": "string"
-          },
-          "trace_id": {
-            "title": "Trace Id",
-            "type": "string"
-          }
-        },
-        "required": [
-          "trace_id",
-          "result"
-        ],
-        "title": "WorkGraphIssueInboxReconcileResponse",
-        "type": "object"
-      },
-      "WorkGraphIssueInboxReconcileResponseResult": {
-        "additionalProperties": false,
-        "properties": {
-          "reconcile": {
-            "$ref": "#/components/schemas/GitHubIssueInboxReconcileResult"
-          }
-        },
-        "required": [
-          "reconcile"
-        ],
-        "title": "WorkGraphIssueInboxReconcileResponseResult",
-        "type": "object"
-      },
-      "WorkGraphIssueInboxResponse": {
-        "additionalProperties": false,
-        "properties": {
-          "configured": {
-            "title": "Configured",
-            "type": "boolean"
-          },
-          "inbox": {
-            "$ref": "#/components/schemas/GitHubIssueInboxReadModel"
-          },
-          "status": {
-            "const": "ok",
-            "default": "ok",
-            "title": "Status",
-            "type": "string"
-          },
-          "trace_id": {
-            "title": "Trace Id",
-            "type": "string"
-          }
-        },
-        "required": [
-          "trace_id",
-          "configured",
-          "inbox"
-        ],
-        "title": "WorkGraphIssueInboxResponse",
-        "type": "object"
-      },
-      "WorkGraphIssueSnapshot": {
-        "additionalProperties": false,
-        "properties": {
-          "blocked_by": {
-            "default": 0,
-            "minimum": 0.0,
-            "title": "Blocked By",
-            "type": "integer"
-          },
-          "blocking": {
-            "default": 0,
-            "minimum": 0.0,
-            "title": "Blocking",
-            "type": "integer"
-          },
-          "check_state": {
-            "default": "unknown",
-            "enum": [
-              "success",
-              "pending",
-              "failure",
-              "unknown"
-            ],
-            "title": "Check State",
-            "type": "string"
-          },
-          "deploy_state": {
-            "default": "unknown",
-            "enum": [
-              "success",
-              "pending",
-              "failure",
-              "unknown"
-            ],
-            "title": "Deploy State",
-            "type": "string"
-          },
-          "finish_line": {
-            "default": "",
-            "title": "Finish Line",
-            "type": "string"
-          },
-          "focus": {
-            "default": "Unknown",
-            "enum": [
-              "Now",
-              "Next",
-              "Waiting",
-              "Later",
-              "Done",
-              "Unknown"
-            ],
-            "title": "Focus",
-            "type": "string"
-          },
-          "is_pull_request": {
-            "default": false,
-            "title": "Is Pull Request",
-            "type": "boolean"
-          },
-          "labels": {
-            "default": [],
-            "items": {
-              "type": "string"
-            },
-            "title": "Labels",
-            "type": "array"
-          },
-          "manager": {
-            "default": "",
-            "title": "Manager",
-            "type": "string"
-          },
-          "number": {
-            "minimum": 1.0,
-            "title": "Number",
-            "type": "integer"
-          },
-          "repository": {
-            "title": "Repository",
-            "type": "string"
-          },
-          "state": {
-            "default": "open",
-            "enum": [
-              "open",
-              "closed"
-            ],
-            "title": "State",
-            "type": "string"
-          },
-          "subissues_completed": {
-            "default": 0,
-            "minimum": 0.0,
-            "title": "Subissues Completed",
-            "type": "integer"
-          },
-          "subissues_total": {
-            "default": 0,
-            "minimum": 0.0,
-            "title": "Subissues Total",
-            "type": "integer"
-          },
-          "title": {
-            "title": "Title",
-            "type": "string"
-          },
-          "updated_at": {
-            "default": "",
-            "title": "Updated At",
-            "type": "string"
-          },
-          "url": {
-            "title": "Url",
-            "type": "string"
-          }
-        },
-        "required": [
-          "repository",
-          "number",
-          "title",
-          "url"
-        ],
-        "title": "WorkGraphIssueSnapshot",
-        "type": "object"
-      },
-      "WorkGraphQueue": {
-        "additionalProperties": false,
-        "properties": {
-          "generated_at": {
-            "title": "Generated At",
-            "type": "string"
-          },
-          "hidden_count": {
-            "default": 0,
-            "minimum": 0.0,
-            "title": "Hidden Count",
-            "type": "integer"
-          },
-          "items": {
-            "items": {
-              "$ref": "#/components/schemas/WorkGraphQueueItem"
-            },
-            "title": "Items",
-            "type": "array"
-          },
-          "schema_version": {
-            "default": 1,
-            "minimum": 1.0,
-            "title": "Schema Version",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "generated_at",
-          "items"
-        ],
-        "title": "WorkGraphQueue",
-        "type": "object"
-      },
-      "WorkGraphQueueEvidence": {
-        "additionalProperties": false,
-        "properties": {
-          "code": {
-            "title": "Code",
-            "type": "string"
-          },
-          "detail": {
-            "title": "Detail",
-            "type": "string"
-          },
-          "source_url": {
-            "default": "",
-            "title": "Source Url",
-            "type": "string"
-          },
-          "state": {
-            "enum": [
-              "verified",
-              "recorded",
-              "stale",
-              "missing",
-              "unsupported"
-            ],
-            "title": "State",
-            "type": "string"
-          }
-        },
-        "required": [
-          "code",
-          "state",
-          "detail"
-        ],
-        "title": "WorkGraphQueueEvidence",
-        "type": "object"
-      },
-      "WorkGraphQueueItem": {
-        "additionalProperties": false,
-        "properties": {
-          "blocked_by_count": {
-            "default": 0,
-            "minimum": 0.0,
-            "title": "Blocked By Count",
-            "type": "integer"
-          },
-          "evidence": {
-            "default": [],
-            "items": {
-              "$ref": "#/components/schemas/WorkGraphQueueEvidence"
-            },
-            "title": "Evidence",
-            "type": "array"
-          },
-          "finish_line": {
-            "default": "",
-            "title": "Finish Line",
-            "type": "string"
-          },
-          "focus": {
-            "enum": [
-              "Now",
-              "Next",
-              "Waiting",
-              "Later",
-              "Done",
-              "Unknown"
-            ],
-            "title": "Focus",
-            "type": "string"
-          },
-          "handoff_url": {
-            "default": "",
-            "title": "Handoff Url",
-            "type": "string"
-          },
-          "manager": {
-            "default": "",
-            "title": "Manager",
-            "type": "string"
-          },
-          "next_action": {
-            "title": "Next Action",
-            "type": "string"
-          },
-          "number": {
-            "title": "Number",
-            "type": "integer"
-          },
-          "product": {
-            "default": "",
-            "title": "Product",
-            "type": "string"
-          },
-          "product_display_name": {
-            "default": "",
-            "title": "Product Display Name",
-            "type": "string"
-          },
-          "reasons": {
-            "items": {
-              "$ref": "#/components/schemas/WorkGraphRecommendationReason"
-            },
-            "title": "Reasons",
-            "type": "array"
-          },
-          "recommendation": {
-            "enum": [
-              "quick_win",
-              "deep_work",
-              "switch_projects",
-              "blocked_cleanup",
-              "attention_needed",
-              "watch"
-            ],
-            "title": "Recommendation",
-            "type": "string"
-          },
-          "repo_classification": {
-            "enum": [
-              "managed_runtime",
-              "active_awareness",
-              "support_dependency",
-              "out_of_scope"
-            ],
-            "title": "Repo Classification",
-            "type": "string"
-          },
-          "repository": {
-            "title": "Repository",
-            "type": "string"
-          },
-          "safe_to_start": {
-            "title": "Safe To Start",
-            "type": "boolean"
-          },
-          "score": {
-            "title": "Score",
-            "type": "integer"
-          },
-          "source_of_truth_url": {
-            "title": "Source Of Truth Url",
-            "type": "string"
-          },
-          "state": {
-            "enum": [
-              "ready",
-              "waiting",
-              "blocked",
-              "done",
-              "hidden"
-            ],
-            "title": "State",
-            "type": "string"
-          },
-          "title": {
-            "title": "Title",
-            "type": "string"
-          },
-          "updated_at": {
-            "default": "",
-            "title": "Updated At",
-            "type": "string"
-          },
-          "url": {
-            "title": "Url",
-            "type": "string"
-          },
-          "why_now": {
-            "title": "Why Now",
-            "type": "string"
-          }
-        },
-        "required": [
-          "repository",
-          "repo_classification",
-          "number",
-          "title",
-          "url",
-          "focus",
-          "state",
-          "recommendation",
-          "score",
-          "safe_to_start",
-          "next_action",
-          "why_now",
-          "source_of_truth_url",
-          "reasons"
-        ],
-        "title": "WorkGraphQueueItem",
-        "type": "object"
-      },
-      "WorkGraphRankEnvelope": {
-        "additionalProperties": false,
-        "properties": {
-          "limit": {
-            "default": 25,
-            "maximum": 100.0,
-            "minimum": 1.0,
-            "title": "Limit",
-            "type": "integer"
-          },
-          "schema_version": {
-            "default": 1,
-            "minimum": 1.0,
-            "title": "Schema Version",
-            "type": "integer"
-          },
-          "snapshot": {
-            "$ref": "#/components/schemas/WorkGraphSnapshot"
-          }
-        },
-        "required": [
-          "snapshot"
-        ],
-        "title": "WorkGraphRankEnvelope",
-        "type": "object"
-      },
-      "WorkGraphRankResponse": {
-        "additionalProperties": false,
-        "properties": {
-          "records": {
-            "additionalProperties": {
-              "type": "string"
-            },
-            "title": "Records",
-            "type": "object"
-          },
-          "result": {
-            "$ref": "#/components/schemas/WorkGraphRankResult"
-          },
-          "status": {
-            "const": "accepted",
-            "default": "accepted",
-            "title": "Status",
-            "type": "string"
-          },
-          "trace_id": {
-            "title": "Trace Id",
-            "type": "string"
-          }
-        },
-        "required": [
-          "trace_id",
-          "result"
-        ],
-        "title": "WorkGraphRankResponse",
-        "type": "object"
-      },
-      "WorkGraphRankResult": {
-        "additionalProperties": false,
-        "properties": {
-          "queue": {
-            "$ref": "#/components/schemas/WorkGraphQueue"
-          }
-        },
-        "required": [
-          "queue"
-        ],
-        "title": "WorkGraphRankResult",
-        "type": "object"
-      },
-      "WorkGraphRecommendationReason": {
-        "additionalProperties": false,
-        "properties": {
-          "code": {
-            "title": "Code",
-            "type": "string"
-          },
-          "detail": {
-            "title": "Detail",
-            "type": "string"
-          }
-        },
-        "required": [
-          "code",
-          "detail"
-        ],
-        "title": "WorkGraphRecommendationReason",
-        "type": "object"
-      },
-      "WorkGraphRepoSnapshot": {
-        "additionalProperties": false,
-        "properties": {
-          "classification": {
-            "enum": [
-              "managed_runtime",
-              "active_awareness",
-              "support_dependency",
-              "out_of_scope"
-            ],
-            "title": "Classification",
-            "type": "string"
-          },
-          "display_name": {
-            "default": "",
-            "title": "Display Name",
-            "type": "string"
-          },
-          "product": {
-            "default": "",
-            "title": "Product",
-            "type": "string"
-          },
-          "repository": {
-            "title": "Repository",
-            "type": "string"
-          }
-        },
-        "required": [
-          "repository",
-          "classification"
-        ],
-        "title": "WorkGraphRepoSnapshot",
-        "type": "object"
-      },
-      "WorkGraphSnapshot": {
-        "additionalProperties": false,
-        "properties": {
-          "generated_at": {
-            "title": "Generated At",
-            "type": "string"
-          },
-          "issues": {
-            "items": {
-              "$ref": "#/components/schemas/WorkGraphIssueSnapshot"
-            },
-            "title": "Issues",
-            "type": "array"
-          },
-          "repos": {
-            "default": [],
-            "items": {
-              "$ref": "#/components/schemas/WorkGraphRepoSnapshot"
-            },
-            "title": "Repos",
-            "type": "array"
-          },
-          "schema_version": {
-            "default": 1,
-            "minimum": 1.0,
-            "title": "Schema Version",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "generated_at",
-          "issues"
-        ],
-        "title": "WorkGraphSnapshot",
-        "type": "object"
-      },
-      "WorkGraphSnapshotResponse": {
-        "additionalProperties": false,
-        "properties": {
-          "snapshot": {
-            "$ref": "#/components/schemas/WorkGraphSnapshot"
-          },
-          "source": {
-            "additionalProperties": true,
-            "title": "Source",
-            "type": "object"
-          },
-          "status": {
-            "const": "ok",
-            "default": "ok",
-            "title": "Status",
-            "type": "string"
-          },
-          "trace_id": {
-            "title": "Trace Id",
-            "type": "string"
-          }
-        },
-        "required": [
-          "trace_id",
-          "snapshot",
-          "source"
-        ],
-        "title": "WorkGraphSnapshotResponse",
         "type": "object"
       },
       "WorkflowRuleRetirementRequest": {
@@ -77481,6 +77091,14 @@
                     "title": "Product",
                     "type": "string"
                   },
+                  "requalify_literal_keys": {
+                    "default": [],
+                    "items": {
+                      "type": "string"
+                    },
+                    "title": "Requalify Literal Keys",
+                    "type": "array"
+                  },
                   "reviewed_binding_sha256": {
                     "default": "",
                     "title": "Reviewed Binding Sha256",
@@ -79600,7 +79218,7 @@
             "description": "Service Unavailable"
           }
         },
-        "summary": "Inspect or reconcile one provider-absent legacy generic-web preview"
+        "summary": "Inspect or reconcile one provider-absent legacy preview"
       }
     },
     "/v1/previews/lifecycle-cleanup": {
@@ -83616,6 +83234,16 @@
               "title": "Authorization",
               "type": "string"
             }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -83714,6 +83342,16 @@
             "schema": {
               "default": "",
               "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
               "type": "string"
             }
           }
@@ -88542,6 +88180,116 @@
         ]
       }
     },
+    "/v1/product-review/withdrawal": {
+      "post": {
+        "operationId": "withdraw_product_review",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReviewWithdrawalRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Withdraw one pending Client review request on a recorded Director decision"
+      }
+    },
     "/v1/production-backup-authority": {
       "get": {
         "operationId": "read_production_backup_authority",
@@ -90158,6 +89906,356 @@
         "summary": "Read exact operational enrollment readiness"
       }
     },
+    "/v1/products/{product}/discussion-topics": {
+      "get": {
+        "operationId": "list_discussion_topics",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_closed",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Closed",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DiscussionTopicsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "List Topics"
+      }
+    },
+    "/v1/products/{product}/discussion-topics/{topic_id}": {
+      "put": {
+        "operationId": "add_discussion_topic",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "topic_id",
+            "required": true,
+            "schema": {
+              "maxLength": 96,
+              "minLength": 1,
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$",
+              "title": "Topic Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DiscussionTopicInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DiscussionTopicResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Add Topic"
+      }
+    },
+    "/v1/products/{product}/discussion-topics/{topic_id}/close": {
+      "post": {
+        "operationId": "close_discussion_topic",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "topic_id",
+            "required": true,
+            "schema": {
+              "maxLength": 96,
+              "minLength": 1,
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$",
+              "title": "Topic Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DiscussionTopicResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Close Topic"
+      }
+    },
     "/v1/products/{product}/environments": {
       "get": {
         "operationId": "list_product_environments",
@@ -90453,6 +90551,16 @@
               "pattern": "^\\S+$",
               "title": "Environment",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_host_network_capacity",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Host Network Capacity",
+              "type": "boolean"
             }
           },
           {
@@ -100048,176 +100156,6 @@
         "summary": "Audit all products' testing lanes without credential values"
       }
     },
-    "/v1/work-graph/github/issues": {
-      "get": {
-        "operationId": "read_work_graph_issue_inbox",
-        "parameters": [
-          {
-            "in": "header",
-            "name": "Authorization",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Authorization",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "Cookie",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Cookie",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/WorkGraphIssueInboxResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "401": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Unauthorized"
-          },
-          "403": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Forbidden"
-          },
-          "409": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Conflict"
-          },
-          "503": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Service Unavailable"
-          }
-        },
-        "summary": "Read Launchplane GitHub issue inbox"
-      }
-    },
-    "/v1/work-graph/github/issues/reconcile": {
-      "post": {
-        "operationId": "reconcile_work_graph_issue_inbox",
-        "parameters": [
-          {
-            "in": "header",
-            "name": "Authorization",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Authorization",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/GitHubIssueInboxReconcileRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "202": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/WorkGraphIssueInboxReconcileResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "400": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Bad Request"
-          },
-          "401": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Unauthorized"
-          },
-          "403": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Forbidden"
-          },
-          "409": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Conflict"
-          },
-          "503": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Service Unavailable"
-          }
-        },
-        "summary": "Reconcile Launchplane GitHub issue inbox"
-      }
-    },
     "/v1/work-graph/merge-train/admission": {
       "get": {
         "operationId": "read_merge_train_admission",
@@ -101718,186 +101656,6 @@
         "summary": "Run one merge train stack collapse worker pass"
       }
     },
-    "/v1/work-graph/rank": {
-      "post": {
-        "operationId": "rank_work_graph_snapshot",
-        "parameters": [
-          {
-            "in": "header",
-            "name": "Authorization",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Authorization",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "Cookie",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Cookie",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/WorkGraphRankEnvelope"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "202": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/WorkGraphRankResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "400": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Bad Request"
-          },
-          "401": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Unauthorized"
-          },
-          "403": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Forbidden"
-          },
-          "409": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Conflict"
-          },
-          "503": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Service Unavailable"
-          }
-        },
-        "summary": "Rank Launchplane work graph snapshot"
-      }
-    },
-    "/v1/work-graph/snapshot": {
-      "get": {
-        "operationId": "read_work_graph_snapshot",
-        "parameters": [
-          {
-            "in": "header",
-            "name": "Authorization",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Authorization",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "Cookie",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Cookie",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/WorkGraphSnapshotResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "401": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Unauthorized"
-          },
-          "403": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Forbidden"
-          },
-          "409": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Conflict"
-          },
-          "503": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Service Unavailable"
-          }
-        },
-        "summary": "Read Launchplane work graph snapshot"
-      }
-    },
     "/v1/work-graph/tenant-admission/controller/run-once": {
       "post": {
         "operationId": "run_tenant_admission_controller_once",
@@ -102553,6 +102311,7 @@
     "/v1/privileged-operations/plans": "list_human_privileged_operations",
     "/v1/privileged-operations/plans/{operation_id}": "read_human_privileged_operation",
     "/v1/privileged-operations/plans/{operation_id}/review": "read_human_privileged_operation_review",
+    "/v1/product-config/testing-hold": "read_testing_hold",
     "/v1/product-profiles": "list_product_profiles",
     "/v1/product-profiles/{product}": "read_product_profile",
     "/v1/product-profiles/{product}/mutation-receipts/{field}": "read_product_profile_mutation_receipt",
@@ -102566,6 +102325,7 @@
     "/v1/products/{product}": "read_product",
     "/v1/products/{product}/activity": "read_product_activity",
     "/v1/products/{product}/contexts/{context}/instances/{instance}/operational-readiness": "read_product_operational_readiness",
+    "/v1/products/{product}/discussion-topics": "list_discussion_topics",
     "/v1/products/{product}/environments": "list_product_environments",
     "/v1/products/{product}/environments/prod/backup-worker-bindings": "read_backup_worker_bindings",
     "/v1/products/{product}/environments/{environment}": "read_product_environment",
@@ -102579,10 +102339,8 @@
     "/v1/release-review": "read_release_review",
     "/v1/repo-product-mapping": "read_repo_product_mapping",
     "/v1/service/github-delivery": "read_service_github_delivery_controls",
-    "/v1/work-graph/github/issues": "read_work_graph_issue_inbox",
     "/v1/work-graph/merge-train/controller/status": "read_merge_train_controller_status",
     "/v1/work-graph/merge-train/policy-targets": "read_merge_train_policy_targets",
-    "/v1/work-graph/snapshot": "read_work_graph_snapshot",
     "/v1/work-graph/tenant-admission/evaluation": "read_tenant_admission_evaluation"
   },
   "x-launchplane-ui-write-operations": {
@@ -102596,6 +102354,7 @@
     "/v1/privileged-operations/plans/{operation_id}/approve": "approve_human_privileged_operation",
     "/v1/privileged-operations/plans/{operation_id}/cancel": "cancel_human_privileged_operation",
     "/v1/privileged-operations/plans/{operation_id}/revoke": "revoke_human_privileged_operation",
+    "/v1/product-config/testing-hold/apply": "apply_testing_hold",
     "/v1/product-profiles/expected-config/apply": "apply_product_expected_config",
     "/v1/product-profiles/health-monitoring/apply": "apply_product_health_monitoring",
     "/v1/product-profiles/stable-lane-repair/apply": "apply_product_stable_lane_repair",
@@ -102623,7 +102382,6 @@
     "/v1/route-bindings/reconcile": "reconcile_route_binding",
     "/v1/service/delivery/apply-receipt": "read_service_delivery_apply_receipt",
     "/v1/service/github-delivery/configuration": "configure_launchplane_github_delivery",
-    "/v1/service/github-delivery/token-retirement": "retire_service_github_tokens",
-    "/v1/work-graph/rank": "rank_work_graph_snapshot"
+    "/v1/service/github-delivery/token-retirement": "retire_service_github_tokens"
   }
 }
