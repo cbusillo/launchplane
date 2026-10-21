@@ -1641,7 +1641,7 @@ class GenericWebDeployProviderMutationAdapter:
             and not receipt.settled_image_deployment_id
             and snapshot is not None
             and snapshot.mode == "deploy"
-            and snapshot.state == "prepared"
+            and snapshot.state in {"prepared", "not_started"}
             and (snapshot.product, snapshot.context, snapshot.instance, snapshot.target_id)
             == (
                 self._profile.product,
@@ -1654,6 +1654,55 @@ class GenericWebDeployProviderMutationAdapter:
             and snapshot.provider_id == self._deploy_provider.provider_id
             and snapshot.extensions == self._lane.generic_web_extensions
         )
+
+    def _record_no_effect_lifecycle_refusal(
+        self, operation_key: str, lease: ProviderOperationLease, recorder: ExecutionRecorder | None
+    ) -> None:
+        if (
+            not self._standing_testing_permission
+            or recorder is None
+            or recorder.expected_record is None
+        ):
+            return
+        if recorded_application_lifecycle(recorder.expected_record) is None:
+            return
+        if not self._proved_no_effect_lifecycle_retry(operation_key, lease, recorder):
+            raise ProviderMutationUnknownError("Original no-effect retirement is not proved.")
+        assert recorder is not None and recorder.expected_record is not None
+        assert isinstance(lease, ProviderEvidenceLease)
+        record = recorder.expected_record
+        snapshot = recorded_application_lifecycle(record)
+        assert snapshot is not None
+        retired = record.model_copy(
+            update={
+                "post_deploy_update": record.post_deploy_update.model_copy(
+                    update={
+                        "evidence": {
+                            **record.post_deploy_update.evidence,
+                            **snapshot.model_copy(update={"state": "not_started"}).evidence(),
+                        }
+                    }
+                )
+            }
+        )
+        try:
+            inventory = cast(
+                _ExecutionInventoryReader, self._record_store
+            ).read_environment_inventory(context_name=record.context, instance_name=record.instance)
+        except FileNotFoundError:
+            inventory = None
+        # Record historical no-effect evidence under the exact original lease,
+        # without requiring the forward facts whose drift caused the refusal.
+        guard = getattr(self._record_store, "provider_evidence_guard")
+        with guard(lease.evidence_reservation, authority_checkpoint=self.execution_check):
+            cast(_TestingResultPublisher, self._record_store).publish_generic_web_testing_result(
+                reservation=lease.evidence_reservation(),
+                expected_deployment=record,
+                expected_inventory=inventory,
+                deployment=retired,
+                inventory=None,
+            )
+        recorder.expected_record = retired
 
     def apply(
         self, provider_operation_key: str, lease: ProviderOperationLease
@@ -1858,15 +1907,23 @@ class GenericWebDeployProviderMutationAdapter:
                 proved_no_effect_retry=self._proved_no_effect_lifecycle_retry(
                     provider_operation_key, lease, recorder
                 ),
-                protect_inherited_baseline=self._standing_testing_permission,
+                check_unproved_predecessor=self._standing_testing_permission,
             )
         except TimeoutError as error:
             if self._lane.generic_web_cutover is not None:
                 raise ProviderMutationUnknownError(type(error).__name__) from error
             raise
-        except (FileNotFoundError, ValueError) as error:
+        except (FileNotFoundError, ValueError, ProviderMutationRejectedError) as error:
             if self._lane.generic_web_cutover is not None and effect_started:
                 raise ProviderMutationUnknownError(type(error).__name__) from error
+            try:
+                self._record_no_effect_lifecycle_refusal(provider_operation_key, lease, recorder)
+            except Exception as publication_error:
+                # Do not release an original whose no-effect evidence could
+                # not be published under its current lease and record CAS.
+                raise ProviderMutationUnknownError(str(publication_error)) from publication_error
+            if isinstance(error, ProviderMutationRejectedError):
+                raise
             raise ProviderMutationRejectedError(error)
         except click.ClickException as error:
             from control_plane.lane_movement import LaneMovementRefused

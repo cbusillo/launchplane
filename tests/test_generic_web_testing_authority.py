@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from tempfile import TemporaryDirectory
 from typing import Any
 import unittest
+import click
 from unittest.mock import patch
 from types import SimpleNamespace
 from contextlib import contextmanager, nullcontext
@@ -12,10 +13,18 @@ from collections.abc import Iterator
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetStaffTestingHold
-from control_plane.contracts.deployment_record import ResolvedTargetEvidence
+from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.dokploy import api
-from control_plane.workflows.generic_web_application_snapshot import recorded_application_lifecycle
-from control_plane.workflows.generic_web_application_lifecycle import schedule_payload
+from control_plane.workflows.generic_web_application_snapshot import (
+    application_snapshot_for_deploy,
+    recorded_application_lifecycle,
+)
+from control_plane.workflows.generic_web_execution import execution_receipt
+from control_plane.generic_web_testing_inputs import TestingInputSafetyRefused
+from control_plane.workflows.generic_web_application_lifecycle import (
+    DokployApplicationLifecycle,
+    schedule_payload,
+)
 from control_plane.workflows.generic_web_deploy_provider import (
     GenericWebResolvedDeployTarget,
     GenericWebProviderDeploymentObservation,
@@ -97,6 +106,23 @@ class _TestingLifecycleProvider(_LifecycleDeployProvider):
 
 
 class GenericWebTestingAuthorityTests(unittest.TestCase):
+    @staticmethod
+    def lifecycle_state(record: DeploymentRecord, state: str) -> DeploymentRecord:
+        snapshot = recorded_application_lifecycle(record)
+        assert snapshot is not None
+        return record.model_copy(
+            update={
+                "post_deploy_update": record.post_deploy_update.model_copy(
+                    update={
+                        "evidence": {
+                            **record.post_deploy_update.evidence,
+                            **snapshot.model_copy(update={"state": state}).evidence(),
+                        }
+                    }
+                )
+            }
+        )
+
     def setUp(self) -> None:
         temporary = TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -506,6 +532,7 @@ class GenericWebTestingAuthorityTests(unittest.TestCase):
                 )
                 baseline = recorded_application_lifecycle(pending)
                 assert baseline is not None
+                self.assertEqual(baseline.state, "not_started")
                 if drift:
                     definition = self.lane.generic_web_extensions.schedules[0]
                     schedules[definition.name] = schedule_payload(
@@ -524,7 +551,7 @@ class GenericWebTestingAuthorityTests(unittest.TestCase):
                 self.assertEqual(
                     after.model_dump(exclude={"state"}), baseline.model_dump(exclude={"state"})
                 )
-                if drift:
+                if drift and not new_key:
                     self.assertEqual(retry_status, 409, retry_payload)
                     self.assertEqual(
                         retry_payload["error"]["code"], "testing_deploy_baseline_changed"
@@ -534,12 +561,316 @@ class GenericWebTestingAuthorityTests(unittest.TestCase):
                     self.assertEqual(schedules, actual_schedules)
                 else:
                     self.assertEqual(retry_status, 202, retry_payload)
-                    self.assertEqual(
-                        retry_payload["records"]["deployment_record_id"], pending.record_id
+                    completed = self.store.read_deployment_record(
+                        retry_payload["records"]["deployment_record_id"]
                     )
-                    self.assertEqual(record.deploy.status, "pass")
+                    self.assertEqual(completed.deploy.status, "pass")
+                    if new_key:
+                        self.assertNotEqual(completed.record_id, pending.record_id)
+                        fresh = recorded_application_lifecycle(completed)
+                        assert fresh is not None
+                        self.assertEqual(fresh.originals, actual_schedules)
+                        self.assertEqual(record, pending)
+                    else:
+                        self.assertEqual(completed.record_id, pending.record_id)
                     self.assertEqual(provider.effects, ["image"])
                     self.assertTrue(writes)
+
+    def test_held_schedule_allows_a_new_standing_fix_forward(self) -> None:
+        with self.lifecycle_provider() as (provider, schedules, _writes):
+            definition = self.lane.generic_web_extensions.schedules[0]
+            original = schedule_payload(definition, provider.target_id, enabled=True)
+            schedules[definition.name] = original
+            with patch.object(
+                DokployApplicationLifecycle,
+                "maintain",
+                side_effect=click.ClickException("Post-image maintenance failed"),
+            ):
+                status, payload = self.deploy(key="held-original")
+            self.assertEqual(status, 202, payload)
+            held = recorded_application_lifecycle(self.store.list_deployment_records()[0])
+            assert held is not None
+            self.assertEqual(held.state, "held")
+            self.assertFalse(schedules[definition.name]["enabled"])
+            self.assertEqual(provider.effects, ["image"])
+            status, payload = self.deploy(key="held-fix-forward")
+            self.assertEqual(status, 202, payload)
+            completed = self.store.read_deployment_record(
+                payload["records"]["deployment_record_id"]
+            )
+            snapshot = recorded_application_lifecycle(completed)
+            assert snapshot is not None
+            self.assertEqual(snapshot.state, "qualified")
+            self.assertEqual(snapshot.originals[definition.name], original)
+            self.assertEqual(provider.effects, ["image", "image"])
+
+    def test_no_effect_proof_cannot_be_forged_after_a_stored_effect_checkpoint(self) -> None:
+        with self.lifecycle_provider() as (provider, _schedules, writes):
+            checkpoint = self.store.checkpoint_mutation_provider_effect
+
+            def checkpoint_then_attempt_retirement(**arguments: Any) -> Any:
+                pending = self.store.list_deployment_records()[0]
+                retired = self.lifecycle_state(pending, "not_started")
+                with self.assertRaises(ValueError):
+                    self.store.write_deployment_record(retired)
+                checkpoint(**arguments)
+                # The caller's earlier lease snapshot is blank; the stored
+                # reservation has now checkpointed and must govern this write.
+                with self.assertRaises(ValueError):
+                    self.store.publish_generic_web_testing_result(
+                        reservation=arguments["reservation"],
+                        expected_deployment=pending,
+                        expected_inventory=None,
+                        deployment=retired,
+                        inventory=None,
+                    )
+                raise ProviderMutationUnknownError("Stop after the isolated stored checkpoint")
+
+            with patch.object(
+                self.store,
+                "checkpoint_mutation_provider_effect",
+                side_effect=checkpoint_then_attempt_retirement,
+            ):
+                status, payload = self.deploy()
+            self.assertEqual(status, 409, payload)
+            self.assertEqual(provider.effects, [])
+            self.assertEqual(writes, [])
+            self.assertTrue(self.store.list_held_provider_target_reservations())
+            snapshot = recorded_application_lifecycle(self.store.list_deployment_records()[0])
+            assert snapshot is not None
+            self.assertEqual(snapshot.state, "prepared")
+
+    def test_no_effect_marker_rejects_generic_consumption_and_execution_credit(self) -> None:
+        with self.lifecycle_provider() as (_provider, _schedules, _writes):
+            checkpoint = self.store.checkpoint_mutation_provider_effect
+            publish = self.store.publish_generic_web_testing_result
+
+            def refuse(**arguments: Any) -> Any:
+                record_safety(
+                    self.store, self.profile.product, self.lane.context, "testing", data="only_copy"
+                )
+                return checkpoint(**arguments)
+
+            def check_marker(**arguments: Any) -> None:
+                publish(**arguments)
+                retired = arguments["deployment"]
+                snapshot = recorded_application_lifecycle(retired)
+                if snapshot is None or snapshot.state != "not_started":
+                    return
+                with self.assertRaises(ValueError):
+                    self.store.write_deployment_record(self.lifecycle_state(retired, "prepared"))
+                receipt = execution_receipt(retired)
+                assert receipt is not None
+                with self.assertRaises(ValueError):
+                    self.store.advance_generic_web_execution_receipt(
+                        record_id=retired.record_id,
+                        receipt_json=receipt.model_copy(
+                            update={"settled_image_deployment_id": "unobserved-image"}
+                        ).model_dump_json(),
+                    )
+                self.assertEqual(self.store.read_deployment_record(retired.record_id), retired)
+
+            with (
+                patch.object(self.store, "checkpoint_mutation_provider_effect", side_effect=refuse),
+                patch.object(
+                    self.store, "publish_generic_web_testing_result", side_effect=check_marker
+                ),
+            ):
+                status, payload = self.deploy()
+            self.assertEqual(status, 409, payload)
+            self.assertEqual(self.store.list_held_provider_target_reservations(), ())
+
+    def test_failed_no_effect_publication_keeps_the_original_fence(self) -> None:
+        with self.lifecycle_provider() as (provider, _schedules, writes):
+            checkpoint = self.store.checkpoint_mutation_provider_effect
+            publish = self.store.publish_generic_web_testing_result
+
+            def refuse(**arguments: Any) -> Any:
+                record_safety(
+                    self.store, self.profile.product, self.lane.context, "testing", data="only_copy"
+                )
+                return checkpoint(**arguments)
+
+            def fail_retirement(**arguments: Any) -> None:
+                snapshot = recorded_application_lifecycle(arguments["deployment"])
+                if snapshot is not None and snapshot.state == "not_started":
+                    raise ValueError("The reviewed pending record changed")
+                publish(**arguments)
+
+            with (
+                patch.object(self.store, "checkpoint_mutation_provider_effect", side_effect=refuse),
+                patch.object(
+                    self.store, "publish_generic_web_testing_result", side_effect=fail_retirement
+                ),
+            ):
+                status, payload = self.deploy()
+            self.assertEqual(status, 409, payload)
+            self.assertTrue(self.store.list_held_provider_target_reservations())
+            record_safety(self.store, self.profile.product, self.lane.context, "testing")
+            status, payload = self.deploy(key="another-operation")
+            self.assertEqual(status, 409, payload)
+            self.assertEqual(payload["error"]["code"], "mutation_reconciliation_required")
+            self.assertEqual(provider.effects, [])
+            self.assertEqual(writes, [])
+
+    def test_legacy_unmarked_original_requires_its_own_proof_before_fresh_baseline(self) -> None:
+        with self.lifecycle_provider() as (provider, schedules, writes):
+            checkpoint = self.store.checkpoint_mutation_provider_effect
+
+            def refuse(**arguments: Any) -> Any:
+                record_safety(
+                    self.store, self.profile.product, self.lane.context, "testing", data="only_copy"
+                )
+                return checkpoint(**arguments)
+
+            # Simulate the earlier version, which released a no-effect
+            # refusal without recording its historical provenance.
+            with (
+                patch.object(self.store, "checkpoint_mutation_provider_effect", side_effect=refuse),
+                patch.object(
+                    GenericWebDeployProviderMutationAdapter,
+                    "_record_no_effect_lifecycle_refusal",
+                    return_value=None,
+                ),
+            ):
+                status, payload = self.deploy(key="legacy-original")
+            self.assertEqual(status, 409, payload)
+            pending = self.store.list_deployment_records()[0]
+            snapshot = recorded_application_lifecycle(pending)
+            assert snapshot is not None
+            self.assertEqual(snapshot.state, "prepared")
+            self.assertEqual(self.store.list_held_provider_target_reservations(), ())
+            definition = self.lane.generic_web_extensions.schedules[0]
+            edited = schedule_payload(definition, provider.target_id, enabled=False)
+            schedules[definition.name] = edited
+            record_safety(self.store, self.profile.product, self.lane.context, "testing")
+            status, payload = self.deploy(key="fresh-original")
+            self.assertEqual(status, 409, payload)
+            self.assertEqual(payload["error"]["code"], "testing_deploy_original_required")
+            self.assertEqual(provider.effects, [])
+            self.assertEqual(writes, [])
+            status, payload = self.deploy(key="legacy-original")
+            self.assertEqual(status, 409, payload)
+            self.assertEqual(payload["error"]["code"], "testing_deploy_baseline_changed")
+            retired = recorded_application_lifecycle(
+                self.store.read_deployment_record(pending.record_id)
+            )
+            assert retired is not None
+            self.assertEqual(retired.state, "not_started")
+            status, payload = self.deploy(key="fresh-original")
+            self.assertEqual(status, 202, payload)
+            fresh = recorded_application_lifecycle(
+                self.store.read_deployment_record(payload["records"]["deployment_record_id"])
+            )
+            assert fresh is not None
+            self.assertEqual(fresh.originals[definition.name], edited)
+            self.assertEqual(provider.effects, ["image"])
+
+    def test_new_original_restores_its_fresh_baseline_after_no_effect_refusal(self) -> None:
+        with self.lifecycle_provider() as (provider, schedules, _writes):
+            checkpoint = self.store.checkpoint_mutation_provider_effect
+
+            def refuse(**arguments: Any) -> Any:
+                record_safety(
+                    self.store, self.profile.product, self.lane.context, "testing", data="only_copy"
+                )
+                return checkpoint(**arguments)
+
+            with patch.object(
+                self.store, "checkpoint_mutation_provider_effect", side_effect=refuse
+            ):
+                status, payload = self.deploy(key="unstarted-original")
+            self.assertEqual(status, 409, payload)
+            original = self.store.list_deployment_records()[0]
+            definition = self.lane.generic_web_extensions.schedules[0]
+            edited = {
+                **schedule_payload(definition, provider.target_id, enabled=False),
+                "command": "./owner-revised-command",
+            }
+            schedules[definition.name] = edited
+            record_safety(self.store, self.profile.product, self.lane.context, "testing")
+            with patch.object(
+                provider,
+                "execute_artifact_deploy",
+                side_effect=TestingInputSafetyRefused("Synthetic pre-image dispatch refusal"),
+            ):
+                status, payload = self.deploy(key="reviewed-fresh-original")
+            self.assertEqual(status, 409, payload)
+            fresh = next(
+                row
+                for row in self.store.list_deployment_records()
+                if row.record_id != original.record_id
+            )
+            snapshot = recorded_application_lifecycle(fresh)
+            assert snapshot is not None
+            self.assertEqual(snapshot.originals[definition.name], edited)
+            self.assertEqual(schedules[definition.name], edited)
+            self.assertEqual(self.store.read_deployment_record(original.record_id), original)
+            self.assertEqual(provider.effects, [])
+
+    def test_inert_predecessor_preserves_earlier_effective_schedule_ownership(self) -> None:
+        with self.lifecycle_provider() as (provider, _schedules, _writes):
+            status, payload = self.deploy(key="effective-owner")
+            self.assertEqual(status, 202, payload)
+            effective = self.store.read_deployment_record(
+                payload["records"]["deployment_record_id"]
+            )
+            owned = self.lane.generic_web_extensions.schedules[0].name
+            extensions = self.lane.generic_web_extensions.model_copy(
+                update={
+                    "schedules": tuple(
+                        row.model_copy(update={"name": f"{row.name}-inert"})
+                        for row in self.lane.generic_web_extensions.schedules
+                    )
+                }
+            )
+            self.profile = self.profile.model_copy(
+                update={
+                    "lanes": tuple(
+                        row.model_copy(update={"generic_web_extensions": extensions})
+                        if row.instance == "testing"
+                        else row
+                        for row in self.profile.lanes
+                    )
+                }
+            )
+            self.lane = next(row for row in self.profile.lanes if row.instance == "testing")
+            self.store.write_product_profile_record(self.profile)
+            record_safety(self.store, self.profile.product, self.lane.context, "testing")
+            checkpoint = self.store.checkpoint_mutation_provider_effect
+
+            def refuse(**arguments: Any) -> Any:
+                record_safety(
+                    self.store, self.profile.product, self.lane.context, "testing", data="only_copy"
+                )
+                return checkpoint(**arguments)
+
+            with patch.object(
+                self.store, "checkpoint_mutation_provider_effect", side_effect=refuse
+            ):
+                status, payload = self.deploy(key="inert-declaration")
+            self.assertEqual(status, 409, payload)
+            pending = next(row for row in self.store.list_deployment_records() if row != effective)
+            inert = recorded_application_lifecycle(pending)
+            assert inert is not None
+            self.assertEqual(inert.state, "not_started")
+            self.assertEqual(set(inert.managed_names), {owned, f"{owned}-inert"})
+            fresh = application_snapshot_for_deploy(
+                store=self.store,
+                product=self.profile.product,
+                context=self.lane.context,
+                instance="testing",
+                provider_id=provider.provider_id,
+                target_id=provider.target_id,
+                artifact_id=inert.artifact_id,
+                source_git_ref=inert.source_git_ref,
+                deployment_record_id="fresh-selection",
+                extensions=extensions.model_copy(update={"schedules": ()}),
+                rollback=False,
+            )
+            assert fresh is not None
+            self.assertEqual(fresh.managed_names, (owned,))
+            self.assertEqual(fresh.originals, {})
 
     def test_other_callers_unknown_original_still_fences_a_new_testing_key(self) -> None:
         _write_generic_web_recovery_reservation(

@@ -34,8 +34,20 @@ refusal only under its current execution lease and record comparison. The
 service rereads the actual application schedules before proceeding. A changed
 baseline returns `409 testing_deploy_baseline_changed` before any forward or
 restore effect; it never rewrites the original receipt or restores stale values.
-Fresh standing work also checks inherited prepared baselines, so a new key
-cannot turn a later schedule edit into something the old operation may delete.
+Before releasing a proved no-effect refusal, the service records `not_started`
+under the exact current original lease and record comparison. Ordinary evidence
+corrections cannot create that proof. A new deployment operation excludes only
+those inert receipts from predecessor selection, retains earlier effective
+ownership or protective holds, and captures its own current schedule baseline.
+This is the supported continuation after a changed-baseline refusal; the old
+original and its immutable baseline remain recorded. Failure to publish the
+no-effect fact retains the original's reconciliation fence. Actual held or
+partially restored attempts keep their existing fix-forward behavior.
+For legacy prepared receipts without that durable proof, a changed inherited
+baseline returns `409 testing_deploy_original_required`. Retry the original
+operation first so its exact current execution can prove a no-effect refusal
+and record the marker before a fresh operation captures the edited baseline.
+An empty receipt alone is never no-effect proof.
 Existing proved pre-image recovery and inverse rollback keep their separate
 authority. Recovery dry-run/apply still require their existing explicit policy;
 [own-original standing recovery](https://github.com/cbusillo/launchplane/issues/4374)

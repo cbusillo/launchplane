@@ -59,7 +59,7 @@ class GenericWebApplicationLifecycle(Protocol):
     effect_attempted: bool
 
     def capture(
-        self, *, require_unchanged_baseline: bool = False, protect_inherited_baseline: bool = False
+        self, *, require_unchanged_baseline: bool = False, check_unproved_predecessor: bool = False
     ) -> None: ...
     def prepare(self) -> None: ...
     def maintain(self) -> dict[str, str]: ...
@@ -76,7 +76,7 @@ class RecordedApplicationLifecycle:
     effect_attempted: bool = False
 
     def capture(
-        self, *, require_unchanged_baseline: bool = False, protect_inherited_baseline: bool = False
+        self, *, require_unchanged_baseline: bool = False, check_unproved_predecessor: bool = False
     ) -> None:
         pass
 
@@ -187,22 +187,24 @@ class DokployApplicationLifecycle:
             )
 
     def capture(
-        self, *, require_unchanged_baseline: bool = False, protect_inherited_baseline: bool = False
+        self, *, require_unchanged_baseline: bool = False, check_unproved_predecessor: bool = False
     ) -> None:
         # Capture every baseline before the first provider mutation. The caller
         # durably writes this artifact-bound receipt before prepare().
+        inherited_check = check_unproved_predecessor and self.snapshot.unproved_predecessor_baseline
         for name in self.snapshot.managed_names:
             observed = self._read(name)
             if (require_unchanged_baseline and name not in self.snapshot.originals) or (
                 self.snapshot.mode == "deploy"
-                and (require_unchanged_baseline or protect_inherited_baseline)
+                and (require_unchanged_baseline or inherited_check)
                 and name in self.snapshot.originals
                 and observed != self.snapshot.originals[name]
             ):
                 # A known no-effect refusal must bypass restore: the changed
                 # provider state belongs to someone else, not this original.
                 raise ApplicationLifecycleBaselineChanged(
-                    "The unstarted original's application schedule baseline changed."
+                    "The original's application schedule baseline changed.",
+                    original_retry_required=inherited_check and not require_unchanged_baseline,
                 )
             self.observed[name] = observed
             if self.snapshot.mode == "rollback" and name not in self.snapshot.current_originals:
@@ -426,11 +428,11 @@ class RecordedPreviewApplicationLifecycle(DokployApplicationLifecycle):
             ) from error
 
     def capture(
-        self, *, require_unchanged_baseline: bool = False, protect_inherited_baseline: bool = False
+        self, *, require_unchanged_baseline: bool = False, check_unproved_predecessor: bool = False
     ) -> None:
         super().capture(
             require_unchanged_baseline=require_unchanged_baseline,
-            protect_inherited_baseline=protect_inherited_baseline,
+            check_unproved_predecessor=check_unproved_predecessor,
         )
         # Persist ownership and the full baseline before pausing any job.
         self._save()
