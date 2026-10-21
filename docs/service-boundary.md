@@ -665,10 +665,8 @@ after it is added to `UI_OPENAPI_WRITE_OPERATIONS` (or
 write route also goes in `BROWSER_WRITE_ROUTES` in
 `frontend/src/browser-write-contract.ts`;
 `frontend/tests/action-model.test.mjs` checks that those routes match the write
-manifest. The write slice currently covers product-config dry-run/apply,
-generic-web promotion dry-runs, and generic-web promotion workflow dispatches.
-It also covers browser-human privileged-operation approval and revocation; the
-service-internal execution path is intentionally absent.
+manifest. Use those manifests for the current selection rather than maintaining
+a second operation list here.
 Generated request, success, validation, and error bindings are the API boundary
 consumed by the UI. Handwritten frontend types
 remain only for UI view models and explicit normalization.
@@ -801,31 +799,20 @@ idempotency key so the service can replay or reconcile the original operation.
 It must not generate a replacement key merely because the browser stopped
 waiting.
 
-The cookie-capable mutation inventory is intentionally limited to:
-
-- `POST /auth/logout`
-- `POST /v1/agent/write-intents/evaluate`
-- `POST /v1/drivers/generic-web/prod-promotion`
-- `POST /v1/drivers/generic-web/prod-promotion-workflow`
-- `POST /v1/product-config/apply`
-- `POST /v1/merge-train/policies/import`
-- `POST /v1/authz-policies/managed-rule-sets/reconcile`
-- `POST /v1/authz-policies/privileged-policy-operations/activation/dry-run`
-- `POST /v1/authz-policies/privileged-policy-operations/activation/apply`
-- `POST /v1/tenant-admission/trusted-maintenance-policies/apply`
-
-Every other authenticated mutation route intentionally rejects session-cookie
-authentication and continues to require its existing GitHub Actions OIDC,
-`local_operator`/`local_admin` bearer, Every Code worker, or webhook boundary. A valid
-`Authorization: Bearer` identity on the existing mixed-identity routes above
-also bypasses browser origin, fetch-metadata, and CSRF checks exactly as before;
-a cookie does not weaken or replace bearer verification. The Launchplane UI exposes only the separately
-generated UI write slice; this inventory is a server-side cookie-capable surface
-list, not a promise of UI controls for every route. In particular, GitHub issue
-inbox reconciliation is displayed as unavailable because it remains a GitHub
-Actions OIDC service operation. Managed-secret root re-encryption is explicitly
-bearer-only even when a valid human session cookie is present; rotating the
-service root is not a browser mutation surface.
+Each route's authentication dependency selects its accepted identities;
+see the dependency definitions and route wiring in
+[`http_app.py`](../control_plane/http_app.py) and
+[`http_routes/`](../control_plane/http_routes/), with wiring and CSRF coverage in
+the [browser mutation tests](../tests/test_http_app_browser_mutation.py).
+Browser-capable mutations use
+the CSRF boundary above and still enforce their route-specific authorization.
+On routes that also accept bearer identities, bearer requests retain their
+existing verification rather than using browser origin, fetch-metadata, or CSRF
+proof. A cookie does not weaken or replace bearer verification. The Launchplane
+UI's selected write surface is defined by the OpenAPI manifests described above.
+Managed-secret root re-encryption remains bearer-only even when a valid human
+session cookie is present; rotating the service root is not a browser mutation
+surface.
 
 Trusted Launchplane CLI clients that are explicitly given `--session-cookie`
 preserve compatibility by reading `/v1/auth/session` immediately before the
@@ -2484,8 +2471,6 @@ The conventional generic-web contract requires an admin-supplied root
 preview base URL and writes it as the context-scoped
 `LAUNCHPLANE_PREVIEW_BASE_URL` runtime-environment record. The reviewed digest
 binds that mutable runtime value; no real domain becomes checked-in authority.
-Repeated onboarding merges that owned key into the existing preview-context
-record instead of replacing unrelated runtime values.
 Generic-web dry-run requires `generic_web_onboarding.plan`; apply and advanced
 manifest writes require `product_onboarding.apply`, all for product/context
 `launchplane`. The route requires DB-backed storage and returns only sanitized
