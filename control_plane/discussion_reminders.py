@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from control_plane.contracts.outbox_delivery import OutboxDeliveryRecord, build_outbox_delivery_id
-from control_plane.notifications import public_discord_url_error
+from control_plane.notifications import DiscordNotificationError, public_discord_url_error
 from control_plane.preview_lifecycle_scheduler import _PreviewScheduler, _timestamp
 from control_plane.storage.postgres import PostgresRecordStore, OutboxWithIdempotencyRequest
 from control_plane.workflows.public_ingress_monitor import (
@@ -252,6 +252,7 @@ def deliver_discussion_reminder(
     clock: Callable[[], float],
 ) -> OutboxDeliveryRecord:
     started = bool(record.provider_operation_key)
+    marking = False
 
     def result(state: str, *, action: str = "", error: str = "") -> OutboxDeliveryRecord:
         return record.model_copy(
@@ -295,6 +296,7 @@ def deliver_discussion_reminder(
                     status="enabled",
                 )
                 if policy.policy_id == destination.policy_id
+                and policy.product == "launchplane"
                 and policy.purpose == "incident_alerts"
                 and not policy.check_name
                 and not policy.check_kind
@@ -318,7 +320,9 @@ def deliver_discussion_reminder(
                 f"Code: {record.payload.get('failure_code')}. "
                 "Check Launchplane delivery records before retrying."
             )
+            marking = True
             mark_provider_started(record.delivery_id, "discord")
+            marking = False
             started = True
             drivers.discord_sender(webhook, {"content": content, "allowed_mentions": {"parse": []}})
             return result("delivered", action="sent_director_reminder_alert")
@@ -348,7 +352,9 @@ def deliver_discussion_reminder(
         link = f"{str(record.payload['public_url']).rstrip('/')}/ui/products/{quote(schedule.product, safe='')}/topics"
         if sender is None:
             return failed("cm_sender_unavailable")
+        marking = True
         mark_provider_started(record.delivery_id, "discord")
+        marking = False
         started = True
         sender(
             product=schedule.product,
@@ -356,12 +362,24 @@ def deliver_discussion_reminder(
             content=f"{heading}. Meeting: {schedule.meeting}.\n{link}",
         )
         return result("delivered", action="sent_discussion_reminder")
-    except Exception:
+    except Exception as error:
+        if marking:
+            # Ownership/marker writes are their own phase. A rejected or
+            # ambiguous marker cannot publish an alert or attempt a send.
+            raise
         if is_alert:
-            _LOGGER.critical("Director reminder alert failed: %s", record.delivery_id)
+            if isinstance(error, DiscordNotificationError) and 400 <= error.status_code < 500:
+                started = False  # Confirmed provider refusal, safe to clear on owned completion.
+                code = "alert_rate_limited" if error.status_code == 429 else "alert_send_rejected"
+                retry = error.status_code == 429 and record.attempt < record.max_attempts
+            else:
+                code = "alert_outcome_unknown" if started else "alert_destination_unavailable"
+                retry = not started and record.attempt < record.max_attempts
+            if not retry:
+                _LOGGER.critical("Director reminder alert failed: %s", record.delivery_id)
             return result(
-                "failed",
-                error="alert_outcome_unknown" if started else "alert_destination_unavailable",
+                "pending" if retry else "failed",
+                error=code,
             )
         if started:
             return failed("reminder_outcome_unknown")

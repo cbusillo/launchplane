@@ -109,7 +109,11 @@ in its window and attempts remain. Exhaustion or expiry is terminal and alerts
 again with that outcome. Provider
 start is recorded before sending. An unconfirmed send is never automatically
 replayed; check its delivery record and the destination before deciding on
-recovery. Alerts contain the product, a bounded failure code and the instruction
+recovery. Lost or ambiguous provider-marker ownership propagates to the outbox
+without sending or publishing a misleading failure alert. Director alerts retry
+pre-send read failures and confirmed Discord rate limits under the outbox budget;
+confirmed other 4xx rejections and unconfirmed sends terminate with a critical
+log. Alerts contain the product, a bounded failure code and the instruction
 to check delivery records, without raw provider errors or topic content. Unknown
 outcomes are reported as needing attention, rather than asserting a failed send. A
 malformed schedule can still alert using the separately parsed Director

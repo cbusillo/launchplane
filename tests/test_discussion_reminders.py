@@ -3,6 +3,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import Mock, patch
+from types import SimpleNamespace
 import json
 
 from pydantic import ValidationError
@@ -20,6 +21,7 @@ from control_plane.discussion_reminders import (
     due_reminders,
 )
 from control_plane.outbox_worker import run_outbox_worker_once
+from control_plane.notifications import DiscordNotificationError
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.public_ingress_monitor import PublicIngressNotificationDriverSet
 from tests.support.stores import sqlite_database_url
@@ -192,6 +194,21 @@ class DiscussionReminderTests(unittest.TestCase):
         self.configure()
         self.scheduler._run_sweep()
         self.assertEqual(self.work(), "failed")
+        policy = self.store.list_public_ingress_notification_policy_records(product="launchplane")[
+            0
+        ]
+        self.store.write_public_ingress_notification_policy_record(
+            policy.model_copy(update={"product": ""})
+        )
+        self.assertEqual(self.work(), "pending")
+        self.alert_sender.assert_not_called()
+        self.store.write_public_ingress_notification_policy_record(policy)
+        alert = next(
+            item
+            for item in self.store.list_outbox_delivery_records(kind="discussion_reminder")
+            if item.payload["alert"]
+        )
+        self.now = datetime.fromisoformat(alert.next_attempt_at.replace("Z", "+00:00"))
         self.assertEqual(self.work(), "delivered")
         self.now = datetime(2026, 10, 24, 14, 0, tzinfo=timezone.utc)
         self.scheduler._run_sweep()
@@ -223,9 +240,10 @@ class DiscussionReminderTests(unittest.TestCase):
                 env={SETTINGS_KEY: json.dumps(data)},
             )
         )
-        with self.assertLogs("control_plane.discussion_reminders", level="ERROR"):
+        with self.assertLogs("control_plane.discussion_reminders", level="ERROR") as logged:
             self.scheduler.run_once()
             self.scheduler.run_once()
+        self.assertEqual(len(logged.output), 1)
         self.assertEqual(self.work(), "delivered")
         self.assertEqual(self.work(), "idle")
         self.alert_sender.assert_called_once()
@@ -255,7 +273,12 @@ class DiscussionReminderTests(unittest.TestCase):
 
     def test_invalid_input_and_other_contexts_cannot_enable_reminders(self) -> None:
         data = self.settings.model_dump(mode="json")
-        for field, bad in (("timezone", "Not/AZone"), ("meeting", "@everyone\nprivate")):
+        for field, bad in (
+            ("timezone", "Not/AZone"),
+            ("meeting", "@everyone\nprivate"),
+            ("meeting", "https://example.test"),
+            ("meeting", "[link](https://example.test)"),
+        ):
             with self.subTest(field=field), self.assertRaises(ValidationError):
                 candidate = json.loads(json.dumps(data))
                 candidate["schedules"][0][field] = bad
@@ -283,11 +306,53 @@ class DiscussionReminderTests(unittest.TestCase):
         self.now = datetime(2026, 10, 24, 14, 0, tzinfo=timezone.utc)
         self.scheduler.run_once()
         self.assertEqual(self.work(), "failed")
+        self.alert_sender.side_effect = DiscordNotificationError(429)
+        self.assertEqual(self.work(), "pending")
+        alert = next(
+            item
+            for item in self.store.list_outbox_delivery_records(kind="discussion_reminder")
+            if item.payload["alert"]
+        )
+        self.assertFalse(alert.provider_operation_key)
+        self.now = datetime.fromisoformat(alert.next_attempt_at.replace("Z", "+00:00"))
         self.alert_sender.side_effect = OSError("secret-bearing-provider-response")
         with self.assertLogs("control_plane.discussion_reminders", level="CRITICAL") as captured:
             self.assertEqual(self.work(), "failed")
         self.assertNotIn("secret-bearing", str(captured.output))
         self.assertEqual(self.work(), "idle")
+
+    def test_lost_marker_ownership_never_sends_or_publishes_a_failure_alert(self) -> None:
+        self.configure()
+        self.scheduler.run_once()
+        with patch.object(
+            self.store,
+            "mark_outbox_delivery_provider_started",
+            return_value=SimpleNamespace(status="lease_expired"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "outbox_provider_marker_not_recorded"):
+                self.work(sender=self.sender)
+        self.sender.assert_not_called()
+        self.assertFalse(
+            any(
+                item.payload["alert"]
+                for item in self.store.list_outbox_delivery_records(kind="discussion_reminder")
+            )
+        )
+        self.now += timedelta(seconds=301)
+        self.assertEqual(self.work(sender=self.sender), "delivered")
+        self.now = datetime(2026, 10, 24, 14, 0, tzinfo=timezone.utc)
+        self.scheduler.run_once()
+        self.assertEqual(self.work(), "failed")
+        with patch.object(
+            self.store,
+            "mark_outbox_delivery_provider_started",
+            return_value=SimpleNamespace(status="lease_expired"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "outbox_provider_marker_not_recorded"):
+                self.work()
+        self.alert_sender.assert_not_called()
+        self.now += timedelta(seconds=301)
+        self.assertEqual(self.work(), "delivered")
 
     def test_harmless_schedule_edit_preserves_due_reminder_and_disabled_config_is_quiet(
         self,
