@@ -190,9 +190,11 @@ class CurrentComparisonTests(unittest.TestCase):
                         *source,
                     ]
                     transport = RecordingMergeTrainGitHubTransport(
-                        responses=tuple(
-                            ([_protected_branch_with_checks()] if candidate else [])
-                            + [_combined_status(), {"check_runs": runs}]
+                        responses=(
+                            _protected_branch_with_checks(),
+                            [],
+                            _combined_status(),
+                            {"check_runs": runs},
                         )
                     )
                     with patch(
@@ -215,6 +217,7 @@ class CurrentComparisonTests(unittest.TestCase):
                                 transport=transport
                             )._required_checks_status(
                                 repository_path=self.repository,
+                                base_branch="main",
                                 head_sha=self.head,
                                 config_comparison=_config_comparison(
                                     self.store,

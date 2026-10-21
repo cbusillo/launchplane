@@ -93,6 +93,8 @@ class _ReuseTransport:
             result_sha = "candidate-after-" + head.removeprefix("head-")
             self.refs[base] = result_sha
             return {"sha": result_sha}
+        if suffix == "/rules/branches/main?per_page=100&page=1":
+            return []
         if suffix.startswith("/branches/"):
             branch = suffix.removeprefix("/branches/")
             if branch == "main":

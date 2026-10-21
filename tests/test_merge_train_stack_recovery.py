@@ -26,7 +26,8 @@ from tests.test_merge_train_handoff import _comment, _snapshot, _stack_fixture
 from tests.test_merge_train_github import (
     _github_pull_request,
     _combined_status,
-    _check_run,
+    _required_check_run,
+    _protected_branch_with_checks,
     _conversation_rule,
 )
 
@@ -62,8 +63,13 @@ class _Provider:
     def request(self, *, method: str, path: str, body: dict[str, object] | None = None) -> object:
         if method == "GET" and "/labels/" in path:
             return {"name": unquote(path.rsplit("/", 1)[1])}
+        if method == "GET" and "/rules/branches/" in path:
+            return []
         if method == "GET" and "/branches/" in path:
-            return {"commit": {"sha": self.heads[unquote(path.split("/branches/")[1])]}}
+            return {
+                "commit": {"sha": self.heads[unquote(path.split("/branches/")[1])]},
+                **_protected_branch_with_checks("ci-status", app_id=None),
+            }
         if method == "GET" and "/compare/" in path:
             child, head = unquote(path.split("/compare/")[1]).split("...")
             return {"status": "ahead" if self.contains(head, child) else "diverged"}
@@ -97,7 +103,7 @@ class _Provider:
         if method == "GET" and "/status?" in path:
             return _combined_status()
         if method == "GET" and "/check-runs" in path:
-            return {"check_runs": [_check_run("completed", "success")]}
+            return {"check_runs": [_required_check_run("ci-status", "completed", "success")]}
         if method == "GET" and path.endswith("/protection"):
             return _conversation_rule()
         if method == "GET" and "/git/commits/" in path:
