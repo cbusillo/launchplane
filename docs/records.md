@@ -1322,18 +1322,22 @@ not a healthy lane.
 percentages of retained verified time. They do not establish physical outage
 durations. Provider delivery/source-warning streams stay separate from actual
 HTTP health streams. Supply the complete reviewed required check set with
-repeated `--check KIND:NAME`
-and the checks that must verify runtime identity with `--identity-check KIND:NAME`.
+repeated `--check KIND:NAME`, and the checks that must verify runtime identity
+with `--identity-check KIND:NAME`.
 The latter must be a nonempty subset of the former. Use repeated `--exclude-check KIND:NAME` for diagnostic streams deliberately
 outside the health set. Every observed stream must be required or explicitly
 excluded; an unaccounted-for stream refuses the calculation. Required and
 excluded sets cannot overlap. The report prints all three sets, every stream
-row, and required checks with zero measured pass/fail coverage. Lane totals intersect these streams in time, so disjoint
+row, and required checks with zero measured pass/fail coverage. Provider
+`monitor-cadence:...` and monitor-source warning streams are event-only
+diagnostics for `--exclude-check`; their incident and cadence qualification
+remains separate. Lane totals intersect required streams in time, so disjoint
 failures cannot hide behind individually passing percentages. A required check
 with no records contributes unknown time, not a pass. TLS or dependency checks
 can belong to the health set without being runtime-identity witnesses. The
 `lane_health_pass_percent` and `lane_health_and_identity_percent` fields use
-those intersections. These observations do not reconstruct past profile declarations,
+those intersections. These observations do not reconstruct past profile
+declarations,
 check applicability, incident-open intervals or the historical Live roster.
 Those qualifications and the no-open-warning closing condition remain separate;
 this read cannot certify the Q419 milestone, reset a clock or retroactively

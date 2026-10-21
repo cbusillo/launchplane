@@ -298,6 +298,12 @@ def assert_history_time_bounds(testcase: unittest.TestCase, store: PostgresRecor
     )
     records = (
         observation("before", -30),
+        observation("positive-last", 59).model_copy(
+            update={"observed_at": "2026-10-01T05:00:59+05:00"}
+        ),
+        observation("positive-before", 58).model_copy(
+            update={"observed_at": "2026-10-01T05:00:58+05:00"}
+        ),
         observation("fraction", 30.5),
         offset,
         observation("tie", 30),
@@ -325,7 +331,7 @@ def assert_history_time_bounds(testcase: unittest.TestCase, store: PostgresRecor
             break
     testcase.assertEqual(
         [item.record_id for page in pages for item in page.observations],
-        ["fraction", "tie", "offset", "before"],
+        ["positive-last", "positive-before", "fraction", "tie", "offset", "before"],
     )
     with testcase.assertRaises(ValueError):
         read_lane_health_history(
