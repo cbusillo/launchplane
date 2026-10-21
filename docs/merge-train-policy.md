@@ -1536,7 +1536,7 @@ uv run launchplane merge-train-policies list \
 The contract is available to dry-run tooling with:
 
 ```sh
-uv run launchplane work-graph merge-train-policy \
+uv run launchplane merge-train-policy \
   --policy-file path/to/merge-train-policy.toml \
   --repository cbusillo/codex-skills \
   --base-branch main
@@ -1545,7 +1545,7 @@ uv run launchplane work-graph merge-train-policy \
 Admins can validate an external TOML before importing it as a policy record:
 
 ```sh
-uv run launchplane work-graph merge-train-policy \
+uv run launchplane merge-train-policy \
   --policy-file path/to/merge-train-policy.toml
 ```
 
@@ -1557,7 +1557,7 @@ The ordered queue dry-run accepts a JSON snapshot of candidate pull requests and
 reports queue order plus the next intended action without mutating GitHub:
 
 ```sh
-uv run launchplane work-graph merge-train-dry-run \
+uv run launchplane merge-train-dry-run \
   --snapshot-file path/to/merge-train-snapshot.json \
   --policy-file path/to/merge-train-policy.toml
 ```
@@ -1567,15 +1567,15 @@ repository/base branch and reports the same worker-step intent without mutating
 by default:
 
 ```sh
-GH_TOKEN=... uv run launchplane work-graph merge-train-run-once \
+GH_TOKEN=... uv run launchplane merge-train-run-once \
   --policy-file path/to/merge-train-policy.toml
 ```
 
 This local rehearsal command reads its explicit `--github-token-env` option
 (default `GH_TOKEN`) independently of the policy's managed credential source.
 The deployed merge train resolves the policy's `github_app` source instead.
-The Project/inbox credential consumer was removed under Q543; self-deploy no
-longer supplies a work-graph token.
+See the [configuration boundary](config-boundary.md#bootstrap-env-only) for
+retired chooser-source settings and self-deploy cleanup.
 
 Passing `--mutate` applies exactly one ordered-queue worker transition from that
 fresh snapshot. Use it only from the intended admin environment for the smoke

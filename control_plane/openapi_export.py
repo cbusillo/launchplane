@@ -187,9 +187,7 @@ UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
     "/v1/every-code/summary": "read_every_code_summary",
     "/v1/every-code/work-requests": "list_every_code_work_requests",
     "/v1/previews/readiness": "read_preview_readiness",
-    "/v1/work-graph/snapshot": "read_work_graph_snapshot",
     "/v1/repo-product-mapping": "read_repo_product_mapping",
-    "/v1/work-graph/github/issues": "read_work_graph_issue_inbox",
     "/v1/work-graph/merge-train/controller/status": "read_merge_train_controller_status",
     "/v1/work-graph/merge-train/policy-targets": "read_merge_train_policy_targets",
     "/v1/work-graph/tenant-admission/evaluation": "read_tenant_admission_evaluation",
@@ -230,7 +228,6 @@ UI_OPENAPI_WRITE_OPERATIONS: dict[str, str] = {
     "/v1/privileged-operations/authorization-candidates/prepare": (
         "prepare_authorization_candidate"
     ),
-    "/v1/work-graph/rank": "rank_work_graph_snapshot",
     "/v1/products/{product}/environments/{environment}/config/apply": (
         "apply_product_environment_config"
     ),

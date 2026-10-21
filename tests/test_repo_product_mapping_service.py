@@ -5,12 +5,8 @@ from typing import cast
 
 from control_plane.contracts.every_code_work_request import EveryCodeWorkRequestRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
-from control_plane.contracts.work_graph_read_model import WorkGraphPlanningIssueFacts
-from control_plane.work_graph_service import (
-    WorkGraphRankEnvelope,
+from control_plane.contracts.repo_product_mapping_read_model import (
     build_repo_product_mapping_service_payload,
-    build_work_graph_rank_result,
-    build_work_graph_snapshot_service_payload,
 )
 
 
@@ -46,15 +42,6 @@ class _EmptyProductStore:
             return self.records
         return tuple(record for record in self.records if record.driver_id == driver_id)
 
-    def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord:
-        for record in self.records:
-            if record.product == product:
-                return record
-        raise AssertionError(f"test product store has no product profile for {product!r}")
-
-    def list_public_ingress_incident_records(self, **kwargs: object) -> tuple[object, ...]:
-        return ()
-
 
 class _WorkRequestStore:
     def __init__(self, records: tuple[EveryCodeWorkRequestRecord, ...]) -> None:
@@ -82,7 +69,7 @@ class _WorkRequestStore:
         return records
 
 
-class WorkGraphServiceTests(unittest.TestCase):
+class RepoProductMappingServiceTests(unittest.TestCase):
     def test_repo_product_mapping_payload_classifies_products_and_awareness_repos(self) -> None:
         payload = build_repo_product_mapping_service_payload(
             generated_at="2026-05-08T18:05:00Z",
@@ -149,41 +136,6 @@ class WorkGraphServiceTests(unittest.TestCase):
         self.assertEqual(awareness_repo["product"], "")
         self.assertEqual(awareness_repo["source"], "every_code_work_request")
 
-    def test_snapshot_payload_builds_source_counts_and_applies_planning_facts(self) -> None:
-        work_request_store = _WorkRequestStore((_work_request(),))
-
-        payload = build_work_graph_snapshot_service_payload(
-            generated_at="2026-05-06T02:05:00Z",
-            product_store=_EmptyProductStore(),
-            work_request_store=work_request_store,
-            action_allowed=lambda _action, _product, _context, _instances: True,
-            planning_facts_provider=lambda: (
-                WorkGraphPlanningIssueFacts.model_validate(
-                    {
-                        "repository": "cbusillo/launchplane",
-                        "number": 190,
-                        "focus": "Now",
-                        "manager": "@cellmechanic",
-                        "blocking": 2,
-                    }
-                ),
-            ),
-        )
-
-        self.assertIsNone(work_request_store.seen_limit)
-        self.assertEqual(
-            payload["source"],
-            {"product_count": 0, "work_request_count": 1, "planning_fact_count": 1},
-        )
-        snapshot = cast(dict[str, object], payload["snapshot"])
-        repos = cast(list[dict[str, object]], snapshot["repos"])
-        issues = cast(list[dict[str, object]], snapshot["issues"])
-        self.assertEqual(snapshot["generated_at"], "2026-05-06T02:05:00Z")
-        self.assertEqual(repos[0]["classification"], "active_awareness")
-        self.assertEqual(issues[0]["focus"], "Now")
-        self.assertEqual(issues[0]["manager"], "@cellmechanic")
-        self.assertEqual(issues[0]["blocking"], 2)
-
     def test_repo_product_mapping_reads_past_first_hundred_work_requests(self) -> None:
         work_request_store = _WorkRequestStore(
             tuple(
@@ -211,65 +163,6 @@ class WorkGraphServiceTests(unittest.TestCase):
             "cbusillo/tool-104",
             {str(repository["repository"]) for repository in repositories},
         )
-
-    def test_snapshot_payload_does_not_classify_unauthorized_product_repo_as_managed(
-        self,
-    ) -> None:
-        product = LaunchplaneProductProfileRecord.model_validate(
-            {
-                "schema_version": 1,
-                "product": "example-site",
-                "display_name": "Example Site",
-                "repository": "every/example-site",
-                "driver_id": "generic-web",
-                "image": {"repository": "ghcr.io/every/example-site"},
-                "runtime_port": 3000,
-                "health_path": "/healthz",
-                "lanes": (
-                    {
-                        "instance": "prod",
-                        "context": "example-site",
-                        "base_url": "https://example-site.example.test",
-                    },
-                ),
-                "updated_at": "2026-05-02T22:30:00Z",
-                "source": "test",
-            }
-        )
-
-        payload = build_work_graph_snapshot_service_payload(
-            generated_at="2026-05-06T02:05:00Z",
-            product_store=_EmptyProductStore((product,)),
-            work_request_store=_WorkRequestStore((_work_request(repository="every/example-site"),)),
-            action_allowed=lambda _action, _product, _context, _instances: False,
-            planning_facts_provider=None,
-        )
-
-        snapshot = cast(dict[str, object], payload["snapshot"])
-        source = cast(dict[str, object], payload["source"])
-        repos = cast(list[dict[str, object]], snapshot["repos"])
-        self.assertEqual(source["product_count"], 1)
-        self.assertEqual(repos[0]["classification"], "active_awareness")
-        self.assertEqual(repos[0]["product"], "")
-
-    def test_rank_result_returns_summary_and_driver_queue(self) -> None:
-        snapshot_payload = build_work_graph_snapshot_service_payload(
-            generated_at="2026-05-06T02:05:00Z",
-            product_store=_EmptyProductStore(),
-            work_request_store=_WorkRequestStore((_work_request(),)),
-            action_allowed=lambda _action, _product, _context, _instances: True,
-            planning_facts_provider=None,
-        )
-        rank_request = WorkGraphRankEnvelope.model_validate(
-            {"snapshot": snapshot_payload["snapshot"], "limit": 5}
-        )
-
-        result, driver_result = build_work_graph_rank_result(rank_request)
-
-        self.assertEqual(result, {"item_count": 1, "hidden_count": 0})
-        queue = cast(dict[str, object], driver_result["queue"])
-        items = cast(list[dict[str, object]], queue["items"])
-        self.assertEqual(items[0]["number"], 190)
 
 
 if __name__ == "__main__":

@@ -1063,7 +1063,7 @@ logs, issue comments, or published evidence merely to use this route.
 The caller needs the separate `authz_repository_scope.read` action and must be
 an authenticated GitHub human, `local_operator`, or local administrator. The
 route performs runtime-policy preflight, reloads the single active DB policy,
-and reauthorizes before reading product, repository, and work-graph records.
+and reauthorizes before reading product, repository, and retained work-request records.
 GitHub Actions and terminal agents cannot use the route; do not borrow a
 workflow identity or dispatch a protected workflow as a workaround.
 
@@ -2093,7 +2093,7 @@ absolute claims cutoff. Recovery is a normal interactive GitHub sign-in.
   fail closed on Docker Hub anonymous pull limits before Launchplane code is
   built or scanned.
 - Before adding or controlling self-hosted runner lanes, use
-  `uv run launchplane work-graph runner-inventory --repository owner/name` to
+  `uv run launchplane runner-inventory --repository owner/name` to
   read GitHub's current repository runner list. The command is read-only and
   reports lane count, online/busy/idle/offline counts, labels, host hints, and a
   capacity-constrained heuristic from the observation timestamp.

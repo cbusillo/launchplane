@@ -5,18 +5,16 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.contracts.repo_product_mapping_read_model import (
+    RepoProductMappingWorkRequestStore,
+    build_repo_product_mapping_service_payload,
+)
+
 from control_plane.contracts.every_code_summary_read_model import (
     build_every_code_summary_read_model,
 )
 from control_plane.contracts.preview_readiness_read_model import (
     build_preview_readiness_read_model,
-)
-from control_plane.contracts.product_environment_read_model import ActionAllowed
-from control_plane.work_graph_service import (
-    WorkGraphPlanningFactsProvider,
-    WorkGraphWorkRequestStore,
-    build_repo_product_mapping_service_payload,
-    build_work_graph_snapshot_service_payload,
 )
 
 
@@ -55,10 +53,8 @@ def build_agent_context_service_payload(
     generated_at: str,
     repository: str,
     product_store: object,
-    work_request_store: WorkGraphWorkRequestStore,
+    work_request_store: RepoProductMappingWorkRequestStore,
     preview_readiness_store: object,
-    action_allowed: ActionAllowed,
-    planning_facts_provider: WorkGraphPlanningFactsProvider | None,
     tenant_admission_section: AgentContextSection | None = None,
 ) -> AgentContextPayload:
     normalized_repository = repository.strip()
@@ -69,13 +65,6 @@ def build_agent_context_service_payload(
                 product_store=product_store,  # type: ignore[arg-type]
                 work_request_store=work_request_store,
             )
-        ),
-        "work_graph_snapshot": _build_work_graph_snapshot_section(
-            generated_at=generated_at,
-            product_store=product_store,
-            work_request_store=work_request_store,
-            action_allowed=action_allowed,
-            planning_facts_provider=planning_facts_provider,
         ),
         "every_code_summary": _available_section(
             {
@@ -113,28 +102,6 @@ def build_agent_context_service_payload(
         },
         sections=sections,
     )
-
-
-def _build_work_graph_snapshot_section(
-    *,
-    generated_at: str,
-    product_store: object,
-    work_request_store: WorkGraphWorkRequestStore,
-    action_allowed: ActionAllowed,
-    planning_facts_provider: WorkGraphPlanningFactsProvider | None,
-) -> AgentContextSection:
-    try:
-        return _available_section(
-            build_work_graph_snapshot_service_payload(
-                generated_at=generated_at,
-                product_store=product_store,  # type: ignore[arg-type]
-                work_request_store=work_request_store,
-                action_allowed=action_allowed,
-                planning_facts_provider=planning_facts_provider,
-            )
-        )
-    except RuntimeError:
-        return AgentContextSection(status="unavailable", reason_code="work_graph_unavailable")
 
 
 def _available_section(payload: dict[str, object]) -> AgentContextSection:

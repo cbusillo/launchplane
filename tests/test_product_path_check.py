@@ -858,7 +858,6 @@ class ProductPathCheckHttpTests(unittest.IsolatedAsyncioTestCase):
                             error_response_model=BaseModel,
                         ),
                         read_product_profile_list_identity=lambda: identity,
-                        work_graph_planning_facts_provider=None,
                         workflow_credentials_ready=lambda _context, _repository: True,
                         control_plane_root=Path("."),
                         github_token=lambda: "",

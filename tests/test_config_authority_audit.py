@@ -3001,22 +3001,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 )
 
         for key, value in (
-            ("audience", "${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}"),
-            ("fail-result-paths", '""'),
-            ("method", "GET"),
-            ("response-output-file", "launchplane-work-graph-snapshot.json"),
-        ):
-            with self.subTest(work_graph_snapshot_mechanic=key):
-                self.assertEqual(
-                    _allow_reason(
-                        path=".github/workflows/work-graph-snapshot-validate.yml",
-                        key=key,
-                        value=value,
-                    ),
-                    "thin_connector_input",
-                )
-
-        for key, value in (
             ("fail-result-paths", "result.operation_status"),
             ("idempotency-key", "${{ steps.request.outputs.idempotency_key }}"),
             ("idempotency-key", "${{ steps.onboarding.outputs.idempotency_key }}"),
@@ -3025,7 +3009,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ("response-output-file", "dokploy-target-inspect-response.json"),
             ("response-output-file", "ingress-route-audit-read-raw.json"),
             ("response-output-file", "launchplane-preview-lifecycle-sweep-response.json"),
-            ("response-output-file", "launchplane-work-graph-snapshot.json"),
         ):
             with self.subTest(path_scoped_provider_target_mechanic=key):
                 self.assertEqual(

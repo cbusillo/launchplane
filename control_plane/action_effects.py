@@ -271,8 +271,6 @@ ACTION_DECLARATIONS: Mapping[str, ActionDeclaration] = MappingProxyType(
         "verireel_prod_rollback.execute": ActionDeclaration("write"),
         "verireel_stable_environment.read": ActionDeclaration("read"),
         "verireel_testing_deploy.execute": ActionDeclaration("write"),
-        "work_graph.issue_inbox.reconcile": ActionDeclaration("write"),
-        "work_graph.rank": ActionDeclaration("plan"),
     }
 )
 
