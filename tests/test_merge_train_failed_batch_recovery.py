@@ -57,7 +57,11 @@ class _RerunProvider(_BatchProvider):
             return _protected_branch_with_checks("ci-gate")
         if method == "GET" and "/check-runs?" in path:
             self.requests.append((method, path, body))
-            failed = {**_required_check_run("ci-gate", "completed", "failure"), "id": 1}
+            failed = {
+                **_required_check_run("ci-gate", "completed", "failure"),
+                "id": 1,
+                "check_suite": {"id": 10},
+            }
             rerun = {
                 **_required_check_run(
                     "ci-gate",
@@ -65,6 +69,7 @@ class _RerunProvider(_BatchProvider):
                     "success" if self.checks_pass else None,
                 ),
                 "id": 2,
+                "check_suite": {"id": 10},
             }
             return {
                 "check_runs": []

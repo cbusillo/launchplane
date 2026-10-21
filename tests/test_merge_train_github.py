@@ -1836,8 +1836,16 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                         _combined_status(),
                         {
                             "check_runs": [
-                                {**_required_check_run("ci-gate", "completed", later), "id": 2},
-                                {**_required_check_run("ci-gate", "completed", earlier), "id": 1},
+                                {
+                                    **_required_check_run("ci-gate", "completed", later),
+                                    "id": 2,
+                                    "check_suite": {"id": 10},
+                                },
+                                {
+                                    **_required_check_run("ci-gate", "completed", earlier),
+                                    "id": 1,
+                                    "check_suite": {"id": 10},
+                                },
                                 _required_check_run("security-gate", "completed", "success"),
                             ]
                         },
@@ -1918,10 +1926,17 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 "metadata_incomplete",
                 "metadata_unavailable",
                 "suite_mismatch",
+                "check_suite_missing",
+                "check_id_missing",
                 "old_failed",
                 "old_timed_out",
                 "old_action_required",
+                "old_stale",
+                "old_startup_failure",
                 "new_failed",
+                "new_stale",
+                "new_startup_failure",
+                "skipped_replacement",
                 "canonical_case",
                 "pending_non_actions",
             ):
@@ -1974,15 +1989,14 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                         old["run_started_at"] = "2026-01-01T10:02:00Z"
                     elif change == "suite_mismatch":
                         old["check_suite_id"] = 30
-                    elif change == "old_failed":
-                        old["conclusion"] = "failure"
-                    elif change == "old_timed_out":
-                        old["conclusion"] = "timed_out"
-                    elif change == "old_action_required":
-                        old["conclusion"] = "action_required"
-                    elif change == "new_failed":
+                    elif change.startswith("old_"):
+                        old["conclusion"] = "failure" if change == "old_failed" else change[4:]
+                    elif change.startswith("new_"):
                         old["conclusion"] = "success"
-                        current["conclusion"] = "failure"
+                        current["conclusion"] = "failure" if change == "new_failed" else change[4:]
+                    elif change == "skipped_replacement":
+                        old["conclusion"] = "failure"
+                        current["conclusion"] = "skipped"
                     checks = [
                         {
                             **_required_check_run("security-gate", "completed", result),
@@ -1993,10 +2007,18 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                             "details_url": f"https://github.com/example/tool/actions/runs/{run}/job/{job}",
                         }
                         for run, job, suite, result in (
-                            (11, 101, 10, "success" if change == "new_failed" else "failure"),
-                            (12, 102, 20, "failure" if change == "new_failed" else "success"),
+                            (11, 101, 10, str(old["conclusion"])),
+                            (12, 102, 20, str(current["conclusion"])),
                         )
                     ]
+                    if change == "check_suite_missing":
+                        for check in checks:
+                            check.pop("check_suite")
+                    elif change == "check_id_missing":
+                        checks[0]["conclusion"] = "success"
+                        checks[1]["conclusion"] = "failure"
+                        checks[1]["check_suite"] = checks[0]["check_suite"]
+                        checks[1].pop("id")
                     if change == "canonical_case":
                         for check in checks:
                             check["details_url"] = str(check["details_url"]).replace(
@@ -2079,9 +2101,12 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                         "old_failed",
                         "old_timed_out",
                         "old_action_required",
+                        "old_stale",
+                        "old_startup_failure",
+                        "skipped_replacement",
                     }:
                         self.assertEqual(status, "pass")
-                    elif change == "new_failed":
+                    elif change.startswith("new_"):
                         self.assertEqual(status, "fail")
                     elif change == "pending_non_actions":
                         self.assertEqual(status, "pending")

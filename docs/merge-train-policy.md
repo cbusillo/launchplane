@@ -928,6 +928,8 @@ and the protected expected-head merge; no
 checks are copied to a new SHA and no provider requirement is changed.
 
 All adapter check reads supersede attempts within their provider check suite.
+Missing suite or check identity retains every observation as independent evidence.
+Stale checks and startup failures block consistently in screening and admission.
 Push and PR workflows can publish identical job names from the same App on one
 SHA; a passing job in one suite cannot erase a failing or pending job in another.
 This applies to PR-head screening, candidate observation, base verification,

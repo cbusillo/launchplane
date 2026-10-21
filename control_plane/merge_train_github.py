@@ -5765,19 +5765,26 @@ def _latest_check_runs(check_runs: list[object]) -> list[object]:
     the same suite supersedes its earlier attempt; the highest check id wins.
     """
     latest: dict[tuple[str, object, int | None], dict[str, object]] = {}
+    unidentified: list[dict[str, object]] = []
     for item in check_runs:
         check_run = _json_object(item, "GitHub check run")
         app = check_run.get("app")
         app_id = app.get("id") if isinstance(app, dict) else None
         suite = check_run.get("check_suite")
         suite_id = suite.get("id") if isinstance(suite, dict) else None
-        if not isinstance(suite_id, int) or isinstance(suite_id, bool):
-            suite_id = None
+        if (
+            not isinstance(suite_id, int)
+            or isinstance(suite_id, bool)
+            or suite_id <= 0
+            or _check_run_order(check_run) <= 0
+        ):
+            unidentified.append(check_run)
+            continue
         key = (str(check_run.get("name") or "").casefold(), app_id, suite_id)
         current = latest.get(key)
         if current is None or _check_run_order(check_run) > _check_run_order(current):
             latest[key] = check_run
-    return list(latest.values())
+    return [*latest.values(), *unidentified]
 
 
 def _check_run_order(check_run: dict[str, object]) -> int:
@@ -5794,7 +5801,14 @@ def _check_run_status(check_run: dict[str, object]) -> MergeTrainCheckStatus:
     conclusion = str(check_run.get("conclusion") or "").strip().lower()
     if conclusion in {"success", "neutral", "skipped"}:
         return "pass"
-    if conclusion in {"failure", "timed_out", "cancelled", "action_required"}:
+    if conclusion in {
+        "failure",
+        "timed_out",
+        "cancelled",
+        "action_required",
+        "startup_failure",
+        "stale",
+    }:
         return "fail"
     return "unknown"
 
