@@ -237,9 +237,10 @@ An existing lane needs its own supported qualification/rebuild path, including
 current usage, data and isolation evidence. The compose shape cannot reset or
 replace it.
 
-The same endpoint also accepts `create-application`, the conventional testing-lane
-shape: a new project, a new environment and an empty application on a named
-server, with no domain route. It may replace the lane's current testing target
+The same Director-agent first-testing path also accepts `create-application`,
+the conventional testing-lane shape: a new project, a new environment and an
+empty application on a named server, with no domain route. It may replace the
+lane's current testing target
 only with positive evidence that nobody used the lane: the setup route created
 that target empty (not adopted, not source-completed), no deploy passed there
 and no artifact was ever current. The target must carry an `isolation_staging`

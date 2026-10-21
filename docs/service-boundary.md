@@ -1130,7 +1130,7 @@ comment, the worker resolves `gh api user --jq .login` with that token and
 blocks the work request if the actor does not match. Claim comments never fall
 back to the host's ambient `gh` login.
 
-Local terminal agents that need Launchplane context use a separate read-only
+Local terminal agents that need Launchplane context use a dedicated
 bearer credential, not the browser OAuth session cookie and not
 `LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN`. Configure
 `LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN` on the service and provide the same
@@ -1138,14 +1138,11 @@ secret to the trusted local terminal agent out of band. Configure
 `LAUNCHPLANE_TERMINAL_AGENT_SUBJECT` and
 `LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL` to identify the local Director subject and
 token label used by `terminal_agents` authz policy rules; both identity values
-are required whenever the bearer token is configured. The service accepts this
-identity on redacted `GET` routes and the inert ordinary-agent enrollment
-proposal route only when exactly one managed rule authorizes that request. It
-cannot dispatch product config writes, prod promotion, destructive cleanup,
-authz policy mutation, read-model POSTs, or plaintext secret reveal routes.
-Policy still scopes which redacted read actions and product/context pairs the
-agent can access, such as `product_environment.read` for product environment and
-config-status diagnostics. Enrollment proposal authority creates no principal,
+are required whenever the bearer token is configured. The
+[standing-admission contract](authorization-authority.md#standing-agent-read-plan-and-proven-projection-permission)
+owns Director identity recognition, inherited authority and transport limits.
+Each native route retains its admission and safety checks.
+Enrollment proposal authority creates no principal,
 credential, session, grant, activation, or worker start on its own.
 
 Trusted Director terminals that need to make Launchplane-owned admin mutations
@@ -1156,8 +1153,7 @@ secret to trusted local agents through
 `LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT` and
 `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL` to identify the actor in audit and
 idempotency records; both identity values are required whenever the bearer token
-is configured. Routine admin authority is DB-backed by `local_operators`
-authz policy rules, scoped by subject, token label, product, context, and action.
+is configured. The standing-admission contract above also governs this identity.
 
 Rare `local_admin` operations use `LAUNCHPLANE_LOCAL_ADMIN_TOKEN` with configured
 `LAUNCHPLANE_LOCAL_ADMIN_SUBJECT` and `LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL`.
@@ -1167,7 +1163,7 @@ token alone does not grant blanket access. Director-agent write requests must
 include a non-empty `reason`; product-config apply is also rejected until the
 service has recorded a matching Director-agent dry-run for the same payload. These
 requests still use Launchplane records, redacted responses, runtime key-safety
-policy, and managed secret storage. Terminal-agent credentials remain read-only.
+policy, and managed secret storage.
 
 `GET /v1/every-code/summary` returns a compact agent-safe projection of Every
 Code work requests. It requires `every_code_work_request.read` for
@@ -1559,7 +1555,7 @@ authorization checks and audit records consume them:
   claims, including the immutable numeric repository and repository-owner IDs.
 - `github_human`: browser-session humans from GitHub OAuth and Launchplane
   session cookies.
-- `terminal_agent`: read-only trusted terminal agents authenticated by the
+- `terminal_agent`: trusted terminal agents authenticated by the
   dedicated terminal-agent bearer token.
 - `local_operator`: reason-bearing admin automation authenticated by the
   dedicated `local_operator` bearer token.
@@ -1731,14 +1727,10 @@ subject model before diagnostics or downstream intent contracts consume them:
   are context-only; write, prod, destructive, secret-backed, and policy-admin
   actions require explicit matching policy grants for the workflow identity.
 - `terminal_agent`: trusted local terminal agents authenticated by the dedicated
-  read bearer token. These subjects are always read-only context consumers and
-  cannot use POST routes, product mutations, authz policy changes, destructive
-  cleanup, or secret-backed actions even if a policy rule is too broad.
+  bearer token. Their agent-context projection has `read_only_context=true`.
 - `local_operator`: trusted Director terminal agents authenticated by the dedicated
-  write bearer token. Their authority comes only from exact `local_operators`
-  policy rules (subject, token label, product, context, action) on routes that
-  accept this identity. Product-config writes require a non-empty reason, and
-  product-config apply also requires a matching recorded dry-run.
+  write bearer token. Their agent-context fields reflect the requested action's
+  safety classification.
 - `github_human`: browser-session humans with `read_only` or `admin` role from
   GitHub human policy rules or bootstrap admin email matching. Read-only humans
   are `limited_remote_user` consumers: even if a rule is accidentally broad,
@@ -1750,8 +1742,8 @@ subject model before diagnostics or downstream intent contracts consume them:
 
 Action names are classified for agent context as `read`, `safe_write`,
 `mutation`, `prod`, `destructive`, `secret_backed`, or `policy_admin`. This
-classification is diagnostic and contractual; authorization still fails closed
-through the exact action/product/context policy rule.
+classification is diagnostic and contractual; native route admission is evaluated
+independently under the standing-admission contract above.
 
 Agent-facing authorization diagnostics include an `agent_audit` envelope with
 the decision, safe reason code, agent subject, action, product, context, policy
@@ -2103,8 +2095,10 @@ CSRF-checked browser session dependency; every request still checks the policy's
 exact product/context/instance plan or apply authority. The configured Director's
 `local_operator` and terminal-agent bearer identities use standing permission for
 the product's declared lanes, including production. This changes monitoring
-records, not the site's runtime or access. Other bearer/OIDC callers retain
-their scoped policy rules. The editor loads the stored profile, shows the preserved endpoint and
+records, not the site's runtime or access. Other terminal-agent identities are
+refused by this mutation route before policy evaluation; other admitted
+bearer/OIDC callers retain their scoped policy rules.
+The editor loads the stored profile, shows the preserved endpoint and
 current private endpoint key comparison (browser-session responses only, to
 preserve existing strict terminal/workflow decoders), and the
 before/after flags, invalidates review on edits, and requires confirmation before
