@@ -219,8 +219,10 @@ testing checks the exact service, tasks, inspected immutable container images,
 deployment-record identity, replica count and configured container health. This
 also applies to application lanes without managed inputs. The provider job and
 runtime wait share the original deployment timeout. Unknown or updating runtime
-remains fenced; a correlated terminal rollback or failed qualification never
-receives delivery credit. Recovery adds the same current-runtime check while
+remains fenced; missing or unreadable task/container evidence is also unknown at
+the original deadline. A complete observation of settled nonconvergence may fail
+qualification at that deadline. A correlated terminal rollback or failed
+qualification never receives delivery credit. Recovery adds the same current-runtime check while
 retaining exact-original execution receipts, reviewed settlement and publication
 CAS. A healthy image cannot prove that earlier product work has stopped.
 

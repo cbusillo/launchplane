@@ -115,7 +115,6 @@ class OriginalExecutionPostgresTests(unittest.TestCase):
                 normal = pool.submit(
                     fixture.run_normal, fixture.normal_adapter(), "receipt-correction"
                 )
-                ingestion = None
                 try:
                     self.assertTrue(executing.wait(15))
                     progress = first.read_environment_inventory(

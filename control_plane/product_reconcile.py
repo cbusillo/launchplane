@@ -552,17 +552,6 @@ def reconcile_testing_target(
                 plan.update(action="wait", reason="testing_runtime_unverified")
                 return ReconcileOutcome(plan)
         if target is not None and target.target_type == "application":
-            hold = read_staff_testing_hold(record_store=record_store, context=lane.context)
-            if hold is not None:
-                plan.update(
-                    action="wait",
-                    held=True,
-                    reason=STAFF_TESTING_HOLD_REASON,
-                    hold_reason=hold.reason,
-                    hold_recorded_by=hold.recorded_by,
-                    hold_recorded_at=hold.recorded_at,
-                )
-                return ReconcileOutcome(plan)
             try:
                 deployed = cast(GenericWebDeployStore, record_store).read_deployment_record(
                     _current_testing_deployment_id(record_store=record_store, lane=lane)

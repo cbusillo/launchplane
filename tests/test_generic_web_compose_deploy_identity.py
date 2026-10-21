@@ -267,7 +267,7 @@ class _UntitledComposeProvider(_FakeGenericWebDeployProvider):
         self.runtime_calls = 0
         self.title_observations = 0
 
-    def execute_artifact_deploy(  # type: ignore[override]
+    def execute_artifact_deploy(
         self,
         *,
         control_plane_root: Path,

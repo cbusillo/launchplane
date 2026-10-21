@@ -9,10 +9,17 @@ import re
 
 import click
 
-from control_plane.contracts.deploy_reference import docker_image_digest, docker_image_repository
+from control_plane.contracts.deploy_reference import (
+    docker_image_digest,
+    docker_image_tag,
+    canonical_docker_image_repository as _repository,
+)
 from control_plane.contracts.idempotency_record import parse_launchplane_mutation_timestamp
 from control_plane.dokploy import api
-from control_plane.dokploy.runtime_evidence import DokployEvidenceProviderError
+from control_plane.dokploy.runtime_evidence import (
+    DokployEvidenceProviderError,
+    _read_container_config,
+)
 
 _IDENTIFIER = re.compile(r"^[a-zA-Z0-9._-]{1,128}$")
 _CONTAINER_ID = re.compile(r"^[a-f0-9]{64}$")
@@ -97,7 +104,10 @@ def application_runtime_matches(
         observed.ready
         and _service_image_matches(observed.service_image, artifact_reference, provider_reference)
         and observed.service_deployment_record_id == deployment_record_id
-        and all(artifact_reference in images for images in observed.running_container_images)
+        and all(
+            any(_immutable_image_matches(image, artifact_reference) for image in images)
+            for images in observed.running_container_images
+        )
         and all(
             record_id == deployment_record_id
             for record_id in observed.running_container_deployment_record_ids
@@ -105,12 +115,26 @@ def application_runtime_matches(
     )
 
 
+def _immutable_image_matches(image: str, artifact_reference: str) -> bool:
+    if image == artifact_reference:
+        return True
+    # The reader validates RepoDigests; identity comparison preserves the exact
+    # digest token while normalizing only equivalent repository spellings.
+    _, image_separator, image_digest = image.rpartition("@")
+    _, expected_separator, expected_digest = artifact_reference.rpartition("@")
+    return bool(image_separator and expected_separator and expected_digest) and (
+        _repository(image) == _repository(artifact_reference) and image_digest == expected_digest
+    )
+
+
 def _service_image_matches(image: str, artifact_reference: str, provider_reference: str) -> bool:
     if "@" in image:
-        return _repository(image) == _repository(artifact_reference) and docker_image_digest(
-            image
-        ) == docker_image_digest(artifact_reference)
-    return image == provider_reference
+        return _immutable_image_matches(image, artifact_reference)
+    return (
+        "@" not in provider_reference
+        and _repository(image) == _repository(provider_reference)
+        and docker_image_tag(image) == docker_image_tag(provider_reference)
+    )
 
 
 def application_runtime_attempt_observed(
@@ -135,9 +159,10 @@ def application_runtime_settled_spec_matches(
     provider_reference: str,
     deployment_record_id: str,
 ) -> bool:
-    """The original service update settled, independently of replacement task health."""
+    """A complete read proves the original update settled, regardless of task health."""
     return (
-        observed.desired_replicas > 0
+        observed.task_evidence_complete
+        and observed.desired_replicas > 0
         and observed.rollout_state in {"", "completed"}
         and observed.service_deployment_record_id == deployment_record_id
         and _service_image_matches(observed.service_image, artifact_reference, provider_reference)
@@ -207,10 +232,6 @@ def _deployment_identity(value: object) -> str:
     return deployment_id
 
 
-def _repository(reference: str) -> str:
-    return docker_image_repository(reference.split("@", 1)[0])
-
-
 def _image(value: object) -> str:
     if (
         not isinstance(value, str)
@@ -261,22 +282,10 @@ def _fetch_application_runtime(
     server_id = "" if raw_server is None or raw_server == "" else _identifier(raw_server)
     query: dict[str, str | int] = {"serverId": server_id} if server_id else {}
 
-    def inspect(identifier: str) -> dict[str, object]:
-        raw = api.dokploy_request(
-            host=host,
-            token=token,
-            path="/api/docker.getConfig",
-            query={**query, "containerId": identifier},
+    def inspect(identifier: str) -> api.JsonObject:
+        return _read_container_config(
+            host=host, token=token, container_id=identifier, server_id=server_id
         )
-        if isinstance(raw, str):
-            try:
-                raw = json.loads(raw)
-            except ValueError:
-                raise DokployEvidenceProviderError("container-config") from None
-        normalized = api.as_json_object(raw)
-        if normalized is None and isinstance(raw, list) and len(raw) == 1:
-            normalized = api.as_json_object(raw[0])
-        return _object(normalized)
 
     service = inspect(app_name)
     service_id = _identifier(service.get("ID"))

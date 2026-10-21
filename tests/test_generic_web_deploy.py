@@ -523,7 +523,7 @@ class _FakeGenericWebDeployProvider:
         deployment_title: str,
         before_provider_mutation: Callable[[str], None],
         effect_started: Callable[[], None],
-    ) -> None:
+    ) -> GenericWebProviderDeploymentObservation | None:
         del control_plane_root
         self.application_runtime = converged_application_runtime(
             resolved_deploy_target, runtime_identity
@@ -534,6 +534,7 @@ class _FakeGenericWebDeployProvider:
         effect_started()
         if self.deploy_error is not None:
             raise self.deploy_error
+        return None
 
     def observe_artifact_deploy(
         self,
@@ -680,7 +681,7 @@ class GenericWebDeployTests(unittest.TestCase):
                         deploy_provider=provider,
                     )
                 self.assertEqual(result.deploy_status, "fail")
-                self.assertTrue(result.provider_failure_proved)
+                self.assertEqual(result.provider_failure_proved, complete)
                 self.assertFalse(store.inventories)
                 sleeper.assert_not_called()
 

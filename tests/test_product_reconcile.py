@@ -2015,6 +2015,41 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         with self.assertRaises(FileNotFoundError):
             self.store.read_environment_inventory(context_name="cm", instance_name="testing")
 
+    def test_unreadable_rollout_at_deadline_retains_original_without_delivery_credit(self) -> None:
+        triggered = self.prepare_application_runtime_test()
+        with (
+            patch.object(
+                self.application_inputs_provider,
+                "observe_testing_application_runtime",
+                side_effect=lambda **_: replace(
+                    self.application_runtime(),
+                    task_evidence_complete=False,
+                    running_container_images=(),
+                    running_container_deployment_record_ids=(),
+                    running_container_health=(),
+                ),
+            ),
+            patch("control_plane.workflows.generic_web_deploy.monotonic", return_value=0),
+            patch(
+                "control_plane.workflows.generic_web_deploy_provider.monotonic", return_value=1e30
+            ),
+        ):
+            self.request()
+            original = self.run_once()
+        self.assertEqual(original.state, "failed")
+        (held,) = self.store.list_held_provider_target_reservations()
+        self.assertEqual(len(triggered), 1)
+        with self.assertRaises(FileNotFoundError):
+            self.store.read_environment_inventory(context_name="cm", instance_name="testing")
+        self.request()
+        repeated = self.run_once()
+        self.assertEqual(repeated.state, "failed")
+        (retained,) = self.store.list_held_provider_target_reservations()
+        self.assertEqual(retained.record_id, held.record_id)
+        self.assertEqual(len(triggered), 1)
+        with self.assertRaises(FileNotFoundError):
+            self.store.read_environment_inventory(context_name="cm", instance_name="testing")
+
     def test_application_without_managed_inputs_repairs_runtime_drift_once(self) -> None:
         from control_plane.generic_web_testing_inputs import testing_input_authority
 
@@ -2352,6 +2387,26 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         self.github.add_run(20, DEPLOYABLE)
         self.request()
         self.reconcile()
+        self.hold_testing()
+        with patch.object(
+            self.application_inputs_provider,
+            "observe_testing_application_runtime",
+            wraps=self.application_runtime,
+        ) as observe:
+            self.request()
+            unchanged = self.reconcile()
+        self.assertEqual(unchanged["reason"], "already_deployed")
+        observe.assert_called_once()
+        self.assertEqual(len(triggered), 1)
+        with patch.object(
+            self.application_inputs_provider,
+            "observe_testing_application_runtime",
+            side_effect=lambda **_: self.rolled_back_application_runtime(),
+        ):
+            self.request()
+            drift_held = self.reconcile()
+        self.assertEqual(drift_held["reason"], "staff_testing")
+        self.assertEqual(len(triggered), 1)
         self.store.write_runtime_environment_record(
             RuntimeEnvironmentRecord(
                 scope="instance",

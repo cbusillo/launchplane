@@ -171,6 +171,61 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
         self.assertNotIn("do-not-expose", repr(observed))
         self.assertNotIn("do-not-expose", str(asdict(observed)))
 
+        for repository, familiar in (
+            ("docker.io/library/nginx", "nginx"),
+            ("docker.io/acme/web", "acme/web"),
+            ("index.docker.io/acme/web", "acme/web"),
+            ("registry.example:5000/team/app", "registry.example:5000/team/app"),
+        ):
+            with self.subTest(repository=repository):
+                canonical_image = f"{repository}@{_DIGEST}"
+                provider_tag = f"{repository}:sha-build"
+                spec = self.service["Spec"]
+                assert isinstance(spec, dict)
+                template = spec["TaskTemplate"]
+                assert isinstance(template, dict)
+                container_spec = template["ContainerSpec"]
+                assert isinstance(container_spec, dict)
+                container_spec["Image"] = provider_tag
+                self.task["Spec"] = {"ContainerSpec": {"Image": provider_tag}}
+                config = self.container["Config"]
+                assert isinstance(config, dict)
+                config["Image"] = f"{familiar}:sha-build"
+                self.image["RepoDigests"] = [canonical_image, f"{familiar}@{_DIGEST}"]
+                observed = self.read()
+                self.assertTrue(observed.task_evidence_complete)
+                for expected in (canonical_image, f"{familiar}@{_DIGEST}"):
+                    for tag in (provider_tag, f"{familiar}:sha-build"):
+                        self.assertTrue(
+                            application_runtime_matches(
+                                observed,
+                                artifact_reference=expected,
+                                provider_reference=tag,
+                                deployment_record_id="deployment-1",
+                            )
+                        )
+                        self.assertFalse(
+                            application_runtime_drift_fingerprint(
+                                observed,
+                                artifact_reference=expected,
+                                provider_reference=tag,
+                                deployment_record_id="deployment-1",
+                            )
+                        )
+                for expected, record_id in (
+                    (f"{repository}@sha256:{'e' * 64}", "deployment-1"),
+                    (f"docker.io/other/web@{_DIGEST}", "deployment-1"),
+                    (canonical_image, "other-deployment"),
+                ):
+                    self.assertFalse(
+                        application_runtime_matches(
+                            observed,
+                            artifact_reference=expected,
+                            provider_reference=provider_tag,
+                            deployment_record_id=record_id,
+                        )
+                    )
+
     def test_healthy_old_task_is_not_the_services_current_deployment(self) -> None:
         config = self.container["Config"]
         assert isinstance(config, dict)
@@ -766,4 +821,11 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
         self.task["Spec"] = original_spec
         self.tasks.append({"containerId": "old-task"})
         self.vanished_tasks.add("old-task")
-        self.assertEqual(qualify(wait=True).deployment_status, "unhealthy")
+        self.assertEqual(qualify(wait=True).outcome, "unknown")
+        self.tasks.pop()
+        self.task.update(
+            DesiredState="running",
+            Status={"State": "running", "ContainerStatus": {"ContainerID": _CONTAINER_ID}},
+        )
+        self.vanished_tasks.add(_CONTAINER_ID)
+        self.assertEqual(qualify(wait=True).outcome, "unknown")
