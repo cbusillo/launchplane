@@ -26,8 +26,9 @@ product's review label remains an explicit override requiring real test notes.
 `Nothing for the Client to test: <reason>` with a nonempty reason marks an
 engineering-only change; it cannot be used with the review label. When the
 Director reroutes an already labeled request, use [pending request withdrawal](#withdrawing-a-pending-request). Missing notes,
-empty template comments, or a malformed engineering-only declaration visibly
-refuse preview readiness and merge admission for repositories feeding a Client
+empty template comments, or a malformed engineering-only declaration (including
+other "nothing to test" wording such as `Nothing for Justin to test.`, which
+the check names instead of waiting for the Client) visibly refuse preview readiness and merge admission for repositories feeding a Client
 release. Shared inputs are resolved from recorded production/testing artifacts,
 not a checked-in repository list. Shared inputs require valid notes and remain
 covered by the consuming product's release review; they do not gain a separate
