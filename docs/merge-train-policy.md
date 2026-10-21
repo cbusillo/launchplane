@@ -886,6 +886,8 @@ removed, regardless of its conclusion, after all current executions have settled
 successfully. Current failed executions keep their existing blockers. Different
 workflows, events, source repositories and PR targets remain independent; newer
 reruns and incomplete or unavailable metadata retain the existing blockers.
+A current skipped execution or job counts as passing and can clear a superseded
+failure without rerunning that job.
 The native token selects Actions read only when the policy's verified installation
 already advertises it, and verifies the issued token against that exact selection.
 It never requests Actions write or changes installation grants. Its issued scopes

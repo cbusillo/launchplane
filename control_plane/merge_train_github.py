@@ -86,6 +86,10 @@ from control_plane.github_read_cache import GitHubReadCache, MERGE_TRAIN_READ_CA
 from control_plane.contracts.merge_train_policy import MergeTrainRepositoryPolicy
 from control_plane.merge_train_candidate_failures import CandidateCheckFailures
 from control_plane.merge_train_candidate_failures import classify_candidate_check_failures
+from control_plane.merge_train_candidate_failures import (
+    FAILURE_CONCLUSIONS,
+    INFRASTRUCTURE_CONCLUSIONS,
+)
 from control_plane.merge_train_codeowners import (
     individual_landing_snapshots,
     carried_change_requires_individual_landing,
@@ -5801,14 +5805,7 @@ def _check_run_status(check_run: dict[str, object]) -> MergeTrainCheckStatus:
     conclusion = str(check_run.get("conclusion") or "").strip().lower()
     if conclusion in {"success", "neutral", "skipped"}:
         return "pass"
-    if conclusion in {
-        "failure",
-        "timed_out",
-        "cancelled",
-        "action_required",
-        "startup_failure",
-        "stale",
-    }:
+    if conclusion in FAILURE_CONCLUSIONS or conclusion in INFRASTRUCTURE_CONCLUSIONS:
         return "fail"
     return "unknown"
 

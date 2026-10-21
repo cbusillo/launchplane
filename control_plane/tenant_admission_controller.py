@@ -21,6 +21,10 @@ from control_plane.contracts.tenant_merge_eligibility import (
     _normalize_utc_timestamp,
 )
 from control_plane.github_payload import json_object, required_positive_int, required_string_text
+from control_plane.merge_train_candidate_failures import (
+    FAILURE_CONCLUSIONS,
+    INFRASTRUCTURE_CONCLUSIONS,
+)
 from control_plane.merge_train_controller_run_once import (
     DEFAULT_MERGE_TRAIN_CONTROLLER_LEASE_SECONDS,
     MergeTrainControllerLeaseContext,
@@ -1207,14 +1211,7 @@ def _check_run_state(check_run: dict[str, object]) -> TenantAdmissionTechnicalCh
     conclusion = str(check_run.get("conclusion") or "").strip().lower()
     if conclusion in {"success", "neutral", "skipped"}:
         return "pass"
-    if conclusion in {
-        "failure",
-        "timed_out",
-        "cancelled",
-        "action_required",
-        "startup_failure",
-        "stale",
-    }:
+    if conclusion in FAILURE_CONCLUSIONS or conclusion in INFRASTRUCTURE_CONCLUSIONS:
         return "fail"
     return "unavailable"
 
