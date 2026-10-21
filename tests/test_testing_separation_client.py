@@ -16,6 +16,20 @@ class TestingSeparationClientTests(unittest.TestCase):
     def test_independent_resources_preserve_review_and_save_a_private_replayable_receipt(
         self,
     ) -> None:
+        self.exercise_resource_roundtrip(None)
+
+    def test_reviewed_application_specification_reaches_the_same_native_preparation(self) -> None:
+        self.exercise_resource_roundtrip(
+            {
+                "runtime_port": 8000,
+                "health_path": "/health",
+                "network_name": "fixture-network",
+                "state": {"kind": "none"},
+                "local_credentials": [],
+            }
+        )
+
+    def exercise_resource_roundtrip(self, application: dict[str, object] | None) -> None:
         client = runpy.run_path(
             str(Path(__file__).resolve().parents[1] / "scripts/stage-testing-separation.py")
         )
@@ -42,6 +56,7 @@ class TestingSeparationClientTests(unittest.TestCase):
                     "resources_binding_sha256": "b" * 64,
                     "schedule_id": "fixture-schedule",
                     "qualified_at": utc_now_timestamp(),
+                    "application": application,
                 }
             ).model_dump(mode="json")
             call = Mock(
@@ -73,6 +88,10 @@ class TestingSeparationClientTests(unittest.TestCase):
                 "--evidence-file",
                 str(evidence),
             ]
+            if application is not None:
+                application_file = root / "application.json"
+                application_file.write_text(json.dumps(application))
+                common += ["--application-file", str(application_file)]
             for mode in (
                 "resources-dry-run",
                 "resources-apply",
@@ -99,6 +118,17 @@ class TestingSeparationClientTests(unittest.TestCase):
             self.assertEqual(
                 call.call_args_list[2].kwargs["body"]["reviewed_plan_sha256"], plan["plan_sha256"]
             )
+            if application is not None:
+                from control_plane.contracts.testing_application import (
+                    TestingApplicationSpecification,
+                )
+
+                self.assertEqual(
+                    call.call_args_list[2].kwargs["body"]["application"],
+                    TestingApplicationSpecification.model_validate(application).model_dump(
+                        mode="json"
+                    ),
+                )
 
     def test_reviewed_apply_reports_uncertain_409_and_never_retries(self) -> None:
         self._exercise_apply("mutation_reconciliation_required", unknown=True)

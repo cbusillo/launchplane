@@ -14,6 +14,7 @@ from control_plane.contracts.testing_activation import (
     TestingActivationRequest,
     TestingActivationPlan,
     TestingActivationResult,
+    TestingActivationRefusedResult,
 )
 from control_plane.testing_activation import ROUTE
 
@@ -97,11 +98,14 @@ def main() -> int:
         )
         if response["status"] != "accepted":
             raise ValueError("Activation was not accepted.")
-        result = (
-            (TestingActivationPlan if args.mode == "dry-run" else TestingActivationResult)
-            .model_validate(response["result"])
-            .model_dump(mode="json")
+        result_model = (
+            TestingActivationRefusedResult
+            if response["result"].get("outcome") == "refused"
+            else TestingActivationPlan
+            if args.mode == "dry-run"
+            else TestingActivationResult
         )
+        result = result_model.model_validate(response["result"]).model_dump(mode="json")
         output = (
             args.evidence_file
             if args.mode == "dry-run"

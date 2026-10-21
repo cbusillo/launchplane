@@ -12808,6 +12808,313 @@ class RealPostgresTestingActivationTests(testing_activation.ActivationTests):
         )
 
 
+class RealPostgresApplicationTestingActivationTests(unittest.TestCase):
+    """Application custody lives in the real original intent, including JSONB progress."""
+
+    def setUp(self) -> None:
+        from tests.test_testing_application_flow import ApplicationFlowTests
+
+        database = _head_postgres_database()
+        self.fixture = ApplicationFlowTests()
+        self.fixture.database_url = database.__enter__()
+        self.addCleanup(database.__exit__, None, None, None)
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+
+        policy = testing_activation.activation_hold_policy(
+            self.fixture.product, self.fixture.context
+        )
+        self.fixture.store.seed_authz_policy_if_absent(
+            LaunchplaneAuthzPolicyRecord(
+                record_id=build_authz_policy_record_id(
+                    revision=1, policy_sha256=authz_policy_sha256(policy)
+                ),
+                revision=1,
+                status="active",
+                source="test:application-activation",
+                updated_at=self.fixture.old.now(),
+                policy=policy,
+            )
+        )
+
+    def test_private_publication_serializes_edge_audit_and_new_reservation(self) -> None:
+        from control_plane.storage.postgres import PostgresRecordStore
+        from control_plane.contracts.ingress_route_audit_record import (
+            TESTING_PRIVATE_INGRESS_AUDIT_PREFIX,
+        )
+        from contextlib import ExitStack
+
+        fixture = self.fixture
+        _, ingress, _ = fixture.private_addressed()
+        fixture.prepare()
+        store = fixture.store
+        edge = store.read_edge_endpoint_record(ingress.request.edge_endpoint_key)
+        audit = store.list_ingress_route_audit_records(
+            product=fixture.product, context_name=fixture.context
+        )[0]
+        writers = [PostgresRecordStore(database_url=store.database_url) for _ in range(3)]
+        for writer in writers:
+            self.addCleanup(writer.close)
+        publishing, locked, release = threading.Event(), threading.Event(), threading.Event()
+        attempted = [threading.Event() for _ in writers]
+        backend_pids: list[int] = []
+        original_write, publication_lock = (
+            store.write_testing_activation,
+            store._lock_product_authority_bundle_write,
+        )
+
+        def write(**kwargs: Any) -> None:
+            if kwargs["replacement"]["published"]:
+                publishing.set()
+                try:
+                    original_write(**kwargs)
+                finally:
+                    publishing.clear()
+            else:
+                original_write(**kwargs)
+
+        deadline = 0.0
+
+        def remaining() -> float:
+            return max(0.0, deadline - time.monotonic())
+
+        def hold_publication(session: Any) -> None:
+            publication_lock(session)
+            if publishing.is_set():
+                locked.set()
+                if not release.wait(remaining()):
+                    raise TimeoutError(
+                        "Shared concurrency budget expired before the test released publication."
+                    )
+
+        def blocked_writer(index: int, session: Any) -> None:
+            backend_pids.append(session.scalar(text("SELECT pg_backend_pid()")))
+            attempted[index].set()
+            locks[index](session)
+
+        locks = [writer._lock_product_authority_bundle_write for writer in writers]
+        actions = [
+            lambda: writers[0].write_edge_endpoint_record(
+                edge.model_copy(update={"source_label": "test:concurrent-edge"})
+            ),
+            lambda: writers[1].write_ingress_route_audit_record(
+                audit.model_copy(
+                    update={
+                        "record_id": TESTING_PRIVATE_INGRESS_AUDIT_PREFIX + "concurrent-audit",
+                        "recorded_at": fixture.old.now(1),
+                    }
+                )
+            ),
+            lambda: writers[2].reserve_mutation(
+                scope="private-concurrent",
+                route_path="/fixture-private-reservation",
+                idempotency_key="private-concurrent",
+                request_fingerprint="private-concurrent",
+                lease_owner="private-concurrent",
+                reconciliation_key="private-concurrent",
+                provider_target_key=ingress.target_key(),
+            ),
+        ]
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(store, "write_testing_activation", side_effect=write))
+            stack.enter_context(
+                patch.object(
+                    store, "_lock_product_authority_bundle_write", side_effect=hold_publication
+                )
+            )
+            for index, writer in enumerate(writers):
+                stack.enter_context(
+                    patch.object(
+                        writer,
+                        "_lock_product_authority_bundle_write",
+                        side_effect=lambda session, index=index: blocked_writer(index, session),
+                    )
+                )
+            with ThreadPoolExecutor(max_workers=4) as workers:
+                deadline = time.monotonic() + 60
+                publication = workers.submit(fixture.activate)
+
+                def require_publication_pending(stage: str) -> None:
+                    if publication.done():
+                        outcome = publication.result()
+                        self.fail(
+                            "Publication finished "
+                            + stage
+                            + ": status="
+                            + str(outcome.status)
+                            + "; phase="
+                            + fixture.adapter.current().phase
+                        )
+
+                try:
+                    while not locked.wait(min(0.05, remaining())):
+                        require_publication_pending("before its checkpoint")
+                        if not remaining():
+                            self.fail(
+                                "Shared concurrency budget expired before the publication checkpoint; phase="
+                                + fixture.adapter.current().phase
+                            )
+                    require_publication_pending("before contender observation")
+                    contenders = [workers.submit(action) for action in actions]
+                    while not all(event.is_set() for event in attempted):
+                        require_publication_pending("before all writer lock callbacks")
+                        for contender in contenders:
+                            if contender.done():
+                                contender.result()
+                                self.fail(
+                                    "A private writer completed before the held publication was released."
+                                )
+                        if not remaining():
+                            self.fail(
+                                "Shared concurrency budget expired before all private writer lock callbacks."
+                            )
+                        time.sleep(min(0.01, remaining()))
+                    blocked = False
+                    while remaining():
+                        require_publication_pending("before PostgreSQL blocking witnesses")
+                        with store._engine.connect() as connection:
+                            blocked = all(
+                                bool(
+                                    connection.scalar(
+                                        text("SELECT cardinality(pg_blocking_pids(:pid)) > 0"),
+                                        {"pid": pid},
+                                    )
+                                )
+                                for pid in backend_pids
+                            )
+                        if blocked:
+                            break
+                        time.sleep(min(0.01, remaining()))
+                    self.assertTrue(
+                        blocked,
+                        "Shared concurrency budget expired before all three PostgreSQL blocking witnesses.",
+                    )
+                    require_publication_pending("while private writers were blocked")
+                    self.assertFalse(any(contender.done() for contender in contenders))
+                finally:
+                    release.set()
+                try:
+                    self.assertEqual(publication.result(timeout=remaining()).status, "completed")
+                except TimeoutError:
+                    if publication.done():
+                        raise
+                    self.fail("Shared concurrency budget expired while publication committed.")
+                for contender in contenders:
+                    try:
+                        contender.result(timeout=remaining())
+                    except TimeoutError:
+                        if contender.done():
+                            raise
+                        self.fail(
+                            "Shared concurrency budget expired while a private writer committed."
+                        )
+        self.assertTrue(fixture.adapter.current().published)
+        self.assertEqual(
+            store.read_edge_endpoint_record(edge.endpoint_key).source_label, "test:concurrent-edge"
+        )
+        self.assertIsNotNone(
+            store.read_ingress_route_audit_record(
+                TESTING_PRIVATE_INGRESS_AUDIT_PREFIX + "concurrent-audit"
+            )
+        )
+        self.assertTrue(
+            any(
+                row.provider_target_key == ingress.target_key()
+                for row in store.list_held_provider_target_reservations()
+            )
+        )
+
+    def test_unfinished_preparing_forward_refusal_and_fresh_successor(self) -> None:
+        self.fixture.assert_unfinished_private_forward_recovers_and_successor("preparing")
+
+    def test_excluded_private_forward_refusal_and_fresh_successor(self) -> None:
+        self.fixture.assert_excluded_private_forward_refuses_and_successor("no-container")
+
+    def test_private_same_address_lineage_monitor_and_second_generation(self) -> None:
+        self.fixture.test_private_same_address_monitor_recreate_and_second_generation()
+
+    def test_original_intent_progress_and_native_forward_continuation(self) -> None:
+        self.fixture.test_normal_lost_maintenance_native_activation_and_ordinary_successor()
+
+    def test_final_bundle_rolls_back_and_reuses_original_staged_versions(self) -> None:
+        self.fixture.test_failed_atomic_publication_keeps_old_delivery_and_reuses_staged_generation()
+
+    def test_expired_execution_cannot_publish_target_or_runtime_bindings(self) -> None:
+        self.fixture.test_final_publication_expired_execution_rolls_back_target_and_delivery()
+
+    def test_replaced_execution_cannot_publish_target_or_runtime_bindings(self) -> None:
+        self.fixture.test_final_publication_replaced_execution_rolls_back_target_and_delivery()
+
+    def test_later_supported_hold_correction_prevents_publication(self) -> None:
+        self.fixture.test_later_supported_hold_correction_refuses_final_publication()
+
+    def test_new_staff_use_prevents_fresh_creation(self) -> None:
+        self.fixture.test_new_staff_use_refuses_before_fresh_creation()
+
+    def test_supported_application_route_original_intent_and_key_replay(self) -> None:
+        self.fixture.assert_supported_http_activation(native_apply=True)
+
+    def test_interrupted_http_apply_reuses_immutable_original_intent(self) -> None:
+        self.fixture.assert_supported_http_activation(native_apply=True, interrupted=True)
+
+    def test_in_progress_http_apply_reuses_immutable_original_intent(self) -> None:
+        self.fixture.assert_supported_http_activation(native_apply=True, in_progress=True)
+
+    def test_refused_http_apply_readback_and_receipt_remain_unqualified(self) -> None:
+        self.fixture.assert_supported_http_activation(native_apply=True, failed=True)
+
+    def test_pre_effect_refusal_releases_for_fresh_review(self) -> None:
+        self.fixture.test_pre_checkpoint_review_drift_releases_for_a_fresh_review_and_key()
+
+    def test_post_inspector_permanent_refusal_keeps_custody_and_continues(self) -> None:
+        self.fixture.test_post_inspector_permanent_configuration_refusal_keeps_custody_and_continues()
+
+    def test_failed_private_candidate_retains_resources_for_distinct_generation(self) -> None:
+        self.fixture.test_lost_failed_private_application_keeps_resources_and_new_generation()
+
+    def test_publication_refusal_restores_route_before_next_generation(self) -> None:
+        self.fixture.test_addressed_publication_correction_restores_route_and_allows_fresh_generation()
+
+    def test_terminal_private_job_correction_before_health_keeps_original_custody(self) -> None:
+        self.fixture.test_terminal_private_candidate_correction_does_not_require_passing_health()
+
+    def test_answered_unused_placement_correction_keeps_original_custody(self) -> None:
+        self.fixture.test_answered_placement_correction_retains_unused_candidate()
+
+    def test_staged_private_inputs_correction_keeps_original_custody(self) -> None:
+        self.fixture.test_staged_private_inputs_correction_retains_unused_candidate()
+
+    def test_answered_mount_correction_keeps_original_custody(self) -> None:
+        self.fixture.test_answered_mount_correction_retains_unused_candidate()
+
+    def test_answered_configuration_correction_keeps_original_custody(self) -> None:
+        self.fixture.test_answered_configuration_correction_retains_unused_candidate()
+
+    def test_generic_publication_error_continues_original_forward(self) -> None:
+        self.fixture.test_addressed_generic_publication_error_retries_forward_without_route_rewrite()
+
+    def test_staff_use_pauses_forward_until_reviewed_clear(self) -> None:
+        self.fixture.test_addressed_staff_use_pauses_then_original_key_publishes_without_inverse()
+
+    def test_verified_public_failure_restores_original(self) -> None:
+        self.fixture.test_verified_public_http_failure_restores_original_and_allows_successor()
+
+    def test_verified_private_failure_retains_candidate(self) -> None:
+        self.fixture.test_verified_private_http_failure_retains_candidate_and_allows_successor()
+
+    def test_proxy_restart_before_inverse_preserves_original_directions(self) -> None:
+        self.fixture.test_proxy_restart_before_inverse_retains_distinct_inverse_custody()
+
+    def test_proxy_restart_after_lost_inverse_preserves_original_child(self) -> None:
+        self.fixture.test_proxy_restart_after_lost_inverse_reply_reuses_original_child()
+
+    def test_staff_use_pauses_persisted_inverse_until_reviewed_clear(self) -> None:
+        self.fixture.test_persisted_inverse_pauses_for_staff_use_then_restores_original()
+
+    def test_route_restores_before_foreign_job_holds_negative_receipt(self) -> None:
+        self.fixture.test_inverse_restores_before_unrelated_candidate_job_holds_negative_receipt()
+
+
 class RealPostgresRecipientRecoveryTests(unittest.TestCase):
     def setUp(self) -> None:
         from tests import test_production_recipient_qualification as qualification

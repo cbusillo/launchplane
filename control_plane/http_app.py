@@ -17183,6 +17183,7 @@ def create_launchplane_fastapi_app(
         reservation_scope: str = "",
         target_supersession: ProviderTargetSupersession | None = None,
         public_failure_messages: Mapping[str, str] | None = None,
+        original_intent: dict[str, object] | None = None,
     ) -> AcceptedEvidenceResponse:
         def operation(store: PostgresRecordStore) -> DurableProviderOperationResult:
             return run_durable_provider_operation(
@@ -17195,6 +17196,7 @@ def create_launchplane_fastapi_app(
                 response_trace_id=trace_id,
                 adapter=adapter,
                 target_supersession=target_supersession,
+                original_intent=original_intent,
             )
 
         return await run_provider_operation_http(
