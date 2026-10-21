@@ -695,7 +695,7 @@ release, supersede, retry, adopt, or write deployment, inventory, idempotency,
 or provider state. The bounded response reports only reservation state and
 timestamps, hashed identifiers, provider outcome/status, retry safety, one of
 `replay_completed`, `wait_for_active_lease`, `adopt_observed`,
-`retry_original_operation`, `close_out_observed`, or `hold_unknown`, and a
+`retry_original_operation`, `settle_testing_failure`, `close_out_observed`, or `hold_unknown`, and a
 canonical recovery digest.
 Recovery apply recomputes that evidence and rejects a stale digest. After a
 Launchplane deployment changes provider observation or reconciliation behavior,
@@ -859,8 +859,77 @@ Apply never creates a new reservation, releases a reservation, or supersedes a
 provider target. If the reviewed reservation is an expired `running` mutation,
 apply first CAS-transitions that exact reservation to `reconcile_required` via
 the durable mutation store, then uses the existing exact-match adoption or retry
-methods. `adopt_observed` stores deployment/inventory evidence from the reviewed
-inspection without re-observing the provider. `retry_original_operation` resumes
+methods. For in-place application testing, `adopt_observed` reacquires the
+original lease and rechecks the reviewed execution, captured authority, image
+and exact inventory before publication. It runs no deploy, maintenance,
+canary or activation. For receipt-bearing attempts, a provider observation never
+supplies a missing passing application-testing result. A saved final result
+completes as recorded unless exact original terminal image-failure evidence
+invalidates a saved pass. That contradiction uses failure settlement without
+repeating product work. Terminal work without a durable aggregate result also
+uses failure settlement, including an image-only attempt interrupted before its
+final write. A normal attempt's unobserved image marker is unfinished evidence:
+exact original terminal image proof permits failed settlement and an ordinary
+successor, while a conflicting real saved image ID remains fenced. Receiptless
+legacy image-only attempts retain guarded image adoption only
+when the inspected configuration, lifecycle and phase declare no post-deploy
+obligation; missing proof for required work remains unknown.
+Missing current-lane publication can complete only against missing inventory or
+the exact pre-attempt inventory bound before dispatch.
+Already final deployment evidence and independently corrected inventory are
+preserved. If another inventory is now current, recovery can complete the
+truthful historical original result while leaving that inventory unchanged.
+Automatic observation is read-only and can adopt only an already saved qualified
+result with matching durable inventory; adoption compares both again in the
+reservation transaction. Other scopes retain direct reviewed-evidence adoption.
+`settle_testing_failure` requires attributable terminal execution and runs only
+the original schedule hold before publishing truthful failure. Its HTTP 202
+recovery envelope preserves the original failed HTTP 502 result and replays
+without effects. An unqualified healthy image retains its separate image fact;
+settlement never creates a successful lane projection. Missing execution proof
+stays `hold_unknown` even if cleanup is the last saved phase. Receiptless legacy
+`records_commit` alone does not prove image-only work: a current configuration
+without an executor does not establish what the original required. Such originals
+need attributable terminal proof. Where the provider cannot supply it,
+application-side isolation or verified cessation of the original work is a
+prerequisite for a safe continuation; deploying another image does not provide
+that proof.
+A schedule inspection failure before any write can be reviewed again on the
+same original operation. An acknowledged schedule write remains terminal even
+if its later readback fails; review the original again to finish its failed
+settlement. A lost write reply remains unknown even when a later read shows the
+schedule disabled or absent. Foreign schedule evidence triggers the captured
+schedule hold but never supplies terminal proof for the disputed run.
+When current inventory already points at that original, restarted settlement
+preserves it exactly and writes the truthful failed deployment it references.
+Its copied fields can remain pending until an ordinary successor replaces it;
+the joined source qualifier rejects the failed referenced deployment. A final
+saved pass with corrected inventory is preserved without rebuilding either.
+An answered failed qualification after successful image execution updates the
+unchanged original inventory baseline to failed qualification, through the same
+locked publisher used by ordinary completion. A failed image creates no fresh
+inventory. Durable terminal execution facts are not re-derived from later cron
+history; only unresolved original entries require provider observation.
+When post-image maintenance, an executor or schedule activation is required, the
+ordinary application-testing producer first publishes image success with
+qualification pending under its original lease, exact deployment/inventory CAS
+and current target binding. Input or profile metadata drift does not suppress
+that unqualified projection while the binding remains current. After committing
+it, the producer rechecks the full current profile and captured input authority
+before any further work. A refusal retains the fence and dispatches no
+post-image maintenance, executor or activation. Terminal work can use reviewed
+original recovery above, never another guessed provider call.
+A completed native post-image failure settlement ends the original reservation.
+When ordinary planning selects a deploy, a return to the settled predecessor's
+exact inputs receives a deterministic event successor, including on a fresh lane.
+Repeated sweeps reuse that successor. If it becomes unknown, it needs its own
+native settlement before another successor can start. Settlement does not itself
+select a same-artifact deploy when inventory already points at the desired image;
+existing already-deployed and failed-qualification decisions still apply. A newer
+build, changed lane or deliberate new-key deploy can supply the next attempt.
+An ordinary recorded failure retains the existing newer-build or changed-lane
+retry policy.
+`retry_original_operation` resumes
 the already-acquired reservation path and preserves `reconcile_required` for
 pre-effect rejection, lease loss, uncertain, or non-durable outcomes.
 `close_out_observed` settles the exact reservation from the reinspected runtime

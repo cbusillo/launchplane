@@ -1926,6 +1926,36 @@ provider message or rollback health exception is embedded in the detail.
 
 ## Deployment Record
 
+In-place application testing retains a cumulative typed receipt in
+`post_deploy_update.evidence.generic_web_original_execution`. The original
+deployment and reservation identify its product, lane, artifact, source and
+provider target. The receipt records intent before dispatch, the complete
+pre-dispatch schedule-history identifiers, bounded acknowledgements and
+attributable terminal facts. It also binds the pre-attempt inventory by digest.
+An optional application lifecycle snapshot retains the original schedule
+baseline; executor-only testing does not manufacture a snapshot.
+
+Only the current original provider execution can create or advance these
+facts. Supported deployment-evidence corrections can preserve them exactly and
+correct other evidence, but cannot replace the captured lifecycle baseline or
+turn unknown work into completed work. Cleanup appends evidence; it never
+replaces earlier unresolved effects. Terminal execution and testing
+qualification remain separate: a healthy image with failed product assertions
+can retain its image fact while the original operation settles as failed.
+Receipt-only advances merge against the current row under the original lease
+and authority transaction, so a simultaneous supported evidence correction is
+retained. When post-image maintenance, an executor or schedule activation is
+required, the original publishes exact image success with qualification pending
+before that work and makes it current. Its lease, exact record/inventory CAS and
+current target binding protect that unqualified fact. Current profile and captured
+input qualification are checked again after its commit, before more work.
+That projection contains no previous qualification verdict. The executor receives
+the prior inventory captured before publication, so bounded qualification retries
+retain their prior-attempt count.
+Final publication compares the producer's expected record and inventory;
+it does not adopt a correction as permission to overwrite it. Recorded terminal
+facts survive later cron activity and do not require another history read.
+
 Failed Odoo stable bootstrap and production backup restore deployments use
 `failure` for a code and a fixed Launchplane description. Bootstrap codes
 separate execution, post-deploy and readiness failures; restore codes separate

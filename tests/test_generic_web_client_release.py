@@ -1,5 +1,6 @@
 """Run the service-owned release with real storage, backup gates and fake providers."""
 
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -1082,9 +1083,11 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         commands: list[str] = []
 
         def upsert(**kwargs: Any) -> dict[str, Any]:
-            payload = kwargs["schedule_payload"]
-            schedules[str(payload["name"])] = dict(payload)
-            return {**payload, "scheduleId": payload["name"]}
+            guard = kwargs.get("provider_mutation_guard")
+            with guard() if callable(guard) else nullcontext():
+                payload = kwargs["schedule_payload"]
+                schedules[str(payload["name"])] = dict(payload)
+                return {**payload, "scheduleId": payload["name"]}
 
         with (
             patch(

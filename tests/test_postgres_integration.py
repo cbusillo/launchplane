@@ -12810,34 +12810,44 @@ class RealPostgresTestingActivationTests(testing_activation.ActivationTests):
         )
 
 
+def _application_testing_fixture(case: unittest.TestCase, *, direct_original: bool = False) -> Any:
+    from tests.test_testing_application_flow import ApplicationFlowTests
+
+    database = _head_postgres_database()
+    fixture = ApplicationFlowTests()
+    fixture.direct_original = direct_original
+    fixture.database_url = database.__enter__()
+    case.addCleanup(database.__exit__, None, None, None)
+    fixture.setUp()
+    case.addCleanup(fixture.doCleanups)
+
+    policy = testing_activation.activation_hold_policy(fixture.product, fixture.context)
+    fixture.store.seed_authz_policy_if_absent(
+        LaunchplaneAuthzPolicyRecord(
+            record_id=build_authz_policy_record_id(
+                revision=1, policy_sha256=authz_policy_sha256(policy)
+            ),
+            revision=1,
+            status="active",
+            source="test:application-activation",
+            updated_at=fixture.old.now(),
+            policy=policy,
+        )
+    )
+    return fixture
+
+
+class RealPostgresDirectApplicationTestingActivationTests(unittest.TestCase):
+    def test_direct_original_continuation_uses_native_operation_custody(self) -> None:
+        fixture = _application_testing_fixture(self, direct_original=True)
+        fixture.test_normal_lost_maintenance_native_activation_and_ordinary_successor()
+
+
 class RealPostgresApplicationTestingActivationTests(unittest.TestCase):
     """Application custody lives in the real original intent, including JSONB progress."""
 
     def setUp(self) -> None:
-        from tests.test_testing_application_flow import ApplicationFlowTests
-
-        database = _head_postgres_database()
-        self.fixture = ApplicationFlowTests()
-        self.fixture.database_url = database.__enter__()
-        self.addCleanup(database.__exit__, None, None, None)
-        self.fixture.setUp()
-        self.addCleanup(self.fixture.doCleanups)
-
-        policy = testing_activation.activation_hold_policy(
-            self.fixture.product, self.fixture.context
-        )
-        self.fixture.store.seed_authz_policy_if_absent(
-            LaunchplaneAuthzPolicyRecord(
-                record_id=build_authz_policy_record_id(
-                    revision=1, policy_sha256=authz_policy_sha256(policy)
-                ),
-                revision=1,
-                status="active",
-                source="test:application-activation",
-                updated_at=self.fixture.old.now(),
-                policy=policy,
-            )
-        )
+        self.fixture = _application_testing_fixture(self)
 
     def test_private_publication_serializes_edge_audit_and_new_reservation(self) -> None:
         from control_plane.storage.postgres import PostgresRecordStore

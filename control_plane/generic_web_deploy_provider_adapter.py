@@ -1,5 +1,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass
+from contextlib import nullcontext
+from dataclasses import replace
 from pathlib import Path
 from typing import Protocol, cast
 
@@ -7,6 +9,9 @@ import click
 from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.deployment_record import deployment_record_passed
+from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.generic_web_testing_inputs import (
     TESTING_DISPATCH_REFUSED_PHASE,
     testing_input_authority,
@@ -14,6 +19,7 @@ from control_plane.generic_web_testing_inputs import (
 from control_plane.generic_web_testing_settlement import (
     TESTING_DISPATCH_REFUSED_SETTLED,
     TESTING_PRE_IMAGE_SETTLED,
+    TESTING_POST_IMAGE_SETTLEMENT_PHASE,
     settle_testing_pre_image_attempt,
     testing_pre_image_settlement_required,
 )
@@ -36,6 +42,7 @@ from control_plane.generic_web_deploy_http import (
     should_store_generic_web_deploy_idempotency,
 )
 from control_plane.provider_operations import (
+    ProviderEvidenceLease,
     ProviderMutationOutcome,
     ProviderMutationRejectedError,
     ProviderMutationUnknownError,
@@ -44,17 +51,34 @@ from control_plane.provider_operations import (
     provider_operation_response_payload,
     provider_operation_title,
 )
+from control_plane.workflows.generic_web_execution import (
+    EXECUTION_EVIDENCE_KEY,
+    ExecutionReceipt,
+    ExecutionRecorder,
+    ExecutionObservation,
+    execution_receipt,
+    observe_execution,
+    require_recorded_execution,
+    evidence_digest,
+)
+from control_plane.dokploy.api import JsonObject
 from control_plane.workflows.generic_web_deploy import (
     GenericWebDeployStore,
+    GENERIC_WEB_UNOBSERVED_DEPLOYMENT_ID,
     normalize_generic_web_artifact_id,
     record_observed_generic_web_deploy,
+    build_observed_generic_web_deploy,
+    generic_web_record_result,
 )
+from control_plane.workflows.inventory import build_environment_inventory
 from control_plane.workflows.generic_web_deploy_provider import (
     GenericWebDeployLegacyCorrelationProvider,
+    GenericWebApplicationExecutionProvider,
     GenericWebDeployProvider,
     GenericWebDeployRuntimeArtifactProvider,
     GenericWebLegacyDeploymentCorrelation,
     GenericWebProviderDeploymentObservation,
+    GenericWebProviderDeploymentFailed,
     GenericWebResolvedDeployTarget,
     GenericWebRuntimeCloseOutEvidence,
     build_generic_web_provider_reconciliation_key,
@@ -86,6 +110,24 @@ class _DeploymentRecordReader(Protocol):
     def read_deployment_record(self, record_id: str) -> DeploymentRecord: ...
 
 
+class _ExecutionInventoryReader(Protocol):
+    def read_environment_inventory(
+        self, *, context_name: str, instance_name: str
+    ) -> EnvironmentInventory: ...
+
+
+class _TestingResultPublisher(Protocol):
+    def publish_generic_web_testing_result(
+        self,
+        *,
+        reservation: LaunchplaneIdempotencyRecord,
+        expected_deployment: DeploymentRecord | None,
+        expected_inventory: EnvironmentInventory | None,
+        deployment: DeploymentRecord,
+        inventory: EnvironmentInventory | None,
+    ) -> None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class _GenericWebDeployProviderInspection:
     observation: GenericWebProviderDeploymentObservation
@@ -96,6 +138,26 @@ class _GenericWebDeployProviderInspection:
     provider_evidence: GenericWebDeployProviderEvidenceClassification = "not_inspected"
     provider_read_error_class: GenericWebDeployProviderReadErrorClass = ""
     legacy_correlation_digest_evidence: dict[str, object] | None = None
+    execution: ExecutionObservation | None = None
+    execution_record: DeploymentRecord | None = None
+    execution_inventory: EnvironmentInventory | None = None
+
+
+def _saved_testing_result_is_final(record: DeploymentRecord | None) -> bool:
+    return (
+        record is not None
+        and record.deploy.status in {"pass", "fail"}
+        and record.deploy.deployment_id != GENERIC_WEB_UNOBSERVED_DEPLOYMENT_ID
+        and (
+            record.deploy.status == "fail"
+            or record.post_deploy_update.status == "fail"
+            or record.destination_health.status == "fail"
+            or (
+                record.post_deploy_update.status in {"pass", "skipped"}
+                and record.destination_health.status in {"pass", "skipped"}
+            )
+        )
+    )
 
 
 class GenericWebDeployProviderMutationAdapter:
@@ -118,7 +180,7 @@ class GenericWebDeployProviderMutationAdapter:
         self._recorded_artifact = recorded_artifact
         self._retain_event_request = retain_event_request
         self._control_plane_root = control_plane_root
-        self._record_store = record_store
+        self._record_store = cast(GenericWebDeployStore, record_store)
         self._deploy_request = deploy_request
         self._profile = profile
         self._lane = lane
@@ -146,6 +208,140 @@ class GenericWebDeployProviderMutationAdapter:
     @property
     def lane(self) -> ProductLaneProfile:
         return self._lane
+
+    def _application_testing(self, target: GenericWebResolvedDeployTarget) -> bool:
+        return (
+            self._lane.instance == "testing"
+            and self._lane.generic_web_cutover is None
+            and target.resolved_target.target_type == "application"
+        )
+
+    def _execution_recorder(self, operation_key: str) -> ExecutionRecorder:
+        record_id = self._deployment_record_id(operation_key)
+        try:
+            record = self._record_store.read_deployment_record(record_id)
+            receipt = execution_receipt(record)
+        except FileNotFoundError:
+            record = None
+            receipt = None
+        if receipt is None:
+            try:
+                inventory = cast(
+                    _ExecutionInventoryReader, self._record_store
+                ).read_environment_inventory(
+                    context_name=self._lane.context, instance_name=self._lane.instance
+                )
+            except FileNotFoundError:
+                inventory = None
+            receipt = ExecutionReceipt(
+                inventory_baseline_digest=evidence_digest(
+                    inventory.model_dump(mode="json") if inventory else None
+                )
+            )
+        return ExecutionRecorder(self._record_store, record_id, receipt, expected_record=record)
+
+    def _execution_evidence(
+        self, operation_key: str, target: GenericWebResolvedDeployTarget, phase: str
+    ) -> tuple[ExecutionObservation | None, DeploymentRecord | None]:
+        if not self._application_testing(target):
+            return None, None
+        try:
+            record = self._record_store.read_deployment_record(
+                self._deployment_record_id(operation_key)
+            )
+        except FileNotFoundError:
+            if phase.startswith(("application_", "post_deploy_")) or phase in {
+                "records_commit",
+                TESTING_POST_IMAGE_SETTLEMENT_PHASE,
+            }:
+                return ExecutionObservation("unknown", {"receipt": "missing"}), None
+            return None, None
+        ship = target.ship_request
+        if (
+            record.context,
+            record.instance,
+            record.source_git_ref,
+            record.artifact_identity.artifact_id if record.artifact_identity else "",
+            record.resolved_target,
+        ) != (
+            self._lane.context,
+            self._lane.instance,
+            ship.source_git_ref,
+            ship.artifact_id,
+            target.resolved_target,
+        ):
+            return ExecutionObservation("unknown", {"binding": "changed"}), record
+        if (
+            record.deployed_target is None
+            or record.deployed_target.provider_id != self._deploy_provider.provider_id
+            or record.deployed_target.target_id != target.resolved_target.target_id
+        ):
+            return ExecutionObservation("unknown", {"binding": "changed"}), record
+        identity = record.runtime_identity
+        if identity is not None and (
+            identity.product,
+            identity.context,
+            identity.instance,
+            identity.deployment_record_id,
+            identity.artifact_id,
+            identity.source_git_ref,
+        ) != (
+            self._profile.product,
+            self._lane.context,
+            self._lane.instance,
+            record.record_id,
+            ship.artifact_id,
+            ship.source_git_ref,
+        ):
+            return ExecutionObservation("unknown", {"binding": "changed"}), record
+        try:
+            lifecycle = recorded_application_lifecycle(record)
+            if lifecycle is not None and (
+                lifecycle.product,
+                lifecycle.provider_id,
+                lifecycle.target_id,
+            ) != (
+                self._profile.product,
+                self._deploy_provider.provider_id,
+                target.resolved_target.target_id,
+            ):
+                return ExecutionObservation("unknown", {"binding": "changed"}), record
+            receipt = execution_receipt(record)
+            if receipt is None:
+                if (
+                    lifecycle is not None
+                    or self._lane.generic_web_extensions.configured
+                    or generic_web_post_deploy_executor_for_profile(
+                        self._profile, instance=self._lane.instance
+                    )
+                    is not None
+                    or phase.startswith(("application_", "post_deploy_"))
+                    or phase == "records_commit"
+                ):
+                    return ExecutionObservation("unknown", {"receipt": "missing"}), record
+                return None, record
+
+            def read_history(schedule_id: str) -> tuple[JsonObject, ...]:
+                if not isinstance(self._deploy_provider, GenericWebApplicationExecutionProvider):
+                    raise ValueError("Provider cannot observe the original application execution.")
+                return self._deploy_provider.application_execution_history(
+                    control_plane_root=self._control_plane_root,
+                    application_id=target.resolved_target.target_id,
+                    schedule_id=schedule_id,
+                )
+
+            result = observe_execution(receipt, read_history)
+            return ExecutionObservation(
+                result.outcome,
+                {
+                    **result.digest_evidence,
+                    "baseline": lifecycle.model_dump(mode="json") if lifecycle else None,
+                    "authority": self._reconciliation_qualification_digest,
+                    "testing_authority": target.testing_runtime_digest,
+                },
+            ), record
+        except (ValueError, click.ClickException):
+            return ExecutionObservation("unknown", {"receipt": "invalid"}), record
 
     @property
     def testing_settlement_pending(self) -> bool:
@@ -295,11 +491,52 @@ class GenericWebDeployProviderMutationAdapter:
                     and inspection.resolved_deploy_target.testing_runtime_digest
                 ),
             )
+        if self._application_testing(inspection.resolved_deploy_target):
+            saved_record = inspection.execution_record
+            if (
+                (inspection.execution is not None and inspection.execution.outcome != "terminal")
+                or inspection.post_deploy_unobserved
+                or saved_record is None
+            ):
+                return ProviderObservation(outcome="unknown")
+            try:
+                inventory = cast(
+                    _ExecutionInventoryReader, self._record_store
+                ).read_environment_inventory(
+                    context_name=saved_record.context, instance_name=saved_record.instance
+                )
+            except FileNotFoundError:
+                return ProviderObservation(outcome="unknown")
+            expected = build_environment_inventory(
+                deployment_record=saved_record, updated_at=inventory.updated_at
+            )
+            if (
+                inventory != expected
+                or saved_record.deploy.status != "pass"
+                or saved_record.post_deploy_update.status not in {"pass", "skipped"}
+                or not deployment_record_passed(saved_record)
+                or saved_record.runtime_identity is None
+                or saved_record.deploy.deployment_id != observation.deployment_id
+            ):
+                return ProviderObservation(outcome="unknown")
+            records, result = generic_web_record_result(
+                record=saved_record,
+                product=self._profile.product,
+                target=inspection.resolved_deploy_target,
+                observation=observation,
+            )
+            return ProviderObservation(
+                outcome="present",
+                response_payload=provider_operation_response_payload(
+                    trace_id=self._trace_id, records=records, result=result
+                ),
+                expected_binding_evidence=(saved_record, inventory),
+            )
         resolved_target = inspection.resolved_deploy_target
         deployment_record_id = self._deployment_record_id(provider_operation_key)
         try:
             records, driver_result = record_observed_generic_web_deploy(
-                record_store=cast(GenericWebDeployStore, self._record_store),
+                record_store=self._record_store,
                 profile=self._profile,
                 lane=self._lane,
                 resolved_deploy_target=resolved_target,
@@ -347,7 +584,49 @@ class GenericWebDeployProviderMutationAdapter:
         )
         if not evidence.identity_matches:
             return evidence
+        if evidence.resolved_deploy_target is not None:
+            execution, record = self._execution_evidence(
+                provider_operation_key, evidence.resolved_deploy_target, provider_effect_phase
+            )
+            evidence = replace(evidence, execution_record=record)
+            if execution is not None:
+                if execution.outcome == "unknown":
+                    return replace(
+                        evidence,
+                        observation=GenericWebProviderDeploymentObservation(outcome="unknown"),
+                        execution=execution,
+                        execution_record=record,
+                    )
+                evidence = replace(
+                    evidence,
+                    execution=execution,
+                    execution_record=record,
+                )
+            if evidence.resolved_deploy_target is not None and self._application_testing(
+                evidence.resolved_deploy_target
+            ):
+                try:
+                    saved_inventory = cast(
+                        _ExecutionInventoryReader, self._record_store
+                    ).read_environment_inventory(
+                        context_name=self._lane.context, instance_name=self._lane.instance
+                    )
+                except FileNotFoundError:
+                    saved_inventory = None
+                evidence = replace(evidence, execution_inventory=saved_inventory)
         observation = evidence.observation
+        if (
+            evidence.resolved_deploy_target is not None
+            and self._application_testing(evidence.resolved_deploy_target)
+            and observation.outcome == "present"
+            and not generic_web_provider_deployment_succeeded(observation.deployment_status)
+        ):
+            try:
+                GenericWebProviderDeploymentFailed(observation)
+            except ValueError:
+                return replace(
+                    evidence, observation=GenericWebProviderDeploymentObservation(outcome="unknown")
+                )
         resolved_target = evidence.resolved_deploy_target
         if observation.outcome != "present":
             if (
@@ -509,6 +788,16 @@ class GenericWebDeployProviderMutationAdapter:
                     provider_evidence=evidence.provider_evidence,
                 )
             post_deploy_unobserved = receipt is not None and receipt.state != "qualified"
+        if self._application_testing(resolved_target):
+            if evidence.execution is not None:
+                saved = evidence.execution_record
+                post_deploy_unobserved = not _saved_testing_result_is_final(saved) or (
+                    saved is not None
+                    and deployment_record_passed(saved)
+                    and not generic_web_provider_deployment_succeeded(observation.deployment_status)
+                )
+            elif post_deploy_unobserved:
+                observation = GenericWebProviderDeploymentObservation(outcome="unknown")
         return _GenericWebDeployProviderInspection(
             observation=observation,
             resolved_deploy_target=resolved_target,
@@ -516,6 +805,9 @@ class GenericWebDeployProviderMutationAdapter:
             provider_evidence=evidence.provider_evidence,
             provider_read_error_class=evidence.provider_read_error_class,
             legacy_correlation_digest_evidence=evidence.legacy_correlation_digest_evidence,
+            execution=evidence.execution,
+            execution_record=evidence.execution_record,
+            execution_inventory=evidence.execution_inventory,
         )
 
     def _inspect_legacy_artifact_deploy(
@@ -871,7 +1163,365 @@ class GenericWebDeployProviderMutationAdapter:
             instance=self._lane.instance,
         )
 
+    def _require_testing_publication_authority(
+        self,
+        target: GenericWebResolvedDeployTarget,
+        *,
+        current_lane: bool,
+        check_inputs: bool,
+        check_profile: bool = True,
+    ) -> None:
+        from control_plane.generic_web_testing_inputs import (
+            require_testing_application_target_authority,
+        )
+
+        self.execution_check()
+        if check_profile and (
+            self._record_store.read_product_profile_record(self._profile.product) != self._profile
+        ):
+            raise ProviderMutationUnknownError("Reviewed product ownership changed.")
+        if current_lane:
+            require_testing_application_target_authority(
+                self._record_store,
+                self._profile,
+                self._lane,
+                target_id=target.resolved_target.target_id,
+                provider_id=self._deploy_provider.provider_id,
+                driver_id=self._profile.driver_id,
+            )
+            if (
+                check_inputs
+                and target.testing_runtime_digest
+                and testing_input_authority(self._record_store, self._profile, self._lane)
+                != target.testing_runtime_digest
+            ):
+                raise ProviderMutationUnknownError("Original testing input authority changed.")
+
+    def recover_execution(
+        self,
+        operation_key: str,
+        lease: ProviderOperationLease,
+        reviewed: _GenericWebDeployProviderInspection,
+        *,
+        settle: bool,
+    ) -> ProviderMutationOutcome:
+        try:
+            return self._recover_execution(operation_key, lease, reviewed, settle=settle)
+        except (FileNotFoundError, ValueError, click.ClickException, SQLAlchemyError) as error:
+            raise ProviderMutationUnknownError(
+                "Original testing recovery evidence changed or is unavailable."
+            ) from error
+
+    def _recover_execution(
+        self,
+        operation_key: str,
+        lease: ProviderOperationLease,
+        reviewed: _GenericWebDeployProviderInspection,
+        *,
+        settle: bool,
+    ) -> ProviderMutationOutcome:
+        """Publish or hold the original terminal result; never run its executor again."""
+        from control_plane.workflows.generic_web_preview import (
+            serialize_generic_web_product_operation,
+        )
+        from control_plane.workflows.generic_web_application_lifecycle import (
+            application_lifecycle_for_lane,
+            DokployApplicationLifecycle,
+        )
+        from control_plane.provider_operations import build_provider_operation_key
+
+        target = reviewed.resolved_deploy_target
+        if (
+            target is None
+            or (settle and (reviewed.execution is None or reviewed.execution_record is None))
+            or not self._application_testing(target)
+            or not isinstance(lease, ProviderEvidenceLease)
+        ):
+            raise ProviderMutationUnknownError("Original terminal execution is unavailable.")
+
+        saved_inventory = reviewed.execution_inventory
+        saved = reviewed.execution_record
+        receipt = execution_receipt(saved) if saved is not None else None
+        original_lane = (
+            saved_inventory is None
+            or saved_inventory.deployment_record_id == self._deployment_record_id(operation_key)
+            or (
+                receipt is not None
+                and receipt.inventory_baseline_digest
+                == evidence_digest(saved_inventory.model_dump(mode="json"))
+            )
+        )
+        already_published = (
+            saved_inventory is not None
+            and saved_inventory.deployment_record_id == self._deployment_record_id(operation_key)
+        )
+        lifecycle_snapshot = recorded_application_lifecycle(saved) if saved is not None else None
+        hold_needed = (
+            settle
+            and original_lane
+            and not (
+                saved is not None
+                and saved.post_deploy_update.status == "fail"
+                and (lifecycle_snapshot is None or lifecycle_snapshot.state == "held")
+            )
+        )
+        publish_inventory = (
+            original_lane
+            and not already_published
+            and generic_web_provider_deployment_succeeded(reviewed.observation.deployment_status)
+            and (not settle or saved_inventory is not None)
+        )
+        current_lane = hold_needed or publish_inventory
+
+        def authority_checkpoint() -> None:
+            self._require_testing_publication_authority(
+                target, current_lane=current_lane, check_inputs=not settle
+            )
+
+        guard = getattr(self._record_store, "provider_evidence_guard", None)
+        with (
+            serialize_generic_web_product_operation(
+                record_store=self._record_store, product=self._profile.product, exclusive=True
+            ),
+            guard(lease.evidence_reservation, authority_checkpoint=authority_checkpoint)
+            if guard
+            else nullcontext(),
+        ):
+
+            def checkpoint(phase: str) -> None:
+                self.execution_check()
+                lease.assert_current()
+                reservation = lease.evidence_reservation()
+                if (
+                    build_provider_operation_key(
+                        scope=reservation.scope,
+                        route_path=reservation.route_path,
+                        idempotency_key=reservation.idempotency_key,
+                        request_fingerprint=reservation.request_fingerprint,
+                        reconciliation_key=reservation.reconciliation_key,
+                    )
+                    != operation_key
+                ):
+                    raise ProviderMutationUnknownError("Original recovery identity changed.")
+                authority_checkpoint()
+                lease.checkpoint_effect(phase)
+
+            reservation = lease.evidence_reservation()
+            fresh = self.inspect(
+                provider_operation_key=operation_key,
+                provider_effect_phase=reservation.provider_effect_phase,
+                reconciliation_key=reservation.reconciliation_key,
+                expected_provider_target_key=reservation.provider_target_key,
+                legacy_provider_effect_started_at=reservation.provider_effect_started_at,
+            )
+            current, record = fresh.execution, fresh.execution_record
+            if (
+                (current is not None and current.outcome != "terminal")
+                or record != reviewed.execution_record
+                or (current is None) != (reviewed.execution is None)
+                or (
+                    current is not None
+                    and reviewed.execution is not None
+                    and evidence_digest(current.digest_evidence)
+                    != evidence_digest(reviewed.execution.digest_evidence)
+                )
+            ):
+                raise ProviderMutationUnknownError("Reviewed original execution changed.")
+            observation = fresh.observation
+            if (
+                observation != reviewed.observation
+                or fresh.execution_inventory != reviewed.execution_inventory
+            ):
+                raise ProviderMutationUnknownError("Reviewed image observation changed.")
+            expected_record = record
+
+            def receipt_update_record(receipt: ExecutionReceipt) -> DeploymentRecord:
+                assert expected_record is not None
+                expected = expected_record.model_copy(
+                    update={
+                        "post_deploy_update": expected_record.post_deploy_update.model_copy(
+                            update={
+                                "evidence": {
+                                    **expected_record.post_deploy_update.evidence,
+                                    EXECUTION_EVIDENCE_KEY: receipt.model_dump_json(),
+                                }
+                            }
+                        )
+                    }
+                )
+                if self._record_store.read_deployment_record(expected.record_id) != expected:
+                    raise ProviderMutationUnknownError("Reviewed original deployment changed.")
+                return expected
+
+            if record is not None and current is not None:
+                original = execution_receipt(record)
+                assert original is not None
+                completed = ExecutionRecorder(self._record_store, record.record_id, original)
+                for index, entry in enumerate(original.entries):
+                    if entry.kind == "schedule_run" and not entry.terminal:
+                        completed.update(index, terminal="done")
+                record = receipt_update_record(completed.receipt)
+                expected_record = record
+            if settle and hold_needed:
+                assert record is not None
+                checkpoint(TESTING_POST_IMAGE_SETTLEMENT_PHASE)
+                snapshot = recorded_application_lifecycle(record)
+                original_receipt = execution_receipt(record)
+                assert original_receipt is not None
+                recorder = ExecutionRecorder(self._record_store, record.record_id, original_receipt)
+                lifecycle = application_lifecycle_for_lane(
+                    control_plane_root=self._control_plane_root,
+                    snapshot=snapshot,
+                    provider=self._deploy_provider,
+                    target_type="application",
+                    target_id=target.resolved_target.target_id,
+                    checkpoint=checkpoint,
+                    effect_started=lambda: None,
+                )
+                if isinstance(lifecycle, DokployApplicationLifecycle):
+                    lifecycle.execution_recorder = recorder
+                if lifecycle is not None:
+                    lifecycle.hold()
+                    lifecycle.snapshot.state = "held"
+                record = receipt_update_record(recorder.receipt)
+                expected_record = record
+                record = record.model_copy(
+                    update={
+                        "post_deploy_update": record.post_deploy_update.model_copy(
+                            update={
+                                "evidence": {
+                                    **record.post_deploy_update.evidence,
+                                    **(lifecycle.snapshot.evidence() if lifecycle else {}),
+                                }
+                            }
+                        )
+                    }
+                )
+            if settle and record is not None and record.post_deploy_update.status != "fail":
+                record = record.model_copy(
+                    update={
+                        "post_deploy_update": record.post_deploy_update.model_copy(
+                            update={
+                                "attempted": True,
+                                "status": "fail",
+                                "detail": "Original terminal testing work did not qualify.",
+                            }
+                        )
+                    }
+                )
+            elif not settle and reviewed.post_deploy_unobserved:
+                raise ProviderMutationUnknownError(
+                    "Unqualified testing work requires hold-only settlement."
+                )
+            checkpoint(TESTING_POST_IMAGE_SETTLEMENT_PHASE if settle else "records_commit")
+            legacy_image_only = current is None and not fresh.post_deploy_unobserved and not settle
+            if legacy_image_only and not _saved_testing_result_is_final(record):
+                record, _legacy_records, _legacy_result = build_observed_generic_web_deploy(
+                    record_store=self._record_store,
+                    profile=self._profile,
+                    lane=self._lane,
+                    resolved_deploy_target=target,
+                    observation=observation,
+                    deployment_record_id=self._deployment_record_id(operation_key),
+                    post_deploy_unobserved=False,
+                )
+                if expected_record is not None:
+                    record = expected_record.model_copy(
+                        update={
+                            "deploy": record.deploy,
+                            "post_deploy_update": record.post_deploy_update,
+                            "runtime_identity": record.runtime_identity,
+                        }
+                    )
+            if record is None:
+                raise ProviderMutationUnknownError("The original testing result is unavailable.")
+            observed_final_image = (
+                record.deploy.status in {"pass", "fail"}
+                and record.deploy.deployment_id != GENERIC_WEB_UNOBSERVED_DEPLOYMENT_ID
+            )
+            if observed_final_image:
+                if record.deploy.deployment_id != observation.deployment_id:
+                    raise ProviderMutationUnknownError("The original image observation changed.")
+            if settle and (
+                not observed_final_image
+                or not generic_web_provider_deployment_succeeded(observation.deployment_status)
+            ):
+                record = record.model_copy(
+                    update={
+                        "deploy": record.deploy.model_copy(
+                            update={
+                                "status": "pass"
+                                if generic_web_provider_deployment_succeeded(
+                                    observation.deployment_status
+                                )
+                                else "fail",
+                                "deployment_id": observation.deployment_id,
+                                "started_at": observation.started_at,
+                                "finished_at": observation.finished_at,
+                            }
+                        ),
+                    }
+                )
+            elif not observed_final_image:
+                raise ProviderMutationUnknownError("The original testing result is unfinished.")
+            published = record
+            records, result = generic_web_record_result(
+                record=published,
+                product=self._profile.product,
+                target=target,
+                observation=observation,
+            )
+            failed = (
+                settle
+                or not deployment_record_passed(published)
+                or not generic_web_provider_deployment_succeeded(observation.deployment_status)
+            )
+            if failed:
+                result.update(
+                    deploy_status="fail",
+                    error_message=published.post_deploy_update.detail or observation.error_message,
+                )
+            if settle:
+                result["post_deploy_status"] = "fail"
+            inventory = None
+            if publish_inventory and (not failed or settle):
+                inventory = build_environment_inventory(
+                    deployment_record=published,
+                    updated_at=published.deploy.finished_at or observation.finished_at,
+                )
+            cast(_TestingResultPublisher, self._record_store).publish_generic_web_testing_result(
+                reservation=lease.evidence_reservation(),
+                expected_deployment=expected_record,
+                expected_inventory=reviewed.execution_inventory,
+                deployment=published,
+                inventory=inventory,
+            )
+            return ProviderMutationOutcome(
+                response_status_code=502 if failed else 202,
+                response_payload=provider_operation_response_payload(
+                    trace_id=self._trace_id, records=records, result=result
+                ),
+            )
+
     def apply(
+        self, provider_operation_key: str, lease: ProviderOperationLease
+    ) -> ProviderMutationOutcome:
+        guard = (
+            getattr(self._record_store, "provider_evidence_guard", None)
+            if self._application_testing(self._resolve_deploy_target())
+            else None
+        )
+        context = nullcontext()
+        if guard is not None:
+            if not isinstance(lease, ProviderEvidenceLease):
+                raise ProviderMutationUnknownError(
+                    "Application evidence requires its original execution lease."
+                )
+            context = guard(lease.evidence_reservation)
+        with context:
+            return self._apply(provider_operation_key, lease)
+
+    def _apply(
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
         if self._settlement_operation == provider_operation_key:
@@ -926,6 +1576,81 @@ class GenericWebDeployProviderMutationAdapter:
 
         proved_pre_image_retry = self._proved_pre_image_operation == provider_operation_key
         self._proved_pre_image_operation = ""
+        resolved_target = self._resolve_deploy_target()
+        recorder = (
+            self._execution_recorder(provider_operation_key)
+            if self._application_testing(resolved_target)
+            else None
+        )
+        try:
+            expected_inventory = (
+                cast(_ExecutionInventoryReader, self._record_store).read_environment_inventory(
+                    context_name=self._lane.context, instance_name=self._lane.instance
+                )
+                if recorder is not None
+                else None
+            )
+        except FileNotFoundError:
+            expected_inventory = None
+
+        def publish_deployment(
+            record: DeploymentRecord, inventory: EnvironmentInventory | None
+        ) -> None:
+            nonlocal expected_inventory
+            assert recorder is not None
+            progress = record.post_deploy_update.status == "pending"
+            if not progress:
+                require_recorded_execution(recorder.receipt)
+            try:
+                current_inventory = cast(
+                    _ExecutionInventoryReader, self._record_store
+                ).read_environment_inventory(
+                    context_name=record.context, instance_name=record.instance
+                )
+            except FileNotFoundError:
+                current_inventory = None
+            if current_inventory != expected_inventory:
+                if progress:
+                    raise ProviderMutationUnknownError(
+                        "Testing inventory changed before qualification."
+                    )
+                inventory = None
+            guard = getattr(self._record_store, "provider_evidence_guard", None)
+            if guard is None or not isinstance(lease, ProviderEvidenceLease):
+                raise ProviderMutationUnknownError(
+                    "Testing publication requires its original execution."
+                )
+
+            def authority() -> None:
+                self._require_testing_publication_authority(
+                    resolved_target,
+                    current_lane=inventory is not None,
+                    check_inputs=not progress
+                    and inventory is not None
+                    and deployment_record_passed(record),
+                    check_profile=not progress,
+                )
+
+            with guard(lease.evidence_reservation, authority_checkpoint=authority):
+                cast(
+                    _TestingResultPublisher, self._record_store
+                ).publish_generic_web_testing_result(
+                    reservation=lease.evidence_reservation(),
+                    expected_deployment=recorder.expected_record,
+                    expected_inventory=current_inventory,
+                    deployment=record,
+                    inventory=inventory,
+                )
+            recorder.expected_record = record
+            if inventory is not None:
+                expected_inventory = inventory
+            if progress:
+                self._require_testing_publication_authority(
+                    resolved_target,
+                    current_lane=True,
+                    check_inputs=True,
+                )
+
         try:
             resolved_target = self._resolve_deploy_target()
             records, result = execute_generic_web_deploy_result(
@@ -938,6 +1663,12 @@ class GenericWebDeployProviderMutationAdapter:
                 deployment_record_id=self._deployment_record_id(provider_operation_key),
                 deploy_provider=self._deploy_provider,
                 post_deploy_authority_digest=self._qualification_authority_digest,
+                execution_recorder=recorder,
+                publish_deployment=publish_deployment
+                if recorder is not None
+                and getattr(self._record_store, "publish_generic_web_testing_result", None)
+                is not None
+                else None,
                 resolved_deploy_target=resolved_target,
                 provider_effect_checkpoint=checkpoint,
                 before_records_commit=lambda: checkpoint("records_commit"),

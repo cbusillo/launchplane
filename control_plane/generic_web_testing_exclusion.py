@@ -107,6 +107,89 @@ def bind_testing_recipient(
     return profile, target, target_id, provider
 
 
+def _recorded_native_application_custody(
+    store: PostgresRecordStore,
+    row: LaunchplaneIdempotencyRecord,
+    *,
+    product: str,
+    context: str,
+) -> bool:
+    """Recognize one real native original; physical isolation is proved separately."""
+    from control_plane.provider_operations import build_provider_operation_key
+    from control_plane.workflows.generic_web_application_snapshot import (
+        generic_web_provider_deployment_record_id,
+        recorded_application_lifecycle,
+    )
+    from control_plane.workflows.generic_web_execution import execution_receipt
+
+    snapshot = decode_generic_web_provider_reconciliation_target(row.reconciliation_key)
+    if snapshot.product != product or snapshot.original_event_deploy is not None:
+        return False
+    operation = build_provider_operation_key(
+        scope=row.scope,
+        route_path=row.route_path,
+        idempotency_key=row.idempotency_key,
+        request_fingerprint=row.request_fingerprint,
+        reconciliation_key=row.reconciliation_key,
+    )
+    record_id = generic_web_provider_deployment_record_id(
+        operation, context=context, instance="testing"
+    )
+    try:
+        record = store.read_deployment_record(record_id)
+        if execution_receipt(record) is None:
+            return False
+        lifecycle = recorded_application_lifecycle(record)
+    except (FileNotFoundError, ValueError, click.ClickException):
+        return False
+    resolved = record.resolved_target
+    if (
+        record.record_id != record_id
+        or (record.context, record.instance) != (context, "testing")
+        or record.artifact_identity is None
+        or not record.artifact_identity.artifact_id
+        or resolved is None
+        or (resolved.target_type, resolved.target_id, resolved.target_name)
+        != (snapshot.target_type, snapshot.target_id, snapshot.target_name)
+        or record.deploy.provider_id != snapshot.provider_id
+        or record.deploy.target_category != "application"
+        or record.deploy.provider_target_type != snapshot.provider_target_type
+    ):
+        return False
+    deployed = record.deployed_target
+    if deployed is not None and (
+        deployed.provider_id,
+        deployed.target_category,
+        deployed.provider_target_type,
+        deployed.target_id,
+    ) != (snapshot.provider_id, "application", snapshot.provider_target_type, snapshot.target_id):
+        return False
+    identity = record.runtime_identity
+    if identity is not None and (
+        identity.product,
+        identity.context,
+        identity.instance,
+        identity.deployment_record_id,
+        identity.artifact_id,
+        identity.source_git_ref,
+    ) != (
+        product,
+        context,
+        "testing",
+        record.record_id,
+        record.artifact_identity.artifact_id,
+        record.source_git_ref,
+    ):
+        return False
+    if lifecycle is not None and (
+        lifecycle.product,
+        lifecycle.provider_id,
+        lifecycle.target_id,
+    ) != (product, snapshot.provider_id, snapshot.target_id):
+        return False
+    return True
+
+
 def require_retained_application_custody(
     store: PostgresRecordStore,
     *,
@@ -153,10 +236,8 @@ def require_retained_application_custody(
         snapshot = decode_generic_web_provider_reconciliation_target(row.reconciliation_key)
         if (
             row.state != "reconcile_required"
-            or row.scope != reconcile_reservation_scope(product)
             or row.route_path != GENERIC_WEB_DEPLOY_ROUTE
             or row.provider_target_key != key
-            or not row.idempotency_key.startswith(prefix)
             or (snapshot.context, snapshot.instance, snapshot.target_type, snapshot.target_id)
             != (context, "testing", "application", target_id.target_id)
             or snapshot.provider_id != provider.provider_id
@@ -166,6 +247,14 @@ def require_retained_application_custody(
             or parse_launchplane_mutation_timestamp(row.lease_expires_at, field_name="lease")
             >= parse_launchplane_mutation_timestamp(lookup.observed_at, field_name="now")
         ):
+            raise TestingExclusionRefused("execution_ownership_unproved")
+        event_original = row.scope == reconcile_reservation_scope(
+            product
+        ) and row.idempotency_key.startswith(prefix)
+        direct_original = row.scope != reconcile_reservation_scope(
+            product
+        ) and _recorded_native_application_custody(store, row, product=product, context=context)
+        if not event_original and not direct_original:
             raise TestingExclusionRefused("execution_ownership_unproved")
     if not current:
         raise TestingExclusionRefused("reservation_fence_absent")
