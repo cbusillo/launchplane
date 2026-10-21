@@ -308,8 +308,6 @@ class TestingVerificationTests(TestingVerificationScenario):
                         )
                     )
                 else:
-                    # Use the same fresh setup as a positive control before changing
-                    # only the installed operation's lifecycle at its initial write.
                     for running in (False, True):
                         scenario = TestingVerificationScenario()
                         scenario.installed_operation_running = running

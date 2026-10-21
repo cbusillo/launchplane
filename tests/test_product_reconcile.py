@@ -1393,8 +1393,6 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
             ),
             patch("control_plane.product_reconcile._utc_now", return_value=generation.prepared_at),
         ):
-            # Uncertain originals are covered by test_uncertain_testing_deploy_is_not_bypassed.
-            # This generation starts after the immutable old terminal history.
             for _ in range(TESTING_DEPLOY_MAX_FAILED_ATTEMPTS):
                 self.request()
                 queued = cast(str, self.reconcile()["queued_operation_id"])

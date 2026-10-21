@@ -1,5 +1,3 @@
-"""One attribution projection for shared provider holds, without recovery authority."""
-
 from dataclasses import dataclass
 from datetime import timedelta
 import base64
@@ -25,7 +23,7 @@ from control_plane.contracts.odoo_stable_target_replacement_operation import (
 
 
 class ProviderHoldAuthorityBusy(RuntimeError):
-    """The short source recheck cannot wait behind a publisher holding reservation rows."""
+    pass
 
 
 @dataclass(frozen=True)
@@ -53,8 +51,6 @@ class ProviderOperationReference:
 
 @dataclass(frozen=True)
 class ProviderOperationAttentionReference:
-    """Material attention identity only; never proof of a particular incarnation."""
-
     record_id: str
     state: Literal["held", "unverified"] = "unverified"
 
@@ -125,7 +121,6 @@ class ProviderTargetHold:
     operation_nonce: UUID | None = None
     separated: bool = False
     current_target_matches: bool = False
-    # Current records can associate attention, never establish historical custody.
     current_lanes: tuple[tuple[str, str, str], ...] = ()
 
     @property
@@ -212,7 +207,6 @@ class ProviderHoldLaneSnapshot:
     holds: tuple[ProviderTargetHold, ...]
     references: tuple[str, ...] = ()
     unavailable_references: tuple[str, ...] = ()
-    # Internal only. Includes exact source and separation inputs, never public material.
     source_sha256: str = ""
     replacement_operations: tuple[OdooStableTargetReplacementOperationRecord, ...] = ()
 

@@ -535,7 +535,6 @@ def _hold_deploy_fence(
 def _run_provider_monitor_at(
     *, record_store: PostgresRecordStore, checked_at: str
 ) -> PublicIngressMonitorResult:
-    # Both observation and locked acceptance use this fixture's chosen DB time.
     with patch.object(record_store, "_database_mutation_timestamp", return_value=checked_at):
         return run_public_ingress_monitor_once(record_store=record_store, checked_at=checked_at)
 

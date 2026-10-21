@@ -147,8 +147,6 @@ def register_walkthrough_route(
                             allow_mutation=False,
                         )
                     except ValueError:
-                        # A clean pre-effect release can win after the original
-                        # read. Recovery cannot recapture custody or dispatch.
                         refuse(
                             WALKTHROUGH_RECONCILIATION_REQUIRED,
                             "The original dispatch evidence is unavailable; preserve its key and task account.",

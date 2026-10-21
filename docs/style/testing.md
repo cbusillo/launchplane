@@ -71,6 +71,16 @@ current-head CI before the checked `gh-pr.py ready` handoff; a local test pass
 does not replace that evidence. The trial does not change CI workflows or
 required checks.
 
+The comment/docstring gate compares a pull request with its event base and a
+protected-default push with its event's previous commit, covering every commit
+in the push. Train candidates compare their entire contribution with the first
+shared commit in the candidate and protected-default first-parent histories.
+That range survives candidate reconstruction and a rerun after merge landing;
+the last member's parent and an ordinary merge-base can omit earlier members.
+Scheduled runs compare the previous first-parent commit. Missing, shallow or
+unsupported comparison history fails the gate instead of reporting an empty
+diff. Comments outside the selected change remain out of scope.
+
 Safety, authorization, approval-rule, destructive-helper, and shared-infrastructure
 changes keep their safety classification. Credential handling falls under safety
 and authorization; shared test helpers, shard tooling, and CI runner selection

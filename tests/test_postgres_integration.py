@@ -15551,7 +15551,6 @@ class RealPostgresProviderHoldMonitorTests(unittest.TestCase):
             future: Any = None
 
             def commit_before_transition(**kwargs: Any) -> Any:
-                # Discovery and pure probe have observed A completed and no B.
                 self.assertEqual(kwargs["observation"].status, "pass")
                 release.set()
                 future.result(10)
@@ -15849,8 +15848,6 @@ class RealPostgresProviderHoldMonitorTests(unittest.TestCase):
         )
         for module, case_type, method in scenarios:
             with self.subTest(method=method), _store_for_fresh_head_database() as store:
-                # Existing native qualification pattern: portable behavior fixture,
-                # real migrated storage. Schema creation becomes verification only.
                 with (
                     patch.object(module, "PostgresRecordStore", return_value=store),
                     patch.object(store, "ensure_schema", side_effect=store.verify_schema),
@@ -16087,8 +16084,6 @@ class RealPostgresProviderHoldMonitorTests(unittest.TestCase):
                             )
                             try:
                                 self.assertTrue(held.wait(10))
-                                # This must return while admission holds the lane: the monitor
-                                # uses TRY on the existing namespace, never waits behind it.
                                 observed = pool.submit(fixture.observe, old.updated_at).result(10)
                                 self.assertEqual(observed.skipped_count, 1)
                                 self.assertEqual(observed.resolved_incident_count, 0)
@@ -16169,7 +16164,6 @@ class RealPostgresProviderHoldMonitorTests(unittest.TestCase):
                 with publisher._session_factory() as session:
                     publisher._lock_product_authority_bundle_write(session)
                     publisher_locked.set()
-                    # Matches bundle publication: authority first, then execution row.
                     row = session.get(
                         LaunchplaneIdempotencyRow, old.record_id, with_for_update=True
                     )

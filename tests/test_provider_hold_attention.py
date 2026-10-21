@@ -1,5 +1,3 @@
-"""Bounded storage attention, origin integrity and public data minimization."""
-
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -58,8 +56,6 @@ class ProviderHoldAttentionTests(unittest.TestCase):
 
     def test_keyset_pages_bound_projection_and_keep_inactive_original_scope(self) -> None:
         rows = [reserve_attention_hold(self.store, f"row-{index}") for index in range(7)]
-        # Same timestamps cannot cause duplicates/skips. Unrelated and suffixed child
-        # rows must not consume the bounded parent page or fabricate completion.
         for index, key in enumerate(("unrelated:key", rows[0].provider_target_key + ":child")):
             self.store.reserve_mutation(
                 scope="fixture",
@@ -90,7 +86,6 @@ class ProviderHoldAttentionTests(unittest.TestCase):
             cursor = page.next_cursor
         self.assertEqual(len(seen), len(rows))
         self.assertEqual(len(set(seen)), len(rows))
-        # A continuation after the final record is still partial evidence.
         last = max(rows, key=lambda row: row.record_id)
         empty = self.store.read_provider_hold_attention_page(
             limit=2, cursor=provider_hold_cursor(last.record_id)
@@ -120,8 +115,6 @@ class ProviderHoldAttentionTests(unittest.TestCase):
                 for column in statement.column_descriptions
             ):
                 return
-            # The first reservation select is membership; receipt reads follow it.
-            # Observe its executed row-cap value, independent of dialect rendering.
             cap = statement._limit_clause
             if cap is None:
                 cap = statement._fetch_clause
@@ -148,9 +141,6 @@ class ProviderHoldAttentionTests(unittest.TestCase):
         self.assertTrue(page.has_more)
         self.assertTrue(membership_bounds)
         self.assertEqual(membership_bounds[0], limit + 1)
-        # Increasing retained inventory must not increase work for a fixed page.
-        # The executed row cap above proves membership is bounded independently of N;
-        # compare projected source work without pinning an implementation query budget.
         with patch.object(
             self.store, "_read_provider_hold_record", wraps=self.store._read_provider_hold_record
         ) as read:

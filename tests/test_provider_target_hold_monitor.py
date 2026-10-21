@@ -1,5 +1,3 @@
-"""Behavioral proof of all-held custody, exact settlement and material operation sets."""
-
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -280,7 +278,7 @@ class ProviderTargetHoldMonitorTests(unittest.TestCase):
                     if authority is None:
                         stored = session.get(LaunchplaneIdempotencyRow, row.record_id)
                         assert stored is not None
-                        stored.state = "reconcile_required"  # Contradicts the valid payload.
+                        stored.state = "reconcile_required"
                     else:
                         session.add(authority)
                 try:
@@ -558,8 +556,6 @@ class ProviderTargetHoldMonitorTests(unittest.TestCase):
             side_effect=renew_before_publish,
         ):
             self.assertEqual(self.observe(operation.updated_at).open_incident_count, 1)
-        # Settle the live typed operation before admitting a successor: the native
-        # active-lane index correctly refuses overlapping typed admissions.
         self.assertTrue(
             self.store.complete_odoo_stable_target_replacement_operation_record(
                 record=operation.model_copy(
@@ -577,7 +573,6 @@ class ProviderTargetHoldMonitorTests(unittest.TestCase):
                 lease_owner=operation.lease_owner,
             )
         )
-        # Remove the generic hold: a proposed recovery must still reject a new typed hold.
         self.complete(self.store.list_held_provider_target_reservations()[0])
 
         def add_before_publish(**kwargs: Any) -> PublicIngressTransitionWriteResult:
@@ -603,9 +598,7 @@ class ProviderTargetHoldMonitorTests(unittest.TestCase):
         directory = self.enterContext(TemporaryDirectory())
         source = FilesystemRecordStore(state_dir=Path(directory))
         source.write_odoo_stable_target_replacement_operation_record(operation)
-        self.store.import_core_records_from_filesystem(
-            source
-        )  # Identical import remains supported.
+        self.store.import_core_records_from_filesystem(source)
         changed = operation.model_copy(update={"request_fingerprint": "different-original-request"})
         source.write_odoo_stable_target_replacement_operation_record(changed)
         with self.assertRaises(ValueError):
@@ -635,7 +628,6 @@ class ProviderTargetHoldMonitorTests(unittest.TestCase):
                 record=terminal, lease_owner=operation.lease_owner
             )
         )
-        # Same-terminal historical evidence remains authorable; its identity/status do not change.
         terminal = terminal.model_copy(
             update={"error_message": "Updated historical failure evidence."}
         )
@@ -659,8 +651,6 @@ class ProviderTargetHoldMonitorTests(unittest.TestCase):
                 }
             ),
         ):
-            # Validate the proposed model so refusal proves the storage guard,
-            # rather than an unrelated malformed-fixture validation error.
             changed_status = type(operation).model_validate(changed_status.model_dump(mode="json"))
             source.write_odoo_stable_target_replacement_operation_record(changed_status)
             with self.assertRaises(ValueError):
@@ -902,7 +892,7 @@ class ProviderTargetHoldMonitorTests(unittest.TestCase):
     def test_completed_exact_reference_settles_hold_without_claiming_success(self) -> None:
         old = self.reserve("old")
         self.assertEqual(self.observe().open_incident_count, 1)
-        self.complete(old)  # Deliberately terminal failure. It no longer holds.
+        self.complete(old)
         result = self.observe("2026-10-01T01:01:00Z")
         self.assertEqual(result.resolved_incident_count, 1)
         self.assertEqual(result.records[0].check_kind, "provider")
@@ -1034,7 +1024,6 @@ class ProviderTargetHoldMonitorTests(unittest.TestCase):
                     )
                 )
 
-        # A legacy encoded origin is attributable, but cannot establish incarnation.
         for strong_first in (False, True):
             with self.subTest(strong_first=strong_first):
                 legacy = _hold_deploy_fence(self.store, idempotency_key=f"legacy-{strong_first}")
