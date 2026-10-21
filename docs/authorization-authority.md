@@ -128,6 +128,15 @@ reviewed digests, original-key replay, generation and custody fences, staff
 holds, active/unknown-operation refusal and the worker's safety checks remain
 in force. See [testing retry](testing-deploy-retry.md).
 
+Generic-web deploy recovery dry runs authorize the instance-scoped
+`generic_web_deploy_recovery.plan` action, with the existing execute grant as a
+compatibility alternative. The authenticated Director agent inherits this inert
+plan permission. Both the current lane and the stored original lane must pass
+authorization; exact request, reference, reservation and target checks remain.
+Apply still requires `generic_web_deploy.execute`, including production recovery.
+An unknown provider outcome still holds the original fence; planning never
+settles, retries or releases it.
+
 Projection sync requires executable proof of zero provider writes and no access
 or policy change. Every declared projection action must run its invariant proof
 in `tests/test_projection_sync.py`; an action without that proof stays `write`.
