@@ -1235,8 +1235,6 @@ def build_generic_web_write_route_handlers(
             context=lane.context,
             instances=(lane.instance,),
         )
-        # The action also serves production. Keep its policy unchanged and
-        # qualify the bounded standing alternative at actual effect admission.
         standing_testing_permission = (
             not explicitly_authorized
             and isinstance(identity, LocalOperatorIdentity)
@@ -1326,7 +1324,7 @@ def build_generic_web_write_route_handlers(
                 trace_id=trace_id,
                 code="testing_deploy_baseline_changed",
                 message=(
-                    "The unstarted original's application schedules changed. Its saved baseline "
+                    "The unstarted original's captured testing baseline changed. Its saved baseline "
                     "is preserved. Start a new deployment operation to capture the current "
                     "baseline after reviewing the change."
                 ),

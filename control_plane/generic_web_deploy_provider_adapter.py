@@ -218,6 +218,7 @@ class GenericWebDeployProviderMutationAdapter:
         self._settlement_no_effect_checkpoint = False
         self._standing_testing_permission = standing_testing_permission
         self._standing_effect_started = False
+        self._no_effect_retry_inventory_digest: str | None = None
         self._standing_binding_sha256 = ""
         self.execution_check: Callable[[], None] = lambda: None
 
@@ -380,8 +381,6 @@ class GenericWebDeployProviderMutationAdapter:
     def _resolve_deploy_target(self) -> GenericWebResolvedDeployTarget:
         if self._resolved_deploy_target is None:
             if self._standing_testing_permission:
-                # Capture before target preparation. Fresh facts for a different
-                # recipient or input bundle cannot qualify this reserved work.
                 self._standing_binding_sha256 = resolve_disposable_observation_binding(
                     cast(DisposableLaneStore, self._record_store),
                     product=self._profile.product,
@@ -1622,21 +1621,19 @@ class GenericWebDeployProviderMutationAdapter:
         lease: ProviderOperationLease,
         recorder: ExecutionRecorder | None,
         *,
-        match_current_declarations: bool = True,
+        require_current_baseline: bool = True,
     ) -> bool:
         if recorder is None or recorder.expected_record is None:
             return False
         if not isinstance(lease, ProviderEvidenceLease):
             return False
-        # Renew against the current stored owner before reading its effect
-        # witness. Publication still checks this lease and the exact record CAS.
         lease.assert_current()
         reservation = lease.evidence_reservation()
         record = recorder.expected_record
         receipt = execution_receipt(record)
         snapshot = recorded_application_lifecycle(record)
         target = self._resolve_deploy_target()
-        return (
+        proved_original = (
             not reservation.provider_effect_started_at
             and not reservation.provider_effect_phase
             and record.record_id == self._deployment_record_id(operation_key)
@@ -1658,11 +1655,35 @@ class GenericWebDeployProviderMutationAdapter:
             and (snapshot.artifact_id, snapshot.source_git_ref)
             == (target.ship_request.artifact_id, target.ship_request.source_git_ref)
             and snapshot.provider_id == self._deploy_provider.provider_id
-            and (
-                not match_current_declarations
-                or snapshot.extensions == self._lane.generic_web_extensions
-            )
         )
+        if not proved_original or not require_current_baseline:
+            return proved_original
+        assert snapshot is not None and receipt is not None
+        return (
+            snapshot.extensions == self._lane.generic_web_extensions
+            and receipt.inventory_baseline_digest == self._current_testing_inventory_digest()
+        )
+
+    def _current_testing_inventory_digest(self) -> str:
+        try:
+            inventory = cast(
+                _ExecutionInventoryReader, self._record_store
+            ).read_environment_inventory(
+                context_name=self._lane.context, instance_name=self._lane.instance
+            )
+        except FileNotFoundError:
+            inventory = None
+        return evidence_digest(inventory.model_dump(mode="json") if inventory else None)
+
+    def _require_effect_admission(self) -> None:
+        if self._standing_effect_started:
+            return
+        self._require_standing_testing_admission()
+        if (
+            self._no_effect_retry_inventory_digest is not None
+            and self._no_effect_retry_inventory_digest != self._current_testing_inventory_digest()
+        ):
+            raise ApplicationLifecycleBaselineChanged("The original testing inventory changed.")
 
     def _record_no_effect_lifecycle_refusal(
         self, operation_key: str, lease: ProviderOperationLease, recorder: ExecutionRecorder | None
@@ -1679,7 +1700,7 @@ class GenericWebDeployProviderMutationAdapter:
         if reservation.provider_effect_phase or reservation.provider_effect_started_at:
             return
         if not self._proved_no_effect_lifecycle_retry(
-            operation_key, lease, recorder, match_current_declarations=False
+            operation_key, lease, recorder, require_current_baseline=False
         ):
             raise ProviderMutationUnknownError("Original no-effect retirement is not proved.")
         if snapshot.state == "not_started":
@@ -1707,8 +1728,6 @@ class GenericWebDeployProviderMutationAdapter:
             ).read_environment_inventory(context_name=record.context, instance_name=record.instance)
         except FileNotFoundError:
             inventory = None
-        # Record historical no-effect evidence under the exact original lease,
-        # without requiring the forward facts whose drift caused the refusal.
         guard = getattr(self._record_store, "provider_evidence_guard")
         with guard(lease.evidence_reservation, authority_checkpoint=self.execution_check):
             cast(_TestingResultPublisher, self._record_store).publish_generic_web_testing_result(
@@ -1723,6 +1742,8 @@ class GenericWebDeployProviderMutationAdapter:
     def apply(
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
+        self._standing_effect_started = self._settlement_operation == provider_operation_key
+        self._no_effect_retry_inventory_digest = None
         guard = (
             getattr(self._record_store, "provider_evidence_guard", None)
             if self._standing_testing_permission
@@ -1740,16 +1761,15 @@ class GenericWebDeployProviderMutationAdapter:
                     "Application evidence requires its original execution lease."
                 )
             if self._standing_testing_permission:
-                # A historical checkpoint does not admit another forward
-                # dispatch on a reacquired lease. Only this live execution's
-                # first checkpoint or its inert protective settlement does.
-                self._standing_effect_started = self._settlement_operation == provider_operation_key
                 context = guard(
                     lease.evidence_reservation,
-                    effect_admission_checkpoint=self._require_standing_testing_admission,
+                    effect_admission_checkpoint=self._require_effect_admission,
                 )
             else:
-                context = guard(lease.evidence_reservation)
+                context = guard(
+                    lease.evidence_reservation,
+                    effect_admission_checkpoint=self._require_effect_admission,
+                )
         with context:
             try:
                 self._require_standing_testing_admission()
@@ -1808,8 +1828,6 @@ class GenericWebDeployProviderMutationAdapter:
             else:
                 lease.checkpoint_effect(phase)
                 effect_started = True
-                # Once admitted, preserve completion, evidence publication and
-                # protective rollback of this original execution after drift.
                 self._standing_effect_started = True
                 known_dispatch_refusal = phase == TESTING_DISPATCH_REFUSED_PHASE
 
@@ -1892,18 +1910,22 @@ class GenericWebDeployProviderMutationAdapter:
 
         try:
             resolved_target = self._resolve_deploy_target()
+            proved_no_effect_retry = False
             if recorder is not None and recorder.expected_record is not None:
-                original = recorded_application_lifecycle(recorder.expected_record)
-                if (
-                    original is not None
-                    and original.extensions != self._lane.generic_web_extensions
-                    and self._proved_no_effect_lifecycle_retry(
-                        provider_operation_key, lease, recorder, match_current_declarations=False
-                    )
-                ):
-                    raise ApplicationLifecycleBaselineChanged(
-                        "The current declarations differ from the unstarted original."
-                    )
+                historical_no_effect = self._proved_no_effect_lifecycle_retry(
+                    provider_operation_key, lease, recorder, require_current_baseline=False
+                )
+                if historical_no_effect:
+                    if not self._proved_no_effect_lifecycle_retry(
+                        provider_operation_key, lease, recorder
+                    ):
+                        raise ApplicationLifecycleBaselineChanged(
+                            "The original testing baseline changed."
+                        )
+                    receipt = execution_receipt(recorder.expected_record)
+                    assert receipt is not None
+                    self._no_effect_retry_inventory_digest = receipt.inventory_baseline_digest
+                    proved_no_effect_retry = True
             records, result = execute_generic_web_deploy_result(
                 control_plane_root=self._control_plane_root,
                 record_store=self._record_store,
@@ -1932,9 +1954,7 @@ class GenericWebDeployProviderMutationAdapter:
                 ),
                 recorded_artifact=self._recorded_artifact,
                 proved_pre_image_retry=proved_pre_image_retry,
-                proved_no_effect_retry=self._proved_no_effect_lifecycle_retry(
-                    provider_operation_key, lease, recorder
-                ),
+                proved_no_effect_retry=proved_no_effect_retry,
                 established_testing_predecessor=self._standing_testing_permission,
             )
         except TimeoutError as error:
@@ -1947,8 +1967,6 @@ class GenericWebDeployProviderMutationAdapter:
             try:
                 self._record_no_effect_lifecycle_refusal(provider_operation_key, lease, recorder)
             except Exception as publication_error:
-                # Do not release an original whose no-effect evidence could
-                # not be published under its current lease and record CAS.
                 raise ProviderMutationUnknownError(str(publication_error)) from publication_error
             if isinstance(error, ProviderMutationRejectedError):
                 raise

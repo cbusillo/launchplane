@@ -29,9 +29,11 @@ authority. Completed replay and read-only
 original observation do not require fresh execution qualification. An unresolved
 original continues to fence another key or caller.
 
-For every application-testing caller, an exact pending lifecycle baseline can be reused after a proved no-effect
-refusal only under its current execution lease and record comparison. The
-service rereads the actual application schedules before proceeding. A changed
+For every application-testing caller, an exact pending lifecycle baseline can
+be reused after a proved no-effect refusal only under its current execution
+lease and record comparison. Its declarations and immutable inventory baseline
+must still match; the inventory is rechecked under the first-effect authority
+lock. The service rereads actual application schedules before proceeding. A changed
 baseline returns `409 testing_deploy_baseline_changed` before any forward or
 restore effect; it never rewrites the original receipt or restores stale values.
 Before releasing a proved no-effect refusal, the service records `not_started`

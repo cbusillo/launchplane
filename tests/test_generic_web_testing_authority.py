@@ -1,5 +1,3 @@
-"""Standing testing permission through authenticated HTTP and the durable runner."""
-
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from tempfile import TemporaryDirectory
@@ -8,7 +6,7 @@ import unittest
 import click
 from unittest.mock import patch
 from types import SimpleNamespace
-from contextlib import contextmanager, nullcontext
+from contextlib import closing, contextmanager, nullcontext
 from collections.abc import Iterator
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
@@ -20,6 +18,7 @@ from control_plane.workflows.generic_web_application_snapshot import (
     recorded_application_lifecycle,
 )
 from control_plane.workflows.generic_web_execution import execution_receipt
+from control_plane.workflows.evidence_ingestion import apply_deployment_evidence
 from control_plane.generic_web_testing_inputs import TestingInputSafetyRefused
 from control_plane.workflows.generic_web_application_lifecycle import (
     DokployApplicationLifecycle,
@@ -50,6 +49,7 @@ from tests.test_generic_web_deploy_recovery import (
     _write_generic_web_recovery_reservation,
 )
 from tests.test_service import _invoke_app
+from tests.test_evidence_ingestion import _deployment_record
 
 
 class _TestingLifecycleProvider(_LifecycleDeployProvider):
@@ -380,8 +380,6 @@ class GenericWebTestingAuthorityTests(unittest.TestCase):
         self.assertEqual(status, 409, payload)
         self.assertEqual(payload["error"]["code"], "testing_deploy_safety_unknown")
         self.assertEqual(effects, [])
-        # A proved pre-effect refusal releases the reservation, so restoring
-        # factual qualification permits the original key without bypassing it.
         record_safety(self.store, self.profile.product, self.lane.context, self.lane.instance)
         with patch(
             "control_plane.generic_web_deploy_http.execute_generic_web_deploy",
@@ -522,8 +520,6 @@ class GenericWebTestingAuthorityTests(unittest.TestCase):
             self.lane.instance,
             data="only_copy",
         )
-        # The original provider observation permits a retry while preserving
-        # its earlier effect checkpoint. That is not fresh lane admission.
         with (
             patch.object(
                 GenericWebDeployProviderMutationAdapter,
@@ -625,6 +621,141 @@ class GenericWebTestingAuthorityTests(unittest.TestCase):
                     self.assertEqual(provider.effects, ["image"])
                     self.assertTrue(writes)
 
+    def test_unstarted_original_refuses_inventory_from_another_completed_operation(self) -> None:
+        with self.lifecycle_provider() as (provider, schedules, writes):
+            definition = self.lane.generic_web_extensions.schedules[0]
+            schedules[definition.name] = schedule_payload(
+                definition, provider.target_id, enabled=False
+            )
+            with patch.object(
+                self.store,
+                "checkpoint_mutation_provider_effect",
+                side_effect=MutationEffectAdmissionRefusedError(ValueError("Pre-effect refusal")),
+            ):
+                status, payload = self.deploy(key="inventory-original")
+            self.assertEqual(status, 400, payload)
+            original = self.store.list_deployment_records()[0]
+            self.assertEqual(provider.effects, [])
+            self.assertEqual(writes, [])
+            status, payload = self.deploy(key="inventory-successor")
+            self.assertEqual(status, 202, payload)
+            effects_before = list(provider.effects)
+            writes_before = list(writes)
+            record_safety(self.store, self.profile.product, self.lane.context, self.lane.instance)
+            status, payload = self.deploy(key="inventory-original")
+            self.assertEqual(status, 409, payload)
+            self.assertEqual(payload["error"]["code"], "testing_deploy_baseline_changed")
+            self.assertEqual(provider.effects, effects_before)
+            self.assertEqual(writes, writes_before)
+            self.assertEqual(self.store.read_deployment_record(original.record_id), original)
+            self.assertEqual(self.store.list_held_provider_target_reservations(), ())
+            status, payload = self.deploy(key="inventory-fresh")
+            self.assertEqual(status, 202, payload)
+
+    def test_unstarted_retry_rechecks_inventory_at_its_first_effect(self) -> None:
+        self.check_inventory_correction_at_retry(before_workflow=False)
+
+    def test_unstarted_retry_keeps_original_classification_after_preflight(self) -> None:
+        self.check_inventory_correction_at_retry(before_workflow=True)
+
+    def check_inventory_correction_at_retry(self, *, before_workflow: bool) -> None:
+        with self.lifecycle_provider() as (provider, _schedules, writes):
+            status, payload = self.deploy(key="inventory-baseline")
+            self.assertEqual(status, 202, payload)
+            record_safety(self.store, self.profile.product, self.lane.context, self.lane.instance)
+            with patch.object(
+                self.store,
+                "checkpoint_mutation_provider_effect",
+                side_effect=MutationEffectAdmissionRefusedError(ValueError("Pre-effect refusal")),
+            ):
+                status, payload = self.deploy(key="inventory-race")
+            self.assertEqual(status, 400, payload)
+            original = next(
+                row
+                for row in self.store.list_deployment_records()
+                if (snapshot := recorded_application_lifecycle(row)) is not None
+                and snapshot.state == "not_started"
+            )
+            inventory = self.store.read_environment_inventory(
+                context_name=self.lane.context, instance_name=self.lane.instance
+            )
+            corrected = inventory.model_copy(
+                update={
+                    "post_deploy_update": inventory.post_deploy_update.model_copy(
+                        update={"detail": "Independently corrected inventory evidence"}
+                    )
+                }
+            )
+            effects_before = list(provider.effects)
+            writes_before = list(writes)
+            checkpoint = self.store.checkpoint_mutation_provider_effect
+
+            def correct_inventory() -> None:
+                with closing(
+                    PostgresRecordStore(database_url=_sqlite_database_url(self.root / "state.db"))
+                ) as writer:
+                    writer.write_environment_inventory(corrected)
+
+            def correct_before_checkpoint(**arguments: Any) -> Any:
+                correct_inventory()
+                return checkpoint(**arguments)
+
+            proof = GenericWebDeployProviderMutationAdapter._proved_no_effect_lifecycle_retry
+
+            def correct_after_preflight(adapter: Any, *arguments: Any, **keywords: Any) -> bool:
+                result = proof(adapter, *arguments, **keywords)
+                if result and keywords.get("require_current_baseline", True):
+                    correct_inventory()
+                return result
+
+            correction = (
+                patch(
+                    "control_plane.generic_web_deploy_provider_adapter.GenericWebDeployProviderMutationAdapter._proved_no_effect_lifecycle_retry",
+                    autospec=True,
+                    side_effect=correct_after_preflight,
+                )
+                if before_workflow
+                else patch.object(
+                    self.store,
+                    "checkpoint_mutation_provider_effect",
+                    side_effect=correct_before_checkpoint,
+                )
+            )
+            with correction:
+                status, payload = self.deploy(key="inventory-race")
+            self.assertEqual(status, 409, payload)
+            self.assertEqual(payload["error"]["code"], "testing_deploy_baseline_changed")
+            self.assertEqual(provider.effects, effects_before)
+            self.assertEqual(writes, writes_before)
+            self.assertEqual(self.store.read_deployment_record(original.record_id), original)
+            self.assertEqual(
+                self.store.read_environment_inventory(
+                    context_name=self.lane.context, instance_name=self.lane.instance
+                ),
+                corrected,
+            )
+            self.assertEqual(self.store.list_held_provider_target_reservations(), ())
+
+    def test_ordinary_legacy_lifecycle_evidence_can_be_corrected(self) -> None:
+        clean = _deployment_record()
+        legacy = clean.model_copy(
+            update={
+                "post_deploy_update": clean.post_deploy_update.model_copy(
+                    update={
+                        "evidence": {
+                            "generic_web_application_lifecycle": "malformed legacy evidence"
+                        }
+                    }
+                )
+            }
+        )
+        with patch.object(
+            self.store, "_require_generic_web_no_effect_lifecycle_transition", return_value=None
+        ):
+            self.store.write_deployment_record(legacy)
+        apply_deployment_evidence(record_store=self.store, deployment_record=clean)
+        self.assertEqual(self.store.read_deployment_record(clean.record_id), clean)
+
     def test_held_schedule_allows_a_new_standing_fix_forward(self) -> None:
         with self.lifecycle_provider() as (provider, schedules, _writes):
             definition = self.lane.generic_web_extensions.schedules[0]
@@ -665,8 +796,6 @@ class GenericWebTestingAuthorityTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.store.write_deployment_record(retired)
                 checkpoint(**arguments)
-                # The caller's earlier lease snapshot is blank; the stored
-                # reservation has now checkpointed and must govern this write.
                 with self.assertRaises(ValueError):
                     self.store.publish_generic_web_testing_result(
                         reservation=arguments["reservation"],

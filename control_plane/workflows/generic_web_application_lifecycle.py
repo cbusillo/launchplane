@@ -193,8 +193,6 @@ class DokployApplicationLifecycle:
                 and name in self.snapshot.originals
                 and observed != self.snapshot.originals[name]
             ):
-                # A known no-effect refusal must bypass restore: the changed
-                # provider state belongs to someone else, not this original.
                 raise ApplicationLifecycleBaselineChanged(
                     "The original's application schedule baseline changed.",
                 )

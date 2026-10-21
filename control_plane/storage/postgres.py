@@ -5979,6 +5979,23 @@ class PostgresRecordStore(HumanSessionStore):
             raise ValueError("Original execution facts have a different operation.")
 
     @staticmethod
+    def _has_no_effect_lifecycle_state(record: DeploymentRecord | None) -> bool:
+        from control_plane.workflows.generic_web_application_snapshot import (
+            APPLICATION_LIFECYCLE_EVIDENCE_KEY,
+        )
+
+        if record is None:
+            return False
+        text = record.post_deploy_update.evidence.get(APPLICATION_LIFECYCLE_EVIDENCE_KEY)
+        if not text:
+            return False
+        try:
+            value = json.loads(text)
+        except json.JSONDecodeError:
+            return False
+        return isinstance(value, dict) and value.get("state") == "not_started"
+
+    @staticmethod
     def _require_generic_web_no_effect_lifecycle_transition(
         previous: DeploymentRecord | None,
         current: DeploymentRecord,
@@ -5986,6 +6003,11 @@ class PostgresRecordStore(HumanSessionStore):
         reservation: LaunchplaneIdempotencyRecord | None = None,
         inventory: EnvironmentInventory | None = None,
     ) -> None:
+        if not (
+            PostgresRecordStore._has_no_effect_lifecycle_state(previous)
+            or PostgresRecordStore._has_no_effect_lifecycle_state(current)
+        ):
+            return
         from control_plane.workflows.generic_web_application_snapshot import (
             recorded_application_lifecycle,
         )
@@ -6039,8 +6061,6 @@ class PostgresRecordStore(HumanSessionStore):
                 )
             }
         )
-        # Retirement is exactly a state-only fact. Resumption may refresh the
-        # pending deployment envelope, but retains its immutable baseline.
         if is_inert and current != expected:
             raise ValueError("No-effect retirement changed its original deployment evidence.")
 

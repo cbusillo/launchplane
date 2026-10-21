@@ -16,7 +16,7 @@ APPLICATION_LIFECYCLE_EVIDENCE_KEY = "generic_web_application_lifecycle"
 
 
 class ApplicationLifecycleBaselineChanged(ValueError):
-    """An unstarted original no longer matches its captured provider baseline."""
+    pass
 
 
 class ApplicationLifecycleSnapshot(BaseModel):
@@ -136,9 +136,6 @@ def application_snapshot_for_deploy(
     same_attempt = read_snapshot(deployment_record_id)
     excluded_predecessor_states = {"not_started"}
     if established_testing_predecessor and not rollback and same_attempt is None:
-        # Another prepared declaration does not establish this operation's
-        # ownership. Preserve that original for exact-key recovery. Its live
-        # native reservation, if any, still fences this new operation.
         excluded_predecessor_states.add("prepared")
     previous_artifact = previous_source = ""
     prior: ApplicationLifecycleSnapshot | None = None
