@@ -1128,8 +1128,10 @@ idempotency receipt retains the original hold, lift reason, actor scope, time
 and trace. A lost response retains the original reviewed request and key for
 retry, including after reloading the tab. If that request cannot settle, an
 administrator can explicitly start a separate review of the current hold;
-the earlier key remains recorded as unverified. This does not claim that the
-earlier request failed or succeeded. Isolation staging interlocks retain
+the earlier key is shown as unverified in this tab across reloads. Closing the
+tab or clearing its storage discards this local history, not the service's audit
+receipt. This does not claim the earlier request failed or succeeded.
+Isolation staging interlocks retain
 their separate activation flow.
 The Director's agent can set a testing hold but not lift one.
 The authenticated Director agent has the separate bounded

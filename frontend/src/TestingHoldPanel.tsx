@@ -160,7 +160,8 @@ function TestingHoldControl({ scope, actor, refreshToken, onRefresh }: {
     <OperationNotice state={plan.state} label="Review lift" />
     <OperationNotice state={apply.state} label="Lift" />
     {apply.state.phase === "succeeded" ? <p role="status">Testing hold lifted. Testing reconciliation requested. Audit trace: {apply.state.receipt?.traceId}</p> : null}
-    {earlierKeys.map(key => <p key={key}>Earlier lift outcome remains unverified. Original operation key: <code>{key}</code></p>)}
-    {!busy && !recovering ? <button className="button" type="button" onClick={() => setReload(value => value + 1)}>Refresh hold</button> : null}
+    {earlierKeys.length ? <p>Earlier keys are kept only in this tab until it closes or its storage is cleared. The service receipt is the audit record.</p> : null}
+    {earlierKeys.map(key => <p key={key}>Earlier lift not verified in this tab. Original operation key: <code>{key}</code></p>)}
+    {!busy ? <button className="button" type="button" onClick={() => setReload(value => value + 1)}>Refresh hold</button> : null}
   </section>;
 }

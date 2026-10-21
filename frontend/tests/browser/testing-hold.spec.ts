@@ -9,6 +9,7 @@ for (const outcome of ["success", "uncertain", "uncertain-stale", "uncertain-sta
         environment: module.environmentForFixture("products", "atlas-commerce", "testing")! };
     });
     const scope = { product: "atlas-commerce", context: fixtures.environment.context, instance: "testing" };
+    const receiptTrace = "lift-receipt";
     const original = { reason: "Renderer diagnosis. https://issues.example/diagnosis/42", recorded_by: "diagnosis-agent", recorded_at: "2026-10-20T20:00:00Z" };
     let hold: typeof original & { purpose?: "staff_testing" | "isolation_staging" } | null = original;
     const administrator = !["read-only", "narrow-admin"].includes(outcome);
@@ -20,7 +21,14 @@ for (const outcome of ["success", "uncertain", "uncertain-stale", "uncertain-sta
     await page.route("**/v1/products", route => route.fulfill({ json: { status: "ok", trace_id: "products", products: fixtures.products } }));
     await page.route("**/v1/products/atlas-commerce/environments/testing", route => route.fulfill({ json: { status: "ok", trace_id: "lane", environment: fixtures.environment } }));
     await page.route("**/public-ingress/incidents", route => route.fulfill({ json: { status: "ok", trace_id: "incidents", incidents: [] } }));
-    await page.route("**/v1/product-config/testing-hold?*", route => route.fulfill({ json: { status: "accepted", trace_id: "hold-read", records: {}, result: { ...scope, hold, record_sha256: "b".repeat(64) } } }));
+    let failNextHoldRead = false;
+    await page.route("**/v1/product-config/testing-hold?*", route => {
+      if (failNextHoldRead) {
+        failNextHoldRead = false;
+        return route.fulfill({ status: 503, json: { error: { code: "hold_read_unavailable", message: "Hold evidence is temporarily unavailable." } } });
+      }
+      return route.fulfill({ json: { status: "accepted", trace_id: "hold-read", records: {}, result: { ...scope, hold, record_sha256: "b".repeat(64) } } });
+    });
     const applies: Array<{ key: string; body: unknown }> = [];
     await page.route("**/v1/product-config/testing-hold/apply", async route => {
       const body = route.request().postDataJSON();
@@ -32,6 +40,7 @@ for (const outcome of ["success", "uncertain", "uncertain-stale", "uncertain-sta
         expect(body.reviewed_plan_sha256).toBe("a".repeat(64));
         if (outcome.startsWith("uncertain") && applies.length === 1) {
           if (outcome === "uncertain-staging") hold = { ...original, purpose: "isolation_staging" };
+          if (outcome === "uncertain-stale") failNextHoldRead = true;
           await route.abort(); return;
         }
         if (["uncertain-stale", "uncertain-staging"].includes(outcome) && applies.length === 2) {
@@ -42,7 +51,7 @@ for (const outcome of ["success", "uncertain", "uncertain-stale", "uncertain-sta
         }
         hold = null;
       }
-      await route.fulfill({ json: { status: "accepted", trace_id: "lift-receipt", records: {}, result: {
+      await route.fulfill({ json: { status: "accepted", trace_id: receiptTrace, records: {}, result: {
         ...scope, action: "clear", changed: true, applied: body.mode === "apply", before: original,
         plan_sha256: "a".repeat(64), reason: body.reason, read_back_matches: true, reconcile_requested: body.mode === "apply",
       } } });
@@ -68,7 +77,11 @@ for (const outcome of ["success", "uncertain", "uncertain-stale", "uncertain-sta
       await page.evaluate(() => {
         const originalSet = Storage.prototype.setItem;
         Storage.prototype.setItem = function(key, value) {
-          if (key.startsWith("launchplane.browser-operation.v2.")) throw new DOMException("Storage full", "QuotaExceededError");
+          let operation: { phase?: string; identity?: { idempotencyKey?: string; requestFingerprint?: string } } | null = null;
+          try { operation = JSON.parse(value); } catch { /* Other storage values are unaffected. */ }
+          if (operation?.phase === "submitting" && operation.identity?.idempotencyKey && operation.identity.requestFingerprint) {
+            throw new DOMException("Storage full", "QuotaExceededError");
+          }
           return originalSet.call(this, key, value);
         };
       });
@@ -81,6 +94,12 @@ for (const outcome of ["success", "uncertain", "uncertain-stale", "uncertain-sta
     }
     if (outcome.startsWith("uncertain")) {
       await expect(panel.getByRole("button", { name: "Retry original lift", exact: true })).toBeEnabled();
+      if (outcome === "uncertain-stale") {
+        await expect(panel.getByRole("alert")).toBeVisible();
+        await panel.getByRole("button", { name: "Refresh hold", exact: true }).click();
+        await expect(panel.getByRole("button", { name: "Review current hold separately", exact: true })).toBeEnabled();
+        expect(applies).toHaveLength(1);
+      }
       await page.reload();
       panel = page.getByRole("region", { name: "Testing hold", exact: true });
       await panel.getByRole("button", { name: "Retry original lift", exact: true }).click();
@@ -110,7 +129,7 @@ for (const outcome of ["success", "uncertain", "uncertain-stale", "uncertain-sta
       await expect(panel.getByRole("button", { name: "Lift testing hold", exact: true })).toHaveCount(0);
       expect(hold).toEqual(original);
     } else {
-      await expect(panel.getByText(/Testing hold lifted/)).toBeVisible();
+      await expect(panel.getByRole("status").filter({ hasText: receiptTrace })).toBeVisible();
       expect(hold).toBeNull();
     }
     expect(applies[0].key).toBeTruthy();
