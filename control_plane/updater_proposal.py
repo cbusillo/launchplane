@@ -12,9 +12,6 @@ from typing import Literal
 from control_plane.contracts.updater_proposal import (
     UPDATER_PROPOSAL_ACTION,
     UPDATER_PROPOSAL_MAX_CHANGE_BYTES,
-    UPDATER_PROPOSAL_MAX_FILE_BYTES,
-    UPDATER_PROPOSAL_MAX_MATERIALIZED_BYTES,
-    UpdaterFileEdit,
     UpdaterProposalRequest,
     UpdaterProposalResponse,
 )
@@ -27,7 +24,6 @@ from control_plane.github_payload import json_object, required_positive_int, req
 from control_plane.launchplane_github_delivery import resolve_delivery_github_app_identity
 from control_plane.service_auth import GitHubActionsIdentity, LaunchplaneAuthzPolicy
 from control_plane.workflows.launchplane import github_api_request
-from control_plane.updater_proposal_edits import materialize_updater_edit
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -299,7 +295,6 @@ def open_updater_proposal(
         current_sizes: dict[str, int] = {}
         current_types: dict[str, object] = {}
         current_modes: dict[str, object] = {}
-        current_blob_shas: dict[str, object] = {}
         for item in tree_entries:
             base_entry = json_object(item, "Base tree entry", error_type=ValueError)
             path = required_string_text(
@@ -307,7 +302,6 @@ def open_updater_proposal(
             )
             current_types[path] = base_entry.get("type")
             current_modes[path] = base_entry.get("mode")
-            current_blob_shas[path] = base_entry.get("sha")
             if base_entry.get("type") == "blob":
                 size = base_entry.get("size")
                 if not isinstance(size, int) or isinstance(size, bool) or size < 0:
@@ -327,70 +321,24 @@ def open_updater_proposal(
             ]
             if any(path in current_types and current_types[path] != "tree" for path in ancestors):
                 raise UpdaterProposalRefused("Updater cannot replace an ancestor file.")
-            if isinstance(change, UpdaterFileEdit):
-                if (
-                    change.path not in current_sizes
-                    or current_blob_shas.get(change.path) != change.base_blob_sha
-                ):
-                    raise UpdaterProposalRefused(
-                        "Updater edit requires the exact existing base blob."
-                    )
-            elif change.content is None and change.path not in current_sizes:
+            if change.content is None and change.path not in current_sizes:
                 raise UpdaterProposalRefused("Updater deletion requires an existing file.")
         changed_bytes = sum(
-            change.submitted_change_bytes
-            + (0 if isinstance(change, UpdaterFileEdit) else current_sizes.get(change.path, 0))
+            current_sizes.get(change.path, 0) + len((change.content or "").encode("utf-8"))
             for change in request.files
         )
         if changed_bytes > UPDATER_PROPOSAL_MAX_CHANGE_BYTES:
             raise UpdaterProposalRefused(
                 "Updater change exceeds the old-plus-new content size limit."
             )
-        materialized_bytes = 0
-        for change in request.files:
-            base_size = current_sizes.get(change.path, 0)
-            if isinstance(change, UpdaterFileEdit):
-                result_size = base_size + change.size_delta
-                if (
-                    base_size > UPDATER_PROPOSAL_MAX_FILE_BYTES
-                    or not 0 <= result_size <= UPDATER_PROPOSAL_MAX_FILE_BYTES
-                    or any(
-                        edit.start_byte + len(edit.old_text.encode("utf-8")) > base_size
-                        for edit in change.edits
-                    )
-                ):
-                    raise UpdaterProposalRefused(
-                        "Updater edit exceeds the base or result size limit."
-                    )
-            else:
-                result_size = change.submitted_change_bytes
-            materialized_bytes += base_size + result_size
-        if materialized_bytes > UPDATER_PROPOSAL_MAX_MATERIALIZED_BYTES:
-            raise UpdaterProposalRefused("Updater change exceeds the materialization size limit.")
-        edited_contents: dict[str, str] = {}
-        for change in request.files:
-            if isinstance(change, UpdaterFileEdit):
-                blob = call("/git/blobs/" + change.base_blob_sha)
-                try:
-                    edited_contents[change.path] = materialize_updater_edit(
-                        change, base_size=current_sizes[change.path], blob=blob
-                    )
-                except ValueError as error:
-                    raise UpdaterProposalRefused(str(error)) from error
         entries: list[dict[str, object]] = []
         for change in request.files:
             entry: dict[str, object] = {
                 "path": change.path,
-                "mode": (
-                    current_modes[change.path]
-                    if isinstance(change, UpdaterFileEdit)
-                    else change.mode or current_modes.get(change.path, "100644")
-                ),
+                "mode": change.mode or current_modes.get(change.path, "100644"),
                 "type": "blob",
             }
-            if isinstance(change, UpdaterFileEdit):
-                entry["content"] = edited_contents[change.path]
-            elif change.content is None:
+            if change.content is None:
                 entry["sha"] = None
             else:
                 entry["content"] = change.content

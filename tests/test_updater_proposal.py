@@ -1,6 +1,4 @@
 import unittest
-import base64
-from hashlib import sha1
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -20,9 +18,6 @@ from control_plane.contracts.updater_proposal import (
     UPDATER_PROPOSAL_MAX_BODY_BYTES,
     UPDATER_PROPOSAL_MAX_CHANGE_BYTES,
     UPDATER_PROPOSAL_MAX_FILES,
-    UPDATER_PROPOSAL_MAX_EDITS,
-    UPDATER_PROPOSAL_MAX_FILE_BYTES,
-    UPDATER_PROPOSAL_MAX_MATERIALIZED_BYTES,
     UPDATER_PROPOSAL_ROUTE,
     UpdaterProposalRequest,
     UpdaterProposalResponse,
@@ -87,14 +82,6 @@ def proposal_payload() -> dict[str, Any]:
         "title": "Update dependencies",
         "files": [{"path": "requirements.txt", "content": "example==2\n"}],
     }
-
-
-def blob_sha(content: bytes) -> str:
-    return sha1(f"blob {len(content)}\0".encode() + content).hexdigest()
-
-
-def sparse_change(path: str, content: bytes, edits: list[dict[str, Any]]) -> dict[str, Any]:
-    return {"path": path, "base_blob_sha": blob_sha(content), "edits": edits}
 
 
 class UpdaterAuthorizationTests(unittest.TestCase):
@@ -306,49 +293,6 @@ class FakeGitHub:
         raise AssertionError(path)
 
 
-class SparseFakeGitHub(FakeGitHub):
-    def __init__(self, files: dict[str, bytes]) -> None:
-        super().__init__()
-        self.files = files
-        self.blob_response_changes: dict[str, object] = {}
-        self.tree_size_override: int | None = None
-        self.tree_sha = "d" * 40
-
-    def __call__(self, **kwargs: Any) -> object:
-        path = kwargs["path"]
-        if path == self.fail_path:
-            return super().__call__(**kwargs)
-        if path.endswith("?recursive=1"):
-            self.calls.append(kwargs)
-            return {
-                "truncated": False,
-                "tree": [
-                    {
-                        "path": name,
-                        "type": "blob",
-                        "size": len(content)
-                        if self.tree_size_override is None
-                        else self.tree_size_override,
-                        "mode": self.base_mode,
-                        "sha": blob_sha(content),
-                    }
-                    for name, content in self.files.items()
-                ],
-            }
-        if "/git/blobs/" in path:
-            self.calls.append(kwargs)
-            sha = path.rsplit("/", 1)[1]
-            content = next(content for content in self.files.values() if blob_sha(content) == sha)
-            return {
-                "sha": sha,
-                "size": len(content),
-                "encoding": "base64",
-                "content": base64.encodebytes(content).decode(),
-                **self.blob_response_changes,
-            }
-        return super().__call__(**kwargs)
-
-
 class UpdaterProviderTests(unittest.TestCase):
     key: str
 
@@ -368,7 +312,9 @@ class UpdaterProviderTests(unittest.TestCase):
         ):
             return open_updater_proposal(
                 identity=updater_identity(),
-                request=UpdaterProposalRequest.model_validate(payload or proposal_payload()),
+                request=UpdaterProposalRequest.model_validate(
+                    proposal_payload() if payload is None else payload
+                ),
                 control_plane_root=Path("."),
                 api_request=api,
             )
@@ -415,6 +361,43 @@ class UpdaterProviderTests(unittest.TestCase):
         self.assertEqual(api.created_refs, {"refs/heads/" + first.branch})
         self.assertEqual(sum(call["path"].endswith("/pulls") for call in api.calls), 1)
         self.assertEqual(api.calls[-1]["method"], "DELETE")
+
+    def test_large_whole_file_and_exact_old_plus_new_budget(self) -> None:
+        content = "example==2\n" + "# unchanged public source\n" * 15_000
+        content_bytes = len(content.encode("utf-8"))
+        payload = {
+            **proposal_payload(),
+            "files": [{"path": "requirements.txt", "content": content}],
+        }
+        self.assertLess(
+            len(UpdaterProposalRequest.model_validate(payload).model_dump_json().encode("utf-8")),
+            UPDATER_PROPOSAL_MAX_BODY_BYTES,
+        )
+        for base_size, accepted in (
+            (content_bytes, True),
+            (UPDATER_PROPOSAL_MAX_CHANGE_BYTES - content_bytes, True),
+            (UPDATER_PROPOSAL_MAX_CHANGE_BYTES - content_bytes + 1, False),
+        ):
+            api = FakeGitHub()
+            api.tree_sha = "d" * 40
+            api.base_file_size = base_size
+            with self.subTest(base_size=base_size, accepted=accepted):
+                if accepted:
+                    self.invoke(api, payload)
+                    tree_write = next(
+                        call for call in api.calls if call["path"].endswith("/git/trees")
+                    )
+                    self.assertEqual(tree_write["body"]["tree"][0]["content"], content)
+                else:
+                    with self.assertRaises(UpdaterProposalRefused):
+                        self.invoke(api, payload)
+                    self.assertFalse(
+                        any(
+                            call.get("method") == "POST" and call["path"].startswith("/repos/")
+                            for call in api.calls
+                        )
+                    )
+                self.assertEqual(api.calls[-1]["method"], "DELETE")
 
     def test_foreign_prefix_prs_are_ignored_and_closed_identical_proposals_are_not_reopened(
         self,
@@ -572,357 +555,6 @@ class UpdaterProviderTests(unittest.TestCase):
                     )
                 )
 
-    def test_sparse_large_file_reconstruction_and_original_byte_coordinates(self) -> None:
-        original = (
-            b"# dependencies\r\nexample==1\r\n"
-            + b"# unchanged source\r\n" * (UPDATER_PROPOSAL_MAX_CHANGE_BYTES // 32)
-            + b"# preserved example==1\r\n"
-            + "é-tail\r\n".encode()
-        )
-        self.assertGreater(len(original) * 2, UPDATER_PROPOSAL_MAX_CHANGE_BYTES)
-        changes = [
-            {
-                "start_byte": original.index(b"example==1"),
-                "old_text": "example==1",
-                "new_text": "example==20",
-            },
-            {
-                "start_byte": original.index("é-tail".encode()),
-                "old_text": "é-tail",
-                "new_text": "é-new-tail",
-            },
-        ]
-        api = SparseFakeGitHub({"requirements.txt": original})
-        api.base_mode = "100755"
-        payload = {
-            **proposal_payload(),
-            "files": [sparse_change("requirements.txt", original, changes)],
-        }
-        result = self.invoke(api, payload)
-        tree = next(
-            call["body"]["tree"] for call in api.calls if call["path"].endswith("/git/trees")
-        )
-        self.assertEqual(
-            tree,
-            [
-                {
-                    "path": "requirements.txt",
-                    "mode": api.base_mode,
-                    "type": "blob",
-                    "content": original.replace(b"example==1", b"example==20", 1)
-                    .replace("é-tail".encode(), "é-new-tail".encode())
-                    .decode(),
-                }
-            ],
-        )
-        self.assertEqual(result.disposition, "created")
-        self.assertEqual(self.invoke(api, payload).disposition, "replayed")
-        api.closed_prs, api.prs = api.prs, []
-        self.assertEqual(self.invoke(api, payload).disposition, "replayed")
-        self.assertEqual(sum(call["path"].endswith("/pulls") for call in api.calls), 1)
-
-    def test_sparse_insert_delete_and_mixed_full_file_changes(self) -> None:
-        original = "éabc\r\n".encode()
-        payload = {
-            **proposal_payload(),
-            "files": [
-                sparse_change(
-                    "requirements.txt",
-                    original,
-                    [
-                        {"start_byte": len("é".encode()), "old_text": "", "new_text": "X"},
-                        {"start_byte": len("éa".encode()), "old_text": "b", "new_text": ""},
-                    ],
-                ),
-                {"path": "new.txt", "content": "new file\n"},
-            ],
-        }
-        api = SparseFakeGitHub({"requirements.txt": original})
-        self.invoke(api, payload)
-        tree = next(
-            call["body"]["tree"] for call in api.calls if call["path"].endswith("/git/trees")
-        )
-        self.assertEqual([entry["content"] for entry in tree], ["éXac\r\n", "new file\n"])
-
-    def test_sparse_shape_order_and_incoming_budgets_refuse_before_provider(self) -> None:
-        edit = {"start_byte": 0, "old_text": "a", "new_text": "b"}
-        change = sparse_change("requirements.txt", b"abc", [edit])
-        cases = [
-            {**change, "content": "replacement"},
-            {**change, "mode": "100755"},
-            {**change, "base_blob_sha": "not-a-sha"},
-            {**change, "path": ".github/workflows/update.yml"},
-            {**change, "edits": []},
-            {**change, "edits": [edit, edit]},
-            {**change, "edits": [{**edit, "old_text": "ab"}, {**edit, "start_byte": 1}]},
-            {**change, "edits": [{**edit, "start_byte": 2}, edit]},
-            {**change, "edits": [{**edit, "old_text": "", "new_text": ""}]},
-            {**change, "edits": [{**edit, "new_text": "\ud800"}]},
-            {
-                **change,
-                "edits": [
-                    {
-                        **edit,
-                        "old_text": "",
-                        "new_text": "é" * (UPDATER_PROPOSAL_MAX_CHANGE_BYTES // 2 + 1),
-                    }
-                ],
-            },
-            {
-                **change,
-                "edits": [{**edit, "start_byte": n} for n in range(UPDATER_PROPOSAL_MAX_EDITS + 1)],
-            },
-            {**change, "edits": [{**edit, "old_text": ""}, {**edit, "old_text": ""}]},
-        ]
-        cases.extend(
-            {**change, "edits": [{**edit, "start_byte": value}]}
-            for value in (-1, True, 1.0, "1", UPDATER_PROPOSAL_MAX_FILE_BYTES + 1)
-        )
-        for case in cases:
-            with self.subTest(case=str(case)[:120]), self.assertRaises(ValidationError):
-                UpdaterProposalRequest.model_validate({**proposal_payload(), "files": [case]})
-        first = [{**edit, "start_byte": n} for n in range(UPDATER_PROPOSAL_MAX_EDITS)]
-        with self.assertRaises(ValidationError):
-            UpdaterProposalRequest.model_validate(
-                {
-                    **proposal_payload(),
-                    "files": [
-                        {**change, "edits": first},
-                        {**change, "path": "other.txt"},
-                    ],
-                }
-            )
-
-    def test_sparse_mismatch_encoding_and_blob_corruption_make_no_repository_writes(self) -> None:
-        original = "éabc".encode()
-        good = {"start_byte": 2, "old_text": "a", "new_text": "x"}
-        cases: list[tuple[dict[str, Any], dict[str, object]]] = [
-            ({"start_byte": 2, "old_text": "b", "new_text": "x"}, {}),
-            ({"start_byte": len(original) + 1, "old_text": "", "new_text": "x"}, {}),
-            ({"start_byte": 1, "old_text": "", "new_text": "x"}, {}),
-            (good, {"sha": "e" * 40}),
-            (good, {"size": len(original) + 1}),
-            (good, {"size": True}),
-            (good, {"encoding": "utf-8"}),
-            (good, {"content": "!not-base64!"}),
-            (good, {"content": base64.b64encode(b"corrupt").decode()}),
-            (good, {"content": "A" * (2 * UPDATER_PROPOSAL_MAX_FILE_BYTES + 1)}),
-        ]
-        for edit, corruption in cases:
-            api = SparseFakeGitHub({"requirements.txt": original})
-            api.blob_response_changes = corruption
-            payload = {
-                **proposal_payload(),
-                "files": [sparse_change("requirements.txt", original, [edit])],
-            }
-            with (
-                self.subTest(edit=edit, corruption=list(corruption)),
-                self.assertRaises(UpdaterProposalRefused),
-            ):
-                self.invoke(api, payload)
-            self.assertFalse(
-                any(
-                    call.get("method") == "POST" and call["path"].startswith("/repos/")
-                    for call in api.calls
-                )
-            )
-            self.assertEqual(api.calls[-1]["method"], "DELETE")
-        invalid = b"\xffabc"
-        api = SparseFakeGitHub({"requirements.txt": invalid})
-        with self.assertRaises(UpdaterProposalRefused):
-            self.invoke(
-                api,
-                {
-                    **proposal_payload(),
-                    "files": [
-                        sparse_change(
-                            "requirements.txt",
-                            invalid,
-                            [{"start_byte": 1, "old_text": "a", "new_text": "b"}],
-                        )
-                    ],
-                },
-            )
-
-    def test_sparse_requires_path_blob_identity_and_regular_existing_file(self) -> None:
-        original = b"abc"
-        good = sparse_change(
-            "requirements.txt", original, [{"start_byte": 0, "old_text": "a", "new_text": "b"}]
-        )
-        for changes, mode in (
-            ({"base_blob_sha": "e" * 40}, "100644"),
-            ({"path": "missing.txt"}, "100644"),
-            ({}, "120000"),
-            ({}, "160000"),
-        ):
-            api = SparseFakeGitHub({"requirements.txt": original})
-            api.base_mode = mode
-            with (
-                self.subTest(changes=changes, mode=mode),
-                self.assertRaises(UpdaterProposalRefused),
-            ):
-                self.invoke(api, {**proposal_payload(), "files": [{**good, **changes}]})
-            self.assertFalse(
-                any(
-                    "/git/blobs/" in call["path"]
-                    or call.get("method") == "POST"
-                    and call["path"].startswith("/repos/")
-                    for call in api.calls
-                )
-            )
-
-    def test_sparse_materialization_limits_precede_blob_reads_and_writes(self) -> None:
-        original = b"a" * UPDATER_PROPOSAL_MAX_FILE_BYTES
-        edit = {"start_byte": 0, "old_text": "a", "new_text": "b"}
-        count = UPDATER_PROPOSAL_MAX_MATERIALIZED_BYTES // (len(original) * 2) + 1
-        files = {str(n): original for n in range(count)}
-        cases = [
-            (
-                files,
-                [sparse_change(path, content, [edit]) for path, content in files.items()],
-                None,
-            ),
-            (
-                {"requirements.txt": original},
-                [sparse_change("requirements.txt", original, [{**edit, "new_text": "bb"}])],
-                None,
-            ),
-            (
-                {"requirements.txt": b"a"},
-                [sparse_change("requirements.txt", b"a", [edit])],
-                UPDATER_PROPOSAL_MAX_FILE_BYTES + 1,
-            ),
-        ]
-        for originals, changes, size_override in cases:
-            api = SparseFakeGitHub(originals)
-            api.tree_size_override = size_override
-            with (
-                self.subTest(files=len(originals), override=size_override),
-                self.assertRaises(UpdaterProposalRefused),
-            ):
-                self.invoke(api, {**proposal_payload(), "files": changes})
-            self.assertFalse(
-                any(
-                    "/git/blobs/" in call["path"]
-                    or call.get("method") == "POST"
-                    and call["path"].startswith("/repos/")
-                    for call in api.calls
-                )
-            )
-
-    def test_sparse_validates_last_file_before_any_git_object_write(self) -> None:
-        original = b"abc"
-        api = SparseFakeGitHub({"first.txt": original, "last.txt": original})
-        changes = [
-            sparse_change(
-                "first.txt", original, [{"start_byte": 0, "old_text": "a", "new_text": "b"}]
-            ),
-            sparse_change(
-                "last.txt", original, [{"start_byte": 0, "old_text": "xyz", "new_text": "x"}]
-            ),
-        ]
-        with self.assertRaises(UpdaterProposalRefused):
-            self.invoke(api, {**proposal_payload(), "files": changes})
-        self.assertFalse(
-            any(
-                call.get("method") == "POST" and call["path"].startswith("/repos/")
-                for call in api.calls
-            )
-        )
-
-    def test_sparse_noop_and_blob_read_failure_revoke_without_git_writes(self) -> None:
-        original = b"aa"
-        for edits, fail_read in (
-            (
-                [
-                    {"start_byte": 0, "old_text": "a", "new_text": ""},
-                    {"start_byte": 1, "old_text": "a", "new_text": "aa"},
-                ],
-                False,
-            ),
-            ([{"start_byte": 0, "old_text": "a", "new_text": "b"}], True),
-        ):
-            api = SparseFakeGitHub({"requirements.txt": original})
-            if fail_read:
-                api.fail_path = "/repos/" + REPOSITORY + "/git/blobs/" + blob_sha(original)
-            with self.subTest(fail_read=fail_read), self.assertRaises(ValueError):
-                self.invoke(
-                    api,
-                    {
-                        **proposal_payload(),
-                        "files": [sparse_change("requirements.txt", original, edits)],
-                    },
-                )
-            self.assertFalse(
-                any(
-                    call.get("method") == "POST" and call["path"].startswith("/repos/")
-                    for call in api.calls
-                )
-            )
-            self.assertEqual(api.calls[-1]["method"], "DELETE")
-
-    def test_sparse_materialization_at_limit_and_legacy_deletion(self) -> None:
-        original = b"a" * UPDATER_PROPOSAL_MAX_FILE_BYTES
-        count = UPDATER_PROPOSAL_MAX_MATERIALIZED_BYTES // (len(original) * 2)
-        originals = {str(n): original for n in range(count)}
-        api = SparseFakeGitHub(originals)
-        self.invoke(
-            api,
-            {
-                **proposal_payload(),
-                "files": [
-                    sparse_change(
-                        path, content, [{"start_byte": 0, "old_text": "a", "new_text": "b"}]
-                    )
-                    for path, content in originals.items()
-                ],
-            },
-        )
-        tree = next(
-            call["body"]["tree"] for call in api.calls if call["path"].endswith("/git/trees")
-        )
-        self.assertEqual(
-            [entry["content"] for entry in tree], [(b"b" + original[1:]).decode()] * count
-        )
-        legacy = FakeGitHub()
-        legacy.tree_sha = "d" * 40
-        self.invoke(
-            legacy, {**proposal_payload(), "files": [{"path": "requirements.txt", "content": None}]}
-        )
-        deleted = next(
-            call["body"]["tree"] for call in legacy.calls if call["path"].endswith("/git/trees")
-        )
-        self.assertEqual(
-            deleted,
-            [{"path": "requirements.txt", "mode": legacy.base_mode, "type": "blob", "sha": None}],
-        )
-
-    def test_sparse_orphan_recovery_and_pending_after_main_moves(self) -> None:
-        original = b"abc"
-        api = SparseFakeGitHub({"requirements.txt": original})
-        payload = {
-            **proposal_payload(),
-            "files": [
-                sparse_change(
-                    "requirements.txt",
-                    original,
-                    [{"start_byte": 0, "old_text": "a", "new_text": "b"}],
-                )
-            ],
-        }
-        api.fail_path = "/repos/" + REPOSITORY + "/pulls"
-        with self.assertRaises(ValueError):
-            self.invoke(api, payload)
-        api.fail_path = ""
-        api.base_sha = HEAD_SHA
-        first = self.invoke(api, payload)
-        count = len(api.calls)
-        pending = self.invoke(api, {**payload, "title": "Another proposal"})
-        self.assertEqual(pending.disposition, "pending")
-        self.assertEqual(pending.pull_request_number, first.pull_request_number)
-        self.assertFalse(any("/git/blobs/" in call["path"] for call in api.calls[count:]))
-        self.assertEqual(len(api.created_refs), 1)
-
 
 class UpdaterHttpTests(unittest.IsolatedAsyncioTestCase):
     def app(self, verifier: Any, policy: LaunchplaneAuthzPolicy | None = None) -> Any:
@@ -940,36 +572,19 @@ class UpdaterHttpTests(unittest.IsolatedAsyncioTestCase):
             pull_request_number=17,
             pull_request_url="https://github.com/" + REPOSITORY + "/pull/17",
         )
-        for payload in (
-            proposal_payload(),
-            {
-                **proposal_payload(),
-                "files": [
-                    sparse_change(
-                        "requirements.txt",
-                        b"abc",
-                        [{"start_byte": 0, "old_text": "a", "new_text": "b"}],
-                    )
-                ],
-            },
-        ):
-            with (
-                self.subTest(payload=payload),
-                patch(
-                    "control_plane.http_routes.updater_proposal.open_updater_proposal",
-                    return_value=result,
-                ) as provider,
-            ):
-                response = await http_request(
-                    self.app(_StubVerifier(updater_identity())),
-                    "POST",
-                    UPDATER_PROPOSAL_ROUTE,
-                    headers={"Authorization": "Bearer valid-token"},
-                    payload=payload,
-                )
-            self.assertEqual(response.status_code, 201)
-            self.assertEqual(response.json(), result.model_dump(mode="json"))
-            provider.assert_called_once()
+        with patch(
+            "control_plane.http_routes.updater_proposal.open_updater_proposal", return_value=result
+        ) as provider:
+            response = await http_request(
+                self.app(_StubVerifier(updater_identity())),
+                "POST",
+                UPDATER_PROPOSAL_ROUTE,
+                headers={"Authorization": "Bearer valid-token"},
+                payload=proposal_payload(),
+            )
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json(), result.model_dump(mode="json"))
+        provider.assert_called_once()
 
     async def test_unlisted_callers_never_invoke_provider(self) -> None:
         for identity in (
