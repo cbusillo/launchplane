@@ -156,8 +156,8 @@ original idempotency key.
 
 ## Command Groups
 
-Use `uv run launchplane --help` for the complete CLI surface. Frequently used
-top-level groups include:
+Use `uv run launchplane --help` and each group's `--help` for the current CLI
+commands, options, and defaults.
 
 Today this CLI is the local Launchplane admin/client surface around the
 service API. Shared or production mutations must prefer the deployed service API
@@ -167,36 +167,6 @@ paths. If a live mutation still exists only as a local CLI command, stop and add
 or use a service API path instead of running the local command from an arbitrary
 checkout.
 
-- `artifacts`: rehearse artifact manifest writes, inspect artifact manifests,
-  and emit protected artifact inventories for registry cleanup deny sets.
-- `backup-gates`: rehearse and inspect backup-gate records.
-- `deployments`: rehearse and inspect deployment records.
-- `environments`: write, list, and resolve DB-backed runtime environment
-  contracts.
-- `launchplane-previews`: inspect, mutate, render, ingest, and replay
-  Launchplane preview state.
-- `inventory`: inspect current environment inventory.
-- `promote`: record, resolve, and execute artifact-backed promotions.
-- `promotions`: rehearse and inspect promotion records.
-- `product-config`: dry-run and apply trusted product runtime/secret config
-  bundles from a live Launchplane context.
-- `release-tuples`: inspect state-backed tuple records and explicitly export a
-  TOML catalog from minted state.
-- `service`: run the first local Launchplane HTTP ingress slice.
-  `service outbox-workers run-once` and `service outbox-workers run` operate
-  PostgreSQL transactional outbox deliveries for external workflow dispatch and
-  notification effects.
-  `service merge-train-workers run-once` and `service merge-train-workers run`
-  run the scheduled merge-train pass for every scheduler-enabled policy target;
-  the `launchplane-merge-train-workers` compose service runs it every five
-  minutes.
-- `ship`: plan, resolve, and execute artifact-backed deploy requests.
-- `storage provider-target-audit`: run the read-only provider-target parity
-  preflight before backfill or provider-target authority cutover.
-- `storage provider-target-backfill`: dry-run explicit provider-target row
-  projections from complete Dokploy target/id pairs; shared/live apply uses the
-  service-backed Provider Target Operations workflow.
-
 `deployments write`, `promotions write`, `inventory write-from-deployment`,
 `inventory write-from-promotion`, and `release-tuples write-from-promotion`
 are local rehearsal commands. Shared-service evidence ingress uses
@@ -204,10 +174,9 @@ authenticated Launchplane service routes so Launchplane can accept externally
 produced deployment and promotion facts without claiming it executed that
 product's runtime action itself.
 
-Those commands are current implementation scaffolding. The Launchplane boundary
-is a long-running service with authenticated HTTP ingress. The CLI should remain
-a client of Launchplane's stable API contract or an explicit DB-backed admin
-tool, not a separate live-state authority.
+The Launchplane boundary is a long-running service with authenticated HTTP
+ingress. The CLI should remain a client of Launchplane's stable API contract or
+an explicit DB-backed admin tool, not a separate live-state authority.
 
 Provider-target data changes for shared or production lanes must use the
 deployed Launchplane service. The manual `Provider Target Operations` workflow
@@ -2606,13 +2575,7 @@ reconcile succeeds. Use `Product Onboarding Manifest (Advanced)` only when the
 typed generic-web contract does not fit, and use `Dokploy Target Setup` for
 adoption, production, compose, or repair operations.
 
-To change the preview base URL later, rerun `Product Onboarding` with the new
-root URL. Onboarding updates its owned key while preserving unrelated values in
-the same preview-context runtime-environment record.
-
-Products onboarded before this input existed must rerun `Product Onboarding`
-once to record the preview base URL. Until then, preview readiness and refresh
-return a typed blocked result rather than guessing a domain.
+Conventional onboarding creates new products only.
 
 - Promotions and deploys reference explicit artifact identifiers.
 - Missing control-plane config is a hard error, not a silent fallback.

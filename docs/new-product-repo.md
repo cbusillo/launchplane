@@ -96,17 +96,9 @@ and cross-checks the product profile when available. Retirement cannot set
 `include_ingress_operator` and removes all target-product preview rules, including
 scoped ingress rules, without querying GitHub.
 
-The conventional product-repo caller files are
-`.github/workflows/launchplane-preview.yml` for pull-request refresh,
-verification, and feedback, and
-`.github/workflows/launchplane-preview-notice.yml` for trusted cleanup and
-fork/Dependabot notice handling. The conventional caller contract and onboarding
-authz planner use these exact paths; custom filenames require an advanced
-contract rather than an implicit fallback.
-
-Do not store these as product-repo Launchplane manifests. The repo may document
-the expected app runtime contract, but Launchplane records are the live source
-of lifecycle truth. Store admin manifests under Launchplane state or another
+Do not store onboarding inputs as product-repo Launchplane manifests. The repo
+may document the expected app runtime contract, but Launchplane records are the
+live source of lifecycle truth. Store admin manifests under Launchplane state or another
 admin-owned state location, not in product repos and not in git-tracked
 history when they contain site-specific runtime details.
 
@@ -129,37 +121,10 @@ OIDC request, grant, secret, or build setting. Launchplane hears the build and
 pull request events itself, verifies the build, and deploys previews and the
 `testing` lane; see [event-driven-deploys.md](event-driven-deploys.md).
 
-The remaining caller-workflow reference in this section describes the retired
-call-in path. [DIRECTION.md](../DIRECTION.md) owns its status; current product
-setup follows [event-driven-deploys.md](event-driven-deploys.md).
-
-In that historical path, a conventional generic-web product used the thin preview facade documented
-in [product-repo-contract.md](product-repo-contract.md). One same-repository
-`pull_request` caller delegates image publication, preview refresh,
-product-owned verification, evidence, and feedback to
-`reusable-generic-web-preview.yml`. A second `pull_request_target` caller uses
-`reusable-preview-request-notice.yml` for trusted same-repository cleanup and
-fork/Dependabot notices. Pin both reusable workflows to full reviewed
-Launchplane commit SHAs. Do not grant OIDC to product build or verification
-jobs; the reusable workflows scope OIDC to Launchplane requests that do not
-check out untrusted code.
-
-When a product workflow needs to turn local publish/provision/verification or
-cleanup job results into preview feedback status, call
-`cbusillo/launchplane/.github/workflows/reusable-preview-feedback-status.yml@<launchplane-sha>`.
-Keep product-owned smoke facts local, pass primitive job results and failure
-summaries to the reusable workflow, and let Launchplane derive the final
-`status` and `failure_summary` before it calls `reusable-preview-pr-feedback`.
-For generic-web cleanup, pass the lifecycle workflow's `destroy_outcome` output
-as `cleanup_outcome`; `no_preview_recorded` clears stale managed feedback while
-real and unknown failures remain fail-closed. Do not copy Launchplane feedback
-route, payload, idempotency, marker, or delivery logic into the product repo.
-
-For direct JSON calls to Launchplane service routes, use the reusable
-`cbusillo/launchplane/.github/actions/launchplane-request` action rather than
-copying an OIDC/fetch helper into the product repo. Product repos can still keep
-small scripts that assemble product-specific payload JSON until Launchplane owns
-that request-shaping layer too.
+Existing products still using caller workflows follow the transitional
+[preview workflow contract](preview-workflow-contract.md) and
+[caller path contract](product-repo-contract.md#repo-metadata-boundary) until
+migration. New products use the event-driven path above.
 
 Product-owned smoke tests manage their own dynamic fixtures. They do not use a
 Launchplane maintenance route or a generated Launchplane smoke client.
