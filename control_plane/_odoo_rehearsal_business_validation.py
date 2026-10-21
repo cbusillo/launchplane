@@ -1,6 +1,6 @@
 """Fixed image entrypoint and value-free receipt checks for the isolated runner."""
 
-BUSINESS_VALIDATION_ENTRYPOINT = "/volumes/scripts/launchplane_business_validation.py"
+BUSINESS_VALIDATION_ENTRYPOINT = "/opt/project/addons/launchplane_business_validation.py"
 BUSINESS_VALIDATION_RECEIPT_MAX_BYTES = 8192
 
 # The remote host has only the standard library. Keep this parser identical to

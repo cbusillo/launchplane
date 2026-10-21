@@ -7,7 +7,10 @@ from unittest.mock import Mock, patch
 
 from pydantic import ValidationError
 
-from control_plane._odoo_rehearsal_business_validation import BUSINESS_VALIDATION_ENTRYPOINT
+from control_plane._odoo_rehearsal_business_validation import (
+    BUSINESS_VALIDATION_ENTRYPOINT,
+    BUSINESS_VALIDATION_RECEIPT_MAX_BYTES,
+)
 from control_plane.contracts.odoo_rehearsal_business_validation import BusinessValidationReceipt
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.odoo_upgrade_rehearsal import OdooUpgradeRehearsalRequest
@@ -70,7 +73,11 @@ class BusinessValidationContractTests(unittest.TestCase):
         # Generic product models and more than 100 identified records are valid within the byte budget.
         valid["checks"][0]["records"] = [{"model": "repair.order", "id": n} for n in range(1, 102)]
         self.assertTrue(BusinessValidationReceipt.model_validate(valid).passed)
-        valid["checks"][0]["records"] *= 4
+        while (
+            len(json.dumps(valid, separators=(",", ":"), ensure_ascii=True).encode())
+            <= BUSINESS_VALIDATION_RECEIPT_MAX_BYTES
+        ):
+            valid["checks"][0]["records"] *= 2
         with self.assertRaises(ValidationError):
             BusinessValidationReceipt.model_validate(valid)
 
@@ -105,7 +112,6 @@ class BusinessValidationAdapterTests(unittest.TestCase):
     def test_plan_binds_copy_candidate_without_a_business_payload(self) -> None:
         self.assertEqual(self.request.intent(), self.fixture.request.intent())
         self.assertEqual(self.adapter.inputs()[0], self.record)
-        self.assertEqual(self.adapter.reviewed_binding(self.record), self.record.binding_sha256)
         with self.assertRaises(ValidationError):
             OdooUpgradeRehearsalRequest.model_validate(
                 {**self.request.model_dump(mode="json"), "business_validation": {"steps": []}}
@@ -466,15 +472,27 @@ class BusinessValidationHostTests(unittest.TestCase):
         self.assertIn(self.spec["target_image"], arguments)
         self.assertIn(BUSINESS_VALIDATION_ENTRYPOINT, arguments)
         self.assertIn("--check", arguments)
-        self.assertNotIn("--env", arguments)
-        call.side_effect = RuntimeError("missing entrypoint")
+        self.assertFalse(
+            set(arguments) & {"--env", "-e", "--env-file", "-v", "--volume", "--mount"}
+        )
+        call.side_effect = self.host["RehearsalCommandFailure"](
+            {
+                "step": "business_validation",
+                "exit_status": 2,
+                "error_text": "Product validation unavailable",
+            }
+        )
         self.spec.update(action="prepare", source_image=self.spec["target_image"])
         self.spec["record"]["state"] = "planned"
         self.host["compose"] = compose = Mock()
-        with self.assertRaises(RuntimeError):
-            self.fixture.run_host(self.spec)
+        refused = self.fixture.run_host(self.spec)
+        self.assertFalse(refused["completed"])
+        self.assertEqual(refused["refusal_code"], "rehearsal_entrypoint_unavailable")
         compose.assert_not_called()
         self.assertFalse((self.root / "prepare.started").exists())
+        calls = call.call_count
+        self.assertEqual(self.fixture.run_host({**self.spec, "mode": "observe"}), refused)
+        self.assertEqual(call.call_count, calls)
 
     def test_invalid_or_missing_reply_preserves_unknown_original_without_replay(self) -> None:
         valid = json.dumps(receipt(self.plan)).encode().hex().encode()
@@ -503,23 +521,37 @@ class BusinessValidationHostTests(unittest.TestCase):
             self.assertTrue(observed["custody"]["effect_started"])
             self.assertNotIn("copied customer", str(observed))
 
-    def test_nonzero_product_exit_does_not_retain_copied_values(self) -> None:
-        import subprocess
+    def test_failed_noisy_or_hung_product_does_not_expose_output_or_hold_host_forever(self) -> None:
+        import sys
 
-        completed = subprocess.CompletedProcess(
-            [], 9, stdout=b"copied customer", stderr=b"private traceback"
-        )
-        # Load the actual implementation, replacing our successful product fixture.
         helper = rehearsal_tests.RehearsalHostSafetyTests()
         helper.setUp()
         self.addCleanup(helper.doCleanups)
-        with (
-            patch.object(subprocess, "run", return_value=completed),
-            self.assertRaises(helper.host["RehearsalCommandFailure"]) as failure,
-        ):
-            helper.host["product_command"](["fixed", "product"])
-        self.assertNotIn("copied customer", str(failure.exception.diagnostic))
-        self.assertNotIn("private traceback", str(failure.exception.diagnostic))
+        cases: tuple[tuple[str, dict[str, int]], ...] = (
+            (
+                "import sys; print('copied customer'); print('private traceback', file=sys.stderr); sys.exit(9)",
+                {},
+            ),
+            (
+                "print('copied customer' * "
+                + str(helper.host["PRODUCT_COMMAND_OUTPUT_MAX_BYTES"])
+                + ")",
+                {},
+            ),
+            ("import time; time.sleep(60)", {"PRODUCT_COMMAND_TIMEOUT_SECONDS": 0}),
+        )
+        for script, limits in cases:
+            with (
+                self.subTest(script=script),
+                patch.dict(helper.host, limits),
+                self.assertRaises(helper.host["RehearsalCommandFailure"]) as failure,
+            ):
+                helper.host["product_command"]([sys.executable, "-c", script])
+            self.assertNotIn("copied customer", str(failure.exception.diagnostic))
+            self.assertNotIn("private traceback", str(failure.exception.diagnostic))
+        self.assertEqual(
+            helper.host["product_command"]([sys.executable, "-c", "print('receipt')"]), b"receipt\n"
+        )
 
 
 class BusinessValidationClientTests(unittest.TestCase):

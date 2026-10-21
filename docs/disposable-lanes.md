@@ -2889,13 +2889,15 @@ After `simulate-final` and before `verify`, use the supported client with
 `action: validate-business` and the original rehearsal intent fields. There is
 no business payload: caller-supplied code, commands, paths and step lists are
 refused. The product ships its scenarios in the candidate image; Launchplane
-runs exactly `python3 /volumes/scripts/launchplane_business_validation.py`.
+runs exactly `python3 /opt/project/addons/launchplane_business_validation.py`.
 A product change needs no Launchplane model or method allowlist change.
 
 `prepare` first runs that fixed file with `--check` in the exact candidate
 image, with no network, credentials or application mounts. It must exit zero
 only when the entrypoint and scenario imports are available, without opening
-a database. A missing entrypoint fails before upgrade or source-copy work.
+a database. A missing entrypoint returns the determinate `rehearsal_entrypoint_unavailable`
+refusal before upgrade or source-copy work, retaining its exact attempt’s
+no-effect receipt. Existing isolated placement stays owned by the rehearsal.
 
 Normal invocation runs inside the independently checked isolated script-runner.
 The native environment supplies only rehearsal-local credentials, with
@@ -2911,12 +2913,17 @@ The product disables mail/tracking and uses attempt-scoped synthetic names.
 The review binds the current rehearsal record. Existing network, credential,
 container, copy-witness and connection checks run before and after the product
 invocation. No public route, source-host credential or outbound integration is
-added. Removing the JSON interpreter does not remove the enforced isolation.
+added. The runner enforces network and credential isolation. The product checks its
+connected database and holds the native workflow lock; it can access other
+rehearsal-local copies, whose recovery snapshots remain outside its mounts.
 
 The product writes exactly one line
 `business_validation_result=<hex-encoded UTF-8 JSON receipt>`. Other output is
 discarded, including stderr and nonzero-exit stdout; product tracebacks are never
-used as diagnostics. A receipt contains exactly the six input identity fields,
+used as diagnostics. Product command observation has a bounded deadline and
+output budget. A timeout or excessive output after a write starts preserves
+unknown original-key custody; stopping the host observer does not prove the
+in-container writer stopped or rolled back. A receipt contains exactly the six input identity fields,
 `passed`, `committed`, and `checks`. Each check has a unique `key`, a `passed`
 boolean and `records`, a list of `{ "model": "sale.order", "id": 123 }` objects.
 Model names use ordinary dotted lowercase Odoo model syntax; ids are positive

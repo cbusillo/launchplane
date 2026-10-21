@@ -1,6 +1,6 @@
 """Product-owned scenario receipts; Launchplane interprets no business operations."""
 
-from typing import Annotated, Self
+from typing import Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -10,13 +10,13 @@ from control_plane.contracts.canonical_json import canonical_json_sha256
 
 class BusinessRecord(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
-    model: str = Field(pattern=r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$")
-    id: int = Field(gt=0)
+    model: str
+    id: int
 
 
 class BusinessCheckEvidence(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
-    key: str = Field(pattern=r"^[a-z][a-z0-9_]{0,39}$")
+    key: str
     passed: bool
     records: list[BusinessRecord]
 
@@ -31,7 +31,7 @@ class BusinessValidationReceipt(BaseModel):
     attempt_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     passed: bool
     committed: bool
-    checks: Annotated[list[BusinessCheckEvidence], Field(min_length=1, max_length=64)]
+    checks: list[BusinessCheckEvidence]
 
     @model_validator(mode="after")
     def successful_commit(self) -> Self:

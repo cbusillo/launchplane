@@ -416,6 +416,19 @@ def rehearsal_resource(record: OdooUpgradeRehearsalRecord) -> OdooRehearsalResou
     )
 
 
+def business_validation_identity(
+    record: OdooUpgradeRehearsalRecord, operation_key: str
+) -> dict[str, str]:
+    return {
+        "product": record.product,
+        "rehearsal_id": record.rehearsal_id,
+        "artifact_id": record.target_artifact.artifact_id,
+        "source_commit": record.target_artifact.source_commit,
+        "database": record.rehearsal_id.replace("-", "_") + "_final_upgrade",
+        "attempt_sha256": canonical_json_sha256({"operation_key": operation_key}),
+    }
+
+
 def rehearsal_host_program() -> str:
     from control_plane._odoo_copy_runtime_guard import COPY_RUNTIME_INSPECTION_LIBRARY
     from control_plane._odoo_testing_storage_program import STORAGE_MAINTENANCE_LIBRARY
@@ -1111,14 +1124,9 @@ class OdooRehearsalAdapter:
         spec["record_binding_sha256"] = record.binding_sha256
         spec["inspect_capture"] = mode == "observe" and inspect_capture
         if self.request.action == "validate-business":
-            spec["business_validation_identity"] = {
-                "product": record.product,
-                "rehearsal_id": record.rehearsal_id,
-                "artifact_id": record.target_artifact.artifact_id,
-                "source_commit": record.target_artifact.source_commit,
-                "database": record.rehearsal_id.replace("-", "_") + "_final_upgrade",
-                "attempt_sha256": str(spec["attempt_sha256"]),
-            }
+            spec["business_validation_identity"] = business_validation_identity(
+                record, operation_key
+            )
         program = str(spec.pop("program"))
         encoded = base64.b64encode(json.dumps(spec, sort_keys=True).encode()).decode()
         # Keep both Dokploy's remote shell materializer and Python's argv small.
@@ -1262,14 +1270,7 @@ class OdooRehearsalAdapter:
                 if isinstance(pending, dict)
                 else result.get("business_validation")
             )
-            expected = {
-                "product": record.product,
-                "rehearsal_id": record.rehearsal_id,
-                "artifact_id": record.target_artifact.artifact_id,
-                "source_commit": record.target_artifact.source_commit,
-                "database": record.rehearsal_id.replace("-", "_") + "_final_upgrade",
-                "attempt_sha256": canonical_json_sha256({"operation_key": operation_key}),
-            }
+            expected = business_validation_identity(record, operation_key)
             if not isinstance(validation, dict) or any(
                 validation[key] != value for key, value in expected.items()
             ):

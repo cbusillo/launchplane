@@ -314,14 +314,46 @@ def business_validation_precheck(spec,containers):
         raise RuntimeError('Validation connection isolation changed')
 
 
+PRODUCT_COMMAND_TIMEOUT_SECONDS=900
+PRODUCT_COMMAND_OUTPUT_MAX_BYTES=2*BUSINESS_VALIDATION_RECEIPT_MAX_BYTES+1024
+
+
 def product_command(arguments, *, stdin=None):
-    # Product stderr and failed stdout can contain copied Client data. They are
-    # never passed through the generic command diagnostic redactor.
-    result=subprocess.run(arguments,input=stdin,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,check=False)
-    if result.returncode:
+    # Discard product stderr and failed stdout, which can contain Client data.
+    process=subprocess.Popen(arguments,stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
+    deadline=time.monotonic()+PRODUCT_COMMAND_TIMEOUT_SECONDS
+    output=bytearray()
+    try:
+        if stdin is not None:
+            process.stdin.write(stdin)
+            process.stdin.close()
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout,selectors.EVENT_READ)
+            while True:
+                remaining=deadline-time.monotonic()
+                if remaining<=0 or not selector.select(remaining):
+                    raise subprocess.TimeoutExpired('product validation',PRODUCT_COMMAND_TIMEOUT_SECONDS)
+                chunk=os.read(process.stdout.fileno(),65536)
+                if not chunk:
+                    break
+                if len(output)+len(chunk)>PRODUCT_COMMAND_OUTPUT_MAX_BYTES:
+                    raise ValueError('Product output exceeds its bound')
+                output.extend(chunk)
+        status=process.wait(timeout=max(0.1,deadline-time.monotonic()))
+        if status:
+            raise ValueError('Product validation failed')
+        return bytes(output)
+    except (ValueError,OSError,subprocess.TimeoutExpired):
         raise RehearsalCommandFailure({'step':'business_validation',
-            'exit_status':result.returncode,'error_text':'Product validation unavailable'})
-    return result.stdout
+            'exit_status':process.returncode or -1,'error_text':'Product validation unavailable'}) from None
+    finally:
+        process.stdout.close()
+        if process.stdin is not None and not process.stdin.closed:
+            process.stdin.close()
+        if process.poll() is None:
+            process.kill()
+        process.wait()
 
 
 def check_business_entrypoint(spec):
@@ -486,7 +518,7 @@ def refusal_receipt(spec, root, code):
     if not all(re.fullmatch(r'[a-f0-9]{64}',value) for value in (attempt,binding)):
         return None
     kind={'rehearsal_storage_capacity_insufficient':'capacity',
-        'rehearsal_precheck_refused':'precheck'}[code]
+        'rehearsal_precheck_refused':'precheck','rehearsal_entrypoint_unavailable':'entrypoint'}[code]
     return root/(spec['action']+'.refused-'+attempt+'-'+binding+'-'+kind)
 
 
@@ -498,9 +530,29 @@ def refusal_result(spec, code):
         'completed':False,'refusal_code':code,'attempt_sha256':spec['attempt_sha256']}
 
 
+def emit_refusal(spec,root,code):
+    path=refusal_receipt(spec,root,code)
+    if path is None:
+        raise RuntimeError('Missing refusal attempt identity')
+    # Creation itself is the complete no-effect proof. There is no
+    # partial JSON/rename window to strand a killed refusal writer.
+    descriptor=os.open(path,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    descriptor=os.open(root,os.O_RDONLY|os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    result=refusal_result(spec,code)
+    emit_rehearsal_result(result)
+
+
 def read_refusal(spec, root):
     result=None
-    for code in ('rehearsal_storage_capacity_insufficient','rehearsal_precheck_refused'):
+    for code in ('rehearsal_storage_capacity_insufficient','rehearsal_precheck_refused','rehearsal_entrypoint_unavailable'):
         path=refusal_receipt(spec,root,code)
         if path is None:
             continue
@@ -757,7 +809,11 @@ def main():
         action=spec['action']
         database,image=current(spec)
         if action=='prepare':
-            check_business_entrypoint(spec)
+            try:
+                check_business_entrypoint(spec)
+            except RehearsalCommandFailure:
+                emit_refusal(spec,root,'rehearsal_entrypoint_unavailable')
+                return
             (root/(action+'.started')).touch(mode=0o600)
             compose(spec,root,image=spec['source_image'],database=names['source'])
             deadline=time.monotonic()+120
@@ -791,23 +847,7 @@ def main():
                 # malformed provider observations are determinate refusals too.
                 code='rehearsal_precheck_refused'
             if code:
-                path=refusal_receipt(spec,root,code)
-                if path is None:
-                    raise RuntimeError('Missing refusal attempt identity')
-                # Creation itself is the complete no-effect proof. There is no
-                # partial JSON/rename window to strand a killed refusal writer.
-                descriptor=os.open(path,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
-                try:
-                    os.fsync(descriptor)
-                finally:
-                    os.close(descriptor)
-                descriptor=os.open(root,os.O_RDONLY|os.O_DIRECTORY)
-                try:
-                    os.fsync(descriptor)
-                finally:
-                    os.close(descriptor)
-                result=refusal_result(spec,code)
-                emit_rehearsal_result(result)
+                emit_refusal(spec,root,code)
                 return
             (root/(spec['receipt_action']+'.started')).touch(mode=0o600)
             copies=list(record['copies'])
