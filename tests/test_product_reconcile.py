@@ -3,14 +3,14 @@ from control_plane.odoo_testing_restore import FreshOdooTestingGeneration
 from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
 from control_plane.dokploy.api import DokployRequestFailed, DokployScheduleExecutionFailed
 from control_plane.contracts.record_failures import record_failure_summary
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import datetime, timedelta, timezone, tzinfo
 from email.message import Message
 import io
 import json
 import os
 import unittest
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 import zipfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -2173,8 +2173,10 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
             )
 
         def upsert(**kwargs: Any) -> Any:
-            self.input_schedule = dict(kwargs["schedule_payload"])
-            return {**self.input_schedule, "scheduleId": "cleanup"}
+            guard = kwargs.get("provider_mutation_guard")
+            with guard() if callable(guard) else nullcontext():
+                self.input_schedule = dict(kwargs["schedule_payload"])
+                return {**self.input_schedule, "scheduleId": "cleanup"}
 
         for patcher in (
             patch.object(
@@ -2619,7 +2621,15 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
             if saved:
                 cleanup_writes.append("hold")
                 if cleanup_failure:
-                    raise click.ClickException("Lost held-schedule reply")
+                    guard = kwargs.get("provider_mutation_guard")
+
+                    @contextmanager
+                    def lost_reply() -> Iterator[None]:
+                        with guard() if callable(guard) else nullcontext():
+                            yield
+                            raise click.ClickException("Lost held-schedule reply")
+
+                    kwargs["provider_mutation_guard"] = lost_reply
             return schedule_write(**kwargs)
 
         def write(**kwargs: Any) -> Any:
@@ -3397,8 +3407,15 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         upsert = cast(Any, api.upsert_dokploy_application_schedule).side_effect
 
         def lost_restore_reply(**kwargs: Any) -> Any:
-            upsert(**kwargs)
-            raise ProviderMutationUnknownError("lost schedule restoration reply")
+            guard = kwargs.get("provider_mutation_guard")
+
+            @contextmanager
+            def lost_reply() -> Iterator[None]:
+                with guard() if callable(guard) else nullcontext():
+                    yield
+                    raise ProviderMutationUnknownError("lost schedule restoration reply")
+
+            return upsert(**{**kwargs, "provider_mutation_guard": lost_reply})
 
         self.request()
         with (

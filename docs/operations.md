@@ -894,6 +894,12 @@ need attributable terminal proof. Where the provider cannot supply it,
 application-side isolation or verified cessation of the original work is a
 prerequisite for a safe continuation; deploying another image does not provide
 that proof.
+A schedule inspection failure before any write can be reviewed again on the
+same original operation. An acknowledged schedule write remains terminal even
+if its later readback fails; review the original again to finish its failed
+settlement. A lost write reply remains unknown even when a later read shows the
+schedule disabled or absent. Foreign schedule evidence triggers the captured
+schedule hold but never supplies terminal proof for the disputed run.
 When current inventory already points at that original, restarted settlement
 preserves it exactly and writes the truthful failed deployment it references.
 Its copied fields can remain pending until an ordinary successor replaces it;
@@ -913,11 +919,16 @@ it, the producer rechecks the full current profile and captured input authority
 before any further work. A refusal retains the fence and dispatches no
 post-image maintenance, executor or activation. Terminal work can use reviewed
 original recovery above, never another guessed provider call.
-A completed native post-image failure settlement permits a deterministic ordinary
-event successor, including when a fresh lane has no inventory to change its
-starting point. Repeated sweeps reuse that successor. If it becomes unknown, it
-needs its own native settlement before another successor can start. An ordinary
-recorded failure retains the existing newer-build or changed-lane retry policy.
+A completed native post-image failure settlement ends the original reservation.
+When ordinary planning selects a deploy, a return to the settled predecessor's
+exact inputs receives a deterministic event successor, including on a fresh lane.
+Repeated sweeps reuse that successor. If it becomes unknown, it needs its own
+native settlement before another successor can start. Settlement does not itself
+select a same-artifact deploy when inventory already points at the desired image;
+existing already-deployed and failed-qualification decisions still apply. A newer
+build, changed lane or deliberate new-key deploy can supply the next attempt.
+An ordinary recorded failure retains the existing newer-build or changed-lane
+retry policy.
 `retry_original_operation` resumes
 the already-acquired reservation path and preserves `reconcile_required` for
 pre-effect rejection, lease loss, uncertain, or non-durable outcomes.

@@ -1425,6 +1425,14 @@ class GenericWebDeployProviderMutationAdapter:
                     deployment_record_id=self._deployment_record_id(operation_key),
                     post_deploy_unobserved=False,
                 )
+                if expected_record is not None:
+                    record = expected_record.model_copy(
+                        update={
+                            "deploy": record.deploy,
+                            "post_deploy_update": record.post_deploy_update,
+                            "runtime_identity": record.runtime_identity,
+                        }
+                    )
             if record is None:
                 raise ProviderMutationUnknownError("The original testing result is unavailable.")
             observed_final_image = (

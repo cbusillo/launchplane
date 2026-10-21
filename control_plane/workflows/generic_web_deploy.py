@@ -1464,14 +1464,6 @@ def build_observed_generic_web_deploy(
         runtime_identity=runtime_identity,
         runtime_source=existing_record.runtime_source if existing_record is not None else {},
     )
-    if existing_record is not None:
-        deployment_record = existing_record.model_copy(
-            update={
-                "deploy": deployment_record.deploy,
-                "post_deploy_update": deployment_record.post_deploy_update,
-                "runtime_identity": deployment_record.runtime_identity,
-            }
-        )
     records, result = generic_web_record_result(
         record=deployment_record,
         product=profile.product,

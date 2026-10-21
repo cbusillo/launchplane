@@ -140,8 +140,13 @@ reservation. The webhook request never waits on a deploy.
     and fails the reconcile until it settles, including when current inventory
     points at an image whose referenced deployment still has pending qualification.
     That image identity is not an already-qualified result. Explicit native
-    terminal failure settlement permits one deterministic ordinary successor,
-    including on a fresh lane; an unknown successor needs its own settlement.
+    terminal failure settlement ends that reservation. If ordinary planning selects
+    a deploy, returning to the settled predecessor's exact inputs receives a
+    deterministic successor, including on a fresh lane; an unknown successor needs
+    its own settlement. Settlement does not override already-deployed or
+    failed-qualification decisions when inventory already has the desired image.
+    A newer build, changed lane or deliberate new-key deploy can supply the next
+    attempt.
     An ordinary recorded failure is not retried until a newer build or the lane
     changes. A complete, correlated terminal provider failure before any
     application/post-deploy

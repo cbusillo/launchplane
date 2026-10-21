@@ -116,6 +116,10 @@ def schedule_completed(entry: ExecutionEntry, history: tuple[api.JsonObject, ...
     return entry.acknowledgement == "rejected" and entry.terminal == "not_started"
 
 
+class ScheduleHistoryBindingRefused(ValueError):
+    """Provider evidence names a different intended schedule or application."""
+
+
 def require_schedule_history_binding(
     history: tuple[api.JsonObject, ...], *, schedule_id: str, application_id: object
 ) -> None:
@@ -123,9 +127,13 @@ def require_schedule_history_binding(
         nested = api.as_json_object(row.get("schedule"))
         for identity in (row, nested or {}):
             if identity.get("scheduleId") and identity["scheduleId"] != schedule_id:
-                raise ValueError("Original schedule history has a foreign schedule.")
+                raise ScheduleHistoryBindingRefused(
+                    "Original schedule history has a foreign schedule."
+                )
             if identity.get("applicationId") and identity["applicationId"] != application_id:
-                raise ValueError("Original schedule history has a foreign application.")
+                raise ScheduleHistoryBindingRefused(
+                    "Original schedule history has a foreign application."
+                )
 
 
 @dataclass(frozen=True)
@@ -285,11 +293,7 @@ class RecordedScheduleExecution:
         payload = api.as_json_object(response)
         intended = api.as_json_object(self.payload) if isinstance(self.payload, dict) else None
         if payload is not None:
-            require_schedule_history_binding(
-                (payload,),
-                schedule_id=self.schedule_id,
-                application_id=intended.get("applicationId") if intended is not None else None,
-            )
+            self._require_binding((payload,), intended)
         if (
             payload is not None
             and isinstance(payload.get("deploymentId"), str)
@@ -308,16 +312,29 @@ class RecordedScheduleExecution:
         elif response is True:
             self.recorder.update(self.index, acknowledgement="synchronous")
 
+    def _require_binding(
+        self, history: tuple[api.JsonObject, ...], intended: api.JsonObject | None
+    ) -> None:
+        try:
+            require_schedule_history_binding(
+                history,
+                schedule_id=self.schedule_id,
+                application_id=intended.get("applicationId") if intended is not None else None,
+            )
+        except ScheduleHistoryBindingRefused as error:
+            raise api.DokployScheduleExecutionFailed(
+                schedule_id=self.schedule_id,
+                deployment_id="",
+                deployment_status="unknown",
+                cause="execution_binding_unproved",
+            ) from error
+
     def rejected(self) -> None:
         self.recorder.update(self.index, acknowledgement="rejected", terminal="not_started")
 
     def completed(self, history: tuple[api.JsonObject, ...]) -> bool:
         intended = api.as_json_object(self.payload) if isinstance(self.payload, dict) else None
-        require_schedule_history_binding(
-            history,
-            schedule_id=self.schedule_id,
-            application_id=intended.get("applicationId") if intended is not None else None,
-        )
+        self._require_binding(history, intended)
         if schedule_completed(self.recorder.receipt.entries[self.index], history):
             self.recorder.update(self.index, terminal="done")
             return True

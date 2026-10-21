@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from contextlib import closing, ExitStack
 from datetime import UTC, datetime
 from pathlib import Path
@@ -255,9 +256,11 @@ class OriginalExecutionTests(unittest.TestCase):
                     schedules: dict[str, api.JsonObject] = {}
 
                     def upsert(**kwargs: Any) -> api.JsonObject:
-                        payload = dict(kwargs["schedule_payload"])
-                        schedules[str(payload["name"])] = payload
-                        return {**payload, "scheduleId": payload["name"]}
+                        guard = kwargs.get("provider_mutation_guard")
+                        with guard() if callable(guard) else nullcontext():
+                            payload = dict(kwargs["schedule_payload"])
+                            schedules[str(payload["name"])] = payload
+                            return {**payload, "scheduleId": payload["name"]}
 
                     patches.enter_context(
                         patch(
@@ -356,7 +359,10 @@ class OriginalExecutionTests(unittest.TestCase):
             {"deploymentId": "job", "schedule": {"scheduleId": "other"}},
         )
         for response in responses:
-            with self.subTest(response=response), self.assertRaises(ValueError):
+            with (
+                self.subTest(response=response),
+                self.assertRaises(api.DokployScheduleExecutionFailed),
+            ):
                 observer.acknowledged(response)
         observer.acknowledged({"deploymentId": "job", "status": ["malformed"]})
         self.assertEqual(recorder.receipt.entries[0].status, "unknown")
@@ -366,9 +372,17 @@ class OriginalExecutionTests(unittest.TestCase):
             {"schedule": {"scheduleId": "other"}},
         )
         for identity in identities:
-            with self.subTest(identity=identity), self.assertRaises(ValueError):
+            with (
+                self.subTest(identity=identity),
+                self.assertRaises(api.DokployScheduleExecutionFailed),
+            ):
                 observer.completed(({"deploymentId": "job", "status": "done", **identity},))
         self.assertFalse(recorder.receipt.entries[0].terminal)
+        with (
+            patch.object(recorder, "update", side_effect=ValueError("Receipt extension refused")),
+            self.assertRaises(ValueError),
+        ):
+            observer.acknowledged(True)
 
     def test_history_requires_original_acknowledgement_and_complete_terminal_rows(self) -> None:
         entry = ExecutionEntry(
@@ -463,6 +477,214 @@ class OriginalExecutionTests(unittest.TestCase):
             observe_execution(ExecutionReceipt(entries=(enable, hold)), lambda _id: ()).outcome,
             "unknown",
         )
+
+    def test_schedule_write_receipts_follow_actual_post_not_helper_readback(self) -> None:
+        from control_plane.workflows.generic_web_application_lifecycle import (
+            DokployApplicationLifecycle,
+        )
+
+        request = _request()
+        transport = api.dokploy_request
+        for operation in ("create", "update", "delete"):
+            for failure in (
+                "none",
+                "pre_read",
+                "post_loss",
+                "post_read",
+                "http_error",
+                "absent",
+            ):
+                if failure == "absent" and operation != "delete":
+                    continue
+                with self.subTest(operation=operation, failure=failure):
+                    records = _GenericWebDeployStore(_profile())
+                    record = DeploymentRecord(
+                        record_id="original-write",
+                        context=request.product + "-testing",
+                        instance="testing",
+                        source_git_ref=request.source_git_ref,
+                        deploy=DeploymentEvidence(
+                            target_name="app",
+                            target_type="application",
+                            deploy_mode="application",
+                            status="pending",
+                        ),
+                    )
+                    records.write_deployment_record(record)
+                    recorder = ExecutionRecorder(records, record.record_id)
+                    extensions = _extensions()
+                    definition = extensions.schedules[0]
+                    payload = schedule_payload(definition, "app", enabled=False)
+                    schedules = (
+                        {}
+                        if operation == "create" or failure == "absent"
+                        else {definition.name: {**payload, "scheduleId": "schedule"}}
+                    )
+                    snapshot = ApplicationLifecycleSnapshot(
+                        product=request.product,
+                        context=record.context,
+                        instance="testing",
+                        provider_id="dokploy",
+                        target_id="app",
+                        artifact_id=request.artifact_id,
+                        source_git_ref=request.source_git_ref,
+                        extensions=extensions,
+                    )
+                    phases: list[str] = []
+                    reads = 0
+                    posts: list[str] = []
+                    lifecycle = DokployApplicationLifecycle(
+                        host="https://provider.invalid",
+                        token="fixture",
+                        application_id="app",
+                        snapshot=snapshot,
+                        checkpoint=phases.append,
+                        effect_started=lambda: None,
+                        execution_recorder=recorder,
+                    )
+
+                    def provider(**kwargs: Any) -> Any:
+                        nonlocal reads
+                        path = kwargs["path"]
+                        if path == "/api/schedule.list":
+                            reads += 1
+                            preliminary = reads == (2 if operation == "delete" else 1)
+                            if (failure == "pre_read" and preliminary) or (
+                                failure == "post_read" and posts
+                            ):
+                                with patch.object(
+                                    api, "urlopen", side_effect=URLError("Read lost")
+                                ):
+                                    return transport(**kwargs)
+                            return list(schedules.values())
+                        entries = recorder.receipt.entries
+                        self.assertTrue(entries, "Durable intent must precede actual POST")
+                        self.assertFalse(entries[-1].terminal)
+                        self.assertTrue(phases)
+                        posts.append(path)
+                        if failure == "http_error":
+                            error = HTTPError(
+                                "https://provider.invalid", 403, "Refused", Message(), io.BytesIO()
+                            )
+                            with patch.object(api, "urlopen", side_effect=error):
+                                return transport(**kwargs)
+                        if operation == "delete":
+                            schedules.clear()
+                        else:
+                            schedules[definition.name] = {
+                                **kwargs["payload"],
+                                "scheduleId": "schedule",
+                            }
+                        if failure == "post_loss":
+                            with patch.object(api, "urlopen", side_effect=URLError("Reply lost")):
+                                return transport(**kwargs)
+                        return True
+
+                    with patch.object(api, "dokploy_request", side_effect=provider):
+                        if failure not in {"none", "absent"}:
+                            with self.assertRaises(api.DokployRequestFailed):
+                                if operation == "delete":
+                                    lifecycle._delete(definition.name)
+                                else:
+                                    lifecycle._upsert(payload, "application_schedule_prepare")
+                        elif operation == "delete":
+                            lifecycle._delete(definition.name)
+                        else:
+                            lifecycle._upsert(payload, "application_schedule_prepare")
+                    if failure in {"pre_read", "absent"}:
+                        self.assertFalse(posts)
+                        self.assertFalse(phases)
+                        self.assertFalse(recorder.receipt.entries)
+                    else:
+                        self.assertEqual(len(posts), 1)
+                        terminal = failure in {"none", "post_read"}
+                        self.assertEqual(bool(recorder.receipt.entries[-1].terminal), terminal)
+                        self.assertEqual(
+                            observe_execution(recorder.receipt, lambda _id: ()).outcome,
+                            "terminal" if terminal else "unknown",
+                        )
+
+    def test_foreign_canary_evidence_holds_earlier_schedule_without_completing_run(self) -> None:
+        from control_plane.workflows.generic_web_deploy import execute_generic_web_deploy
+
+        for foreign in ("acknowledgement", "history"):
+            with self.subTest(foreign=foreign):
+                profile = _profile()
+                definition = _extensions().schedules[0]
+                extensions = _extensions().model_copy(
+                    update={
+                        "maintenance": (),
+                        "schedules": tuple(
+                            definition.model_copy(update={"name": name})
+                            for name in ("first-recurring", "second-recurring")
+                        ),
+                    }
+                )
+                lane = profile.lanes[0].model_copy(update={"generic_web_extensions": extensions})
+                profile = profile.model_copy(update={"lanes": (lane,)})
+                records = _GenericWebDeployStore(profile)
+                recorder = ExecutionRecorder(records, "actual-canaries")
+                schedules: dict[str, api.JsonObject] = {}
+                history: dict[str, list[api.JsonObject]] = {}
+                enabled_before_second: list[bool] = []
+                runs: list[str] = []
+
+                def provider(**kwargs: Any) -> Any:
+                    path = kwargs["path"]
+                    if path == "/api/schedule.list":
+                        return list(schedules.values())
+                    if path == "/api/deployment.allByType":
+                        return history.get(kwargs["query"]["id"], [])
+                    payload = kwargs["payload"]
+                    if path in {"/api/schedule.create", "/api/schedule.update"}:
+                        schedules[str(payload["name"])] = {**payload, "scheduleId": payload["name"]}
+                        return schedules[str(payload["name"])]
+                    self.assertEqual(path, "/api/schedule.runManually")
+                    identifier = payload["scheduleId"]
+                    runs.append(identifier)
+                    history[identifier] = [
+                        {
+                            "deploymentId": "job-" + identifier,
+                            "scheduleId": identifier,
+                            "applicationId": "app-123",
+                            "status": "done",
+                        }
+                    ]
+                    if identifier == "second-recurring":
+                        enabled_before_second.append(bool(schedules["first-recurring"]["enabled"]))
+                        if foreign == "acknowledgement":
+                            return {**history[identifier][0], "scheduleId": "foreign-schedule"}
+                        history[identifier][0]["applicationId"] = "foreign-application"
+                    return True
+
+                with (
+                    patch(
+                        "control_plane.dokploy.source.read_dokploy_config",
+                        return_value=("https://provider.invalid", "fixture"),
+                    ),
+                    patch.object(api, "dokploy_request", side_effect=provider),
+                    self.assertRaises(ProviderMutationUnknownError),
+                ):
+                    execute_generic_web_deploy(
+                        control_plane_root=Path("."),
+                        record_store=records,
+                        request=_request(),
+                        execution_recorder=recorder,
+                        deployment_record_id=recorder.record_id,
+                        deploy_provider=_LifecycleDeployProvider(target_id="app-123"),
+                    )
+                self.assertEqual(enabled_before_second, [True])
+                self.assertTrue(all(row["enabled"] is False for row in schedules.values()))
+                self.assertEqual(runs, [item.name for item in extensions.schedules])
+                pending = [entry for entry in recorder.receipt.entries if not entry.terminal]
+                self.assertEqual([entry.name for entry in pending], ["second-recurring"])
+                self.assertEqual(
+                    observe_execution(recorder.receipt, lambda _id: ()).outcome, "unknown"
+                )
+                self.assertEqual(recorder.receipt.entries[-1].name, "first-recurring")
+                self.assertEqual(recorder.receipt.entries[-1].terminal, "write_completed")
+                saved = records.read_deployment_record(recorder.record_id)
+                self.assertNotEqual(saved.post_deploy_update.status, "pass")
 
     def test_schedule_receipt_persistence_precedes_trigger_and_uses_execution_budget(self) -> None:
         records = _GenericWebDeployStore(_profile())
@@ -588,10 +810,12 @@ class OriginalExecutionTests(unittest.TestCase):
                 return dict(value) if value else None
 
             def upsert(**kwargs: object) -> api.JsonObject:
-                payload = api.as_json_object(cast(api.JsonValue, kwargs["schedule_payload"]))
-                assert payload is not None
-                schedules[str(payload["name"])] = dict(payload)
-                return {**payload, "scheduleId": payload["name"]}
+                guard = kwargs.get("provider_mutation_guard")
+                with guard() if callable(guard) else nullcontext():
+                    payload = api.as_json_object(cast(api.JsonValue, kwargs["schedule_payload"]))
+                    assert payload is not None
+                    schedules[str(payload["name"])] = dict(payload)
+                    return {**payload, "scheduleId": payload["name"]}
 
             def run(**kwargs: object) -> str:
                 callback = kwargs.get("before_trigger")
@@ -1627,24 +1851,28 @@ class ExecutionRecoveryTests(unittest.TestCase):
                 writes: list[str] = []
 
                 def upsert(**kwargs: Any) -> api.JsonObject:
-                    payload = cast(api.JsonObject, kwargs["schedule_payload"])
-                    current = self.store.read_deployment_record(record_id)
-                    self.assertFalse(
-                        ExecutionReceipt.model_validate_json(
-                            current.post_deploy_update.evidence[EXECUTION_EVIDENCE_KEY]
+                    guard = kwargs.get("provider_mutation_guard")
+                    with guard() if callable(guard) else nullcontext():
+                        payload = cast(api.JsonObject, kwargs["schedule_payload"])
+                        current = self.store.read_deployment_record(record_id)
+                        self.assertFalse(
+                            ExecutionReceipt.model_validate_json(
+                                current.post_deploy_update.evidence[EXECUTION_EVIDENCE_KEY]
+                            )
+                            .entries[-1]
+                            .terminal
                         )
-                        .entries[-1]
-                        .terminal
-                    )
-                    schedules[str(payload["name"])] = payload
-                    writes.append("enable")
-                    if lost:
-                        raise ProviderMutationUnknownError("Original enable reply lost.")
-                    return payload
+                        schedules[str(payload["name"])] = payload
+                        writes.append("enable")
+                        if lost:
+                            raise ProviderMutationUnknownError("Original enable reply lost.")
+                        return payload
 
                 def delete(**kwargs: Any) -> None:
-                    schedules.pop(kwargs["schedule_payload"]["name"])
-                    writes.append("delete")
+                    guard = kwargs.get("provider_mutation_guard")
+                    with guard() if callable(guard) else nullcontext():
+                        schedules.pop(kwargs["schedule_payload"]["name"])
+                        writes.append("delete")
 
                 class Adapter:
                     def target_key(inner) -> str:
@@ -2262,6 +2490,130 @@ class ExecutionRecoveryTests(unittest.TestCase):
                 context_name=lane.context, instance_name="testing"
             )
 
+    def test_settlement_write_failures_follow_actual_dispatch_and_allow_known_retry(self) -> None:
+        class Provider(_RecoveryObservationProvider, DokployGenericWebDeployProvider):
+            pass
+
+        transport = api.dokploy_request
+        for failure in ("pre_read", "post_read", "post_loss"):
+            with self.subTest(failure=failure):
+                definition = _extensions().schedules[0]
+                original = {
+                    **schedule_payload(
+                        definition, self.target.resolved_target.target_id, enabled=True
+                    ),
+                    "scheduleId": "captured-schedule",
+                }
+                snapshot = ApplicationLifecycleSnapshot(
+                    product=self.profile.product,
+                    context=self.target.ship_request.context,
+                    instance="testing",
+                    provider_id="dokploy",
+                    target_id=self.target.resolved_target.target_id,
+                    artifact_id=self.target.ship_request.artifact_id,
+                    source_git_ref=self.target.ship_request.source_git_ref,
+                    extensions=_extensions(),
+                    originals={definition.name: original},
+                    managed_names=(definition.name,),
+                )
+                key = "settlement-" + failure
+                record_id = self.prepare(
+                    "post_deploy_finished",
+                    ExecutionReceipt(),
+                    snapshot=snapshot,
+                    idempotency_key=key,
+                )
+                schedules = {definition.name: dict(original)}
+                writes: list[api.JsonObject] = []
+                reads = 0
+                inject = True
+
+                def provider(**kwargs: Any) -> Any:
+                    nonlocal reads, inject
+                    if kwargs["path"] == "/api/schedule.list":
+                        reads += 1
+                        if inject and (
+                            (failure == "pre_read" and reads == 2)
+                            or (failure == "post_read" and writes)
+                        ):
+                            inject = False
+                            with patch.object(api, "urlopen", side_effect=URLError("Read lost")):
+                                return transport(**kwargs)
+                        return list(schedules.values())
+                    self.assertEqual(kwargs["path"], "/api/schedule.update")
+                    payload = kwargs["payload"]
+                    schedules[definition.name].update(payload)
+                    writes.append(dict(payload))
+                    if inject and failure == "post_loss":
+                        inject = False
+                        with patch.object(api, "urlopen", side_effect=URLError("Reply lost")):
+                            return transport(**kwargs)
+                    return True
+
+                with (
+                    patch(
+                        "control_plane.generic_web_deploy_provider_adapter.default_generic_web_deploy_provider",
+                        return_value=Provider(self.provider.observation),
+                    ),
+                    patch(
+                        "control_plane.dokploy.source.read_dokploy_config",
+                        return_value=("https://provider.invalid", "fixture"),
+                    ),
+                    patch.object(api, "dokploy_request", side_effect=provider),
+                ):
+                    status, dry = _invoke_recovery(
+                        self.app,
+                        original_deploy=self.request,
+                        idempotency_key=key,
+                        reason="Hold the terminal original.",
+                    )
+                    self.assertEqual(status, 200)
+                    self.assertEqual(dry["proposed_action"], "settle_testing_failure")
+                    status, _ = _invoke_recovery_apply(
+                        self.app,
+                        original_deploy=self.request,
+                        idempotency_key=key,
+                        reason="Hold the terminal original.",
+                        expected_recovery_digest=dry["recovery_digest"],
+                    )
+                    self.assertEqual(status, 409)
+                    saved = self.store.read_deployment_record(record_id)
+                    receipt = ExecutionReceipt.model_validate_json(
+                        saved.post_deploy_update.evidence[EXECUTION_EVIDENCE_KEY]
+                    )
+                    if failure == "pre_read":
+                        self.assertFalse(receipt.entries)
+                        self.assertFalse(writes)
+                    else:
+                        self.assertEqual(bool(receipt.entries[-1].terminal), failure == "post_read")
+                    status, retry = _invoke_recovery(
+                        self.app,
+                        original_deploy=self.request,
+                        idempotency_key=key,
+                        reason="Review only the original again.",
+                    )
+                    self.assertEqual(status, 200)
+                    if failure == "post_loss":
+                        self.assertEqual(retry["proposed_action"], "hold_unknown")
+                        self.assertEqual(self.store.read_deployment_record(record_id), saved)
+                    else:
+                        self.assertEqual(retry["proposed_action"], "settle_testing_failure")
+                        status, result = _invoke_recovery_apply(
+                            self.app,
+                            original_deploy=self.request,
+                            idempotency_key=key,
+                            reason="Review only the original again.",
+                            expected_recovery_digest=retry["recovery_digest"],
+                        )
+                        self.assertEqual(status, 202)
+                        self.assertEqual(result["reservation_state"], "completed")
+                        self.assertEqual(
+                            self.store.read_deployment_record(record_id).post_deploy_update.status,
+                            "fail",
+                        )
+                    self.assertEqual(len(writes), 1)
+                    self.assertFalse(schedules[definition.name]["enabled"])
+
     def test_terminal_unqualified_settlement_only_holds_captured_schedules(self) -> None:
         class Provider(_RecoveryObservationProvider, DokployGenericWebDeployProvider):
             pass
@@ -2286,11 +2638,13 @@ class ExecutionRecoveryTests(unittest.TestCase):
         writes: list[api.JsonObject] = []
 
         def upsert(**kwargs: object) -> api.JsonObject:
-            payload = cast(api.JsonObject, kwargs["schedule_payload"])
-            self.assertFalse(payload["enabled"])
-            schedules[str(payload["name"])] = payload
-            writes.append(payload)
-            return payload
+            guard = kwargs.get("provider_mutation_guard")
+            with guard() if callable(guard) else nullcontext():
+                payload = cast(api.JsonObject, kwargs["schedule_payload"])
+                self.assertFalse(payload["enabled"])
+                schedules[str(payload["name"])] = payload
+                writes.append(payload)
+                return payload
 
         with (
             patch(

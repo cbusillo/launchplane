@@ -263,6 +263,8 @@ def _goto(
     exchanges: "_TestingPageExchanges | None" = None,
 ) -> None:
     try:
+        if exchanges is not None:
+            exchanges.finish()
         response = page.goto(f"{base_url}{path}", wait_until="domcontentloaded")
         if guard is not None:
             if response is None or response.status >= 400:
@@ -297,8 +299,14 @@ class _TestingPageExchanges:
         self.responses: dict[BrowserRequest, BrowserResponse] = {}
         page.on("request", self.started)
         page.on("response", self.responded)
-        page.on("requestfinished", self.completed.add)
-        page.on("requestfailed", self.failed.add)
+        page.on("requestfinished", self.finished)
+        page.on("requestfailed", self.failure)
+
+    def finished(self, request: BrowserRequest) -> None:
+        self.completed.add(request)
+
+    def failure(self, request: BrowserRequest) -> None:
+        self.failed.add(request)
 
     def responded(self, response: BrowserResponse) -> None:
         self.responses[response.request] = response
@@ -403,6 +411,7 @@ def verify_verireel_testing_product(
                         page.get_by_placeholder("Create a strong password").fill(
                             "Quartz!Canopy$" + "-".join(str(randbelow(10)) for _ in range(18))
                         )
+                        exchanges.finish()
                         checkpoint_testing_effect(guard, "post_deploy_fixture_signup")
                         with page.expect_response(
                             lambda response: (
@@ -427,6 +436,7 @@ def verify_verireel_testing_product(
                             expect(page.get_by_text(email, exact=False).first).to_be_visible(
                                 timeout=30_000
                             )
+                        exchanges.finish()
                         _maintenance(
                             root,
                             context,
@@ -439,6 +449,7 @@ def verify_verireel_testing_product(
                         page.get_by_label("Video label").fill(f"Launchplane creator {stamp}")
                         page.get_by_label("Public verification label").fill(public_label)
                         page.get_by_label("Destination URL").fill(destination)
+                        exchanges.finish()
                         checkpoint_testing_effect(guard, "post_deploy_fixture_qr")
                         with page.expect_response(
                             lambda response: (
@@ -471,8 +482,10 @@ def verify_verireel_testing_product(
                             expect(
                                 public_page.get_by_role("link", name=destination, exact=True)
                             ).to_be_visible(timeout=30_000)
+                            public_exchanges.finish()
                         assert_verireel_testing_identity(base_url, context)
                         evidence["creator_verification_status"] = "pass"
+                        exchanges.finish()
                         _maintenance(
                             root,
                             context,

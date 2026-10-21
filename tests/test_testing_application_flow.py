@@ -14,8 +14,11 @@ from typing import Any, Literal
 from typing import cast
 import unittest
 from unittest.mock import patch
+from urllib.error import URLError
 
 from control_plane import secrets
+from control_plane.dokploy import api
+from control_plane.dokploy.api import dokploy_request as schedule_transport
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_record import (
     DokployTargetRecord,
@@ -242,8 +245,6 @@ class ApplicationFlowTests(unittest.TestCase):
                 side_effect=lambda **kw: self.deployments[kw["target_id"]][-1]["deploymentId"],
             )
         )
-        from control_plane.dokploy import api
-
         self.schedule_runner = api.run_dokploy_schedule
         self.enterContext(
             patch("control_plane.dokploy.api.run_dokploy_schedule", side_effect=self.command)
@@ -309,13 +310,10 @@ class ApplicationFlowTests(unittest.TestCase):
             }
         self.store.write_product_profile_record(profile)
         self.lose_command = True
-        with (
-            self.assertRaises(OSError),
-            patch.object(
-                self.store, "_database_mutation_timestamp", return_value=self.old.now(-3600)
-            ),
+        with patch.object(
+            self.store, "_database_mutation_timestamp", return_value=self.old.now(-3600)
         ):
-            self.normal("original")
+            self.assertEqual(self.normal("original").status, "reconcile_required")
         self.lose_command = False
         self.original = next(
             row
@@ -324,7 +322,7 @@ class ApplicationFlowTests(unittest.TestCase):
         )
         self.assertEqual(
             self.original.provider_effect_phase,
-            "application_schedule_quiesce"
+            "application_schedule_restore"
             if self.pre_image_unknown
             else "application_maintenance_execute",
         )
@@ -522,6 +520,10 @@ class ApplicationFlowTests(unittest.TestCase):
             },
         }
 
+    def lost_schedule_reply(self, **kwargs: Any) -> Any:
+        with patch.object(api, "urlopen", side_effect=URLError("Lost provider execution reply")):
+            return schedule_transport(**kwargs)
+
     def provider(self, **kwargs: Any) -> Any:
         path, body = kwargs["path"], kwargs.get("payload", {})
         if kwargs.get("method", "GET") == "GET":
@@ -563,8 +565,8 @@ class ApplicationFlowTests(unittest.TestCase):
             }
             self.schedule_history.setdefault(identifier, []).append(row)
             if self.lose_command:
-                raise OSError("Lost the original local-command execution reply")
-            return deepcopy(row)
+                return self.lost_schedule_reply(**kwargs)
+            return True
         if path == "/api/schedule.create":
             identifier = "schedule-" + str(len(self.schedules))
             self.schedules[identifier] = {**body, "scheduleId": identifier}
@@ -572,7 +574,7 @@ class ApplicationFlowTests(unittest.TestCase):
         if path == "/api/schedule.update":
             self.schedules[body["scheduleId"]].update(body)
             if self.pre_image_unknown and self.lose_command and body.get("enabled") is False:
-                raise OSError("Lost original schedule quiesce reply before image dispatch")
+                return self.lost_schedule_reply(**kwargs)
             return deepcopy(self.schedules[body["scheduleId"]])
         if path == "/api/schedule.delete":
             self.schedules.pop(body["scheduleId"])
@@ -1581,12 +1583,15 @@ class ApplicationFlowTests(unittest.TestCase):
     def test_unfinished_private_forward_recovery_and_fresh_successor(self) -> None:
         for problem in ("empty", "preparing", "busy"):
             with self.subTest(problem=problem):
+                outer_runs, outer_writes = list(self.schedule_runs), list(self.writes)
                 fixture = ApplicationFlowTests()
                 fixture.setUp()
                 try:
                     fixture.assert_unfinished_private_forward_recovers_and_successor(problem)
                 finally:
                     fixture.doCleanups()
+                self.assertEqual(self.schedule_runs, outer_runs)
+                self.assertEqual(self.writes, outer_writes)
 
     def test_unfinished_forward_adoption_loses_to_actual_new_writing_attempt(self) -> None:
         from control_plane.testing_route_effects import ROUTE_WRITING
@@ -2398,13 +2403,10 @@ class ApplicationFlowTests(unittest.TestCase):
         )
         self.assertEqual(ingress.client.proxy_hosts, edge_before)
         self.lose_command = True
-        with (
-            self.assertRaises(OSError),
-            patch.object(
-                self.store, "_database_mutation_timestamp", return_value=self.old.now(-3600)
-            ),
+        with patch.object(
+            self.store, "_database_mutation_timestamp", return_value=self.old.now(-3600)
         ):
-            self.normal("second-private-original")
+            self.assertEqual(self.normal("second-private-original").status, "reconcile_required")
         self.lose_command = False
         target = self.store.read_dokploy_target_record(
             context_name=self.context, instance_name="testing"
@@ -2650,6 +2652,13 @@ class ApplicationFlowTests(unittest.TestCase):
                     not entry.terminal and entry.acknowledgement == "none" for entry in unknown_runs
                 )
             )
+        else:
+            quiesce, restore = original_receipt.entries
+            self.assertEqual(quiesce.kind, "schedule_write")
+            self.assertFalse(quiesce.terminal)
+            self.assertEqual(restore.kind, "schedule_write")
+            self.assertEqual(restore.terminal, "write_completed")
+            self.assertEqual(quiesce.name, restore.name)
         before_runs = list(self.schedule_runs)
         self.assertEqual(self.normal("original").status, "reconcile_required")
         self.assertEqual(self.normal("same-target-before-separation").status, "target_busy")
@@ -4312,13 +4321,10 @@ class ApplicationFlowTests(unittest.TestCase):
             product=self.product, context=self.context, scope=self.scope, preparation_key="prepare"
         )
         self.lose_command = True
-        with (
-            self.assertRaises(OSError),
-            patch.object(
-                self.store, "_database_mutation_timestamp", return_value=self.old.now(-3600)
-            ),
+        with patch.object(
+            self.store, "_database_mutation_timestamp", return_value=self.old.now(-3600)
         ):
-            self.normal("second-original")
+            self.assertEqual(self.normal("second-original").status, "reconcile_required")
         self.lose_command = False
         target = self.store.read_dokploy_target_record(
             context_name=self.context, instance_name="testing"

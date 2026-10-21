@@ -11,7 +11,11 @@ from control_plane.contracts.dokploy_target_id_record import DokployTargetIdReco
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.environment_inventory import EnvironmentInventory
-from control_plane.contracts.promotion_record import HealthcheckEvidence, PostDeployUpdateEvidence
+from control_plane.contracts.promotion_record import (
+    DeploymentEvidence,
+    HealthcheckEvidence,
+    PostDeployUpdateEvidence,
+)
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductImageProfile,
@@ -1650,47 +1654,101 @@ class GenericWebDeployTests(unittest.TestCase):
         self.assertEqual(store.deployments, [])
 
     def test_record_observed_generic_web_deploy_repairs_missing_records(self) -> None:
-        profile = _profile(driver_id="odoo")
-        lane = profile.lanes[0]
-        store = _GenericWebDeployStore(profile)
-        provider = _FakeGenericWebDeployProvider()
-        request = _request()
-        resolved_target = provider.resolve_deploy_target(
-            control_plane_root=Path("."),
-            request_artifact_id=request.artifact_id,
-            request_source_git_ref=request.source_git_ref,
-            request_timeout_seconds=request.timeout_seconds,
-            request_no_cache=request.no_cache,
-            record_store=store,
-            profile=profile,
-            lane=lane,
-            normalized_artifact_id=request.artifact_id,
-            fallback_target_name="unused",
-        )
-
-        records, result = record_observed_generic_web_deploy(
-            record_store=store,
-            profile=profile,
-            lane=lane,
-            resolved_deploy_target=resolved_target,
-            observation=GenericWebProviderDeploymentObservation(
-                outcome="present",
-                deployment_status="success",
-                deployment_id="deployment-observed",
-                started_at="2026-07-13T12:00:00Z",
-                finished_at="2026-07-13T12:01:00Z",
-            ),
-            deployment_record_id="deployment-recovered",
-            post_deploy_unobserved=True,
-        )
-
-        self.assertEqual(records, {"deployment_record_id": "deployment-recovered"})
-        self.assertEqual(result["deploy_status"], "pass")
-        self.assertEqual(result["post_deploy_status"], "fail")
-        self.assertEqual(len(store.deployments), 1)
-        self.assertEqual(store.deployments[0].record_id, "deployment-recovered")
-        self.assertEqual(store.deployments[0].post_deploy_update.status, "fail")
-        self.assertEqual(len(store.inventories), 1)
+        for instance, target_type in (
+            ("testing", "compose"),
+            ("preview", "application"),
+            ("prod", "application"),
+        ):
+            for partial in (False, True):
+                with self.subTest(instance=instance, target_type=target_type, partial=partial):
+                    profile = _profile(driver_id="odoo")
+                    lane = profile.lanes[0].model_copy(update={"instance": instance})
+                    profile = profile.model_copy(update={"lanes": (lane,)})
+                    store = _GenericWebDeployStore(profile)
+                    provider = _FakeGenericWebDeployProvider()
+                    request = _request()
+                    target = provider.resolve_deploy_target(
+                        control_plane_root=Path("."),
+                        request_artifact_id=request.artifact_id,
+                        request_source_git_ref=request.source_git_ref,
+                        request_timeout_seconds=request.timeout_seconds,
+                        request_no_cache=request.no_cache,
+                        record_store=store,
+                        profile=profile,
+                        lane=lane,
+                        normalized_artifact_id=request.artifact_id,
+                        fallback_target_name="unused",
+                    )
+                    if target_type == "compose":
+                        assert target.deployed_target is not None
+                        target = target.model_copy(
+                            update={
+                                "ship_request": target.ship_request.model_copy(
+                                    update={
+                                        "target_type": target_type,
+                                        "target_category": target_type,
+                                        "provider_target_type": target_type,
+                                    }
+                                ),
+                                "resolved_target": target.resolved_target.model_copy(
+                                    update={"target_type": target_type}
+                                ),
+                                "deployed_target": target.deployed_target.model_copy(
+                                    update={
+                                        "target_category": target_type,
+                                        "provider_target_type": target_type,
+                                    }
+                                ),
+                            }
+                        )
+                    if partial:
+                        store.write_deployment_record(
+                            DeploymentRecord(
+                                record_id="deployment-recovered",
+                                context=lane.context,
+                                instance=lane.instance,
+                                source_git_ref=request.source_git_ref,
+                                deploy=DeploymentEvidence(
+                                    target_name=target.resolved_target.target_name,
+                                    target_type=target.ship_request.target_type,
+                                    provider_id=target.ship_request.provider_id,
+                                    target_category=target.ship_request.target_category,
+                                    provider_target_type=target.ship_request.provider_target_type,
+                                    deploy_mode=target.ship_request.deploy_mode,
+                                    status="pending",
+                                ),
+                            )
+                        )
+                    records, result = record_observed_generic_web_deploy(
+                        record_store=store,
+                        profile=profile,
+                        lane=lane,
+                        resolved_deploy_target=target,
+                        observation=GenericWebProviderDeploymentObservation(
+                            outcome="present",
+                            deployment_status="success",
+                            deployment_id="deployment-observed",
+                            started_at="2026-07-13T12:00:00Z",
+                            finished_at="2026-07-13T12:01:00Z",
+                        ),
+                        deployment_record_id="deployment-recovered",
+                        post_deploy_unobserved=True,
+                    )
+                    self.assertEqual(records, {"deployment_record_id": "deployment-recovered"})
+                    self.assertEqual(result["deploy_status"], "pass")
+                    self.assertEqual(result["post_deploy_status"], "fail")
+                    self.assertEqual(len(store.deployments), 1)
+                    saved = store.deployments[0]
+                    self.assertEqual(saved.record_id, "deployment-recovered")
+                    self.assertEqual(saved.post_deploy_update.status, "fail")
+                    self.assertEqual(saved.resolved_target, target.resolved_target)
+                    self.assertEqual(saved.deployed_target, target.deployed_target)
+                    assert saved.artifact_identity is not None
+                    self.assertEqual(saved.artifact_identity.artifact_id, request.artifact_id)
+                    self.assertEqual(len(store.inventories), 1)
+                    self.assertEqual(
+                        store.inventories[0].artifact_identity, saved.artifact_identity
+                    )
 
     def test_record_observed_generic_web_deploy_preserves_existing_post_deploy_evidence(
         self,

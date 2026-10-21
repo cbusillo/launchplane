@@ -2,14 +2,17 @@
 
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, nullcontext
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 import unittest
 from unittest.mock import patch
 from urllib.error import URLError
 
 import click
+from playwright.sync_api import Page
+from pyee import EventEmitter
 
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.promotion_record import DeploymentEvidence, PostDeployUpdateEvidence
@@ -57,8 +60,17 @@ class _Locator:
             raise OSError("Browser transport disconnected.")
         if self.page.browser.failure == "fill":
             raise RuntimeError("local input unavailable")
+        if (
+            self.page.browser.failure == "signup-refresh"
+            and self.label == "Create a strong password"
+        ) or (
+            self.page.browser.failure in {"qr-refresh", "refresh-unknown"}
+            and self.label == "Destination URL"
+        ):
+            self.page.emit("GET", "/dashboard?_rsc=fixture")
 
     def click(self) -> None:
+        self.page.require_drained_requests()
         name = str(self.label)
         if "create account" in name:
             if self.page.browser.failure == "signup-click":
@@ -101,8 +113,8 @@ class _Page:
             if (
                 self.browser.failure == "billing-pending"
                 and request.url.endswith("/billing")
-                and predicate(request)
-            ):
+                or ("?_rsc=" in request.url and self.browser.failure != "refresh-unknown")
+            ) and predicate(request):
                 self.browser.finished.add(request)
                 self.event("requestfinished", request)
                 return
@@ -122,6 +134,8 @@ class _Page:
                 self.event("requestfailed", request)
         elif path == "/billing" and self.browser.failure == "billing-pending":
             pass
+        elif "?_rsc=" in path:
+            pass
         else:
             self.browser.finished.add(request)
             self.browser.events.append("finished:" + response.url)
@@ -131,13 +145,30 @@ class _Page:
         return response
 
     def goto(self, url: str, **_kwargs: Any) -> _Response:
+        self.require_drained_requests()
         path = url.removeprefix("https://video.test")
+        if self.browser.failure == "initial-refusal":
+            raise OSError("Connection refused before receiving a response.")
         self.url = (
             url
             if self.browser.admin or not path.startswith("/site-config")
             else "https://video.test/dashboard"
         )
-        return self.emit("GET", path)
+        response = self.emit("GET", path)
+        if self.browser.failure == "redirect-refusal":
+            response.status = 302
+            raise OSError("Connection refused after following the original response redirect.")
+        if self.browser.failure == "gateway-error":
+            response.status = 503
+        if self.browser.failure == "navigation-refresh" and path == "/site-config":
+            self.emit("GET", "/dashboard?_rsc=fixture")
+        return response
+
+    def require_drained_requests(self) -> None:
+        for request in self.browser.requests:
+            if "?_rsc=" in request.url and request not in self.browser.finished:
+                self.event("requestfailed", request)
+                raise OSError("Navigation or submission abandoned an outstanding product request.")
 
     def set_default_timeout(self, _value: int) -> None:
         pass
@@ -195,6 +226,30 @@ class _Browser:
 
 
 class ProductExecutionTests(unittest.TestCase):
+    def test_collector_registers_with_the_public_playwright_event_api(self) -> None:
+        loop = asyncio.new_event_loop()
+        self.addCleanup(loop.close)
+
+        class PageEvents(EventEmitter):
+            def __init__(self) -> None:
+                super().__init__()
+                self._loop = loop
+                self._dispatcher_fiber = None
+
+        events = PageEvents()
+        # Only the event transport is finite; Page.on's SDK adaptation is real.
+        page = Page(cast(Any, events))
+        collector = verification._TestingPageExchanges(
+            page, "https://video.test", GenericWebPostDeployGuard()
+        )
+        finished, failed = object(), object()
+        events.emit("requestfinished", finished)
+        events.emit("requestfailed", failed)
+        self.assertIn(finished, collector.completed)
+        self.assertNotIn(finished, collector.failed)
+        self.assertIn(failed, collector.failed)
+        self.assertNotIn(failed, collector.completed)
+
     def verify(self, failure: str) -> tuple[ExecutionRecorder, _Browser, list[str]]:
         captured = context()
         records = _GenericWebDeployStore(_profile())
@@ -256,6 +311,8 @@ class ProductExecutionTests(unittest.TestCase):
             def visible(**_kwargs: Any) -> None:
                 if failure == "assertion" and locator.role == "heading":
                     raise AssertionError("answered page has unexpected presentation")
+                if failure == "public-refresh" and locator.role == "link":
+                    locator.page.emit("GET", "/v/fixture?_rsc=fixture")
 
             return SimpleNamespace(to_be_visible=visible)
 
@@ -289,7 +346,14 @@ class ProductExecutionTests(unittest.TestCase):
         return recorder, browser, actions
 
     def test_real_verifier_finishes_dynamic_refresh_and_action_responses(self) -> None:
-        for failure in ("", "billing-pending"):
+        for failure in (
+            "",
+            "billing-pending",
+            "signup-refresh",
+            "qr-refresh",
+            "navigation-refresh",
+            "public-refresh",
+        ):
             with self.subTest(failure=failure):
                 recorder, browser, actions = self.verify(failure)
                 self.assertEqual(recorder.receipt.entries[0].terminal, "executor_completed")
@@ -299,7 +363,17 @@ class ProductExecutionTests(unittest.TestCase):
                 self.assertTrue(all(self.billing_at_grant))
 
     def test_lost_signup_or_maintenance_reply_skips_data_cleanup(self) -> None:
-        for failure in ("signup", "body_pending", "maintenance", "qr", "disconnected"):
+        for failure in (
+            "signup",
+            "body_pending",
+            "maintenance",
+            "qr",
+            "disconnected",
+            "refresh-unknown",
+            "initial-refusal",
+            "redirect-refusal",
+            "gateway-error",
+        ):
             with self.subTest(failure=failure):
                 with self.assertRaises(ProviderMutationUnknownError):
                     self.verify(failure)

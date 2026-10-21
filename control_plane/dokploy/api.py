@@ -1848,6 +1848,7 @@ def upsert_dokploy_application_schedule(
     token: str,
     application_id: str,
     schedule_payload: JsonObject,
+    provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
 ) -> JsonObject:
     schedule_name = str(schedule_payload.get("name") or "").strip()
     if not schedule_name:
@@ -1867,26 +1868,28 @@ def upsert_dokploy_application_schedule(
         schedule_name=schedule_name,
     )
     if existing_schedule is None:
-        dokploy_request(
-            host=host,
-            token=token,
-            path="/api/schedule.create",
-            method="POST",
-            payload=schedule_payload,
-        )
+        with (provider_mutation_guard or nullcontext)():
+            dokploy_request(
+                host=host,
+                token=token,
+                path="/api/schedule.create",
+                method="POST",
+                payload=schedule_payload,
+            )
     else:
         existing_schedule_id = schedule_key(existing_schedule)
         if not existing_schedule_id:
             raise click.ClickException(
                 f"Dokploy application schedule {schedule_name!r} did not expose a schedule id."
             )
-        dokploy_request(
-            host=host,
-            token=token,
-            path="/api/schedule.update",
-            method="POST",
-            payload={"scheduleId": existing_schedule_id, **schedule_payload},
-        )
+        with (provider_mutation_guard or nullcontext)():
+            dokploy_request(
+                host=host,
+                token=token,
+                path="/api/schedule.update",
+                method="POST",
+                payload={"scheduleId": existing_schedule_id, **schedule_payload},
+            )
 
     resolved_schedule = read_dokploy_application_schedule(
         host=host,
@@ -1916,6 +1919,7 @@ def delete_dokploy_application_schedule(
     token: str,
     application_id: str,
     schedule_payload: JsonObject,
+    provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
 ) -> None:
     schedule_name = str(schedule_payload.get("name") or "").strip()
     if not schedule_name:
@@ -1938,13 +1942,14 @@ def delete_dokploy_application_schedule(
         raise click.ClickException(
             f"Dokploy application schedule {schedule_name!r} did not expose a schedule id."
         )
-    dokploy_request(
-        host=host,
-        token=token,
-        path="/api/schedule.delete",
-        method="POST",
-        payload={"scheduleId": schedule_id},
-    )
+    with (provider_mutation_guard or nullcontext)():
+        dokploy_request(
+            host=host,
+            token=token,
+            path="/api/schedule.delete",
+            method="POST",
+            payload={"scheduleId": schedule_id},
+        )
     if (
         read_dokploy_application_schedule(
             host=host,

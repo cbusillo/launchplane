@@ -1,9 +1,10 @@
 """Declared application maintenance and schedules under the deploy effect fence."""
 
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from collections.abc import Callable
-from typing import Protocol, runtime_checkable, cast
+from collections.abc import Callable, Iterator
+from typing import Literal, Protocol, runtime_checkable, cast
 from uuid import uuid4
 
 import click
@@ -136,48 +137,49 @@ class DokployApplicationLifecycle:
             raise click.ClickException("Application schedule has no exact target/state readback.")
         return {key: observed.get(key) for key in api._DOKPLOY_APPLICATION_SCHEDULE_READBACK_FIELDS}
 
-    def _upsert(self, payload: api.JsonObject, phase: str) -> api.JsonObject:
+    @contextmanager
+    def _schedule_write(
+        self,
+        kind: Literal["schedule_write", "schedule_delete"],
+        name: str,
+        payload: api.JsonObject,
+        phase: str,
+    ) -> Iterator[None]:
         self._mutate(phase)
         index = (
-            self.execution_recorder.begin(
-                "schedule_write", str(payload["name"]), self.application_id, payload
-            )
+            self.execution_recorder.begin(kind, name, self.application_id, payload)
             if self.execution_recorder
             else -1
         )
-        result = api.upsert_dokploy_application_schedule(
-            host=self.host,
-            token=self.token,
-            application_id=self.application_id,
-            schedule_payload=payload,
-        )
+        yield
         if self.execution_recorder is not None:
             self.execution_recorder.update(
                 index, acknowledgement="completed", terminal="write_completed"
             )
-        return result
+
+    def _upsert(self, payload: api.JsonObject, phase: str) -> api.JsonObject:
+        return api.upsert_dokploy_application_schedule(
+            host=self.host,
+            token=self.token,
+            application_id=self.application_id,
+            schedule_payload=payload,
+            provider_mutation_guard=lambda: self._schedule_write(
+                "schedule_write", str(payload["name"]), payload, phase
+            ),
+        )
 
     def _delete(self, name: str) -> None:
         observed = self._read(name)
         if observed is not None:
-            self._mutate("application_schedule_remove")
-            index = (
-                self.execution_recorder.begin(
-                    "schedule_delete", name, self.application_id, observed
-                )
-                if self.execution_recorder
-                else -1
-            )
             api.delete_dokploy_application_schedule(
                 host=self.host,
                 token=self.token,
                 application_id=self.application_id,
                 schedule_payload=observed,
+                provider_mutation_guard=lambda: self._schedule_write(
+                    "schedule_delete", name, observed, "application_schedule_remove"
+                ),
             )
-            if self.execution_recorder is not None:
-                self.execution_recorder.update(
-                    index, acknowledgement="completed", terminal="write_completed"
-                )
 
     def capture(self) -> None:
         # Capture every baseline before the first provider mutation. The caller
