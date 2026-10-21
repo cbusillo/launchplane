@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 import { sweepPreviewLifecycle } from "../src/api.ts";
+import { BROWSER_WRITE_ROUTES } from "../src/browser-write-contract.ts";
 
 const originalFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = originalFetch; });
@@ -20,7 +21,7 @@ test("both sweep modes use the native session CSRF and original operation key", 
     const result = await sweepPreviewLifecycle(body, { idempotencyKey: `sweep-${apply}` });
     assert.equal(result.result.status, "fail");
     const call = calls.at(-1);
-    assert.equal(call.path, "/v1/previews/lifecycle-sweep");
+    assert.equal(call.path, BROWSER_WRITE_ROUTES.previewLifecycleSweep);
     assert.equal(call.init.method, "POST");
     assert.equal(call.init.headers["X-CSRF-Token"], `csrf-${csrf}`);
     assert.equal(call.init.headers["Idempotency-Key"], `sweep-${apply}`);
