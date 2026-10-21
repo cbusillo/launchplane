@@ -85,12 +85,9 @@ class CiCommentRangeTests(unittest.TestCase):
                 "reconstructed candidate",
             )
             _git(repository, "reset", "--hard", head)
-        if movement in {"landed", "landed_then_advanced", "fast_forward"}:
+        if movement in {"landed", "landed_then_advanced"}:
             _git(repository, "checkout", "trunk")
-            if movement == "fast_forward":
-                _git(repository, "merge", "--ff-only", head)
-            else:
-                _git(repository, "merge", "--no-ff", "-m", "land candidate", head)
+            _git(repository, "merge", "--no-ff", "-m", "land candidate", head)
         if movement in {"advanced", "landed_then_advanced"}:
             _git(repository, "checkout", "trunk")
             (repository / "later.py").write_text("VALUE = 5\n")
@@ -191,6 +188,16 @@ class CiCommentRangeTests(unittest.TestCase):
                 {"first.py", "second.py", "new-default.py"},
             )
 
+    def test_already_protected_no_op_candidate_has_no_new_contribution(self) -> None:
+        for movement in ("", "advanced"):
+            with self.subTest(movement=movement), TemporaryDirectory() as directory:
+                history = self._history(Path(directory), movement=movement)
+                _git(history.root, "checkout", "--detach", history.base)
+                history = replace(history, head=history.base)
+                result = self._exercise(history)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self._assert_range(history, history.base), set())
+
     def test_pr_and_multi_commit_push_cover_the_whole_contribution(self) -> None:
         for event in ("pull_request", "push"):
             with self.subTest(event=event), TemporaryDirectory() as directory:
@@ -229,7 +236,7 @@ class CiCommentRangeTests(unittest.TestCase):
             self.assertEqual(self._assert_range(history, parent), {"second.py"})
 
     def test_missing_or_unsupported_history_refuses_before_scanning(self) -> None:
-        for movement in ("deleted", "unrelated", "fast_forward", "shallow"):
+        for movement in ("deleted", "unrelated", "shallow"):
             with self.subTest(movement=movement), TemporaryDirectory() as directory:
                 history = self._history(Path(directory), movement=movement)
                 result = self._exercise(history)
