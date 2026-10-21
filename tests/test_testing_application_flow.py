@@ -1390,39 +1390,370 @@ class ApplicationFlowTests(unittest.TestCase):
                 fixture = ApplicationFlowTests()
                 fixture.setUp()
                 try:
+                    fixture.assert_excluded_private_forward_refuses_and_successor(problem)
+                finally:
+                    fixture.doCleanups()
+
+    def assert_excluded_private_forward_refuses_and_successor(self, problem: str) -> None:
+        from control_plane.testing_application_activation import (
+            completed_application_forward_exclusion,
+            completed_application_inverse,
+        )
+        from control_plane.contracts.testing_rebuild import REBUILD_SCOPE
+        from control_plane.testing_route_effects import ROUTE_WRITER_RECEIPT
+        from control_plane.dokploy.testing_route import route_document
+        from control_plane.contracts.canonical_json import canonical_json_sha256
+        from control_plane.dokploy.testing_route_execution import TestingRouteExecutionIntent
+
+        routing, _, _ = self.private_addressed()
+        self.unhealthy_retained_runtime()
+        self.prepare()
+        changed = []
+
+        def change_candidate() -> None:
+            record = self.adapter.current()
+            name = record.app_name
+            changed.append(routing.effect_count)
+            if problem == "no-container":
+                self.tasks[name + "-task"]["Status"] = {"State": "preparing", "ContainerStatus": {}}
+            else:
+                self.containers[name + "-container"]["State"]["Status"] = "exited"
+
+        routing.before_publish = change_candidate
+        result = self.activate()
+        self.assertEqual(result.status, "completed", result)
+        refused = self.adapter.current()
+        assert refused.failure is not None and refused.application_readiness is not None
+        self.assertEqual(refused.failure.kind, "publication_refused")
+        self.assertFalse(refused.published)
+        self.assertTrue(changed)
+        self.assertFalse(routing.route_file.exists())
+        self.assertEqual(routing.effect_count, changed[0])
+        self.assertTrue(completed_application_forward_exclusion(self.store, refused))
+        self.assertTrue(completed_application_inverse(self.store, refused))
+        readiness = refused.application_readiness
+        assert readiness.route is not None and readiness.route_execution is not None
+        forward = self.store.read_idempotency_record(
+            scope=refused.scope,
+            route_path=ROUTE.format(product=self.product) + ":route",
+            idempotency_key=refused.plan_sha256 + ":route",
+        )
+        assert forward is not None
+        physical = self.store.read_idempotency_record(
+            scope=REBUILD_SCOPE,
+            route_path=ROUTE_WRITER_RECEIPT,
+            idempotency_key=readiness.route_execution.key(attempt=forward.attempt),
+        )
+        assert physical is not None
+        self.assertEqual(physical.response_payload.get("writer_outcome"), "excluded")
+        inverse = self.store.read_idempotency_record(
+            scope=refused.scope,
+            route_path=ROUTE.format(product=self.product) + ":route-inverse",
+            idempotency_key=refused.plan_sha256 + ":route-inverse",
+        )
+        assert inverse is not None
+        restored = TestingRouteExecutionIntent.model_validate(
+            self.store.read_original_mutation_intent(inverse)["route_execution"]
+        )
+        expected = readiness.route_execution.model_copy(
+            update={
+                "backend": readiness.route.old_backend,
+                "document_sha256": canonical_json_sha256(
+                    route_document(readiness.route, readiness.route.old_backend)
+                ),
+            }
+        )
+        self.assertEqual(
+            restored.model_dump(exclude={"custody"}), expected.model_dump(exclude={"custody"})
+        )
+        self.assertEqual(self.activate().status, "replayed")
+        self.assertEqual(routing.effect_count, changed[0])
+        self.assertEqual(self.canonical_password(), "retained-only-password")
+        self.assertEqual(
+            self.store.read_idempotency_record(
+                scope=self.original.scope,
+                route_path=self.original.route_path,
+                idempotency_key=self.original.idempotency_key,
+            ),
+            self.original,
+        )
+        # Eligibility is bound to the exact original receipt and intent, never
+        # a busy/unknown outcome, merely truthy marker or foreign operation.
+        read = self.store.read_idempotency_record
+        for updates in (
+            {"state": "reconcile_required"},
+            {"response_payload": {"route_write_not_started": 1}},
+            {"response_payload": {"writer_outcome": "busy"}},
+            {"request_fingerprint": "foreign"},
+            {"reconciliation_key": "foreign"},
+            {"provider_target_key": "foreign"},
+            {"scope": "foreign"},
+            {"route_path": "foreign"},
+            {"idempotency_key": "foreign"},
+        ):
+            with self.subTest(receipt=updates):
+                with patch.object(
+                    self.store,
+                    "read_idempotency_record",
+                    return_value=forward.model_copy(update=updates),
+                ):
+                    self.assertFalse(completed_application_forward_exclusion(self.store, refused))
+        for intent in (
+            {},
+            {
+                "route_execution": readiness.route_execution.model_copy(
+                    update={"operation_id": "foreign"}
+                ).model_dump(mode="json")
+            },
+        ):
+            with patch.object(self.store, "read_original_mutation_intent", return_value=intent):
+                self.assertFalse(completed_application_forward_exclusion(self.store, refused))
+        routing.before_publish = None
+        self.activation_key = "after-excluded-forward"
+        self.prepare("after-excluded-forward")
+        self.assertEqual(self.activate().status, "completed")
+        self.assertTrue(self.adapter.current().published)
+        self.assertEqual(
+            read(
+                scope=forward.scope,
+                route_path=forward.route_path,
+                idempotency_key=forward.idempotency_key,
+            ),
+            forward,
+        )
+        self.assertEqual(
+            read(
+                scope=physical.scope,
+                route_path=physical.route_path,
+                idempotency_key=physical.idempotency_key,
+            ),
+            physical,
+        )
+
+    def test_excluded_forward_lost_receipts_and_staff_wait_keep_original_custody(self) -> None:
+        from control_plane.testing_application_activation import completed_application_inverse
+        from control_plane.testing_route_effects import ROUTE_WRITER_RECEIPT
+
+        for loss in ("physical", "logical"):
+            with self.subTest(loss=loss):
+                fixture = ApplicationFlowTests()
+                fixture.setUp()
+                try:
                     routing, _, _ = fixture.private_addressed()
                     fixture.unhealthy_retained_runtime()
                     fixture.prepare()
-                    changed = []
+                    complete = fixture.store.complete_mutation_reservation
+                    lost: list[Any] = []
 
                     def change_candidate() -> None:
-                        record = fixture.adapter.current()
-                        name = record.app_name
-                        changed.append(name)
-                        if problem == "no-container":
-                            fixture.tasks[name + "-task"]["Status"] = {
-                                "State": "preparing",
-                                "ContainerStatus": {},
-                            }
-                        else:
-                            fixture.containers[name + "-container"]["State"]["Status"] = "exited"
+                        name = fixture.adapter.current().app_name
+                        fixture.containers[name + "-container"]["State"]["Status"] = "exited"
+
+                    def lose(**kwargs: Any) -> Any:
+                        completion = kwargs["completion"]
+                        result = complete(**kwargs)
+                        matching = (
+                            completion.route_path == ROUTE_WRITER_RECEIPT
+                            and completion.response_payload.get("writer_outcome") == "excluded"
+                            if loss == "physical"
+                            else completion.route_path
+                            == ROUTE.format(product=fixture.product) + ":route"
+                            and completion.response_payload.get("route_write_not_started") is True
+                        )
+                        if matching and not lost:
+                            lost.append(completion)
+                            fixture.record_staff_usage("in_use")
+                            raise OSError("Lost actual completed exclusion reply")
+                        return result
 
                     routing.before_publish = change_candidate
-                    self.assertEqual(fixture.activate().status, "reconcile_required")
-                    self.assertTrue(changed)
-                    self.assertFalse(fixture.adapter.current().published)
-                    self.assertFalse(routing.route_file.exists())
-                    self.assertEqual(fixture.canonical_password(), "retained-only-password")
-                    self.assertEqual(
-                        fixture.store.read_idempotency_record(
-                            scope=fixture.original.scope,
-                            route_path=fixture.original.route_path,
-                            idempotency_key=fixture.original.idempotency_key,
+                    with (
+                        patch.object(
+                            fixture.store, "complete_mutation_reservation", side_effect=lose
                         ),
-                        fixture.original,
-                    )
+                        patch.object(
+                            fixture.store,
+                            "_database_mutation_timestamp",
+                            return_value=fixture.old.now(-600),
+                        ),
+                    ):
+                        self.assertEqual(fixture.activate().status, "reconcile_required")
+                    self.assertTrue(lost)
+                    pending = fixture.adapter.current()
+                    assert pending.application_readiness is not None
+                    private = pending.application_readiness.private_health
+                    effects = routing.effect_count
+                    self.assertFalse(completed_application_inverse(fixture.store, pending))
+                    self.assertEqual(fixture.activate().status, "reconcile_required")
+                    self.assertEqual(routing.effect_count, effects)
+                    fixture.record_staff_usage("unused")
+                    routing.before_publish = None
+                    self.assertIn(fixture.activate().status, {"completed", "adopted"})
+                    refused = fixture.adapter.current()
+                    assert refused.failure is not None and refused.application_readiness is not None
+                    self.assertEqual(refused.failure.kind, "publication_refused")
+                    self.assertEqual(refused.application_readiness.private_health, private)
+                    self.assertTrue(completed_application_inverse(fixture.store, refused))
+                    self.assertEqual(routing.effect_count, effects)
+                    self.assertFalse(routing.route_file.exists())
                 finally:
                     fixture.doCleanups()
+
+    def test_lost_successful_forward_candidate_death_keeps_original_private_pass(self) -> None:
+        from control_plane.outbound_http import PublicHttpResponse
+        from control_plane.testing_application_activation import (
+            completed_application_forward_exclusion,
+            completed_application_inverse,
+        )
+        from control_plane.contracts.testing_activation import TestingActivationRefusal
+        from control_plane.dokploy.testing_route import observe_testing_route
+
+        routing, _, endpoint = self.private_addressed()
+        self.prepare()
+        native = routing.command
+        lost: list[bool] = []
+
+        def lose(arguments: list[str], **kwargs: Any) -> Any:
+            file_was_present = routing.route_file.exists()
+            result = native(arguments, **kwargs)
+            if not lost and not file_was_present and routing.route_file.exists():
+                lost.append(True)
+                raise subprocess.TimeoutExpired(arguments, 1)
+            return result
+
+        with (
+            patch.object(routing, "command", side_effect=lose),
+            patch.object(
+                self.store, "_database_mutation_timestamp", return_value=self.old.now(-600)
+            ),
+        ):
+            self.assertEqual(self.activate().status, "reconcile_required")
+        admitted = self.adapter.current()
+        readiness = admitted.application_readiness
+        assert (
+            readiness is not None
+            and readiness.private_health is not None
+            and readiness.route is not None
+        )
+        self.assertFalse(completed_application_forward_exclusion(self.store, admitted))
+        self.assertEqual(readiness.private_health.status, "pass")
+        # A persisted route cannot substitute missing or forged private admission.
+        for health in (
+            None,
+            readiness.private_health.model_copy(update={"verified": False}),
+            readiness.private_health.model_copy(update={"observed_runtime_identity": None}),
+        ):
+            invalid = admitted.model_copy(
+                update={
+                    "application_readiness": readiness.model_copy(update={"private_health": health})
+                }
+            )
+            with self.assertRaises(TestingActivationRefusal):
+                self.adapter.qualify_application(invalid)
+        name = admitted.app_name
+        self.tasks[name + "-task"]["DesiredState"] = "shutdown"
+        self.tasks[name + "-task"]["Status"]["State"] = "failed"
+        self.containers[name + "-container"]["State"]["Status"] = "exited"
+        self.containers[name + "-container"]["NetworkSettings"]["Networks"] = {}
+        from control_plane.testing_application_runtime import VerifiedApplicationRuntimeFailure
+
+        with self.assertRaises(VerifiedApplicationRuntimeFailure):
+            self.inspect_current_private_runtime()
+        qualify = self.adapter.qualify_application
+        reentered = []
+
+        def retain_admission(record: Any) -> Any:
+            self.assertFalse(completed_application_forward_exclusion(self.store, record))
+            assert record.application_readiness is not None
+            self.assertIsNotNone(record.application_readiness.route)
+            reentered.append(record)
+            return qualify(record)
+
+        with (
+            patch(
+                "control_plane.testing_private_health.request_private_edge_health",
+                return_value=PublicHttpResponse(503, endpoint.url, 0, (), b"{}"),
+            ),
+            patch.object(self.adapter, "qualify_application", side_effect=retain_admission),
+        ):
+            result = self.activate()
+        self.assertTrue(reentered)
+        self.assertIn(result.status, {"completed", "adopted"}, result)
+        refused = self.adapter.current()
+        assert refused.failure is not None and refused.application_readiness is not None
+        self.assertEqual(refused.failure.kind, "publication_refused")
+        self.assertEqual(refused.application_readiness.private_health, readiness.private_health)
+        self.assertTrue(completed_application_inverse(self.store, refused))
+        self.assertEqual(
+            observe_testing_route(
+                readiness.route, routing.raw, json.loads(routing.route_file.read_text())
+            ),
+            readiness.route.old_backend,
+        )
+
+    def test_pre_forward_authority_refusal_without_owned_file_admits_fresh_generation(self) -> None:
+        from control_plane.testing_application_activation import completed_application_inverse
+
+        routing, _, _ = self.private_addressed()
+        self.prepare()
+        effect = self.adapter.route_effect
+        corrected: list[bool] = []
+
+        def correct(*args: Any, **kwargs: Any) -> Any:
+            if not kwargs["inverse"] and not corrected:
+                corrected.append(True)
+                self.correct_runtime()
+            return effect(*args, **kwargs)
+
+        with patch.object(self.adapter, "route_effect", side_effect=correct):
+            self.assertEqual(self.activate().status, "completed")
+        refused = self.adapter.current()
+        assert refused.failure is not None
+        self.assertEqual(refused.failure.kind, "publication_refused")
+        self.assertTrue(completed_application_inverse(self.store, refused))
+        self.assertFalse(routing.route_file.exists())
+        self.assertIsNone(
+            self.store.read_idempotency_record(
+                scope=refused.scope,
+                route_path=ROUTE.format(product=self.product) + ":route",
+                idempotency_key=refused.plan_sha256 + ":route",
+            )
+        )
+        self.prepare("after-pre-forward-refusal")
+        self.activation_key = "after-pre-forward-refusal"
+        self.assertEqual(self.activate().status, "completed")
+        self.assertTrue(self.adapter.current().published)
+
+    def test_excluded_forward_foreign_candidate_job_keeps_custody_after_inverse(self) -> None:
+        from control_plane.testing_application_activation import completed_application_inverse
+
+        routing, _, _ = self.private_addressed()
+        self.prepare()
+
+        def foreign_job() -> None:
+            record = self.adapter.current()
+            self.containers[record.app_name + "-container"]["State"]["Status"] = "exited"
+            self.deployments[record.target_id].append(
+                {"deploymentId": "foreign", "title": "Unrelated job", "status": "done"}
+            )
+
+        routing.before_publish = foreign_job
+        self.assertEqual(self.activate().status, "reconcile_required")
+        current = self.adapter.current()
+        self.assertEqual(current.phase, "restoring_application_route")
+        self.assertIsNone(current.failure)
+        self.assertFalse(current.published)
+        self.assertFalse(routing.route_file.exists())
+        self.assertTrue(completed_application_inverse(self.store, current))
+        self.assertEqual(self.canonical_password(), "retained-only-password")
+        self.assertEqual(
+            self.store.read_idempotency_record(
+                scope=self.original.scope,
+                route_path=self.original.route_path,
+                idempotency_key=self.original.idempotency_key,
+            ),
+            self.original,
+        )
 
     def test_predecessor_is_captured_before_effects_and_cannot_be_rebound(self) -> None:
         self.private_addressed()

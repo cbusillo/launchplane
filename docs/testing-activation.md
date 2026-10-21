@@ -103,6 +103,25 @@ retained file identity and later owned route template remain in original
 operation custody. A lost writer reply must settle that original native journal;
 it never permits a second blind route publication.
 
+A completed original forward exclusion selects recovery rather than another
+forward attempt. Apply proves the original route through its exact inverse and,
+when the original candidate job is terminal, retains an honest
+`publication_refused` result with all resources intact. Correcting that candidate
+does not reopen the terminal plan. Continue with a fresh reviewed preparation and
+activation key. Staff use, unknown writer outcomes and unknown or foreign
+candidate jobs retain their existing custody instead of inventing completion.
+
+A first cutover can restore the original route without creating an owned route
+file. A fresh generation can then qualify the current initial domain, application
+file, legacy routers and backend directly. This requires a complete positive
+physical observation; an absent or unreadable file is not a fallback for a
+published predecessor's recorded route custody.
+
+Once an original route intent exists, its passing private result remains the
+admission evidence for that route. Re-entry does not overwrite it when a candidate
+later dies. Actual new forward dispatch still proves the current candidate, and
+post-switch edge identity and health still qualify publication or select recovery.
+
 Private and public health establish process/build identity readiness. They do
 not establish product qualification or substitute for declared migration,
 maintenance, verification or recurring-schedule activation. Those run through

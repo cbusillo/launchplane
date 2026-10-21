@@ -12986,6 +12986,9 @@ class RealPostgresApplicationTestingActivationTests(unittest.TestCase):
             )
         )
 
+    def test_excluded_private_forward_refusal_and_fresh_successor(self) -> None:
+        self.fixture.assert_excluded_private_forward_refuses_and_successor("no-container")
+
     def test_private_same_address_lineage_monitor_and_second_generation(self) -> None:
         self.fixture.test_private_same_address_monitor_recreate_and_second_generation()
 

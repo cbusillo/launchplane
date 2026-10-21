@@ -139,6 +139,51 @@ def require_retained_route_authority(store: Any, record: TestingActivationRecord
         raise TestingActivationRefusal("The original serving recipient or route authority changed.")
 
 
+def completed_application_forward_exclusion(store: Any, record: TestingActivationRecord) -> bool:
+    """Only the exact original completed logical child proves terminal forward exclusion."""
+    from control_plane.dokploy.testing_route_execution import TestingRouteExecutionIntent
+
+    readiness = record.application_readiness
+    if readiness is None or readiness.route is None or readiness.route_execution is None:
+        return False
+    path = f"/v1/products/{record.product}/testing-activation:route"
+    key = record.plan_sha256 + ":route"
+    original = store.read_idempotency_record(
+        scope=record.scope, route_path=path, idempotency_key=key
+    )
+    if (
+        original is None
+        or (
+            original.scope,
+            original.route_path,
+            original.idempotency_key,
+            original.state,
+            original.request_fingerprint,
+            original.reconciliation_key,
+            original.provider_target_key,
+        )
+        != (
+            record.scope,
+            path,
+            key,
+            "completed",
+            readiness.route.digest,
+            readiness.route.digest,
+            "testing-activation-route:" + record.product + ":" + record.context,
+        )
+        or original.response_payload.get("route_write_not_started") is not True
+    ):
+        return False
+    try:
+        intent = store.read_original_mutation_intent(original)
+        if not isinstance(intent, dict):
+            return False
+        execution = TestingRouteExecutionIntent.model_validate(intent.get("route_execution"))
+    except (FileNotFoundError, ValueError, TypeError):
+        return False
+    return execution == readiness.route_execution
+
+
 def completed_application_inverse(store: Any, record: TestingActivationRecord) -> bool:
     """The original inverse child binds the captured route, document and physical custody."""
     from control_plane.dokploy.testing_route_execution import TestingRouteExecutionIntent
@@ -975,6 +1020,24 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
         specification = record.request.application
         readiness = record.application_readiness
         assert specification is not None and readiness is not None
+        if readiness.route is not None:
+            from control_plane.contracts.runtime_identity import compare_runtime_identity
+
+            health = readiness.private_health
+            if (
+                health is None
+                or not health.verified
+                or health.status != "pass"
+                or health.runtime_identity_status != "match"
+                or compare_runtime_identity(
+                    expected=readiness.runtime_identity, observed=health.observed_runtime_identity
+                )[0]
+                != "match"
+            ):
+                raise TestingActivationRefusal(
+                    "The original private route admission is unavailable."
+                )
+            return record
         self.verify_provider(record)
         resources, _ = preparation_resources(self.store, self.product, self.request, self.scope)
         host, token = source.read_dokploy_config(control_plane_root=self.root)
@@ -1196,12 +1259,46 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
             if previous_readiness is None or previous_readiness.route is None:
                 raise TestingActivationRefusal("The original owned route template is unavailable.")
             previous_route = previous_readiness.route
+        restored_history = False
         if previous_route is None:
             previous_route = restored_application_route(self.store, record)
+            restored_history = previous_route is not None
+        fresh_restored_history = restored_history and not (readiness and readiness.route)
         original_route = (readiness.route if readiness else None) or previous_route
         if original_route is not None and original_route.application_file_name:
             old_spec["route_file_name"] = original_route.application_file_name
         host, token = source.read_dokploy_config(control_plane_root=self.root)
+        transport = DokployTestingRouteTransport(
+            host=host,
+            token=token,
+            server_id=str(old_payload.get("serverId") or ""),
+            old_project="",
+            product=record.product,
+            context=record.context,
+            public_host=hostname,
+            entrypoints=readiness.route.public_entrypoints if readiness and readiness.route else (),
+            old_runtime_identity=predecessor.runtime_identity if predecessor else None,
+            old_application=old_spec,
+            new_application={
+                "name": record.app_name,
+                "port": specification.runtime_port,
+                "service_id": readiness.service_id if readiness else "",
+                "task_id": readiness.task_id if readiness else "",
+            },
+        )
+        if (
+            original_route is not None
+            and original_route.application_file_sha256
+            and not fresh_restored_history
+        ):
+            transport.payload["expected_application_file_sha256"] = (
+                original_route.application_file_sha256
+            )
+        frame = transport.read()
+        if fresh_restored_history and frame["owned_file"] is None:
+            # A verified inverse can be a no-op. Its historical owned template
+            # cannot replace today's exact initial domain/file/backend admission.
+            previous_route = None
         if previous_route is None:
             old = api.fetch_dokploy_target_payload(
                 host=host,
@@ -1222,29 +1319,6 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                 raise ApplicationRouteAdmissionContradiction(
                     "The retained application does not own this exact stable host/port."
                 )
-        transport = DokployTestingRouteTransport(
-            host=host,
-            token=token,
-            server_id=str(old_payload.get("serverId") or ""),
-            old_project="",
-            product=record.product,
-            context=record.context,
-            public_host=hostname,
-            entrypoints=readiness.route.public_entrypoints if readiness and readiness.route else (),
-            old_runtime_identity=predecessor.runtime_identity if predecessor else None,
-            old_application=old_spec,
-            new_application={
-                "name": record.app_name,
-                "port": specification.runtime_port,
-                "service_id": readiness.service_id if readiness else "",
-                "task_id": readiness.task_id if readiness else "",
-            },
-        )
-        if original_route is not None and original_route.application_file_sha256:
-            transport.payload["expected_application_file_sha256"] = (
-                original_route.application_file_sha256
-            )
-        frame = transport.read()
         try:
             document = (
                 yaml.safe_load(frame["application_file"])
@@ -1908,6 +1982,8 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
         self.require_recovery_unused(record)
         if record.phase in {"restoring_application_route", "refusing_private_candidate"}:
             return True
+        if completed_application_forward_exclusion(self.store, record):
+            return True
         readiness = record.application_readiness
         if readiness is not None and any(
             health is not None and health.verified and health.status == "fail"
@@ -2024,7 +2100,10 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
         started = False
         with self.evidence(lease):
             record = self.current()
-            if record.phase in {"restoring_application_route", "refusing_private_candidate"} or (
+            if (
+                record.phase in {"restoring_application_route", "refusing_private_candidate"}
+                or completed_application_forward_exclusion(self.store, record)
+            ) or (
                 record.application_readiness is not None
                 and any(
                     health is not None and health.verified and health.status == "fail"
