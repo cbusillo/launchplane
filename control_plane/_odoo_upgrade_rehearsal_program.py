@@ -91,8 +91,8 @@ def digest(path):
     return value.hexdigest()
 
 
-def bounded_capture(arguments,path,bound):
-    process=subprocess.Popen(arguments,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+def bounded_capture(arguments,path,bound,*,stdin=None):
+    process=subprocess.Popen(arguments,stdin=stdin,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
     errors=b''
     try:
         size=0
@@ -432,6 +432,25 @@ def sanitize_capture(spec,containers,database,raw):
         docker('exec','-u','root',containers['script-runner'][0],'rm','-f','/tmp/rehearsal.dump')
 
 
+def source_filestore_archive_command(filestore: str) -> str:
+    check='''from pathlib import Path
+import stat
+import sys
+root=Path(sys.argv[1])
+if not root.is_dir():
+    raise RuntimeError('Source filestore is unavailable')
+for shard in range(256):
+    try:
+        metadata=(root/f'{shard:02x}').lstat()
+    except FileNotFoundError:
+        continue
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise RuntimeError('Source filestore shard is aliased or unavailable')
+'''
+    archive=['tar','-cf','-','-C',filestore,'--no-recursion','--null','--verbatim-files-from','-T','-']
+    return shlex.join(['python3','-c',check,filestore])+' && exec '+shlex.join(archive)
+
+
 def capture(spec,root,containers,database):
     started=time.monotonic()
     raw=root/'raw-source'
@@ -443,8 +462,10 @@ def capture(spec,root,containers,database):
     remote=shlex.join(['sudo','-u',values['ODOO_UPSTREAM_DB_USER'],'pg_dump','-Fc','--',values['ODOO_UPSTREAM_DB_NAME']])
     budget=spec['record']['storage']
     bounded_capture([*ssh,destination,remote],raw/'database.dump',budget['database_bytes'])
-    remote=shlex.join(['tar','-cf','-','-C',filestore,'.'])
-    bounded_capture([*ssh,destination,remote],raw/'filestore.tar',budget['filestore_bytes'])
+    names=write_captured_attachment_names(spec,raw,containers)
+    remote=source_filestore_archive_command(filestore)
+    with names.open('rb') as listed:
+        bounded_capture([*ssh,destination,remote],raw/'filestore.tar',budget['filestore_bytes'],stdin=listed)
     (raw/'filestore').mkdir(mode=0o700)
     unpacked=0
     with tarfile.open(raw/'filestore.tar','r:') as archive:
