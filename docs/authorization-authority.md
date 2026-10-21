@@ -108,14 +108,14 @@ secret-copy source checks explicitly disable read-role inheritance. Existing
 terminal transport restrictions remain; `local_operator` supplies the full
 planning surface, including mixed plan/apply routes.
 
-The action catalog and [`service_auth.py`](../control_plane/service_auth.py)
-describe installed runtime admission, including explicit standing-write
-declarations. Native routes retain their principal, transport and safety checks;
+The action catalog, [`service_auth.py`](../control_plane/service_auth.py) and
+native routes describe installed runtime admission. Native routes also recognize
+the Director-agent marker for their qualified source-owned paths; the catalog's
+standing-write declarations are not a complete inventory of those paths.
+Routes retain their principal, transport and safety checks;
 this document does not enable an undeclared write or bypass a route guard.
 [Denial Handling](#denial-handling) governs a refusal that conflicts with direction.
-Health-monitoring's browser/bearer mutation path admits the configured Director's
-terminal identity; other terminal mutation restrictions remain. Its
-[route contract](service-boundary.md#product-profile-endpoints) and the
+[Product-profile route contracts](service-boundary.md#product-profile-endpoints) and the
 [testing-retry contract](testing-deploy-retry.md) own their execution safeguards.
 
 Projection sync requires executable proof of zero provider writes and no access
@@ -142,10 +142,6 @@ caller-supplied claim. Product-level metadata uses the `launchplane` context;
 separate context and instance rules support both scopes. Requests authorize
 the returned product and collections filter each returned record. Revocation
 continues to apply to these scoped rules and to all explicit write permissions.
-
-Expected-configuration plans change no profile. Apply by a `local_operator` to a
-live product still refuses with `live_product_requires_operator`; browser CSRF and read-only
-identity restrictions remain in force.
 
 Product-config plans save only review evidence. An owned testing lane is non-live
 even when its product is Live: existing product-config write authority may record
@@ -201,10 +197,11 @@ refuse a Director read without a matching rule. Report that as a tool defect.
 `POST /v1/live-target-runtime/apply` retains
 the existing context-scoped policy check for existing callers, including
 production and Client scopes; an instance rule does not acquire new rights.
-The disposable-lane path validates an exact testing or uniquely owned preview
-lane. Testing/preview applies need current safety even with a broad
+The separate Director-agent path validates an exact testing or uniquely owned preview
+lane. Director testing/preview applies need current safety even with a broad
 context grant; a grant cannot establish that a lane is unused or data is disposable.
-`deploy=false` may stage an independently reviewed separation without starting
+Director-only staging with `deploy=false` may perform an independently reviewed
+separation without starting
 existing shared-storage containers. Staging eligibility never authorizes deploy.
 Preview-inclusive product retirement checks the Director-agent marker, never-live
 product status and testing-only ownership; Client and other machine callers keep
@@ -223,7 +220,7 @@ compose, leaving retained target/storage and historical effects untouched.
 
 ### First testing target creation
 
-The Dokploy target setup dry-run/apply endpoint stages a first testing target:
+The Director-agent first-testing path on the Dokploy target setup endpoint stages
 only a new project, a new environment and an empty raw compose
 for an active product's exclusively owned context. It accepts no existing
 project, environment or target IDs, replacement reference, repository source,
@@ -240,7 +237,7 @@ An existing lane needs its own supported qualification/rebuild path, including
 current usage, data and isolation evidence. The compose shape cannot reset or
 replace it.
 
-The same path also accepts `create-application`, the conventional testing-lane
+The same endpoint also accepts `create-application`, the conventional testing-lane
 shape: a new project, a new environment and an empty application on a named
 server, with no domain route. It may replace the lane's current testing target
 only with positive evidence that nobody used the lane: the setup route created
@@ -256,33 +253,20 @@ different, partial or missing target refuses. The replaced provider resource is
 left in place for a supported retirement. Image delivery and runtime settings
 then follow the ordinary event-driven testing deploy.
 
-The optional `state_volume_path` uses that same first-testing application
-boundary. It accepts only a new service-named volume on the new application,
-never a selected existing volume, mount, host path or production target. A saved
-service plan binds the caller, target intent, placement and current lane
-authority. Durable original-key execution retains partial effects and blocks
-duplicate creates; readback is observational. See the
+The optional `state_volume_path` follows the
 [storage request and recovery contract](dokploy-service-deployments.md#testing-application-state-volume).
 
 ### Testing-copy connection isolation
 
-The Odoo post-deploy endpoint classifies validated `connection_isolation`
-requests separately from general maintenance. Isolation apply remains a write;
-reading or planning never executes its provider schedule. The testing repair
-checks the authenticated Director-agent marker and current operation-specific
-qualification.
-The fixed repair preserves application records without asserting that a copy is
-unused or reproducible. Production, staff holds, recorded protected use or
-only-copy data, target aliases, shared resources and unverified actual testing
-resources refuse. General post-deploy maintenance cannot substitute for this
-qualified repair. See the
+The source-owned Director-agent repair is separate from general post-deploy
+maintenance. Its observation authority, read-only provider jobs, repair
+qualification and independent readback are defined in the
 [repair procedure](operations.md#repair-copied-carrier-and-customer-sms-connections)
-for reviewed plan binding, stable idempotency, independent readback and current
-evidence-producer limitations.
+with the current evidence-producer limitations.
 
 ### Reviewed never-live classification and preview execution
 
-The bounded agent classification path records a reviewed `unknown` to
+The bounded Director-agent classification path records a reviewed `unknown` to
 `prelaunch` classification through the production-use route for an active
 product whose recorded stable lanes are testing only. A live classification,
 production lane, historical context, production deployment or promotion history
@@ -311,7 +295,7 @@ the before/after bootstrap-exemption effect in the reviewed plan, and the
 Client-settings panel displays it before Apply. Ordinary bounded agent
 classification keeps its existing response shape and supplies no exemption.
 
-Odoo preview apply remains a write,
+The source-owned Director-agent Odoo preview apply remains a write,
 including preview destruction. It requires the caller's exact service-issued
 plan and an existing uniquely owned preview. Stable lanes cannot be substituted
 for a preview. The frozen plan must name the discovered compose and cannot alias
@@ -322,7 +306,8 @@ Source-read permission for an import credential remains separate from execution.
 Existing **Odoo preview refresh** qualifies resources directly, without requiring
 or publishing positive `unused` or `reproducible` observations.
 Scheduled closed-preview cleanup uses the existing disposable observation API:
-current facts for the exact owned preview require evidence and binding checks.
+Director-agent observations record current facts for the exact owned preview
+with evidence and binding checks.
 These observations qualify cleanup
 only; they cannot admit runtime sync or another preview mutation. Unknown facts hold cleanup. Testing
 observations retain their separate service-collector requirement. Same-key

@@ -2094,12 +2094,17 @@ a registered endpoint key; the service requires an active private endpoint
 record owned by the exact lane and never returns or logs its internal URL.
 Strict public runtime-identity checks must resolve to a lane-owned HTTPS host.
 The requested intent must retain its required enabled public or private check.
+Apply compares and writes the complete reviewed profile atomically; concurrent
+profile changes refuse rather than overwrite another edit.
 
 Signed-in administrators use the environment Actions page's Health monitoring
 editor for existing public/private HTTP checks. The route accepts the existing
 CSRF-checked browser session dependency; every request still checks the policy's
-exact product/context/instance plan or apply authority. Bearer/OIDC authority is
-unchanged. The editor loads the stored profile, shows the preserved endpoint and
+exact product/context/instance plan or apply authority. The configured Director's
+`local_operator` and terminal-agent bearer identities use standing permission for
+the product's declared lanes, including production. This changes monitoring
+records, not the site's runtime or access. Other bearer/OIDC callers retain
+their scoped policy rules. The editor loads the stored profile, shows the preserved endpoint and
 current private endpoint key comparison (browser-session responses only, to
 preserve existing strict terminal/workflow decoders), and the
 before/after flags, invalidates review on edits, and requires confirmation before
