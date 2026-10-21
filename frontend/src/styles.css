@@ -907,10 +907,22 @@ h3 {
 }
 
 .directory-lane .directory-evidence-detail,
+.directory-lane .directory-attention,
 .directory-preview .directory-evidence-detail {
   overflow: visible;
   overflow-wrap: anywhere;
   white-space: normal;
+}
+
+.directory-lane .directory-attention,
+.environment-facts .environment-attention {
+  color: var(--danger);
+}
+
+.environment-facts .environment-attention {
+  display: block;
+  overflow: visible;
+  overflow-wrap: anywhere;
 }
 
 .directory-lane,
