@@ -67,6 +67,19 @@ class GenericWebTestingResources(OdooTestingResources):
         }
 
 
+class ApplicationTestingResources(OdooTestingResources):
+    """Only the state actually requested for a fresh application recipient."""
+
+    resource_kind: Literal["application"] = "application"
+    state_kind: Literal["none", "volume"]
+
+    @property
+    def volumes(self) -> dict[str, str]:
+        if self.state_kind == "none":
+            return {}
+        return {"state": f"{self.namespace}-state"}
+
+
 class OdooRehearsalResources(BaseModel):
     """The same empty storage protocol, without a canonical lane identity."""
 
@@ -172,6 +185,14 @@ def main():
             "database": namespace + "-db",
             "config": namespace + "-config",
         }
+    elif spec.get("resource_kind") == "application":
+        kind = spec.get("state_kind")
+        if kind == "none":
+            volumes = {}
+        elif kind == "volume":
+            volumes = {"state": namespace + "-state"}
+        else:
+            raise RuntimeError("Unsupported application state kind")
     elif "resource_kind" in spec and not rehearsal:
         raise RuntimeError("Unsupported testing resource kind")
     if spec["volumes"] != volumes:

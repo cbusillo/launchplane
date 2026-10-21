@@ -571,6 +571,13 @@ hold and historical fence. Its exact-receipt hold continuation is the bounded
 exception to the ordinary Director-agent staging-lift refusal described above.
 It proves separation before requesting normal testing reconciliation.
 
+Application resource allocations bind their original preparation operation, so
+a distinct reviewed preparation creates fresh storage even when the lane's
+configuration is unchanged. A refused activation retains those resources and
+its truthful negative receipt; it does not clear unknown historical work. See
+[activation recovery](testing-activation.md) for private failed candidates and
+addressed route restoration before another independent generation.
+
 `POST /v1/products/{product}/testing-separation-resources` provides preparation
 when the old testing recipient cannot be changed. It accepts only the exact
 owned generic-web testing context, a reason, mode and reviewed plan digest.
@@ -579,7 +586,22 @@ legacy purpose remains a staff hold; no reason text is interpreted, no hold is
 converted or lifted, and even a genuine staff hold continues protecting the old
 lane. Other callers' holds and production aliases refuse preparation.
 
-Apply requires PostgreSQL, complete current provider/executor exclusion, the
+An explicit reviewed `application` specification selects the
+[conventional application continuation](testing-activation.md#conventional-application-recipients).
+It allocates zero volumes for stateless applications or one application volume,
+rather than inventing the legacy two-volume shape. Independent PostgreSQL state
+and derived connection URLs are deferred to [#4290](https://github.com/cbusillo/launchplane/issues/4290). The same specification is required at activation. This admission retains
+the exact original unknown application execution; it proves custody and
+attributable retained-recipient capabilities without claiming remote quiescence.
+Actual old task/container attribution, no platform authority and independently
+qualified new backing are required. The strict exclusion read stays truthful.
+Application preparation accepts reviewed data paths; it still accepts no secret values or old database credentials.
+New credential material remains purpose-staged until atomic application
+publication. Local-command and verifier obligations then run normally against
+the new recipient after the explicit activation-backed hold lift. External
+writable identities that cannot be independently allocated remain unsupported.
+
+Legacy Compose apply requires PostgreSQL, complete current provider/executor exclusion, the
 reviewed configuration/secret-metadata/hold/reservation/provider-placement snapshot and a stable
 idempotency key. It acquires the original executor lock, but never settles or
 releases the original deployment reservation. The only new effect is a disabled,

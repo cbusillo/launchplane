@@ -46,6 +46,20 @@ application testing lanes. Q453 accepted this topology instead of the
 Compose-only upstream binding and its host firewall requirement. It does not
 change the restrictions on the Compose path below or any production record.
 
+Independent application activation can preserve an existing private hostname
+through its [native same-address route continuation](testing-activation.md).
+The original edge marker, certificate, access list and provider domain remain
+unchanged. The canonical replacement has no copied provider domain or managed
+public route binding. Private health and a create/readback no-op verify the
+original receipt, completed activation lineage and actual winning native route.
+A second generation reuses that original template. An unhealthy predecessor does
+not require hand repair: exact physical custody and independent candidate/private
+edge identity are still required. Endpoint, edge and current receipt updates and
+new private-ingress reservations share the existing publication authority fence.
+A concurrent unresolved private operation stays unknown; activation never
+re-enables an intentionally disabled edge. Actual authenticated WSS and product
+qualification remain separate post-delivery proof.
+
 ### Continue a freshly allocated application
 
 Keep the `isolation_staging` hold through endpoint and private-route preparation.
