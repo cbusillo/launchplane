@@ -1676,6 +1676,136 @@
         ]
       }
     },
+    "/v1/product-config/testing-hold": {
+      "get": {
+        "operationId": "read_testing_hold",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "product",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "context",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Context",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "instance",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Instance",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read a testing lane's staff-testing hold"
+      }
+    },
     "/v1/product-profiles": {
       "get": {
         "operationId": "list_product_profiles",
@@ -3157,6 +3287,118 @@
         "summary": "Read exact operational enrollment readiness"
       }
     },
+    "/v1/products/{product}/discussion-topics": {
+      "get": {
+        "operationId": "list_discussion_topics",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_closed",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Closed",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DiscussionTopicsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "List Topics"
+      }
+    },
     "/v1/products/{product}/environments": {
       "get": {
         "operationId": "list_product_environments",
@@ -3362,6 +3604,16 @@
               "pattern": "^\\S+$",
               "title": "Environment",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_host_network_capacity",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Host Network Capacity",
+              "type": "boolean"
             }
           },
           {
@@ -6063,6 +6315,197 @@
         "tags": [
           "privileged-operations"
         ]
+      }
+    },
+    "/v1/product-config/testing-hold/apply": {
+      "post": {
+        "operationId": "apply_testing_hold",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "activation_plan_sha256": {
+                    "default": "",
+                    "pattern": "^(?:[a-f0-9]{64})?$",
+                    "title": "Activation Plan Sha256",
+                    "type": "string"
+                  },
+                  "context": {
+                    "title": "Context",
+                    "type": "string"
+                  },
+                  "hold": {
+                    "title": "Hold",
+                    "type": "boolean"
+                  },
+                  "instance": {
+                    "title": "Instance",
+                    "type": "string"
+                  },
+                  "mode": {
+                    "default": "dry-run",
+                    "enum": [
+                      "dry-run",
+                      "apply"
+                    ],
+                    "title": "Mode",
+                    "type": "string"
+                  },
+                  "product": {
+                    "title": "Product",
+                    "type": "string"
+                  },
+                  "purpose": {
+                    "default": "staff_testing",
+                    "enum": [
+                      "staff_testing",
+                      "isolation_staging"
+                    ],
+                    "title": "Purpose",
+                    "type": "string"
+                  },
+                  "reason": {
+                    "title": "Reason",
+                    "type": "string"
+                  },
+                  "rehearsal": {
+                    "default": false,
+                    "title": "Rehearsal",
+                    "type": "boolean"
+                  },
+                  "reviewed_plan_sha256": {
+                    "default": "",
+                    "title": "Reviewed Plan Sha256",
+                    "type": "string"
+                  },
+                  "schema_version": {
+                    "const": 1,
+                    "default": 1,
+                    "title": "Schema Version",
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "product",
+                  "context",
+                  "instance",
+                  "hold",
+                  "reason"
+                ],
+                "title": "TestingHoldApplyRequest",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Content Too Large"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Dry-run or apply a testing lane's staff-testing hold"
       }
     },
     "/v1/product-profiles/expected-config/apply": {
@@ -11761,6 +12204,27 @@
           "run_status"
         ]
       },
+      "BridgeNetworkCapacity": {
+        "additionalProperties": false,
+        "properties": {
+          "free_slots": {
+            "minimum": 0,
+            "title": "Free Slots",
+            "type": "integer"
+          },
+          "total_slots": {
+            "minimum": 0,
+            "title": "Total Slots",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "free_slots",
+          "total_slots"
+        ],
+        "title": "BridgeNetworkCapacity",
+        "type": "object"
+      },
       "BrowserRouteRepairRequest": {
         "additionalProperties": false,
         "properties": {
@@ -12733,6 +13197,99 @@
           "wait_for_completion"
         ],
         "title": "DeploymentRecord",
+        "type": "object"
+      },
+      "DiscussionTopicRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "added_at": {
+            "title": "Added At",
+            "type": "string"
+          },
+          "closed_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Closed At"
+          },
+          "issue_url": {
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "Issue Url",
+            "type": "string"
+          },
+          "product": {
+            "minLength": 1,
+            "title": "Product",
+            "type": "string"
+          },
+          "title": {
+            "maxLength": 240,
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          },
+          "topic_id": {
+            "maxLength": 96,
+            "minLength": 1,
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$",
+            "title": "Topic Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "added_at",
+          "closed_at",
+          "issue_url",
+          "product",
+          "title",
+          "topic_id"
+        ],
+        "title": "DiscussionTopicRecord",
+        "type": "object"
+      },
+      "DiscussionTopicsResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "topics": {
+            "items": {
+              "$ref": "#/components/schemas/DiscussionTopicRecord"
+            },
+            "title": "Topics",
+            "type": "array"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "display_name",
+          "product",
+          "status",
+          "topics",
+          "trace_id"
+        ],
+        "title": "DiscussionTopicsResponse",
         "type": "object"
       },
       "DokployDomainRepairReview": {
@@ -15998,6 +16555,66 @@
           "urls",
           "verified"
         ]
+      },
+      "HostNetworkCapacityObservation": {
+        "additionalProperties": false,
+        "properties": {
+          "capacity": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BridgeNetworkCapacity"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "observed_at": {
+            "title": "Observed At",
+            "type": "string"
+          },
+          "reason": {
+            "default": "",
+            "title": "Reason",
+            "type": "string"
+          },
+          "required_networks": {
+            "minimum": 1,
+            "title": "Required Networks",
+            "type": "integer"
+          },
+          "safety_margin": {
+            "minimum": 0,
+            "title": "Safety Margin",
+            "type": "integer"
+          },
+          "server_id": {
+            "default": "",
+            "title": "Server Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "available",
+              "short",
+              "unavailable",
+              "denied"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "capacity",
+          "observed_at",
+          "reason",
+          "required_networks",
+          "safety_margin",
+          "server_id",
+          "status"
+        ],
+        "title": "HostNetworkCapacityObservation",
+        "type": "object"
       },
       "IntegrationKeyReadbackEvidence": {
         "additionalProperties": false,
@@ -29294,6 +29911,21 @@
           "environment": {
             "$ref": "#/components/schemas/ProductEnvironmentDetail"
           },
+          "host_network_capacity": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HostNetworkCapacityObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "host_network_capacity_available": {
+            "default": false,
+            "title": "Host Network Capacity Available",
+            "type": "boolean"
+          },
           "status": {
             "const": "ok",
             "default": "ok",
@@ -29307,6 +29939,8 @@
         },
         "required": [
           "environment",
+          "host_network_capacity",
+          "host_network_capacity_available",
           "status",
           "trace_id"
         ],

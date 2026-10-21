@@ -5,6 +5,7 @@ import type {
   ApplyProductEnvironmentConfigData,
   ApplyProductOwnerData,
   DataProvenance,
+  DiscussionTopicsResponse,
   DispatchProductPromotionWorkflowData,
   DryRunProductPromotionData,
   EveryCodeSummaryResponse,
@@ -61,6 +62,16 @@ export function ownerSecretInputsForFixture(fixture: DataFixtureMode, product: s
       integration: "runtime_environment", binding_key: "MAIL_PASSWORD", label: "Mail app credential", instructions: "Enter the app credential for the website’s sending account.", environments: ["testing", "prod"], request_revision: "a".repeat(64),
       submitted_at: received ? OBSERVED_AT : "", submission_version_id: received ? "fixture-submission-version" : "",
     }],
+  };
+}
+
+export function hostNetworkCapacityForFixture(mode: string): import("./generated/openapi.ts").HostNetworkCapacityObservation {
+  return {
+    server_id: "fixture-host", observed_at: new Date().toISOString(),
+    status: mode === "denied" ? "denied" : mode === "error" ? "unavailable" : "available",
+    capacity: mode === "denied" || mode === "error" ? null : { total_slots: 256, free_slots: 200 },
+    required_networks: 1, safety_margin: 2,
+    reason: mode === "denied" ? "The provider denied the capacity read." : mode === "error" ? "Host capacity could not be verified." : "",
   };
 }
 
@@ -134,6 +145,20 @@ export async function waitForReadinessFixture(
     }, 1800);
     signal.addEventListener("abort", onAbort, { once: true });
   });
+}
+
+export function discussionTopicsForFixture(fixture: DataFixtureMode, product: string): DiscussionTopicsResponse {
+  assertFixtureAvailable(fixture);
+  if (fixture === "denied") throw new LaunchplaneApiError("Topics unavailable.", 403, "fixture-topics");
+  const site = productsForFixture("products").find(candidate => candidate.product === product);
+  if (!site) throw new LaunchplaneApiError("Product unavailable.", 404, "fixture-topics");
+  return {
+    status: "ok", trace_id: "fixture-topics", product, display_name: site.display_name,
+    topics: fixture === "empty" ? [] : [{
+      product, topic_id: "contact-links", title: "Should we keep the contact links?",
+      issue_url: "https://git.example.invalid/example/site/issues/7", added_at: OBSERVED_AT, closed_at: null,
+    }],
+  };
 }
 
 export function productsForFixture(

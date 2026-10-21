@@ -11,6 +11,7 @@ import sys
 import urllib.error
 
 from control_plane.live_target_runtime import LiveTargetRuntimeApplyEnvelope
+from control_plane.contracts.testing_application import TestingApplicationSpecification
 from control_plane.testing_separation_resources import (
     ROUTE,
     SeparationResourcesRequest,
@@ -53,6 +54,7 @@ def main() -> int:
         default="isolation_staging",
     )
     parser.add_argument("--evidence-file", type=Path)
+    parser.add_argument("--application-file", type=Path)
     parser.add_argument("--reviewed-dry-run", action="store_true")
     parser.add_argument("--require-rehearsal", action="store_true")
     parser.add_argument("--idempotency-key", default="")
@@ -63,6 +65,13 @@ def main() -> int:
     applying = args.mode in {"hold-apply", "lift-apply", "apply", "resources-apply"}
     resources = args.mode.startswith("resources-")
     resource_read = args.mode == "resources-read"
+    application = None
+    if args.application_file is not None:
+        if not resources:
+            parser.error("Application specifications apply only to resource preparation modes.")
+        application = TestingApplicationSpecification.model_validate_json(
+            args.application_file.read_text()
+        )
     if resource_read and not args.idempotency_key.strip():
         parser.error("Receipt read requires the original preparation key.")
     holding = args.mode.startswith(("hold-", "lift-"))
@@ -120,9 +129,9 @@ def main() -> int:
     body = draft.model_dump(mode="json")
     path = TESTING_HOLD_APPLY_ROUTE if holding else "/v1/live-target-runtime/apply"
     if resources:
-        body = SeparationResourcesRequest(context=args.context, reason=args.reason).model_dump(
-            mode="json"
-        )
+        body = SeparationResourcesRequest(
+            context=args.context, reason=args.reason, application=application
+        ).model_dump(mode="json")
         path = ROUTE.replace("{product}", args.product)
     submitted = False
     try:

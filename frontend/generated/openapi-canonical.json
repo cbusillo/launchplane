@@ -4369,6 +4369,27 @@
         "title": "BootstrapEvidence",
         "type": "object"
       },
+      "BridgeNetworkCapacity": {
+        "additionalProperties": false,
+        "properties": {
+          "free_slots": {
+            "minimum": 0.0,
+            "title": "Free Slots",
+            "type": "integer"
+          },
+          "total_slots": {
+            "minimum": 0.0,
+            "title": "Total Slots",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total_slots",
+          "free_slots"
+        ],
+        "title": "BridgeNetworkCapacity",
+        "type": "object"
+      },
       "BrowserRouteRepairRequest": {
         "additionalProperties": false,
         "properties": {
@@ -6028,6 +6049,14 @@
       "DiscussionTopicsResponse": {
         "additionalProperties": false,
         "properties": {
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
           "status": {
             "const": "ok",
             "default": "ok",
@@ -6048,6 +6077,8 @@
         },
         "required": [
           "trace_id",
+          "product",
+          "display_name",
           "topics"
         ],
         "title": "DiscussionTopicsResponse",
@@ -14676,6 +14707,63 @@
           "historical_completion_preflight"
         ],
         "title": "HistoricalCompletionPreflightResult",
+        "type": "object"
+      },
+      "HostNetworkCapacityObservation": {
+        "additionalProperties": false,
+        "properties": {
+          "capacity": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BridgeNetworkCapacity"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "observed_at": {
+            "title": "Observed At",
+            "type": "string"
+          },
+          "reason": {
+            "default": "",
+            "title": "Reason",
+            "type": "string"
+          },
+          "required_networks": {
+            "minimum": 1.0,
+            "title": "Required Networks",
+            "type": "integer"
+          },
+          "safety_margin": {
+            "minimum": 0.0,
+            "title": "Safety Margin",
+            "type": "integer"
+          },
+          "server_id": {
+            "default": "",
+            "title": "Server Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "available",
+              "short",
+              "unavailable",
+              "denied"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "observed_at",
+          "status",
+          "required_networks",
+          "safety_margin"
+        ],
+        "title": "HostNetworkCapacityObservation",
         "type": "object"
       },
       "ImportDiagnosticResult": {
@@ -25241,6 +25329,7 @@
               "prepare",
               "execute",
               "simulate-final",
+              "validate-business",
               "verify",
               "retire",
               "retire-incomplete"
@@ -33860,6 +33949,21 @@
         "properties": {
           "environment": {
             "$ref": "#/components/schemas/ProductEnvironmentDetail"
+          },
+          "host_network_capacity": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HostNetworkCapacityObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "host_network_capacity_available": {
+            "default": false,
+            "title": "Host Network Capacity Available",
+            "type": "boolean"
           },
           "status": {
             "const": "ok",
@@ -49581,6 +49685,16 @@
       "SeparationResourcesRequest": {
         "additionalProperties": false,
         "properties": {
+          "application": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TestingApplicationSpecification"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "context": {
             "minLength": 1,
             "title": "Context",
@@ -51621,6 +51735,16 @@
       "TestingActivationRequest": {
         "additionalProperties": false,
         "properties": {
+          "application": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TestingApplicationSpecification"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "context": {
             "minLength": 1,
             "title": "Context",
@@ -51694,6 +51818,94 @@
           "reason"
         ],
         "title": "TestingActivationRequest",
+        "type": "object"
+      },
+      "TestingApplicationCredential": {
+        "additionalProperties": false,
+        "properties": {
+          "binding_key": {
+            "pattern": "^[A-Z][A-Z0-9_]{0,127}$",
+            "title": "Binding Key",
+            "type": "string"
+          },
+          "encoding": {
+            "enum": [
+              "urlsafe",
+              "base64",
+              "hex"
+            ],
+            "title": "Encoding",
+            "type": "string"
+          }
+        },
+        "required": [
+          "binding_key",
+          "encoding"
+        ],
+        "title": "TestingApplicationCredential",
+        "type": "object"
+      },
+      "TestingApplicationSpecification": {
+        "additionalProperties": false,
+        "properties": {
+          "health_path": {
+            "pattern": "^/[^\\s?#]*$",
+            "title": "Health Path",
+            "type": "string"
+          },
+          "local_credentials": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/TestingApplicationCredential"
+            },
+            "title": "Local Credentials",
+            "type": "array"
+          },
+          "network_name": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
+            "title": "Network Name",
+            "type": "string"
+          },
+          "runtime_port": {
+            "maximum": 65535.0,
+            "minimum": 1.0,
+            "title": "Runtime Port",
+            "type": "integer"
+          },
+          "state": {
+            "$ref": "#/components/schemas/TestingApplicationState"
+          }
+        },
+        "required": [
+          "runtime_port",
+          "health_path",
+          "network_name",
+          "state"
+        ],
+        "title": "TestingApplicationSpecification",
+        "type": "object"
+      },
+      "TestingApplicationState": {
+        "additionalProperties": false,
+        "properties": {
+          "container_path": {
+            "default": "",
+            "title": "Container Path",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "none",
+              "volume"
+            ],
+            "title": "Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "title": "TestingApplicationState",
         "type": "object"
       },
       "TestingCredentialAudit": {
@@ -83817,6 +84029,16 @@
               "title": "Authorization",
               "type": "string"
             }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -83915,6 +84137,16 @@
             "schema": {
               "default": "",
               "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
               "type": "string"
             }
           }
@@ -91114,6 +91346,16 @@
               "pattern": "^\\S+$",
               "title": "Environment",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_host_network_capacity",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Host Network Capacity",
+              "type": "boolean"
             }
           },
           {
@@ -103214,6 +103456,7 @@
     "/v1/privileged-operations/plans": "list_human_privileged_operations",
     "/v1/privileged-operations/plans/{operation_id}": "read_human_privileged_operation",
     "/v1/privileged-operations/plans/{operation_id}/review": "read_human_privileged_operation_review",
+    "/v1/product-config/testing-hold": "read_testing_hold",
     "/v1/product-profiles": "list_product_profiles",
     "/v1/product-profiles/{product}": "read_product_profile",
     "/v1/product-profiles/{product}/mutation-receipts/{field}": "read_product_profile_mutation_receipt",
@@ -103227,6 +103470,7 @@
     "/v1/products/{product}": "read_product",
     "/v1/products/{product}/activity": "read_product_activity",
     "/v1/products/{product}/contexts/{context}/instances/{instance}/operational-readiness": "read_product_operational_readiness",
+    "/v1/products/{product}/discussion-topics": "list_discussion_topics",
     "/v1/products/{product}/environments": "list_product_environments",
     "/v1/products/{product}/environments/prod/backup-worker-bindings": "read_backup_worker_bindings",
     "/v1/products/{product}/environments/{environment}": "read_product_environment",
@@ -103257,6 +103501,7 @@
     "/v1/privileged-operations/plans/{operation_id}/approve": "approve_human_privileged_operation",
     "/v1/privileged-operations/plans/{operation_id}/cancel": "cancel_human_privileged_operation",
     "/v1/privileged-operations/plans/{operation_id}/revoke": "revoke_human_privileged_operation",
+    "/v1/product-config/testing-hold/apply": "apply_testing_hold",
     "/v1/product-profiles/expected-config/apply": "apply_product_expected_config",
     "/v1/product-profiles/health-monitoring/apply": "apply_product_health_monitoring",
     "/v1/product-profiles/stable-lane-repair/apply": "apply_product_stable_lane_repair",

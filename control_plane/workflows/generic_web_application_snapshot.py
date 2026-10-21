@@ -135,19 +135,30 @@ def application_snapshot_for_deploy(
         except FileNotFoundError:
             pass
         else:
-            if inventory.artifact_identity is not None:
-                previous_artifact = inventory.artifact_identity.artifact_id
-                previous_source = inventory.source_git_ref
-            prior = read_snapshot(inventory.deployment_record_id)
+            previous_record = None
             if inventory.deployment_record_id:
                 try:
                     previous_record = reader.read_deployment_record(inventory.deployment_record_id)
                 except FileNotFoundError:
                     pass
-                else:
-                    if previous_record.artifact_identity is not None:
-                        previous_artifact = previous_record.artifact_identity.artifact_id
-                        previous_source = previous_record.source_git_ref
+            from control_plane.testing_activation import completed_application_predecessor
+
+            independent = not rollback and completed_application_predecessor(
+                store,
+                product=product,
+                context=context,
+                target_id=target_id,
+                inventory=inventory,
+                deployment=previous_record,
+            )
+            if not independent and inventory.artifact_identity is not None:
+                previous_artifact = inventory.artifact_identity.artifact_id
+                previous_source = inventory.source_git_ref
+            if not independent:
+                prior = read_snapshot(inventory.deployment_record_id)
+                if previous_record is not None and previous_record.artifact_identity is not None:
+                    previous_artifact = previous_record.artifact_identity.artifact_id
+                    previous_source = previous_record.source_git_ref
     if previous_deployment_record_id and prior is None:
         prior = read_snapshot(previous_deployment_record_id)
         if prior is not None:

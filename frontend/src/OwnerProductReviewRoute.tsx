@@ -17,7 +17,7 @@ import type { DevFixtureMode } from "./dev-fixture-loader";
 import { loadDevFixtures } from "./dev-fixture-loader";
 import { formatTime } from "./format";
 import { productReviewLookupFromSearch } from "./route-model";
-import { useAppSearchParams } from "./router";
+import { AppLink, productTopicsPath, useAppSearchParams } from "./router";
 import { safeExternalUrl } from "./url";
 import { OwnerReleaseReviewRoute } from "./OwnerReleaseReviewRoute";
 
@@ -119,7 +119,10 @@ export function OwnerProductReviewRoute({
 }) {
   const searchParams = useAppSearchParams();
   const product = searchParams.get("product");
-  return product ? <OwnerReleaseReviewRoute key={product} product={product} fixtureMode={fixtureMode} /> : <OwnerPreviewReviewRoute fixtureMode={fixtureMode} />;
+  return product ? <>
+    <p><AppLink to={productTopicsPath(product)}>Topics to discuss</AppLink></p>
+    <OwnerReleaseReviewRoute key={product} product={product} fixtureMode={fixtureMode} />
+  </> : <OwnerPreviewReviewRoute fixtureMode={fixtureMode} />;
 }
 
 function OwnerPreviewReviewRoute({
@@ -205,6 +208,8 @@ function OwnerPreviewReviewRoute({
           <button className="button" type="button" onClick={() => void loadReview()}>Refresh review</button>
         </>
       ) : review ? (
+        <>
+        <p><AppLink to={productTopicsPath(review.product)}>Topics to discuss</AppLink></p>
         <ProductReviewCard
           historical={Boolean(decisionId)}
           fixtureMode={fixtureMode}
@@ -212,6 +217,7 @@ function OwnerPreviewReviewRoute({
           onDecided={setReview}
           onRefresh={() => loadReview()}
         />
+        </>
       ) : null}
     </section>
   );

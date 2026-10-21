@@ -89,6 +89,8 @@ from control_plane.product_promotion_http import (
     resolve_product_promotion_target,
 )
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.contracts.host_network_capacity import HostNetworkCapacityObservation
+from control_plane.host_network_capacity import read_lane_host_network_capacity
 from control_plane.tenant_admission_context import (
     build_tenant_admission_evaluation_read_model,
 )
@@ -197,6 +199,8 @@ class ProductEnvironmentResponse(BaseModel):
     status: Literal["ok"] = "ok"
     trace_id: str
     environment: ProductEnvironmentDetail
+    host_network_capacity_available: bool = False
+    host_network_capacity: HostNetworkCapacityObservation | None = None
 
 
 class ProductEnvironmentIncidentsResponse(BaseModel):
@@ -1251,6 +1255,7 @@ def register_product_environment_read_routes(
         environment: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
         identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],
         record_store: Annotated[object, Depends(common.get_record_store)],
+        include_host_network_capacity: bool = False,
     ) -> ProductEnvironmentResponse:
         trace_id = common.next_trace_id()
         result = _build_product_environment_read_result(
@@ -1267,9 +1272,25 @@ def register_product_environment_read_routes(
             result=result,
         )
         environment_detail = ProductEnvironmentDetail.model_validate(result.payload["environment"])
+        capacity_available = (
+            isinstance(record_store, PostgresRecordStore)
+            and environment_detail.target.provider == "dokploy"
+        )
+        capacity = (
+            read_lane_host_network_capacity(
+                root=dependencies.control_plane_root,
+                store=record_store,
+                context=environment_detail.context,
+                instance=environment_detail.environment,
+            )
+            if include_host_network_capacity and isinstance(record_store, PostgresRecordStore)
+            else None
+        )
         return ProductEnvironmentResponse(
             trace_id=trace_id,
             environment=environment_detail,
+            host_network_capacity_available=capacity_available,
+            host_network_capacity=capacity,
         )
 
     def list_product_environment_incidents(

@@ -117,7 +117,13 @@ def register_odoo_upgrade_rehearsal_routes(
                 refuse(403, "authorization_denied")
             if not idempotency_key.strip() or not body.reviewed_plan_sha256:
                 refuse(400, "review_required")
-        elif not dependencies.authorization_allows(
+        if (
+            body.action == "validate-business"
+            and body.mode == "readback"
+            and (not idempotency_key.strip() or not body.reviewed_plan_sha256)
+        ):
+            refuse(400, "original_review_required")
+        if body.mode != "apply" and not dependencies.authorization_allows(
             identity=identity,
             action="operations.read",
             product=product,
@@ -254,7 +260,13 @@ def register_odoo_upgrade_rehearsal_routes(
                     **({"custody": result["custody"]} if result.get("custody") else {}),
                     **{
                         key: result[key]
-                        for key in ("child_failure", "retained_upgrade_logs")
+                        for key in (
+                            "child_failure",
+                            "retained_upgrade_logs",
+                            "business_validation",
+                            "pending_business_validation",
+                            "business_validation_postcheck_verified",
+                        )
                         if result.get(key) is not None
                     },
                     **({"diagnostics_private": True} if result.get("diagnostics_private") else {}),
@@ -309,7 +321,7 @@ def register_odoo_upgrade_rehearsal_routes(
                     )
                 result = {
                     **adapter.public(record),
-                    "plan_sha256": record.binding_sha256,
+                    "plan_sha256": adapter.reviewed_binding(record),
                     "action": body.action,
                     "applied": False,
                 }

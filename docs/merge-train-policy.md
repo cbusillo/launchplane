@@ -882,10 +882,12 @@ check suites using the shared workflow execution selector. An identity-verified
 Actions job with a failed conclusion triggers a bounded, complete exact-head
 workflow inventory. Pure pending-check polls keep their existing read path. Only a
 completed superseded execution with matching job link, head and suite can be
-removed if its workflow was cancelled, after all current executions have settled
-successfully. Genuine failed executions keep their existing blockers. Different
+removed, regardless of its conclusion, after all current executions have settled
+successfully. Current failed executions keep their existing blockers. Different
 workflows, events, source repositories and PR targets remain independent; newer
 reruns and incomplete or unavailable metadata retain the existing blockers.
+A current skipped execution or job counts as passing and can clear a superseded
+failure without rerunning that job.
 The native token selects Actions read only when the policy's verified installation
 already advertises it, and verifies the issued token against that exact selection.
 It never requests Actions write or changes installation grants. Its issued scopes
@@ -905,8 +907,8 @@ Provider refusals include the HTTP status and a redacted route, without provider
 bodies or credentials. A refused or invalid mint still fails closed without an
 alternate credential or retry through another carrier.
 Transient provider failures preserve their original controller retry and quota evidence.
-This applies to original-head, candidate and base check reads without changing
-required-check identities, admission, or landing protection.
+This applies to original-head, candidate, base and technical-admission check reads
+without changing required-check identities, admission, or landing protection.
 
 Required checks must pass on the candidate commit that includes the queued PRs
 being considered for the batch. Checks on each PR's own head are useful
@@ -928,6 +930,8 @@ and the protected expected-head merge; no
 checks are copied to a new SHA and no provider requirement is changed.
 
 All adapter check reads supersede attempts within their provider check suite.
+Missing suite or check identity retains every observation as independent evidence.
+Stale checks and startup failures block consistently in screening and admission.
 Push and PR workflows can publish identical job names from the same App on one
 SHA; a passing job in one suite cannot erase a failing or pending job in another.
 This applies to PR-head screening, candidate observation, base verification,
@@ -935,8 +939,9 @@ head-check reuse and failure diagnostics. Failed suites on a source head can
 prevent reuse and require full candidate CI. A failing candidate enters the
 existing recovery path instead of planning a landing that fresh admission will
 refuse. A passing rerun in the failed suite can establish exact-SHA recovery
-under the existing retry budget; a new suite alone cannot clear the failure.
-When that suite cannot be rerun, recovery needs a new candidate SHA.
+under the existing retry budget. A new suite clears an older execution's failure
+only when the shared selector proves it supersedes that execution; otherwise
+recovery needs a rerun of the failed suite or a new candidate SHA.
 
 Repositories using batch candidates must run their required workflows for
 pushes to `launchplane/train/**` and exclude `launchplane/construct/**` from

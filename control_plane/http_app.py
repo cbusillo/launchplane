@@ -846,6 +846,7 @@ from control_plane.disposable_lane_collection import (
 from control_plane.odoo_testing_usage import read_odoo_testing_usage, OdooTestingUsage
 from control_plane.testing_never_served import read_never_served_testing_usage
 from control_plane.testing_rebuild_service import TestingRebuildRefused
+from control_plane.dokploy.network_capacity import BridgeNetworkCapacityRefused
 from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 
 from control_plane.disposable_lanes import (
@@ -5173,8 +5174,8 @@ def create_launchplane_fastapi_app(
             allow_owner=False,
         )
 
-    # Only the Owner review routes accept a product Owner's session; each route
-    # still checks that the viewer is the named Owner of the requested product.
+    # Client-facing routes accept a Client session and check the requested
+    # product against its recorded Client identity.
     def read_owner_review_identity(
         request: Request,
         response: Response,
@@ -7573,6 +7574,17 @@ def create_launchplane_fastapi_app(
                 records=response.records,
             )
             return response
+        except BridgeNetworkCapacityRefused as error:
+            raise _launchplane_http_error(
+                status_code=409, trace_id=trace_id, code=error.code, message=str(error)
+            ) from None
+        except NativeSourceAuthorizationDenied:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="The provider denied the read.",
+            ) from None
         except OdooPreviewPlanProvenanceError as error:
             raise _launchplane_http_error(
                 status_code=409,
@@ -9053,7 +9065,7 @@ def create_launchplane_fastapi_app(
             ) from error
 
     async def read_testing_hold(
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         product: Annotated[str, Query()] = "",
         context: Annotated[str, Query()] = "",
@@ -9107,9 +9119,23 @@ def create_launchplane_fastapi_app(
             result=result.model_dump(mode="json"),
         )
 
+    def read_testing_hold_mutation_identity(
+        identity: Annotated[LaunchplaneIdentity, Depends(read_operator_mutation_identity)],
+    ) -> LaunchplaneIdentity:
+        if isinstance(identity, GitHubHumanIdentity) and not (
+            resolved_authz_policy_runtime.policy.names_administrator(identity)
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=next_trace_id(),
+                code="authorization_denied",
+                message="Testing hold controls require the signed-in administrator.",
+            )
+        return identity
+
     async def apply_testing_hold(
         request: Request,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_testing_hold_mutation_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
@@ -17157,6 +17183,7 @@ def create_launchplane_fastapi_app(
         reservation_scope: str = "",
         target_supersession: ProviderTargetSupersession | None = None,
         public_failure_messages: Mapping[str, str] | None = None,
+        original_intent: dict[str, object] | None = None,
     ) -> AcceptedEvidenceResponse:
         def operation(store: PostgresRecordStore) -> DurableProviderOperationResult:
             return run_durable_provider_operation(
@@ -17169,6 +17196,7 @@ def create_launchplane_fastapi_app(
                 response_trace_id=trace_id,
                 adapter=adapter,
                 target_supersession=target_supersession,
+                original_intent=original_intent,
             )
 
         return await run_provider_operation_http(
@@ -27236,6 +27264,17 @@ def create_launchplane_fastapi_app(
                     if disposable_rebuild_setup or first_testing_setup
                     else None,
                 )
+        except BridgeNetworkCapacityRefused as error:
+            raise _launchplane_http_error(
+                status_code=409, trace_id=trace_id, code=error.code, message=str(error)
+            ) from None
+        except NativeSourceAuthorizationDenied:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="The provider denied the read.",
+            ) from None
         except DokployComposeDomainPartialError as error:
             raise LaunchplaneHTTPException(
                 status_code=502,
@@ -30924,7 +30963,9 @@ def create_launchplane_fastapi_app(
         app, dependencies=read_route_dependencies, mutation_identity=read_browser_mutation_identity
     )
     register_discussion_topic_routes(
-        app, dependencies=read_route_dependencies, mutation_identity=read_browser_mutation_identity
+        app,
+        dependencies=owner_review_route_dependencies,
+        mutation_identity=read_browser_mutation_identity,
     )
     register_testing_restore_policy_routes(
         app, dependencies=read_route_dependencies, mutation_identity=read_browser_mutation_identity

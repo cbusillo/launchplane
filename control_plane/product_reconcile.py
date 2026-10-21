@@ -56,6 +56,8 @@ from control_plane.dokploy.api import (
     DokployScheduleExecutionFailed,
     is_transient_dokploy_error,
 )
+from control_plane.dokploy.network_capacity import BridgeNetworkCapacityRefused
+from control_plane.contracts.host_network_capacity import HOST_BRIDGE_NETWORK_FAILURE_MESSAGES
 from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 from control_plane.build_provenance import (
     BUILD_WORKFLOW_PATH,
@@ -2389,6 +2391,8 @@ def _run_preview_operation(
                 issued_plan = original.issued_plan
         result = run_issued_plan(issued_plan, allow_mutation=operation != "destroy" or allow_retry)
         return finish_result(result, issued_plan)
+    except (BridgeNetworkCapacityRefused, NativeSourceAuthorizationDenied) as error:
+        return _preview_failure(plan, error.code)
     except _PullRequestMovedError:
         plan["deferred"] = "pull_request_moved"
         return ReconcileOutcome(plan, deferred=True)
@@ -2735,6 +2739,8 @@ def run_product_reconcile_once(
     if request.target_kind == "preview" and outcome.error:
         code = outcome.plan.get("last_failed_error_code")
         if code not in {
+            *HOST_BRIDGE_NETWORK_FAILURE_MESSAGES,
+            "authorization_denied",
             "preview_plan_blocked",
             "preview_config_refused",
             "preview_provenance_refused",

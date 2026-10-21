@@ -2174,6 +2174,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
     ) -> None:
         import logging
         from contextlib import nullcontext
+        from control_plane.contracts.provider_schedule import ScheduleMaterializationTooLarge
         from control_plane.contracts.durable_operation_authorization import (
             DurableOperationAuthorization,
         )
@@ -2208,11 +2209,13 @@ class NativeTestingWorkerTests(unittest.TestCase):
             post_deploy_status="pass",
             health_status="pass",
         )
-        for response in (
-            success,
-            service.NativeTestingRebuildPending("fixture observation pending"),
-            RuntimeError("Fixture execution lock lost after dispatch"),
-            KeyError("Fixture malformed frame after dispatch"),
+        for response, effects_started in (
+            (success, False),
+            (service.NativeTestingRebuildPending("fixture observation pending"), True),
+            (RuntimeError("Fixture execution lock lost after dispatch"), True),
+            (KeyError("Fixture malformed frame after dispatch"), True),
+            (ScheduleMaterializationTooLarge(), True),
+            (ScheduleMaterializationTooLarge(), False),
         ):
             with (
                 self.subTest(pending=isinstance(response, Exception)),
@@ -2231,7 +2234,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
                 patch.object(
                     worker,
                     "native_rebuild_effects_started",
-                    return_value=isinstance(response, Exception),
+                    return_value=effects_started,
                 ),
                 patch.object(
                     self.store,
@@ -2255,6 +2258,13 @@ class NativeTestingWorkerTests(unittest.TestCase):
             execute.assert_called_once()
             legacy.assert_not_called()
             terminal = complete.call_args.kwargs["record"]
+            if isinstance(response, ScheduleMaterializationTooLarge):
+                self.assertEqual(
+                    terminal.status, "reconciliation_required" if effects_started else "fail"
+                )
+                self.assertEqual(terminal.error_code, response.code)
+                self.assertEqual(bool(terminal.finished_at), not effects_started)
+                continue
             self.assertEqual(
                 terminal.status, "pending" if isinstance(response, Exception) else "pass"
             )
@@ -2496,6 +2506,12 @@ class NativeTestingWorkerTests(unittest.TestCase):
             self.assertRaises(service.NativeTestingRebuildPending),
         ):
             self.execute()
+        previous_reservation = self.store.read_idempotency_record(
+            scope=REBUILD_SCOPE,
+            route_path=REBUILD_ROUTE,
+            idempotency_key=self.operation.operation_id,
+        )
+        assert previous_reservation is not None
         authorization = durable_operation_authorization_payload(
             action="odoo_target_replacement_apply.execute",
             managed_rule_id="native-testing-fixture",
@@ -2531,7 +2547,10 @@ class NativeTestingWorkerTests(unittest.TestCase):
                     )
                     assert original is not None
                     self.assertGreater(original.attempt, 1)
-                    self.assertFalse(original.provider_effect_started_at)
+                    self.assertEqual(
+                        original.provider_effect_started_at,
+                        previous_reservation.provider_effect_started_at,
+                    )
                     raise denial
 
             return service.execute_native_testing_rebuild(**{**kwargs, "authorize": checkpoint})

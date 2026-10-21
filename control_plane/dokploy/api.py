@@ -1720,10 +1720,9 @@ def validate_dokploy_schedule_script(schedule_payload: JsonObject) -> int:
         str(schedule_payload.get("appName") or "").encode()
     )
     if materialization_bytes >= DOKPLOY_SCHEDULE_MATERIALIZATION_LIMIT_BYTES:
-        raise click.ClickException(
-            "Dokploy schedule script exceeds the safe materialization size; "
-            "deliver a compact host program before retrying the original operation."
-        )
+        from control_plane.contracts.provider_schedule import ScheduleMaterializationTooLarge
+
+        raise ScheduleMaterializationTooLarge()
     return materialization_bytes
 
 

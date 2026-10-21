@@ -49,6 +49,9 @@ class _DirectorTestingSetupFixture(unittest.IsolatedAsyncioTestCase):
         return f"sqlite+pysqlite:///{self.root / 'state.db'}"
 
     def setUp(self) -> None:
+        self.enterContext(
+            patch("control_plane.workflows.dokploy_target_adoption.require_bridge_network_capacity")
+        )
         temporary = TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)

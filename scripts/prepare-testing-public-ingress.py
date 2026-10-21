@@ -77,8 +77,10 @@ def main() -> int:
             result.get(k) != v for k, v in identity.items() if k != "reason"
         ):
             raise ValueError("The receipt belongs to another testing generation.")
-        if result["applied"] is not (args.mode != "dry-run") or (
-            digest and result["plan_sha256"] != digest
+        if (
+            result["applied"] is not (args.mode != "dry-run")
+            or (digest and result["plan_sha256"] != digest)
+            or result.get("public_tls_verified") is not (args.mode != "dry-run")
         ):
             raise ValueError("The receipt differs from the reviewed plan.")
         if args.mode == "dry-run":
@@ -95,6 +97,7 @@ def main() -> int:
                     "plan_sha256": result["plan_sha256"],
                     "applied": result["applied"],
                     "public_health_verified": False,
+                    "public_tls_verified": result["public_tls_verified"],
                 }
             )
         )

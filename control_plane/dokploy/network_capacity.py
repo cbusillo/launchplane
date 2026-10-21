@@ -15,6 +15,19 @@ from control_plane.docker_errors import docker_daemon_authorization_denied
 BRIDGE_NETWORK_CAPACITY_MARGIN = 2
 
 
+def compose_bridge_network_requirement(document: Mapping[str, object]) -> int:
+    """Reserve the default bridge and declared private bridges in a known Compose.
+
+    Dokploy's Compose rendering can attach the default network even when services
+    declare another network. Counting all declared private bridges is conservative
+    about unused declarations and avoids depending on provider rendering details.
+    """
+    networks = document.get("networks", {})
+    if not isinstance(networks, Mapping):
+        raise BridgeNetworkCapacityRefused("host_bridge_network_capacity_unavailable")
+    return max(1, len(networks) + ("default" not in networks))
+
+
 class BridgeNetworkCapacityRefused(ValueError):
     def __init__(
         self,

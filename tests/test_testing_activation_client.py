@@ -14,11 +14,18 @@ from control_plane.contracts.testing_activation import (
     TestingActivationPlan,
     TestingActivationRequest,
     TestingActivationResult,
+    TestingActivationRefusedResult,
 )
 
 
 class ActivationClientTests(unittest.TestCase):
     def test_review_binding_and_replay_preserve_evidence_with_fresh_trace(self) -> None:
+        self.exercise_review_and_replay(refused=False)
+
+    def test_refused_apply_readback_and_receipt_preserve_the_negative_result(self) -> None:
+        self.exercise_review_and_replay(refused=True)
+
+    def exercise_review_and_replay(self, *, refused: bool) -> None:
         client = runpy.run_path(
             str(Path(__file__).resolve().parents[1] / "scripts/activate-generic-web-testing.py")
         )
@@ -40,9 +47,20 @@ class ActivationClientTests(unittest.TestCase):
             image_reference="example@sha256:" + "a" * 64,
             host_ports=(19212, 19213),
         )
-        result = TestingActivationResult(
-            **plan.model_dump(exclude={"applied", "separation_verified"}),
-            qualified_at="2026-10-15T00:00:00Z",
+        result = (
+            TestingActivationRefusedResult(
+                **plan.model_dump(), reason="candidate_deployment_failed"
+            )
+            if refused
+            else TestingActivationResult(
+                **plan.model_dump(exclude={"applied", "separation_verified"}),
+                qualified_at="2026-10-15T00:00:00Z",
+            )
+        )
+        modes = (
+            ("dry-run", "apply", "apply", "readback", "receipt")
+            if refused
+            else ("dry-run", "apply", "apply")
         )
         post = Mock(
             side_effect=[
@@ -51,7 +69,7 @@ class ActivationClientTests(unittest.TestCase):
                     "trace_id": f"trace-{index}",
                     "result": (plan if index == 0 else result).model_dump(mode="json"),
                 }
-                for index in range(3)
+                for index in range(len(modes))
             ]
         )
         transport: dict[str, Any] = {
@@ -70,7 +88,8 @@ class ActivationClientTests(unittest.TestCase):
             request = root / "request.json"
             request.write_text(draft.model_dump_json())
             evidence = root / "review.json"
-            for mode in ("dry-run", "apply", "apply"):
+            apply_args = []
+            for mode in modes:
                 args = [
                     "client",
                     mode,
@@ -85,6 +104,9 @@ class ActivationClientTests(unittest.TestCase):
                 ]
                 if mode == "apply":
                     args.extend(["--reviewed-dry-run", "--idempotency-key", "original-activation"])
+                    apply_args = args
+                elif mode == "receipt":
+                    args.extend(["--idempotency-key", "original-activation"])
                 output = io.StringIO()
                 with (
                     patch("runpy.run_path", return_value=transport),
@@ -93,6 +115,10 @@ class ActivationClientTests(unittest.TestCase):
                 ):
                     self.assertEqual(client["main"](), 0, output.getvalue())
                 self.assertNotIn("fixture-private-token", output.getvalue())
+                if mode != "dry-run":
+                    self.assertEqual(
+                        json.loads(output.getvalue())["result"], result.model_dump(mode="json")
+                    )
             self.assertEqual(evidence.stat().st_mode & 0o077, 0)
             self.assertEqual(
                 json.loads(evidence.read_text())["result"], plan.model_dump(mode="json")
@@ -106,8 +132,8 @@ class ActivationClientTests(unittest.TestCase):
             output = io.StringIO()
             with (
                 patch("runpy.run_path", return_value=transport),
-                patch("sys.argv", args),
+                patch("sys.argv", apply_args),
                 redirect_stdout(output),
             ):
                 self.assertEqual(client["main"](), 1)
-            self.assertEqual(post.call_count, 3)
+            self.assertEqual(post.call_count, len(modes))

@@ -88,6 +88,25 @@ placement takes precedence, and partial candidates continue under their original
 custody without repeating capacity admission. This read observes headroom; it
 does not reserve capacity against concurrent actors.
 
+Fresh ordinary Compose lanes and Odoo previews use the same admission check
+before their first provider create, including the project's and environment's
+creation. Ordinary lane creation admits its private default bridge; repository
+Compose source is not yet available, so this is not a guarantee for additional
+networks a later deployment might declare. Generic-web testing activation and independent production recipients
+check before recording fresh placement custody or dispatching resource work.
+Their known Compose source reserves the default bridge and all declared private
+networks. Explicit partial-placement recovery and an existing preview continue
+under their original custody; they do not repeat fresh admission. An unused
+durable reservation is released on refusal, and the original key can continue
+after capacity is restored. A provider authorization denial remains denied.
+
+Application targets use Dokploy's existing Swarm network rather than allocating
+a per-target Compose bridge; this admission does not pretend to measure overlay
+address capacity. Missing, local-only or unverified remote-host evidence for a
+new Compose allocation refuses without guessing another host. Host daemon pool
+configuration remains an infrastructure responsibility. See
+[host capacity in the environment view](operator-experience.md#host-network-capacity).
+
 Use a compatible controller/adapter for continuation and preserve unresolved
 provider effects, rather than deleting checkpoints or replaying a legacy
 bootstrap against that copy. Terminal checkpoint reads return their historical
@@ -100,7 +119,12 @@ candidate custody before this component is activated as a rebuild control.
 ## Repair usage rule
 
 `control_plane/lane_usage.py` owns the usage decision for disposable repair.
-A current staff-testing hold always protects the lane. Without a hold,
+A current staff-testing hold always protects the lane. An administrator may
+resume testing through the product's testing overview;
+the [audited hold control](authorization-authority.md#preparing-agent-product-setup) uses the
+existing reviewed lift and can request a new testing deployment. Agents do not
+use that browser control or lift ordinary staff holds themselves.
+Without a hold,
 UNKNOWN occupancy alone does not require downtime or a declaration of non-use
 for a disposable non-production lane. It remains UNKNOWN, never `unused`.
 Positive usage, including recent login/session reports, protects a serving or
@@ -547,6 +571,13 @@ hold and historical fence. Its exact-receipt hold continuation is the bounded
 exception to the ordinary Director-agent staging-lift refusal described above.
 It proves separation before requesting normal testing reconciliation.
 
+Application resource allocations bind their original preparation operation, so
+a distinct reviewed preparation creates fresh storage even when the lane's
+configuration is unchanged. A refused activation retains those resources and
+its truthful negative receipt; it does not clear unknown historical work. See
+[activation recovery](testing-activation.md) for private failed candidates and
+addressed route restoration before another independent generation.
+
 `POST /v1/products/{product}/testing-separation-resources` provides preparation
 when the old testing recipient cannot be changed. It accepts only the exact
 owned generic-web testing context, a reason, mode and reviewed plan digest.
@@ -555,7 +586,22 @@ legacy purpose remains a staff hold; no reason text is interpreted, no hold is
 converted or lifted, and even a genuine staff hold continues protecting the old
 lane. Other callers' holds and production aliases refuse preparation.
 
-Apply requires PostgreSQL, complete current provider/executor exclusion, the
+An explicit reviewed `application` specification selects the
+[conventional application continuation](testing-activation.md#conventional-application-recipients).
+It allocates zero volumes for stateless applications or one application volume,
+rather than inventing the legacy two-volume shape. Independent PostgreSQL state
+and derived connection URLs are deferred to [#4290](https://github.com/cbusillo/launchplane/issues/4290). The same specification is required at activation. This admission retains
+the exact original unknown application execution; it proves custody and
+attributable retained-recipient capabilities without claiming remote quiescence.
+Actual old task/container attribution, no platform authority and independently
+qualified new backing are required. The strict exclusion read stays truthful.
+Application preparation accepts reviewed data paths; it still accepts no secret values or old database credentials.
+New credential material remains purpose-staged until atomic application
+publication. Local-command and verifier obligations then run normally against
+the new recipient after the explicit activation-backed hold lift. External
+writable identities that cannot be independently allocated remain unsupported.
+
+Legacy Compose apply requires PostgreSQL, complete current provider/executor exclusion, the
 reviewed configuration/secret-metadata/hold/reservation/provider-placement snapshot and a stable
 idempotency key. It acquires the original executor lock, but never settles or
 releases the original deployment reservation. The only new effect is a disabled,
@@ -1622,10 +1668,23 @@ no hostname, provider ID, upstream, certificate, raw config or source-copy input
 The service derives the new domain from the current generation/profile/target,
 and its edge from the lane's existing active service-owned NPMplus binding.
 Live provider placement must agree with that recorded endpoint. The existing
-edge host must be public, enabled, free of custom locations/config/access
-controls, and use an existing unexpired certificate covering the new domain.
-The only allowed template config is this operation's own audited identity
-comment. Its generated comment is preserved by the current provider API;
+edge host must be enabled and use an existing unexpired certificate covering
+the new domain. Clean public templates still require no access controls or
+custom locations/config, apart from this operation's audited identity comment.
+There is a separate, bounded protected Odoo template: one existing provider
+access-list reference, no auth-request provider or structured custom locations,
+and exactly two existing `location ^~` exceptions, `/web/image/` and
+`/shopify/webhook`. Each must contain only `auth_basic off`, `satisfy any`,
+`allow all`, a `proxy_pass` to the recorded upstream with `$request_uri`, and
+the Host, X-Real-IP, X-Forwarded-For and X-Forwarded-Proto headers using
+`$host`, `$remote_addr`, `$proxy_add_x_forwarded_for` and `$scheme`, respectively.
+Directive order follows the retained supported structure. The service copies
+these existing rules unchanged and reuses the same access-list and certificate
+references. It never adds an exception, changes ACL membership, or accepts raw
+configuration from the caller. Unknown or incompatible restrictions still
+refuse with `testing_edge_template_incompatible`. An audited protected route
+can template a later generation only while its full route digest still agrees.
+Its generated identity comment is preserved by the current provider API;
 legacy `meta` is neither accepted on writes nor returned by that API.
 Fresh provider reads must show loaded Nginx configuration and no private TLS,
 extra location/directory config or authentication upstream before publication
@@ -1657,21 +1716,29 @@ targets, storage, passwords, restored database and capture records.
 
 Recovery is forward-only under the original edge key: a lost create response
 can adopt only the exact provider route carrying the reviewed plan's marker.
-That marker is a generated Nginx comment, with no directives or caller-supplied
-config. The service also refuses active redirection/404 host claims before
-creation. Provider legacy protocol settings must retain their supported
+That marker is a generated Nginx comment; protected routes retain their verified
+existing rules after it. The service also refuses active redirection/404 host
+claims before creation. Provider legacy protocol settings must retain their supported
 defaults; enable/disable remains the provider's separate lifecycle operation.
 Existing disabled hosts retain that state during updates and can use the normal
 lifecycle endpoints. The provider always creates hosts enabled, so a request
 to create a disabled host refuses before transport rather than briefly exposing
-it. This continuation deliberately publishes an enabled public testing route.
+it. This continuation publishes an enabled route with its template's allowed audience.
 Its pending audit binds the generation, route authority and exact provider
 payload, so certificate renewal with the same ID and unrelated metadata refresh
 do not strand adoption. Meaningful authority or payload drift still refuses;
 publication revalidates current records and uses a fresh compare-and-write.
 An absent or foreign route after a dispatched create stays unknown and is
-never created again. `readback` checks actual route, certificate and binding;
-a terminal apply replay is historical evidence, not a fresh health check.
+never created again. `readback` checks actual loaded route, certificate and binding,
+then probes the generation's public hostname using public DNS address validation
+and strict TLS hostname, chain and expiry verification. Provider certificate
+metadata or an origin `letsencrypt` record is insufficient. A failed TLS probe
+returns `testing_edge_tls_unverified`; after a provider effect, the original
+operation stays unknown until same-key observation verifies it. No second create
+is allowed to repair verification. Successful apply/readback receipts include
+`public_tls_verified=true`; dry-run reports false. This proves TLS at the public
+edge, not application health. A terminal apply replay is historical evidence,
+not a fresh health check.
 Do not issue a new key, edit records, replay bootstrap/restore, recapture data,
 change the origin certificate policy, or dismiss an incident to resolve TLS.
 Retain private review/receipts outside the checkout for same-key recovery.
@@ -1870,6 +1937,24 @@ actual whole-file sizes and hashes match the immutable receipt also permit
 recovery without the private cache. Missing original bytes in both places,
 without a database witness, are held for recovery, never silently replaced with
 a newer production snapshot.
+
+Fresh restore sends its host program and input through compressed Python stdin.
+Only the capture identity and artifact receipts cross the host boundary; the
+full persisted source observation stays in the service. Before native capture
+or delivery, and before this call updates the provider environment, the real
+rendered schedule must fit the shared materialization
+bound with a reserved, bounded capture descriptor. The final exact schedule is
+validated again before upsert. `schedule_materialization_too_large` is a typed,
+value-free local refusal, including after earlier acknowledged provider effects;
+it does not erase those effects or establish that the whole attempt was unused.
+Resource preparation likewise renders and validates before advancing its effect
+checkpoint. Qualified original-key continuations retain their prior effect
+phase and timestamp if rendering refuses before the next provider write.
+The native rebuild worker retains the same typed cause and original reservation.
+An operation with earlier native effects stays `reconciliation_required` for
+the supported explicit same-operation resume by its original authorized caller;
+it cannot be claimed automatically. A refusal without effects can finish as a
+failure. Historical caller restrictions on resume still apply.
 
 The receiver verifies whole artifacts and rejects archive traversal, symlinks,
 hardlinks and special files. Only content-addressed Odoo attachment files enter
@@ -2829,14 +2914,117 @@ key and new evidence file:
 2. `simulate-final` uses the already sanitized source copy. It simulates the
    final capture and switches only the rehearsal web's database to the final
    upgraded copy. It never recaptures or fences the real business system.
-3. `verify` probes health identity and the login page inside the private
+3. `validate-business` runs the candidate image’s fixed product-owned entrypoint on the
+   switched final upgraded copy, as described below. It neither repeats an
+   upgrade nor seals a snapshot.
+4. `verify` probes health identity and the login page inside the private
    network, stops the disposable web writer, and preserves the final upgraded
    database/filestore tuple. Product business validation remains part of the
    consuming rehearsal; health/login proof is not Client acceptance.
-4. `retire` stops web, runner and database and preserves all recovery custody.
+5. `retire` stops web, runner and database and preserves all recovery custody.
    It requires both final source and upgraded tuples. It does not delete
    volumes, provider placement, snapshots or keys. Their custodian carries them
    into the rollback rehearsal before a separately reviewed physical disposal.
+
+#### Private product business validation
+
+After `simulate-final` and before `verify`, use the supported client with
+`action: validate-business` and the original rehearsal intent fields. There is
+no business payload: caller-supplied code, commands, paths and step lists are
+refused. The product ships its scenarios in the candidate image; Launchplane
+runs exactly `python3 /opt/project/addons/launchplane_business_validation.py`.
+A product change needs no Launchplane model or method allowlist change.
+
+`prepare` first runs that fixed file with `--check` in the exact candidate
+image, with no network, credentials or application mounts, a read-only root,
+a bounded memory-only `/tmp` with noexec/nosuid/nodev, dropped capabilities and
+no-new-privileges. Odoo imports require a writable temporary directory; this
+scratch has no host or application data and disappears with the container. It must exit zero
+only when the entrypoint and scenario imports are available, without opening
+a database. A server-scoped probe runs before rehearsal credentials, provider
+placement or storage are allocated. It pulls the pinned image explicitly and
+then checks with `--pull never`. Product failure is an artifact prerequisite;
+Docker/registry failure or unavailable evidence is a provider prerequisite.
+Either stops the fresh prepare before allocation and permits a fresh review/key.
+The probe uses an anonymous automatically removed container, so a leftover
+cannot reserve the name for a later attempt. On its own timeout or handled exception it attempts removal of
+only the exact id its own invocation created. External termination, missing
+container-id evidence or unavailable cleanup can leave a data-free anonymous
+container until the product exits; cleanup is not claimed in those cases. Image inspection, pull and the
+check share one 900-second deadline, followed by at most 30 seconds of cleanup;
+the provider wait allows 960 seconds. Docker exit 125 is reserved as a provider
+failure; exit 126/127 (including a missing image Python) is an artifact failure.
+Other exits, including signal termination, mean candidate unavailability and do
+not identify its root cause; compare provider event logs before diagnosing it.
+The disabled server probe schedule and its deployment logs remain as operational
+evidence after retirement; copy disposal does not remove those server records. After an interrupted preflight, the
+original key can retry only after observing an empty placement and an idle
+probe, with the unchanged reviewed record and no credential binding. Unknown
+observations keep that key held. Partial prepare and host continuation
+keep their existing recovery path; they do not repeat this fresh preflight.
+
+Normal invocation runs inside the independently checked isolated script-runner.
+The native environment supplies only rehearsal-local credentials, with
+`ODOO_DB_NAME` set to the final upgraded copy. Its stdin is one JSON object:
+`product`, `rehearsal_id`, `artifact_id`, `source_commit`, `database`, and
+`attempt_sha256`. Launchplane establishes these from the stored rehearsal,
+verified candidate and original operation key. The product independently checks
+native settings for host `database`, instance `rehearsal` and that exact database
+before opening Odoo. It uses the image’s native shell configuration and holds
+the data-workflow lock across the scenario, commit and fresh-cursor reread.
+The product disables mail/tracking and uses attempt-scoped synthetic names.
+
+The review binds the current rehearsal record. Existing network, credential,
+container, copy-witness and connection checks run before and after the product
+invocation. No public route, source-host credential or outbound integration is
+added. The runner enforces network and credential isolation. The product checks its
+connected database and holds the native workflow lock; it can access other
+rehearsal-local copies, whose recovery snapshots remain outside its mounts.
+
+The product writes exactly one line
+`business_validation_result=<hex-encoded UTF-8 JSON receipt>`. Other output is
+discarded, including stderr and nonzero-exit stdout; product tracebacks are never
+used as diagnostics. Product command observation is bounded to 900 seconds and 17,408 stdout bytes. A timeout or excessive output after a write starts preserves
+unknown original-key custody; stopping the host observer does not prove the
+in-container writer stopped or rolled back. A receipt contains exactly the six input identity fields,
+`passed`, `committed`, and `checks`. Each check has a unique `key`, a `passed`
+boolean and `records`, a list of `{ "model": "sale.order", "id": 123 }` objects.
+Model names use ordinary dotted lowercase Odoo model syntax; ids are positive
+integers. There are 1 to 64 checks; keys match `[a-z][a-z0-9_]{0,39}`. Include
+all synthetic roots and derived records relevant to the checks, including
+pickings and moves. Do not include copied business values or exception text.
+The [receipt contract](../control_plane/contracts/odoo_rehearsal_business_validation.py)
+validates all six identities against Launchplane’s independently established
+expectation; it never replaces wrong product identities with expected ones.
+
+Compact JSON (`ensure_ascii=True`, separators `(',', ':')`) is bounded to 8192
+bytes. The product validates the full prospective receipt and transport budget
+before committing. Every passing check identifies its records. A passing
+receipt requires all checks to pass, a confirmed commit and assertions reread
+with a fresh cursor/environment. A known failure before commit rolls back and
+returns `passed: false, committed: false`, with empty record lists. A failed
+post-commit reread returns `passed: false, committed: true` with retained ids.
+An uncertain commit or missing reply never asserts a rollback or a completed
+outcome. Preserve that original operation; never replay it.
+
+For validation `readback`, supply the original intent, key and saved review
+file; its binding survives publication changing the rehearsal record. A known
+failed scenario may be corrected in the product and reviewed under a new
+operation only after the original known outcome is settled. Each attempt has
+its own host marker, receipt and failure custody. The host retains a confirmed
+outcome before the isolation post-check. If that check fails, original-key
+observation exposes a private `pending_business_validation` receipt with
+`completed: false` and `business_validation_postcheck_verified: false`.
+Fresh isolation checks must pass before reconciliation settles that retained
+outcome. Observation cannot execute the product again or adopt another attempt.
+
+Ordinary `verify` seals the complete ordered `business_validations` history
+into the final upgraded snapshot’s `business_validation_sha256`; it refuses a
+known failed latest validation. Earlier passing and committed failed outcomes
+keep their identified writes in that history. The final sanitized old-version
+tuple stays unchanged. Hand both managed tuples and the value-free validation
+receipts to the rollback consumer before ordinary retirement. Launchplane does
+not perform that consumer’s business checks or rollback.
 
 Use `readback` with the original intent/action to inspect its completed effect.
 Retirement readback verifies stopped containers and immutable files without
