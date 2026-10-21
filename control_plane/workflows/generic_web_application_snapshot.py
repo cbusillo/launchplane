@@ -15,6 +15,10 @@ from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensi
 APPLICATION_LIFECYCLE_EVIDENCE_KEY = "generic_web_application_lifecycle"
 
 
+class ApplicationLifecycleBaselineChanged(ValueError):
+    """An unstarted original no longer matches its captured provider baseline."""
+
+
 class ApplicationLifecycleSnapshot(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -99,6 +103,7 @@ def application_snapshot_for_deploy(
     extensions: GenericWebLaneExtensions,
     rollback: bool,
     proved_pre_image_retry: bool = False,
+    proved_no_effect_retry: bool = False,
     rollback_source_deployment_record_id: str = "",
     rollback_target_deployment_record_id: str = "",
     previous_deployment_record_id: str = "",
@@ -194,7 +199,7 @@ def application_snapshot_for_deploy(
         if (same_attempt.artifact_id, same_attempt.source_git_ref) != (artifact_id, source_git_ref):
             raise click.ClickException("Application lifecycle attempt identity changed.")
         prior = same_attempt
-        if proved_pre_image_retry:
+        if proved_pre_image_retry or proved_no_effect_retry:
             return same_attempt.model_copy(deep=True)
 
     source = read_snapshot(rollback_source_deployment_record_id) or prior

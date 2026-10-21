@@ -142,6 +142,9 @@ from control_plane.storage.postgres import OutboxWithIdempotencyRequest, Postgre
 from control_plane.workflows.generic_web_deploy import (
     normalize_generic_web_artifact_id,
 )
+from control_plane.workflows.generic_web_application_snapshot import (
+    ApplicationLifecycleBaselineChanged,
+)
 from control_plane.workflows.generic_web_deploy_provider import (
     GenericWebResolvedDeployTarget,
     default_generic_web_deploy_provider,
@@ -1317,6 +1320,16 @@ def build_generic_web_write_route_handlers(
                 ),
                 reconcile_message=("The generic web deploy requires reconciliation before retry."),
             )
+        except ApplicationLifecycleBaselineChanged as error:
+            raise dependencies.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="testing_deploy_baseline_changed",
+                message=(
+                    "The unstarted original's application schedules changed. Preserve its "
+                    "original key and review the schedule baseline before another deployment."
+                ),
+            ) from error
         except DisposableLaneSafetyUnknown as error:
             raise dependencies.http_error(
                 status_code=409,

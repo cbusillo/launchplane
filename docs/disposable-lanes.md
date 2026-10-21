@@ -22,10 +22,25 @@ qualification for data custody and production isolation. The existing usage
 rule protects actual use and staff holds; unknown occupancy alone does not
 require an assertion that nobody uses the lane. The service rechecks the current
 profile, lane and safety facts at the first durable provider-effect checkpoint.
-Once that original execution starts, evidence capture, completion and protective
-rollback remain available after facts change. Completed replay and read-only
+During that live execution, evidence capture, completion and protective rollback
+remain available after facts change. A reacquired execution must qualify again
+before another forward dispatch; inert protective settlement retains its original
+authority. Completed replay and read-only
 original observation do not require fresh execution qualification. An unresolved
 original continues to fence another key or caller.
+
+An exact pending lifecycle baseline can be reused after a proved no-effect
+refusal only under its current execution lease and record comparison. The
+service rereads the actual application schedules before proceeding. A changed
+baseline returns `409 testing_deploy_baseline_changed` before any forward or
+restore effect; it never rewrites the original receipt or restores stale values.
+Fresh standing work also checks inherited prepared baselines, so a new key
+cannot turn a later schedule edit into something the old operation may delete.
+Existing proved pre-image recovery and inverse rollback keep their separate
+authority. Recovery dry-run/apply still require their existing explicit policy;
+[own-original standing recovery](https://github.com/cbusillo/launchplane/issues/4374)
+is separate source work. Completed native replay and existing observation
+permissions are unchanged.
 
 Missing qualification returns `409 testing_deploy_safety_unknown`, rather than
 an authorization denial. Use the existing disposable-lane observations `inspect`
@@ -33,7 +48,8 @@ and `collect` routes below to review its current binding and authoritative facts
 The generic collector currently supplies protective holds and target-alias facts;
 positive custody and resource qualification comes from the supported Odoo
 generation inspector. A conventional application without those facts needs the
-authoritative application custody/isolation collector prerequisite tracked by
+authoritative application custody/isolation collector prerequisite
+[#4372](https://github.com/cbusillo/launchplane/issues/4372), related to the broader
 [#3611](https://github.com/cbusillo/launchplane/issues/3611). Caller assertions,
 saved environment inputs and a failed health check cannot fill that gap. Native
 deployment has no service dry-run mode; preparation is not execution proof.

@@ -1615,6 +1615,46 @@ class GenericWebDeployProviderMutationAdapter:
                 "Standing testing deployment lacks current lane qualification."
             ) from error
 
+    def _proved_no_effect_lifecycle_retry(
+        self, operation_key: str, lease: ProviderOperationLease, recorder: ExecutionRecorder | None
+    ) -> bool:
+        if recorder is None or recorder.expected_record is None:
+            return False
+        if not isinstance(lease, ProviderEvidenceLease):
+            return False
+        # Renew against the current stored owner before reading its effect
+        # witness. Publication still checks this lease and the exact record CAS.
+        lease.assert_current()
+        reservation = lease.evidence_reservation()
+        record = recorder.expected_record
+        receipt = execution_receipt(record)
+        snapshot = recorded_application_lifecycle(record)
+        target = self._resolve_deploy_target()
+        return (
+            not reservation.provider_effect_started_at
+            and not reservation.provider_effect_phase
+            and record.record_id == self._deployment_record_id(operation_key)
+            and record.deploy.status == "pending"
+            and record.deploy.deployment_id == GENERIC_WEB_UNOBSERVED_DEPLOYMENT_ID
+            and receipt is not None
+            and not receipt.entries
+            and not receipt.settled_image_deployment_id
+            and snapshot is not None
+            and snapshot.mode == "deploy"
+            and snapshot.state == "prepared"
+            and (snapshot.product, snapshot.context, snapshot.instance, snapshot.target_id)
+            == (
+                self._profile.product,
+                self._lane.context,
+                self._lane.instance,
+                target.resolved_target.target_id,
+            )
+            and (snapshot.artifact_id, snapshot.source_git_ref)
+            == (target.ship_request.artifact_id, target.ship_request.source_git_ref)
+            and snapshot.provider_id == self._deploy_provider.provider_id
+            and snapshot.extensions == self._lane.generic_web_extensions
+        )
+
     def apply(
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
@@ -1635,11 +1675,10 @@ class GenericWebDeployProviderMutationAdapter:
                     "Application evidence requires its original execution lease."
                 )
             if self._standing_testing_permission:
-                # Capture this before checkpoint_effect takes its nonreentrant
-                # heartbeat mutex. The admission callback performs reads only.
-                self._standing_effect_started = bool(
-                    lease.evidence_reservation().provider_effect_started_at
-                )
+                # A historical checkpoint does not admit another forward
+                # dispatch on a reacquired lease. Only this live execution's
+                # first checkpoint or its inert protective settlement does.
+                self._standing_effect_started = self._settlement_operation == provider_operation_key
                 context = guard(
                     lease.evidence_reservation,
                     effect_admission_checkpoint=self._require_standing_testing_admission,
@@ -1816,6 +1855,10 @@ class GenericWebDeployProviderMutationAdapter:
                 ),
                 recorded_artifact=self._recorded_artifact,
                 proved_pre_image_retry=proved_pre_image_retry,
+                proved_no_effect_retry=self._proved_no_effect_lifecycle_retry(
+                    provider_operation_key, lease, recorder
+                ),
+                protect_inherited_baseline=self._standing_testing_permission,
             )
         except TimeoutError as error:
             if self._lane.generic_web_cutover is not None:

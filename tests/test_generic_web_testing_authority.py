@@ -7,18 +7,33 @@ from typing import Any
 import unittest
 from unittest.mock import patch
 from types import SimpleNamespace
+from contextlib import contextmanager, nullcontext
+from collections.abc import Iterator
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetStaffTestingHold
+from control_plane.contracts.deployment_record import ResolvedTargetEvidence
+from control_plane.dokploy import api
+from control_plane.workflows.generic_web_application_snapshot import recorded_application_lifecycle
+from control_plane.workflows.generic_web_application_lifecycle import schedule_payload
+from control_plane.workflows.generic_web_deploy_provider import (
+    GenericWebResolvedDeployTarget,
+    GenericWebProviderDeploymentObservation,
+)
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.provider_operations import ProviderMutationUnknownError, ProviderObservation
+from control_plane.generic_web_deploy_provider_adapter import (
+    GenericWebDeployProviderMutationAdapter,
+)
 from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
 from tests.support.disposable_lanes import record_safety
 from tests.support.auth import local_operator_policy, scoped_agent_transport
 from tests.support.profiles import _product_profile_payload_with_prod
 from tests.support.stores import _seed_generic_web_deploy_target_records, _sqlite_database_url
 from tests.test_generic_web_http import _generic_web_deploy_result
+from tests.test_generic_web_application_lifecycle import _LifecycleDeployProvider, _extensions
 from tests.test_generic_web_deploy_recovery import (
     _generic_web_recovery_original_deploy,
     _generic_web_recovery_reservation,
@@ -26,6 +41,59 @@ from tests.test_generic_web_deploy_recovery import (
     _write_generic_web_recovery_reservation,
 )
 from tests.test_service import _invoke_app
+
+
+class _TestingLifecycleProvider(_LifecycleDeployProvider):
+    def __init__(self, store: PostgresRecordStore, context: str) -> None:
+        stamp = datetime.now(timezone.utc).isoformat()
+        super().__init__(
+            target_id="app-syo-testing",
+            target_name="testing",
+            observation=GenericWebProviderDeploymentObservation(
+                outcome="present",
+                deployment_status="success",
+                deployment_id="testing-image",
+                started_at=stamp,
+                finished_at=stamp,
+            ),
+        )
+        self.store = store
+        self.context = context
+        self.effects: list[str] = []
+
+    def resolve_deploy_target(self, **arguments: Any) -> GenericWebResolvedDeployTarget:
+        target = _generic_web_recovery_target()
+        reference = self.store.read_provider_target_record(
+            context_name=self.context, instance_name="testing"
+        ).to_deployed_target_reference()
+        return target.model_copy(
+            update={
+                "ship_request": target.ship_request.model_copy(
+                    update={
+                        "target_name": reference.display_name,
+                        "verify_health": False,
+                    }
+                ),
+                "resolved_target": ResolvedTargetEvidence(
+                    target_type="application",
+                    target_id=reference.target_id,
+                    target_name=reference.display_name,
+                ),
+                "deployed_target": reference,
+            }
+        )
+
+    def execute_artifact_deploy(
+        self, **arguments: Any
+    ) -> GenericWebProviderDeploymentObservation | None:
+        mark_effect = arguments["effect_started"]
+
+        def started() -> None:
+            self.effects.append("image")
+            mark_effect()
+
+        arguments["effect_started"] = started
+        return super().execute_artifact_deploy(**arguments)
 
 
 class GenericWebTestingAuthorityTests(unittest.TestCase):
@@ -83,6 +151,62 @@ class GenericWebTestingAuthorityTests(unittest.TestCase):
                 "Idempotency-Key": key,
             },
         )
+
+    @contextmanager
+    def lifecycle_provider(
+        self,
+    ) -> Iterator[tuple[_TestingLifecycleProvider, dict[str, Any], list[str]]]:
+        extensions = _extensions()
+        extensions = extensions.model_copy(
+            update={
+                "maintenance": (),
+                "schedules": tuple(
+                    row.model_copy(update={"enabled": False}) for row in extensions.schedules
+                ),
+            }
+        )
+        self.profile = self.profile.model_copy(
+            update={
+                "lanes": tuple(
+                    lane.model_copy(update={"generic_web_extensions": extensions})
+                    if lane.instance == "testing"
+                    else lane
+                    for lane in self.profile.lanes
+                ),
+            }
+        )
+        self.lane = next(lane for lane in self.profile.lanes if lane.instance == "testing")
+        self.store.write_product_profile_record(self.profile)
+        record_safety(self.store, self.profile.product, self.lane.context, self.lane.instance)
+        provider = _TestingLifecycleProvider(self.store, self.lane.context)
+        schedules: dict[str, Any] = {}
+        writes: list[str] = []
+
+        def upsert(**arguments: Any) -> dict[str, Any]:
+            guard = arguments.get("provider_mutation_guard")
+            with guard() if callable(guard) else nullcontext():
+                payload = dict(arguments["schedule_payload"])
+                writes.append("schedule")
+                schedules[payload["name"]] = payload
+                return {**payload, "scheduleId": payload["name"]}
+
+        with (
+            patch(
+                "control_plane.generic_web_deploy_provider_adapter.default_generic_web_deploy_provider",
+                return_value=provider,
+            ),
+            patch(
+                "control_plane.dokploy.source.read_dokploy_config",
+                return_value=("https://fixture.invalid", "fixture-only"),
+            ),
+            patch.object(
+                api,
+                "read_dokploy_application_schedule",
+                side_effect=lambda **arguments: schedules.get(arguments["schedule_name"]),
+            ),
+            patch.object(api, "upsert_dokploy_application_schedule", side_effect=upsert),
+        ):
+            yield provider, schedules, writes
 
     def test_authenticated_director_can_deploy_qualified_testing_without_a_grant(self) -> None:
         with patch(
@@ -305,8 +429,120 @@ class GenericWebTestingAuthorityTests(unittest.TestCase):
         self.assertEqual(status, 409, payload)
         self.assertEqual(effects, [])
 
+    def test_reacquired_original_requalifies_before_another_forward_dispatch(self) -> None:
+        def interrupted_execution(**arguments: Any) -> Any:
+            arguments["provider_effect_checkpoint"]("runtime_registry_prepare")
+            raise ProviderMutationUnknownError("The original execution lost its acknowledgement.")
+
+        with patch(
+            "control_plane.generic_web_deploy_http.execute_generic_web_deploy",
+            side_effect=interrupted_execution,
+        ):
+            status, payload = self.deploy()
+        self.assertEqual(status, 409, payload)
+        record_safety(
+            self.store,
+            self.profile.product,
+            self.lane.context,
+            self.lane.instance,
+            data="only_copy",
+        )
+        # The original provider observation permits a retry while preserving
+        # its earlier effect checkpoint. That is not fresh lane admission.
+        with (
+            patch.object(
+                GenericWebDeployProviderMutationAdapter,
+                "observe_with_effect_started_at",
+                return_value=ProviderObservation(
+                    outcome="absent",
+                    retry_safe=True,
+                    preserve_effect_checkpoint=True,
+                ),
+            ),
+            patch(
+                "control_plane.generic_web_deploy_http.execute_generic_web_deploy",
+                return_value=_generic_web_deploy_result(),
+            ) as executor,
+        ):
+            retry_status, retry_payload = self.deploy()
+        self.assertEqual(retry_status, 409, retry_payload)
+        self.assertEqual(retry_payload["error"]["code"], "mutation_reconciliation_required")
+        executor.assert_not_called()
+
+    def test_unstarted_lifecycle_retry_preserves_baseline_and_refuses_provider_drift(self) -> None:
+        for drift, new_key in ((False, False), (True, False), (True, True)):
+            with (
+                self.subTest(drift=drift),
+                self.lifecycle_provider() as (provider, schedules, writes),
+            ):
+                original_checkpoint = self.store.checkpoint_mutation_provider_effect
+
+                def refuse_before_effect(**arguments: Any) -> Any:
+                    record_safety(
+                        self.store,
+                        self.profile.product,
+                        self.lane.context,
+                        self.lane.instance,
+                        data="only_copy",
+                    )
+                    return original_checkpoint(**arguments)
+
+                key = f"unstarted-lifecycle-{drift}-{new_key}"
+                previous_ids = {row.record_id for row in self.store.list_deployment_records()}
+                with patch.object(
+                    self.store,
+                    "checkpoint_mutation_provider_effect",
+                    side_effect=refuse_before_effect,
+                ):
+                    status, payload = self.deploy(key=key)
+                self.assertEqual(status, 409, payload)
+                self.assertEqual(provider.effects, [])
+                self.assertEqual(writes, [])
+                self.assertEqual(self.store.list_held_provider_target_reservations(), ())
+                pending = next(
+                    row
+                    for row in self.store.list_deployment_records()
+                    if row.record_id not in previous_ids
+                )
+                baseline = recorded_application_lifecycle(pending)
+                assert baseline is not None
+                if drift:
+                    definition = self.lane.generic_web_extensions.schedules[0]
+                    schedules[definition.name] = schedule_payload(
+                        definition,
+                        provider.target_id,
+                        enabled=False,
+                    )
+                actual_schedules = dict(schedules)
+                record_safety(
+                    self.store, self.profile.product, self.lane.context, self.lane.instance
+                )
+                retry_status, retry_payload = self.deploy(key=f"{key}-new" if new_key else key)
+                record = self.store.read_deployment_record(pending.record_id)
+                after = recorded_application_lifecycle(record)
+                assert after is not None
+                self.assertEqual(
+                    after.model_dump(exclude={"state"}), baseline.model_dump(exclude={"state"})
+                )
+                if drift:
+                    self.assertEqual(retry_status, 409, retry_payload)
+                    self.assertEqual(
+                        retry_payload["error"]["code"], "testing_deploy_baseline_changed"
+                    )
+                    self.assertEqual(provider.effects, [])
+                    self.assertEqual(writes, [])
+                    self.assertEqual(schedules, actual_schedules)
+                else:
+                    self.assertEqual(retry_status, 202, retry_payload)
+                    self.assertEqual(
+                        retry_payload["records"]["deployment_record_id"], pending.record_id
+                    )
+                    self.assertEqual(record.deploy.status, "pass")
+                    self.assertEqual(provider.effects, ["image"])
+                    self.assertTrue(writes)
+
     def test_other_callers_unknown_original_still_fences_a_new_testing_key(self) -> None:
-        held = _write_generic_web_recovery_reservation(
+        _write_generic_web_recovery_reservation(
             self.store,
             _generic_web_recovery_reservation(
                 original_deploy=_generic_web_recovery_original_deploy(),
@@ -328,7 +564,6 @@ class GenericWebTestingAuthorityTests(unittest.TestCase):
             status, payload = self.deploy(key="fresh-key")
         self.assertEqual(status, 409, payload)
         self.assertEqual(payload["error"]["code"], "mutation_reconciliation_required")
-        self.assertIn(held.provider_effect_phase, payload["error"]["message"])
         executor.assert_not_called()
 
     def test_explicit_admin_permission_keeps_manual_hold_behavior(self) -> None:
