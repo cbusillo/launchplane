@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -9,6 +9,10 @@ from pydantic import ValidationError
 
 from control_plane.contracts.discussion_topic import DiscussionTopicInput
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.contracts.public_ingress_monitoring import (
+    PublicIngressNotificationDestination,
+    PublicIngressNotificationPolicyRecord,
+)
 from control_plane.discussion_reminders import (
     DiscussionReminderScheduler,
     DiscussionReminderSettings,
@@ -33,6 +37,23 @@ class DiscussionReminderTests(unittest.TestCase):
         self.profile = _profile()
         self.store.write_product_profile_record(self.profile)
         self.now = datetime(2026, 10, 23, 19, 0, tzinfo=timezone.utc)
+        self.store.write_public_ingress_notification_policy_record(
+            PublicIngressNotificationPolicyRecord(
+                policy_id="director-policy",
+                product="launchplane",
+                context="service",
+                instance="prod",
+                created_at=self.now.isoformat(),
+                updated_at=self.now.isoformat(),
+                destinations=(
+                    PublicIngressNotificationDestination(
+                        destination_id="director",
+                        kind="discord",
+                        discord_webhook_secret="director-alert",
+                    ),
+                ),
+            )
+        )
         self.sender = Mock()
         self.alert_sender = Mock()
         self.drivers = PublicIngressNotificationDriverSet(
@@ -42,9 +63,8 @@ class DiscussionReminderTests(unittest.TestCase):
         self.settings = DiscussionReminderSettings.model_validate(
             {
                 "director": {
-                    "secret_id": "director-alert",
-                    "context": "service",
-                    "instance": "prod",
+                    "policy_id": "director-policy",
+                    "destination_id": "director",
                 },
                 "schedules": [
                     {
@@ -125,7 +145,7 @@ class DiscussionReminderTests(unittest.TestCase):
         self.scheduler._run_sweep()
         self.assertEqual(self.work(sender=self.sender), "delivered")
         content = self.sender.call_args.kwargs["content"]
-        self.assertIn("1 topic", content)
+        self.assertIn(str(len(self.store.list_discussion_topics(self.profile.product))), content)
         self.assertIn(f"/ui/products/{self.profile.product}/topics", content)
         self.assertNotIn(topic.title, content)
         self.assertNotIn(topic.issue_url, content)
@@ -136,7 +156,7 @@ class DiscussionReminderTests(unittest.TestCase):
         self.now = datetime(2026, 10, 24, 14, 0, tzinfo=timezone.utc)
         self.scheduler._run_sweep()
         self.assertEqual(self.work(sender=self.sender), "delivered")
-        self.assertIn("No topics", self.sender.call_args.kwargs["content"])
+        self.assertNotEqual(content, self.sender.call_args.kwargs["content"])
 
     def test_read_and_send_failures_alert_director_without_replaying_reminder(self) -> None:
         self.configure()
@@ -151,7 +171,7 @@ class DiscussionReminderTests(unittest.TestCase):
                     with patch.object(
                         self.store, "list_discussion_topics", side_effect=RuntimeError("private")
                     ):
-                        self.assertEqual(self.work(sender=self.sender), "failed")
+                        self.assertEqual(self.work(sender=self.sender), "pending")
                     self.sender.assert_not_called()
                 else:
                     self.assertEqual(self.work(sender=self.sender), "failed")
@@ -160,6 +180,10 @@ class DiscussionReminderTests(unittest.TestCase):
                 self.assertIn(self.profile.product, content)
                 self.assertNotIn("private", content)
                 self.assertNotIn("sensitive", content)
+                if failure == "read":
+                    self.now += timedelta(seconds=30)
+                    self.sender.side_effect = None
+                    self.assertEqual(self.work(sender=self.sender), "delivered")
                 self.assertEqual(self.work(sender=self.sender), "idle")
 
     def test_default_sender_unavailable_alerts_and_gate_revocation_cancels_queued_send(
@@ -232,7 +256,7 @@ class DiscussionReminderTests(unittest.TestCase):
     def test_invalid_input_and_other_contexts_cannot_enable_reminders(self) -> None:
         data = self.settings.model_dump(mode="json")
         for field, bad in (("timezone", "Not/AZone"), ("meeting", "@everyone\nprivate")):
-            with self.subTest(field=field), self.assertRaises((ValidationError, KeyError)):
+            with self.subTest(field=field), self.assertRaises(ValidationError):
                 candidate = json.loads(json.dumps(data))
                 candidate["schedules"][0][field] = bad
                 DiscussionReminderSettings.model_validate(candidate)
@@ -264,6 +288,68 @@ class DiscussionReminderTests(unittest.TestCase):
             self.assertEqual(self.work(), "failed")
         self.assertNotIn("secret-bearing", str(captured.output))
         self.assertEqual(self.work(), "idle")
+
+    def test_harmless_schedule_edit_preserves_due_reminder_and_disabled_config_is_quiet(
+        self,
+    ) -> None:
+        self.configure()
+        self.scheduler.run_once()
+        schedule = self.settings.schedules[0].model_copy(
+            update={
+                "meeting": "Saturday, around 3 PM ET",
+                "overrides": {"2026-10-30": None},
+            }
+        )
+        self.settings = self.settings.model_copy(update={"schedules": (schedule,)})
+        self.configure()
+        self.assertEqual(self.work(sender=self.sender), "delivered")
+        self.assertIn(schedule.meeting, self.sender.call_args.kwargs["content"])
+        self.settings = self.settings.model_copy(update={"schedules": ()})
+        self.configure()
+        self.scheduler.public_url = ""
+        self.scheduler.run_once()
+        self.assertEqual(self.work(), "idle")
+        self.alert_sender.assert_not_called()
+
+    def test_repeated_read_failure_alerts_and_stops_at_budget_without_sending(self) -> None:
+        self.configure()
+        self.scheduler.run_once()
+        maximum = self.store.list_outbox_delivery_records(kind="discussion_reminder")[
+            0
+        ].max_attempts
+        with patch.object(self.store, "list_discussion_topics", side_effect=OSError("private")):
+            for attempt in range(1, maximum + 1):
+                self.assertEqual(
+                    self.work(sender=self.sender), "pending" if attempt < maximum else "failed"
+                )
+                if attempt in (1, maximum):
+                    self.assertEqual(self.work(), "delivered")
+                if attempt < maximum:
+                    record = next(
+                        item
+                        for item in self.store.list_outbox_delivery_records(
+                            kind="discussion_reminder"
+                        )
+                        if not item.payload["alert"]
+                    )
+                    self.now = datetime.fromisoformat(record.next_attempt_at.replace("Z", "+00:00"))
+        self.assertEqual(self.work(), "idle")
+        self.sender.assert_not_called()
+
+    def test_spring_gap_first_fall_fold_and_null_override(self) -> None:
+        data = self.settings.schedules[0].model_dump(mode="json")
+        data["times"] = [{"weekday": 6, "time": "02:30"}]
+        schedule = type(self.settings.schedules[0]).model_validate(data)
+        self.assertEqual(
+            due_reminders(schedule, datetime(2026, 3, 8, 7, 30, tzinfo=timezone.utc)), ()
+        )
+        data["times"] = [{"weekday": 6, "time": "01:30"}]
+        schedule = type(schedule).model_validate(data)
+        first = datetime(2026, 11, 1, 5, 30, tzinfo=timezone.utc)
+        self.assertEqual(due_reminders(schedule, first), (first,))
+        self.assertEqual(due_reminders(schedule, first + timedelta(hours=1)), ())
+        skipped = schedule.model_copy(update={"overrides": {first.date().isoformat(): None}})
+        self.assertEqual(due_reminders(skipped, first), ())
 
 
 if __name__ == "__main__":

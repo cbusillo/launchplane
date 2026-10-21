@@ -4,10 +4,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 import time
-from typing import Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 from control_plane.contracts.outbox_delivery import OutboxDeliveryRecord
-from control_plane.discussion_reminders import DiscussionReminderSender, deliver_discussion_reminder
 from control_plane.workflows.generic_web_promotion_workflow import (
     dispatch_generic_web_promotion_workflow_delivery,
 )
@@ -16,6 +15,9 @@ from control_plane.workflows.public_ingress_monitor import (
     PublicIngressNotificationDriverSet,
     deliver_public_ingress_notification_outbox_delivery,
 )
+
+if TYPE_CHECKING:
+    from control_plane.discussion_reminders import DiscussionReminderSender
 
 
 DEFAULT_OUTBOX_WORKER_LEASE_SECONDS = 300
@@ -126,6 +128,7 @@ def run_outbox_worker_once(
             ),
         )
     elif record.kind == "discussion_reminder":
+        from control_plane.discussion_reminders import deliver_discussion_reminder
         from control_plane.storage.postgres import PostgresRecordStore
 
         if not isinstance(record_store, PostgresRecordStore):

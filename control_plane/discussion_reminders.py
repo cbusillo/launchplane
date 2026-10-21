@@ -12,7 +12,7 @@ from pathlib import Path
 import time
 from typing import Annotated, Protocol
 from urllib.parse import quote, urlsplit
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -51,13 +51,16 @@ class DiscussionReminderSchedule(BaseModel):
     @field_validator("timezone")
     @classmethod
     def valid_timezone(cls, value: str) -> str:
-        ZoneInfo(value)
+        try:
+            ZoneInfo(value)
+        except ZoneInfoNotFoundError as error:
+            raise ValueError("Reminder timezone must name an IANA timezone") from error
         return value
 
     @field_validator("meeting")
     @classmethod
     def plain_meeting(cls, value: str) -> str:
-        if not value.strip() or any(char in value for char in "\r\n@<>`"):
+        if not value.strip() or any(char in value for char in "\r\n@<>`[]") or "://" in value:
             raise ValueError("Meeting text must be a plain line without mentions or links")
         return value
 
@@ -76,9 +79,8 @@ class DiscussionReminderSchedule(BaseModel):
 
 class DirectorDestination(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    secret_id: str = Field(min_length=1)
-    context: str = Field(min_length=1)
-    instance: str = Field(min_length=1)
+    policy_id: str = Field(min_length=1)
+    destination_id: str = Field(min_length=1)
 
 
 class DiscussionReminderSettings(BaseModel):
@@ -165,11 +167,7 @@ def _enqueue(
 
 
 class DiscussionReminderScheduler(_PreviewScheduler):
-    scope = "launchplane:discussion-reminders:v1"
     route = "service:discussion-reminders"
-    fingerprint = "discussion-reminders-v1"
-    interval = 60
-    offset = 0
 
     def __init__(
         self,
@@ -181,6 +179,7 @@ class DiscussionReminderScheduler(_PreviewScheduler):
     ) -> None:
         super().__init__(store, control_plane_root=control_plane_root, clock=clock)
         self.public_url = public_url
+        self._configuration_error_day: int | None = None
 
     def _run_sweep(self) -> dict[str, object]:
         try:
@@ -195,12 +194,18 @@ class DiscussionReminderScheduler(_PreviewScheduler):
                 now=self.clock(),
                 payload={"alert": True, "failure_code": "reminder_configuration_unavailable"},
             )
-            _LOGGER.error("Discussion reminder configuration unavailable")
+            day = int(self.clock() // 86400)
+            if self._configuration_error_day != day:
+                _LOGGER.error("Discussion reminder configuration unavailable")
+                self._configuration_error_day = day
             return {"status": "error", "apply": False}
         return {"status": "pass", "apply": False}
 
     def _enqueue_due(self, settings: DiscussionReminderSettings | None) -> None:
         if settings is None:
+            return
+        active = tuple(schedule for schedule in settings.schedules if schedule.active)
+        if not active:
             return
         parsed = urlsplit(self.public_url)
         if (
@@ -214,8 +219,8 @@ class DiscussionReminderScheduler(_PreviewScheduler):
         ):
             raise ValueError("Reminder links require the service's public HTTPS origin")
         now = datetime.fromtimestamp(self.clock(), timezone.utc)
-        for schedule in settings.schedules:
-            if not schedule.active or self._stop.is_set():
+        for schedule in active:
+            if self._stop.is_set():
                 continue
             for due in due_reminders(schedule, now):
                 _enqueue(
@@ -226,7 +231,6 @@ class DiscussionReminderScheduler(_PreviewScheduler):
                     payload={
                         "alert": False,
                         "due_at": due.isoformat(),
-                        "schedule": schedule.model_dump(mode="json"),
                         "public_url": self.public_url,
                     },
                 )
@@ -262,15 +266,15 @@ def deliver_discussion_reminder(
             }
         )
 
-    def failed(code: str) -> OutboxDeliveryRecord:
+    def failed(code: str, *, retry: bool = False) -> OutboxDeliveryRecord:
         _enqueue(
             store,
-            key=f"{record.dedupe_key}:failure",
+            key=f"{record.dedupe_key}:failure:{code}",
             product=record.aggregate_id,
             now=clock(),
             payload={"alert": True, "failure_code": code},
         )
-        return result("failed", error=code)
+        return result("pending" if retry else "failed", error=code)
 
     is_alert = record.payload.get("alert") is True
     if started:
@@ -284,18 +288,33 @@ def deliver_discussion_reminder(
             if raw is None:
                 raise ValueError("Director reminder destination unavailable")
             destination = DirectorDestination.model_validate(json.loads(raw)["director"])
+            policy, target = next(
+                (policy, target)
+                for policy in store.list_public_ingress_notification_policy_records(
+                    product="launchplane",
+                    status="enabled",
+                )
+                if policy.policy_id == destination.policy_id
+                and policy.purpose == "incident_alerts"
+                and not policy.check_name
+                and not policy.check_kind
+                for target in policy.destinations
+                if target.destination_id == destination.destination_id
+                and target.status == "enabled"
+                and target.kind == "discord"
+            )
             webhook = drivers.secret_resolver(
-                destination.secret_id
+                target.discord_webhook_secret
             ) or managed_notification_secret_value(
                 store,
-                destination.secret_id,
-                destination.context,
-                destination.instance,
+                target.discord_webhook_secret,
+                policy.context,
+                policy.instance,
             )
             if not webhook or public_discord_url_error(webhook):
                 raise ValueError("Director reminder destination unavailable")
             content = (
-                f"Discussion reminder failed for {record.aggregate_id}. "
+                f"Discussion reminder needs attention for {record.aggregate_id}. "
                 f"Code: {record.payload.get('failure_code')}. "
                 "Check Launchplane delivery records before retrying."
             )
@@ -309,13 +328,11 @@ def deliver_discussion_reminder(
             if settings
             else None
         )
-        if (
-            schedule is None
-            or not schedule.active
-            or schedule.model_dump(mode="json") != record.payload.get("schedule")
-        ):
+        if schedule is None or not schedule.active:
             return result("delivered", action="skipped_changed_schedule")
         due = datetime.fromisoformat(str(record.payload["due_at"]))
+        if due not in due_reminders(schedule, due):
+            return result("delivered", action="skipped_changed_schedule")
         now = datetime.fromtimestamp(clock(), timezone.utc)
         if not timedelta(0) <= now - due < DELIVERY_WINDOW:
             return failed("reminder_slot_expired")
@@ -346,4 +363,15 @@ def deliver_discussion_reminder(
                 "failed",
                 error="alert_outcome_unknown" if started else "alert_destination_unavailable",
             )
-        return failed("reminder_outcome_unknown" if started else "reminder_read_failed")
+        if started:
+            return failed("reminder_outcome_unknown")
+        due = datetime.fromisoformat(str(record.payload["due_at"]))
+        retry = (
+            record.attempt < record.max_attempts
+            and timedelta(0)
+            <= datetime.fromtimestamp(clock(), timezone.utc) - due
+            < DELIVERY_WINDOW
+        )
+        return failed(
+            "reminder_read_retry_pending" if retry else "reminder_read_failed", retry=retry
+        )
