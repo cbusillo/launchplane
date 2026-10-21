@@ -1287,3 +1287,11 @@ export function reviewPromotionRecovery(target: PromotionRecoveryTarget, reason:
 export function applyPromotionRecovery(target: PromotionRecoveryTarget, body: import("./generated/openapi.ts").PromotionRecoveryApply): Promise<import("./generated/openapi.ts").PromotionRecoveryApplied> {
   return requestJson(promotionRecoveryPath(target, BROWSER_WRITE_ROUTES.promotionRecoveryApply) + promotionRecoveryQuery(target), "POST", body);
 }
+
+export function sweepPreviewLifecycle(
+  body: import("./generated/openapi.ts").ApplyPreviewLifecycleSweepData["body"],
+  options: BrowserOperationOptions,
+): Promise<AcceptedEvidenceResponse> {
+  return requestJson(BROWSER_WRITE_ROUTES.previewLifecycleSweep, "POST", body,
+    options.signal, options.idempotencyKey, options.onDispatch);
+}
