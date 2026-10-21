@@ -86,6 +86,10 @@ from control_plane.github_read_cache import GitHubReadCache, MERGE_TRAIN_READ_CA
 from control_plane.contracts.merge_train_policy import MergeTrainRepositoryPolicy
 from control_plane.merge_train_candidate_failures import CandidateCheckFailures
 from control_plane.merge_train_candidate_failures import classify_candidate_check_failures
+from control_plane.merge_train_candidate_failures import (
+    FAILURE_CONCLUSIONS,
+    INFRASTRUCTURE_CONCLUSIONS,
+)
 from control_plane.merge_train_codeowners import (
     individual_landing_snapshots,
     carried_change_requires_individual_landing,
@@ -5716,7 +5720,7 @@ def _without_superseded_actions_checks(
         superseded = {
             (run["id"], run["check_suite_id"])
             for run in selection["superseded"]
-            if run["id"] not in current_ids and run.get("conclusion") == "cancelled"
+            if run["id"] not in current_ids
         }
     except (ValueError, KeyError, TypeError, AttributeError):
         return unavailable("actions_history_selection_malformed")
@@ -5765,19 +5769,26 @@ def _latest_check_runs(check_runs: list[object]) -> list[object]:
     the same suite supersedes its earlier attempt; the highest check id wins.
     """
     latest: dict[tuple[str, object, int | None], dict[str, object]] = {}
+    unidentified: list[dict[str, object]] = []
     for item in check_runs:
         check_run = _json_object(item, "GitHub check run")
         app = check_run.get("app")
         app_id = app.get("id") if isinstance(app, dict) else None
         suite = check_run.get("check_suite")
         suite_id = suite.get("id") if isinstance(suite, dict) else None
-        if not isinstance(suite_id, int) or isinstance(suite_id, bool):
-            suite_id = None
+        if (
+            not isinstance(suite_id, int)
+            or isinstance(suite_id, bool)
+            or suite_id <= 0
+            or _check_run_order(check_run) <= 0
+        ):
+            unidentified.append(check_run)
+            continue
         key = (str(check_run.get("name") or "").casefold(), app_id, suite_id)
         current = latest.get(key)
         if current is None or _check_run_order(check_run) > _check_run_order(current):
             latest[key] = check_run
-    return list(latest.values())
+    return [*latest.values(), *unidentified]
 
 
 def _check_run_order(check_run: dict[str, object]) -> int:
@@ -5794,7 +5805,7 @@ def _check_run_status(check_run: dict[str, object]) -> MergeTrainCheckStatus:
     conclusion = str(check_run.get("conclusion") or "").strip().lower()
     if conclusion in {"success", "neutral", "skipped"}:
         return "pass"
-    if conclusion in {"failure", "timed_out", "cancelled", "action_required"}:
+    if conclusion in FAILURE_CONCLUSIONS or conclusion in INFRASTRUCTURE_CONCLUSIONS:
         return "fail"
     return "unknown"
 

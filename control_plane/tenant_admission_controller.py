@@ -4,7 +4,7 @@ from collections.abc import Callable
 import hashlib
 import json
 from typing import Literal, Protocol, cast
-from urllib.parse import quote, urlencode
+from urllib.parse import quote
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -21,6 +21,10 @@ from control_plane.contracts.tenant_merge_eligibility import (
     _normalize_utc_timestamp,
 )
 from control_plane.github_payload import json_object, required_positive_int, required_string_text
+from control_plane.merge_train_candidate_failures import (
+    FAILURE_CONCLUSIONS,
+    INFRASTRUCTURE_CONCLUSIONS,
+)
 from control_plane.merge_train_controller_run_once import (
     DEFAULT_MERGE_TRAIN_CONTROLLER_LEASE_SECONDS,
     MergeTrainControllerLeaseContext,
@@ -33,6 +37,7 @@ from control_plane.merge_train_github import (
     MergeTrainGitHubStaleHeadError,
     MergeTrainGitHubTransport,
     UrllibMergeTrainGitHubTransport,
+    _list_check_runs,
 )
 from control_plane.tenant_admission_status import (
     TENANT_ADMISSION_STATUS_CONTEXT,
@@ -556,31 +561,17 @@ def read_technical_checks_for_requirements(
             "GitHub commit status response does not match the expected head."
         )
     signals = list(_technical_status_signals(status_payload))
-    page = 1
-    while True:
-        query = urlencode({"filter": "latest", "per_page": "100", "page": str(page)})
-        check_runs_payload = json_object(
-            transport.request(
-                method="GET",
-                path=(f"/repos/{repository_path}/commits/{encoded_head_sha}/check-runs?{query}"),
-            ),
-            "GitHub check runs response",
-            error_type=TenantAdmissionControllerError,
+    check_runs_payload = _list_check_runs(
+        transport=transport,
+        repository_path=repository_path,
+        encoded_head_sha=encoded_head_sha,
+    )
+    signals.extend(
+        _technical_check_run_signals(
+            cast(list[object], check_runs_payload["check_runs"]),
+            expected_head_sha=head_sha,
         )
-        raw_check_runs = check_runs_payload.get("check_runs")
-        if not isinstance(raw_check_runs, list):
-            raise TenantAdmissionControllerError(
-                "GitHub check runs response must include check_runs."
-            )
-        signals.extend(
-            _technical_check_run_signals(
-                raw_check_runs,
-                expected_head_sha=head_sha,
-            )
-        )
-        if len(raw_check_runs) < 100:
-            break
-        page += 1
+    )
     normalized_signals = tuple(
         sorted(
             signals,
@@ -1220,14 +1211,7 @@ def _check_run_state(check_run: dict[str, object]) -> TenantAdmissionTechnicalCh
     conclusion = str(check_run.get("conclusion") or "").strip().lower()
     if conclusion in {"success", "neutral", "skipped"}:
         return "pass"
-    if conclusion in {
-        "failure",
-        "timed_out",
-        "cancelled",
-        "action_required",
-        "startup_failure",
-        "stale",
-    }:
+    if conclusion in FAILURE_CONCLUSIONS or conclusion in INFRASTRUCTURE_CONCLUSIONS:
         return "fail"
     return "unavailable"
 
