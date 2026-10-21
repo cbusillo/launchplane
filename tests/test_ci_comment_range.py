@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import os
 from pathlib import Path
 import subprocess
@@ -195,6 +195,20 @@ class CiCommentRangeTests(unittest.TestCase):
         for event in ("pull_request", "push"):
             with self.subTest(event=event), TemporaryDirectory() as directory:
                 history = self._history(Path(directory))
+                if event == "pull_request":
+                    merge_head = _git(
+                        history.root,
+                        "commit-tree",
+                        f"{history.head}^{{tree}}",
+                        "-p",
+                        history.base,
+                        "-p",
+                        history.head,
+                        "-m",
+                        "pull request test merge",
+                    )
+                    _git(history.root, "checkout", "--detach", merge_head)
+                    history = replace(history, head=merge_head)
                 result = self._exercise(
                     history,
                     EVENT_NAME=event,
