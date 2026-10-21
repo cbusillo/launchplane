@@ -638,7 +638,9 @@ the exact closed, unmerged generated batch PR supplies GitHub-side chronology.
 No comparison depends on agreement between the service clock and GitHub's clock.
 A generic or unattributable hold remains held rather than acquiring invented
 provenance. Recovery binds repository, base, policy key and the original blocked
-label. Changes to enqueue, token-source or admission settings do not strand the
+label. Repository names match whatever their casing, as elsewhere in the train;
+a candidate or pull request skipped for another target logs a warning and keeps
+its hold. Changes to enqueue, token-source or admission settings do not strand the
 old label; current checks and review authority are read again, and the subsequent
 ready/admission path enforces the full current policy.
 

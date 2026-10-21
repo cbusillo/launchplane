@@ -38,12 +38,21 @@ from control_plane.contracts.merge_train_batch import build_merge_train_batch_ca
 
 class CandidateBlockRecoveryTests(unittest.TestCase):
     def setUp(self) -> None:
+        self.arrange()
+
+    def arrange(self, *, repository: str | None = None) -> None:
         self.directory = TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.store: FilesystemRecordStore | PostgresRecordStore = FilesystemRecordStore(
             Path(self.directory.name)
         )
-        self.policy = build_test_merge_train_policy(trusted_automation_github_user_ids=(42,))
+        self.policy = (
+            build_test_merge_train_policy(trusted_automation_github_user_ids=(42,))
+            if repository is None
+            else build_test_merge_train_policy(
+                repository=repository, trusted_automation_github_user_ids=(42,)
+            )
+        )
         self.target = self.policy.policies[0]
         source_app = self.target.github_token.github_app
         assert source_app is not None
@@ -721,6 +730,30 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
             self.mutations[0].endswith(f"/labels/{quote(self.target.blocked_label, safe='')}")
         )
         self.lease.checkpoint.assert_called()
+
+    def test_mixed_case_repository_recovers_its_recorded_block(self) -> None:
+        self.arrange(repository="Owner/Mixed_Case")
+        # Candidates and the GitHub reader lowercase the name; the request,
+        # snapshot and policy keep the repository's own casing.
+        self.assertNotEqual(self.record.candidate.repository, self.target.repository)
+        provider_repository = self.target.repository.lower()
+        self.current = self.current.model_copy(
+            update={
+                "base_repository": provider_repository,
+                "head_repository": provider_repository,
+            }
+        )
+        result = self.advance(mutate=True)
+        self.assertEqual(result["controller_action"], "recover_candidate_block")
+        self.assertEqual(result["merge_train_batch_candidate_record_id"], self.record.record_id)
+        self.assertEqual(len(self.mutations), 1)
+
+    def test_fork_head_keeps_block_and_reports_the_skip(self) -> None:
+        self.current = self.current.model_copy(update={"head_repository": "fork/repo"})
+        with self.assertLogs("control_plane.merge_train_github_block_recovery", "WARNING"):
+            result = self.advance(mutate=True)
+        self.assertNotEqual(result["controller_action"], "recover_candidate_block")
+        self.assertEqual(self.mutations, [])
 
     def test_same_head_and_unready_heads_keep_block(self) -> None:
         for changes in (
