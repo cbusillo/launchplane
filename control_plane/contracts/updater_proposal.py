@@ -51,7 +51,7 @@ class UpdaterProposalRequest(BaseModel):
             raise ValueError("Updater file paths must be unique.")
         if any(other.startswith(path + "/") for path in paths for other in paths):
             raise ValueError("Updater file paths cannot overlap directories.")
-        if sum(len((change.content or "").encode("utf-8")) for change in self.files) > (
+        if sum(len((change.content or "").encode()) for change in self.files) > (
             UPDATER_PROPOSAL_MAX_CHANGE_BYTES
         ):
             raise ValueError("Updater change exceeds the content size limit.")

@@ -364,13 +364,13 @@ class UpdaterProviderTests(unittest.TestCase):
 
     def test_large_whole_file_and_exact_old_plus_new_budget(self) -> None:
         content = "example==2\n" + "# unchanged public source\n" * 15_000
-        content_bytes = len(content.encode("utf-8"))
+        content_bytes = len(content.encode())
         payload = {
             **proposal_payload(),
             "files": [{"path": "requirements.txt", "content": content}],
         }
         self.assertLess(
-            len(UpdaterProposalRequest.model_validate(payload).model_dump_json().encode("utf-8")),
+            len(UpdaterProposalRequest.model_validate(payload).model_dump_json().encode()),
             UPDATER_PROPOSAL_MAX_BODY_BYTES,
         )
         for base_size, accepted in (
