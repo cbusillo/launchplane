@@ -4425,13 +4425,20 @@ class ApplicationFlowTests(unittest.TestCase):
             ),
             snapshot,
         )
-        for corruption in ("original-parent-link", "parent-fingerprint"):
+        for corruption in (
+            "original-parent-link",
+            "parent-fingerprint",
+            "request",
+            "preparation-key",
+            "request-shape",
+            "parent-id-type",
+        ):
             with self.subTest(corruption=corruption):
                 with self.store._session_factory.begin() as session:
                     row = session.get(
                         LaunchplaneIdempotencyRow,
                         original_id
-                        if corruption == "original-parent-link"
+                        if corruption != "parent-fingerprint"
                         else first_operation.record_id,
                     )
                     assert row is not None
@@ -4439,8 +4446,20 @@ class ApplicationFlowTests(unittest.TestCase):
                     corrupt_payload = deepcopy(saved_payload)
                     if corruption == "original-parent-link":
                         corrupt_payload["response_payload"].pop("reservation_id")
-                    else:
+                    elif corruption == "parent-fingerprint":
                         corrupt_payload.pop("request_fingerprint")
+                    elif corruption == "parent-id-type":
+                        corrupt_payload["response_payload"]["reservation_id"] = 123
+                    else:
+                        captured = corrupt_payload["response_payload"]["original_intent"][
+                            "testing_activation"
+                        ]
+                        if corruption == "request":
+                            captured.pop("request")
+                        elif corruption == "request-shape":
+                            captured["request"] = []
+                        else:
+                            captured["request"].pop("preparation_key")
                     row.payload = corrupt_payload
                 try:
                     unavailable = self.store.read_provider_hold_snapshot(
@@ -4533,6 +4552,56 @@ class ApplicationFlowTests(unittest.TestCase):
         self.assertEqual(
             self.store.list_public_ingress_observation_records(), previous_observations
         )
+        from control_plane.provider_target_holds import ProviderOperationReference
+
+        capsule = self.store.read_provider_target_origin(self.original)
+        assert capsule is not None
+        reference = ProviderOperationReference(
+            self.original.record_id, capsule.operation_nonce
+        ).encode()
+        for reservation in self.store.list_held_provider_target_reservations():
+            self.store.write_idempotency_record(
+                reservation.model_copy(
+                    update={
+                        "state": "completed",
+                        "response_status_code": 200,
+                        "response_trace_id": "fixture-completed",
+                        "recorded_at": reservation.updated_at,
+                    }
+                )
+            )
+        foreign_lane = (self.product + "-other", self.context, "testing")
+        for attribution in ("retained", "corrupt"):
+            with self.subTest(attribution=attribution):
+                if attribution == "corrupt":
+                    with self.store._session_factory.begin() as session:
+                        row = session.scalar(
+                            select(LaunchplaneIdempotencyRow).where(
+                                LaunchplaneIdempotencyRow.route_path
+                                == ORIGINAL_MUTATION_INTENT_ROUTE,
+                                LaunchplaneIdempotencyRow.idempotency_key
+                                == self.original.record_id,
+                            )
+                        )
+                        assert row is not None
+                        row.payload = {
+                            **row.payload,
+                            "response_payload": {
+                                **row.payload["response_payload"],
+                                "provider_target_origin": {},
+                            },
+                        }
+                bulk = self.store.read_provider_hold_snapshots(
+                    lane_keys=(lane_key, foreign_lane),
+                    references_by_lane={foreign_lane: (reference,)},
+                )
+                self.assertEqual(
+                    bulk[lane_key],
+                    self.store.read_provider_hold_snapshot(
+                        product=self.product, context=self.context, instance="testing"
+                    ),
+                )
+                self.assertIn(reference, bulk[foreign_lane].unavailable_references)
 
 
 class DirectApplicationContinuationTests(unittest.TestCase):

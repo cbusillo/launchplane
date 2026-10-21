@@ -15774,6 +15774,11 @@ class RealPostgresProviderHoldMonitorTests(unittest.TestCase):
             (
                 monitors,
                 monitors.ProviderTargetHoldMonitorTests,
+                "test_completed_old_incident_cannot_change_reused_target_lane_source",
+            ),
+            (
+                monitors,
+                monitors.ProviderTargetHoldMonitorTests,
                 "test_completed_exact_reference_settles_hold_without_claiming_success",
             ),
             (

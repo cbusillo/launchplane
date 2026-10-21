@@ -1729,6 +1729,10 @@ testing hold. Unused or unrelated application history is not validated by a
 lane projection. Unreadable requested proof retains the hold and contributes an
 unavailable outcome to its source witness. Both readable inputs contribute to the source
 witness and scheduler change detection; progress alone never proves separation.
+Bulk discovery may load completed history for several incidents. Each lane's
+source includes only active membership and its own requested history, so another
+lane's unresolved incident cannot change its locked source comparison. Requested
+but mismatched incarnation or lane proof stays unavailable and cannot settle a hold.
 A nonblocking shared product-authority lock avoids waiting
 behind a publisher that holds authority and needs a reservation. A changed or
 busy source leaves the observation unaccepted/skipped, with no persisted pass,

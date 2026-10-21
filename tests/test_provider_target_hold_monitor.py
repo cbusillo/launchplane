@@ -461,6 +461,19 @@ class ProviderTargetHoldMonitorTests(unittest.TestCase):
             }
         )
         self.store.write_odoo_stable_target_replacement_operation_record(terminal)
+        lane_key = (operation.product, operation.context, operation.instance)
+        other_lane = (operation.product + "-other", operation.context, operation.instance)
+        reference = TestingReplacementReference.from_record(terminal).encode()
+        bulk = self.store.read_provider_hold_snapshots(
+            lane_keys=(lane_key, other_lane), references_by_lane={other_lane: (reference,)}
+        )
+        self.assertEqual(
+            bulk[lane_key],
+            self.store.read_provider_hold_snapshot(
+                product=operation.product, context=operation.context, instance=operation.instance
+            ),
+        )
+        self.assertIn(reference, bulk[other_lane].unavailable_references)
         resolved = self.observe(operation.updated_at)
         self.assertEqual(resolved.resolved_incident_count, 1)
         self.assertEqual(resolved.pass_count, 1)
@@ -795,6 +808,71 @@ class ProviderTargetHoldMonitorTests(unittest.TestCase):
                                     )
                                 )
                             )
+
+    def test_completed_old_incident_cannot_change_reused_target_lane_source(self) -> None:
+        old = self.reserve("old-product")
+        self.observe()
+        incident = self.store.list_public_ingress_incident_records(status="open")[0]
+        assert incident.material_fingerprint is not None
+        references = tuple(
+            value
+            for value in incident.material_fingerprint.route_authority.target_keys
+            if ProviderOperationReference.parse(value) is not None
+        )
+        self.assertTrue(references)
+        self.complete(old)
+        other = self.profile.model_copy(
+            update={"product": "new-product", "repository": "fixture/new"}
+        )
+        self.store.write_product_profile_record(other)
+        self.store.write_provider_target_record(
+            ProviderTargetRecord(
+                context=self.origin.context,
+                instance="prod",
+                provider_id=self.origin.provider_id,
+                target_category="compose",
+                target_id=self.origin.target_id,
+                display_name="Fixture",
+                provider_target_type=self.origin.target_type,
+                updated_at=old.created_at,
+            )
+        )
+        current = self.reserve(
+            "new-product", origin=self.origin.model_copy(update={"product": other.product})
+        )
+        original_lane = (self.profile.product, self.origin.context, "prod")
+        current_lane = (other.product, self.origin.context, "prod")
+        bulk = self.store.read_provider_hold_snapshots(
+            lane_keys=(original_lane, current_lane), references_by_lane={original_lane: references}
+        )
+        singular = self.store.read_provider_hold_snapshot(
+            product=other.product, context=self.origin.context, instance="prod"
+        )
+        self.assertEqual(bulk[current_lane], singular)
+        self.assertEqual(
+            {hold.reservation.record_id for hold in singular.holds}, {current.record_id}
+        )
+        target = next(
+            target
+            for target in discover_public_ingress_monitor_targets(self.store)
+            if target.product == other.product and target.check_name == DEPLOY_FENCE_CHECK_NAME
+        )
+        observation = check_public_ingress_target(
+            target=target,
+            checked_at="2026-10-01T01:00:00Z",
+            timeout_seconds=1,
+            http_get=Mock(),
+            tls_get=Mock(),
+        )
+        with patch.object(
+            self.store, "_database_mutation_timestamp", return_value=observation.observed_at
+        ):
+            result = self.store.write_public_ingress_transition_with_outbox(
+                observation=observation,
+                incidents=(),
+                expected_provider_hold_snapshot=target.provider_hold_snapshot,
+            )
+        self.assertEqual(result.status, "written")
 
     def test_repoint_type_change_and_delete_do_not_erase_origin(self) -> None:
         self.reserve("old")

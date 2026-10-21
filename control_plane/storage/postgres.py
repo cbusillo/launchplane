@@ -8810,11 +8810,41 @@ class PostgresRecordStore(HumanSessionStore):
         instance: str,
         references: tuple[str, ...] = (),
     ) -> ProviderHoldLaneSnapshot:
+        # A bulk read unions every incident's references. Terminal rows loaded only
+        # for another lane must not enter this lane's locked source comparison.
+        reference_ids = {
+            reference.record_id
+            for value in references
+            if (reference := ProviderOperationReference.parse(value)) is not None
+        }
+        replacement_ids = {
+            replacement_reference.operation_id
+            for value in references
+            if (replacement_reference := TestingReplacementReference.parse(value)) is not None
+        }
+        holds = tuple(
+            hold
+            for hold in holds
+            if hold.reservation.state in ("running", "reconcile_required")
+            or hold.reservation.record_id in reference_ids
+        )
         lane = (product, context, instance)
         by_reference = {hold.reference: hold for hold in holds if hold.reference}
-        replacements = tuple(
+        replacement_source = tuple(
             record
             for record in authority.replacement_operations
+            if (
+                not odoo_stable_target_replacement_operation_is_terminal(record)
+                or record.operation_id in replacement_ids
+            )
+            and (
+                (record.product, record.context, record.instance) == lane
+                or record.operation_id in replacement_ids
+            )
+        )
+        replacements = tuple(
+            record
+            for record in replacement_source
             if (record.product, record.context, record.instance) == lane
         )
         by_replacement_reference = {
@@ -8853,16 +8883,29 @@ class PostgresRecordStore(HumanSessionStore):
                     hold.current_lanes,
                 )
                 for hold in holds
-                if hold.lane == lane or lane in hold.current_lanes or hold.reference in references
+                if hold.lane == lane
+                or lane in hold.current_lanes
+                or hold.reservation.record_id in reference_ids
             ],
             references,
             unavailable,
-            authority.material_for_lane(product, context, instance),
+            authority.material_for_lane(
+                product,
+                context,
+                instance,
+                reservations=tuple(
+                    hold.reservation
+                    for hold in holds
+                    if hold.lane == lane
+                    or lane in hold.current_lanes
+                    or hold.reservation.record_id in reference_ids
+                ),
+            ),
             [
                 record.model_dump(
                     mode="json", exclude={"updated_at", "heartbeat_at", "lease_expires_at"}
                 )
-                for record in replacements
+                for record in replacement_source
             ],
         ]
         return ProviderHoldLaneSnapshot(
@@ -13323,12 +13366,22 @@ class PostgresRecordStore(HumanSessionStore):
             LaunchplaneIdempotencyRecord.model_validate(row.payload)
             for row in session.scalars(statement.order_by(LaunchplaneIdempotencyRow.record_id))
         )
-        try:
-            parent_ids = tuple(row.response_payload["reservation_id"] for row in originals)
-        except KeyError as exc:
-            raise ValueError(
-                "Application activation original parent binding is unavailable."
-            ) from exc
+        parent_ids = []
+        for original in originals:
+            try:
+                parent_id = original.response_payload["reservation_id"]
+                captured = original.response_payload["original_intent"]["testing_activation"]
+                preparation = captured["request"]["preparation_key"]
+            except (KeyError, TypeError) as exc:
+                raise ValueError("Application activation original binding is unavailable.") from exc
+            if (
+                not isinstance(parent_id, str)
+                or not parent_id
+                or not isinstance(preparation, str)
+                or not preparation
+            ):
+                raise ValueError("Application activation original binding is unavailable.")
+            parent_ids.append(parent_id)
         parents = {
             row.record_id: row
             for row in session.scalars(
@@ -33600,23 +33653,50 @@ class _ProviderHoldAuthorityView(PostgresRecordStore):
             raise ValueError("Application activation evidence is unavailable.")
         return evidence
 
-    def material_for_lane(self, product: str, context: str, instance: str) -> object:
+    def material_for_lane(
+        self,
+        product: str,
+        context: str,
+        instance: str,
+        *,
+        reservations: tuple[LaunchplaneIdempotencyRecord, ...],
+    ) -> object:
         # Only evidence demanded by the separation predicate belongs in its witness.
         # This projection must never read more history outside that fail-closed boundary.
-        application_material: object = []
-        key = (product, context)
-        if instance == "testing" and key in self._application_evidence:
+        application_material: list[object] = []
+        from control_plane.workflows.generic_web_deploy_provider import (
+            decode_generic_web_provider_reconciliation_target,
+        )
+
+        scopes = set()
+        for reservation in reservations:
+            try:
+                captured = decode_generic_web_provider_reconciliation_target(
+                    reservation.reconciliation_key
+                )
+            except ValueError:
+                continue
+            if captured.instance == "testing" and captured.product:
+                scopes.add((captured.product, captured.context))
+        for key in sorted(scopes):
+            if key not in self._application_evidence:
+                continue
             evidence = self._application_evidence[key]
-            application_material = (
-                {"available": False}
-                if evidence is None
-                else [
-                    [
-                        record.model_dump(mode="json", exclude={"updated_at", "lease_expires_at"})
-                        for record in pair
-                    ]
-                    for pair in evidence
-                ]
+            application_material.append(
+                (
+                    key,
+                    {"available": False}
+                    if evidence is None
+                    else [
+                        [
+                            record.model_dump(
+                                mode="json", exclude={"updated_at", "lease_expires_at"}
+                            )
+                            for record in pair
+                        ]
+                        for pair in evidence
+                    ],
+                )
             )
         target_ids = {
             row.target_id
@@ -33644,7 +33724,7 @@ class _ProviderHoldAuthorityView(PostgresRecordStore):
                 for row in self._targets
                 if (row.context, row.instance) == (context, instance)
             ],
-            self._activations.get(key) if instance == "testing" else None,
+            [(key, self._activations.get(key)) for key in sorted(scopes)],
             application_material,
         ]
 
