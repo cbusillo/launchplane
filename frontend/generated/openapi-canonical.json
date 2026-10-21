@@ -34410,6 +34410,17 @@
             "title": "Summary",
             "type": "string"
           },
+          "sync": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SyncCycleHealthEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
           "trust_state": {
             "default": "missing",
             "enum": [
@@ -50290,6 +50301,148 @@
           }
         },
         "title": "StructuredHealthEvidence",
+        "type": "object"
+      },
+      "SyncCycleHealth": {
+        "additionalProperties": false,
+        "properties": {
+          "cycle_finished_at": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cycle Finished At"
+          },
+          "cycle_id": {
+            "anyOf": [
+              {
+                "maxLength": 36,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cycle Id"
+          },
+          "cycle_started_at": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cycle Started At"
+          },
+          "freshness_status": {
+            "enum": [
+              "unknown",
+              "unavailable",
+              "fresh",
+              "stale",
+              "overdue",
+              "failed"
+            ],
+            "title": "Freshness Status",
+            "type": "string"
+          },
+          "is_stale": {
+            "title": "Is Stale",
+            "type": "boolean"
+          },
+          "last_heartbeat": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Heartbeat"
+          },
+          "mode": {
+            "anyOf": [
+              {
+                "enum": [
+                  "full",
+                  "incremental"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mode"
+          },
+          "next_cycle_overdue": {
+            "title": "Next Cycle Overdue",
+            "type": "boolean"
+          },
+          "stale_threshold_seconds": {
+            "minimum": 0.0,
+            "title": "Stale Threshold Seconds",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "idle",
+              "running",
+              "success",
+              "failed",
+              "unknown",
+              "unavailable"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "is_stale",
+          "next_cycle_overdue",
+          "freshness_status",
+          "stale_threshold_seconds"
+        ],
+        "title": "SyncCycleHealth",
+        "type": "object"
+      },
+      "SyncCycleHealthEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "cycle": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SyncCycleHealth"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "enum": [
+              "recorded",
+              "malformed"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "SyncCycleHealthEvidence",
         "type": "object"
       },
       "TenantAdmissionControllerRunOnceEnvelope": {

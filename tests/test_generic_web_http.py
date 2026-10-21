@@ -1,4 +1,5 @@
 import asyncio
+from tests.support.sync_cycle_health import sync_cycle_payload
 import json
 import threading
 import unittest
@@ -5810,6 +5811,7 @@ class GenericWebHttpTests(unittest.TestCase):
                             "status": "ok",
                             "version": runtime_identity.artifact_id,
                             "runtime_identity": runtime_identity.model_dump(mode="json"),
+                            "sync": sync_cycle_payload(),
                         },
                     },
                 },
@@ -5821,6 +5823,9 @@ class GenericWebHttpTests(unittest.TestCase):
         self.assertEqual(status_code, 202, msg=json.dumps(payload, indent=2))
         self.assertEqual(deployment.destination_health.status, "pass")
         self.assertEqual(deployment.destination_health.structured_health.status, "pass")
+        self.assertNotIn(
+            "sync", deployment.destination_health.structured_health.model_dump(mode="json")
+        )
         self.assertEqual(
             deployment.destination_health.structured_health.version,
             runtime_identity.artifact_id,
