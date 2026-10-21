@@ -1,294 +1,354 @@
-"""Product-owned batches exercise only synthetic records on the bound copy."""
+"""Fixed product invocation preserves isolation, original custody and value-free evidence."""
 
-import unittest
 import json
-import sqlite3
-from types import SimpleNamespace
+import unittest
 from typing import Any, cast
 from unittest.mock import Mock, patch
 
 from pydantic import ValidationError
 
-from control_plane.contracts.odoo_rehearsal_business_validation import BusinessValidation
-from control_plane._odoo_rehearsal_business_validation import BUSINESS_VALIDATION_LIBRARY
+from control_plane._odoo_rehearsal_business_validation import (
+    BUSINESS_VALIDATION_ENTRYPOINT,
+    BUSINESS_VALIDATION_COMMAND_TIMEOUT_SECONDS,
+    BUSINESS_VALIDATION_RECEIPT_MAX_BYTES,
+    BUSINESS_ENTRYPOINT_CHECK_LIBRARY,
+    final_business_database,
+    business_entrypoint_check_script,
+)
+from control_plane.contracts.odoo_rehearsal_business_validation import BusinessValidationReceipt
 from control_plane.contracts.canonical_json import canonical_json_sha256
-from control_plane.contracts.odoo_upgrade_rehearsal import OdooUpgradeRehearsalRequest
+from control_plane.contracts.odoo_upgrade_rehearsal import (
+    OdooUpgradeRehearsalRequest,
+    RehearsalPrerequisite,
+)
 from control_plane.odoo_upgrade_rehearsal import OdooRehearsalAdapter, RehearsalRefused
 from tests import test_odoo_upgrade_rehearsal as rehearsal_tests
 
 
-def batch(database: str = "lp_rehearsal_" + "a" * 32 + "_final_upgrade") -> BusinessValidation:
-    return BusinessValidation.model_validate(
-        {
-            "database": database,
-            "source_commit": "b" * 40,
-            "steps": [
-                {
-                    "op": "create",
-                    "key": "customer",
-                    "model": "res.partner",
-                    "values": {"name": "Synthetic rehearsal customer"},
-                },
-                {
-                    "op": "create",
-                    "key": "order",
-                    "model": "sale.order",
-                    "values": {"partner_id": {"$ref": "customer"}},
-                },
-                {"op": "call", "key": "confirm", "record": "order", "method": "action_confirm"},
-                {
-                    "op": "assert",
-                    "key": "confirmed",
-                    "record": "order",
-                    "field": "state",
-                    "expected": "sale",
-                },
-            ],
-        }
-    )
+def identity(record: Any) -> dict[str, str]:
+    return {
+        "product": record.product,
+        "rehearsal_id": record.rehearsal_id,
+        "artifact_id": record.target_artifact.artifact_id,
+        "source_commit": record.target_artifact.source_commit,
+        "database": final_business_database(record.rehearsal_id),
+        "attempt_sha256": canonical_json_sha256({"operation_key": "original"}),
+    }
+
+
+def receipt(bound: dict[str, str]) -> dict[str, Any]:
+    return {
+        **bound,
+        "passed": True,
+        "committed": True,
+        "checks": [
+            {
+                "key": "delivered",
+                "passed": True,
+                "records": [
+                    {"model": "sale.order", "id": 31},
+                    {"model": "stock.picking", "id": 32},
+                    {"model": "stock.move", "id": 33},
+                ],
+            }
+        ],
+    }
 
 
 class BusinessValidationContractTests(unittest.TestCase):
-    def test_batch_requires_the_exact_final_copy_and_only_prior_synthetic_references(self) -> None:
-        plan = batch()
-        for database in ("production", plan.database.replace("final_upgrade", "upgrade")):
-            with self.subTest(database=database), self.assertRaises(ValidationError):
-                batch(database)
-        for change in (
-            {"model": "ir.actions.server"},
-            {"values": {"parent_id": {"$ref": "missing"}}},
-        ):
-            data = plan.model_dump(mode="json")
-            data["steps"][0].update(change)
-            with self.subTest(change=change), self.assertRaises(ValidationError):
-                BusinessValidation.model_validate(data)
-        data = plan.model_dump(mode="json")
-        data["steps"][2]["method"] = "unlink"
-        with self.assertRaises(ValidationError):
-            BusinessValidation.model_validate(data)
-        for command in (
-            [0, 0, {"name": "nested"}],
-            [1, 7, {"name": "changed"}],
-            [2, 7],
-            [6, 0, [7]],
-        ):
-            data = plan.model_dump(mode="json")
-            data["steps"][0]["values"]["child_ids"] = [command]
-            with self.subTest(command=command), self.assertRaises(ValidationError):
-                BusinessValidation.model_validate(data)
-
-    def test_decimal_quantities_and_quoted_strings_are_data_in_the_reviewed_digest(self) -> None:
-        data = batch().model_dump(mode="json")
-        data["steps"][0]["values"]["name"] = "'\n__import__('os')"
-        data["steps"][1]["values"]["price_unit"] = 12.75
-        plan = BusinessValidation.model_validate(data)
-        changed = plan.model_dump(mode="json")
-        changed["steps"][1]["values"]["price_unit"] += 0.01
-        self.assertNotEqual(plan.sha256, BusinessValidation.model_validate(changed).sha256)
-
-
-class SqliteBusinessEnvironment:
-    """Small transactional ORM stand-in; the actual Odoo image is qualified separately."""
-
-    def __init__(self, database: str) -> None:
-        self.connection = sqlite3.connect(":memory:")
-        self.connection.execute("CREATE TABLE records (id INTEGER PRIMARY KEY, data TEXT)")
-        self.cr = SimpleNamespace(
-            dbname=database, commit=self.connection.commit, rollback=self.connection.rollback
+    def test_receipt_bounds_and_success_requirements(self) -> None:
+        bound = {
+            "product": "fixture",
+            "rehearsal_id": "lp-rehearsal-" + "a" * 32,
+            "artifact_id": "candidate",
+            "source_commit": "b" * 40,
+            "database": "lp_rehearsal_" + "a" * 32 + "_final_upgrade",
+            "attempt_sha256": "c" * 64,
+        }
+        valid = receipt(bound)
+        cases: tuple[dict[str, Any], ...] = (
+            {"committed": False},
+            {"passed": "true"},
+            {"checks": []},
+            {"traceback": "private"},
+            {"checks": [{"key": "delivered", "passed": False, "records": []}]},
+            {"checks": valid["checks"] * 2},
         )
-
-    def __getitem__(self, model: str) -> Any:
-        from collections import defaultdict
-
-        environment = self
-
-        class Record:
-            def __init__(self, identifier: int) -> None:
-                self.id = identifier
-                self.ids = [identifier]
-                self._name = model
-
-            def __getitem__(self, field: str) -> Any:
-                data = environment.connection.execute(
-                    "SELECT data FROM records WHERE id=?", (self.id,)
-                ).fetchone()
-                return json.loads(data[0])[field]
-
-            def action_confirm(self) -> None:
-                data = environment.connection.execute(
-                    "SELECT data FROM records WHERE id=?", (self.id,)
-                ).fetchone()
-                values = {**json.loads(data[0]), "state": "sale"}
-                environment.connection.execute(
-                    "UPDATE records SET data=? WHERE id=?", (json.dumps(values), self.id)
-                )
-
-        class Model:
-            _fields = defaultdict(
-                lambda: SimpleNamespace(type="char", comodel_name=""),
-                partner_id=SimpleNamespace(type="many2one", comodel_name="res.partner"),
-            )
-
-            def with_context(self, **kwargs: object) -> "Model":
-                return self
-
-            def create(self, values: dict[str, object]) -> Record:
-                if values.get("name") == "raise-private-error":
-                    raise ValueError("private copied Client value")
-                cursor = environment.connection.execute(
-                    "INSERT INTO records(data) VALUES (?)", (json.dumps(values),)
-                )
-                return Record(cast(int, cursor.lastrowid))
-
-        return Model()
-
-    def flush_all(self) -> None:
-        pass
-
-    def invalidate_all(self) -> None:
-        pass
+        for changes in cases:
+            with self.subTest(changes=changes), self.assertRaises(ValidationError):
+                BusinessValidationReceipt.model_validate({**valid, **changes})
+        # Generic product models and more than 100 identified records are valid within the byte budget.
+        valid["checks"][0]["records"] = [{"model": "repair.order", "id": n} for n in range(1, 102)]
+        self.assertTrue(BusinessValidationReceipt.model_validate(valid).passed)
+        while (
+            len(json.dumps(valid, separators=(",", ":"), ensure_ascii=True).encode())
+            <= BUSINESS_VALIDATION_RECEIPT_MAX_BYTES
+        ):
+            valid["checks"][0]["records"] *= 2
+        with self.assertRaises(ValidationError):
+            BusinessValidationReceipt.model_validate(valid)
 
 
-class BusinessValidationEngineTests(unittest.TestCase):
-    def test_fixed_program_commits_reads_back_and_rolls_back_failed_assertions_without_values(
+class BusinessEntrypointPreflightTests(unittest.TestCase):
+    def test_probe_distinguishes_product_and_provider_failure_and_cleans_its_container(
         self,
     ) -> None:
+        import subprocess
+        from pathlib import Path
+        from types import SimpleNamespace
+
         namespace: dict[str, Any] = {}
-        exec(BUSINESS_VALIDATION_LIBRARY, namespace)
-        run = namespace["run_business_validation"]
+        exec(BUSINESS_ENTRYPOINT_CHECK_LIBRARY, namespace)
         for outcome in (
-            "pass",
-            "assertion",
-            "exception",
-            "wrong_copy",
-            "post_commit",
-            "post_commit_assertion",
-            "wrong_relation",
-            "commit_uncertain",
+            "available",
+            "missing",
+            "python",
+            "docker",
+            "pull",
+            "timeout",
+            "empty-cid",
+            "bad-cid",
         ):
-            with self.subTest(outcome=outcome):
-                plan = batch().model_dump(mode="json")
-                env = SqliteBusinessEnvironment(
-                    plan["database"] if outcome != "wrong_copy" else "production"
-                )
-                self.addCleanup(env.connection.close)
-                if outcome == "assertion":
-                    plan["steps"][-1]["expected"] = "wrong"
-                if outcome == "exception":
-                    plan["steps"][0]["values"]["name"] = "raise-private-error"
-                if outcome == "wrong_relation":
-                    plan["steps"][1]["values"]["partner_id"] = 1
-                if outcome == "commit_uncertain":
-                    env.cr.commit = Mock(side_effect=RuntimeError("connection lost"))
-                    with self.assertRaises(RuntimeError):
-                        run(env, plan)
-                    continue
-                if outcome == "post_commit":
-                    cast(Any, env).invalidate_all = Mock(
-                        side_effect=RuntimeError("private copied Client value")
-                    )
-                if outcome == "post_commit_assertion":
+            calls: list[list[str]] = []
 
-                    def change_after_commit() -> None:
-                        env.connection.execute(
-                            "UPDATE records SET data=? WHERE id=2",
-                            (json.dumps({"state": "draft"}),),
+            def run(arguments: list[str], **kwargs: Any) -> Any:
+                calls.append(arguments)
+                self.assertIs(kwargs["stdout"], subprocess.DEVNULL)
+                self.assertIs(kwargs["stderr"], subprocess.DEVNULL)
+                if arguments[1:3] == ["image", "inspect"]:
+                    return SimpleNamespace(returncode=1 if outcome == "pull" else 0)
+                if arguments[1] == "pull":
+                    return SimpleNamespace(returncode=125)
+                if arguments[1] == "run":
+                    self.assertIn("--rm", arguments)
+                    self.assertNotIn("--name", arguments)
+                    self.assertEqual(arguments[arguments.index("--network") + 1], "none")
+                    self.assertEqual(arguments[arguments.index("--pull") + 1], "never")
+                    scratch = arguments[arguments.index("--tmpfs") + 1]
+                    self.assertTrue(scratch.startswith("/tmp:"))
+                    self.assertTrue(
+                        {"noexec", "nosuid", "nodev"} <= set(scratch.split(":", 1)[1].split(","))
+                    )
+                    self.assertTrue(
+                        any(option.startswith("size=") for option in scratch.split(","))
+                    )
+                    self.assertTrue(
+                        {"--read-only", "--cap-drop", "--security-opt"} <= set(arguments)
+                    )
+                    self.assertFalse(
+                        {"-e", "--env", "--env-file", "-v", "--volume", "--mount"} & set(arguments)
+                    )
+                    self.assertIn(BUSINESS_VALIDATION_ENTRYPOINT, arguments)
+                    self.assertIn(spec["image"], arguments)
+                    if outcome != "empty-cid":
+                        Path(arguments[arguments.index("--cidfile") + 1]).write_text(
+                            "bad" if outcome == "bad-cid" else "a" * 64
                         )
-
-                    cast(Any, env).invalidate_all = change_after_commit
-                result = run(env, plan)
-                self.assertEqual(result["passed"], outcome == "pass")
-                self.assertEqual(
-                    result["committed"], outcome in {"pass", "post_commit", "post_commit_assertion"}
-                )
-                count = env.connection.execute("SELECT count(*) FROM records").fetchone()[0]
-                self.assertEqual(count, 2 if result["committed"] else 0)
-                self.assertEqual(bool(result["steps"][0]["record_ids"]), result["committed"])
-                if outcome == "post_commit_assertion":
-                    self.assertFalse(result["steps"][-1]["passed"])
-                if outcome == "pass":
-                    identifier = result["steps"][1]["record_ids"][0]
-                    values = json.loads(
-                        env.connection.execute(
-                            "SELECT data FROM records WHERE id=?", (identifier,)
-                        ).fetchone()[0]
+                    if outcome == "timeout":
+                        raise subprocess.TimeoutExpired("fixed check", 1)
+                    return SimpleNamespace(
+                        returncode={"missing": 2, "python": 127, "docker": 125}.get(outcome, 0)
                     )
-                    self.assertEqual(values["state"], plan["steps"][-1]["expected"])
-                    self.assertEqual(values["partner_id"], result["steps"][0]["record_ids"][0])
-                self.assertNotIn("private copied Client value", str(result))
-                self.assertNotIn("Synthetic rehearsal customer", str(result))
+                self.assertEqual(arguments[1:], ["rm", "-f", "a" * 64])
+                return SimpleNamespace(returncode=0)
 
-    def test_composed_runner_uses_copy_settings_and_releases_lock_without_raw_output(self) -> None:
-        import io
-        import sys
-        from contextlib import redirect_stdout
-        from types import ModuleType
-        from control_plane._odoo_rehearsal_business_validation import business_validation_runner
-
-        plan = batch().model_dump(mode="json")
-        env = SqliteBusinessEnvironment(plan["database"])
-        self.addCleanup(env.connection.close)
-        settings = SimpleNamespace(
-            host="database", platform_instance="rehearsal", db_name=plan["database"]
-        )
-        module = ModuleType("run_odoo_data_workflows")
-        module.__dict__["LocalServerSettings"] = lambda: settings
-        acquired = Mock()
-        released = Mock()
-
-        class Runner:
-            os_env: dict[str, str] = {}
-
-            def __init__(self, *args: object) -> None:
-                pass
-
-            acquire_data_workflow_lock = acquired
-            release_data_workflow_lock = released
-
-            def _ensure_odoo_shell_preflight(self) -> None:
-                pass
-
-            def _odoo_shell_command(self) -> list[str]:
-                return ["synthetic-shell"]
-
-        module.__dict__["OdooDataWorkflowRunner"] = Runner
-
-        def shell(*args: object, **kwargs: Any) -> Any:
-            output = io.StringIO()
-            with redirect_stdout(output):
-                exec(kwargs["input"], {"env": env})
-            return SimpleNamespace(
-                returncode=0, stdout=output.getvalue().encode(), stderr=b"private copied value"
+            spec: dict[str, Any] = {
+                "image": "fixture@sha256:" + "b" * 64,
+                "entrypoint": BUSINESS_VALIDATION_ENTRYPOINT,
+                "binding": {"attempt": "fixture"},
+            }
+            with self.subTest(outcome=outcome), patch.object(subprocess, "run", side_effect=run):
+                result = namespace["check_business_entrypoint"](spec)
+            expected = (
+                "available"
+                if outcome == "available"
+                else "entrypoint_unavailable"
+                if outcome in {"missing", "python"}
+                else "provider_unavailable"
             )
+            self.assertEqual(result, {**spec["binding"], "status": expected})
+            removals = [call for call in calls if call[1] == "rm"]
+            self.assertEqual(bool(removals), outcome == "timeout")
 
-        output = io.StringIO()
+    def test_probe_uses_one_deadline_across_image_pull_and_invocation(self) -> None:
+        import subprocess
+        import time
+        from types import SimpleNamespace
+
+        namespace: dict[str, Any] = {}
+        exec(BUSINESS_ENTRYPOINT_CHECK_LIBRARY, namespace)
+        limit = BUSINESS_VALIDATION_COMMAND_TIMEOUT_SECONDS
+        elapsed = 0.0
+
+        def advance(arguments: list[str], **kwargs: Any) -> Any:
+            nonlocal elapsed
+            if arguments[1] == "pull":
+                elapsed += limit
+                return SimpleNamespace(returncode=0)
+            elapsed += limit / 3
+            return SimpleNamespace(returncode=1)
+
         with (
-            patch.dict(sys.modules, {module.__name__: module}),
-            patch("subprocess.run", side_effect=shell),
-            redirect_stdout(output),
+            patch.object(time, "monotonic", side_effect=lambda: elapsed),
+            patch.object(subprocess, "run", side_effect=advance) as run,
         ):
-            exec(business_validation_runner(plan), {})
-        observed = json.loads(bytes.fromhex(output.getvalue().strip().split("=", 1)[1]))
-        self.assertTrue(observed["passed"])
-        self.assertTrue(observed["committed"])
-        acquired.assert_called_once()
-        released.assert_called_once()
-        self.assertNotIn("private copied value", output.getvalue())
+            result = namespace["check_business_entrypoint"](
+                {"image": "fixture", "entrypoint": BUSINESS_VALIDATION_ENTRYPOINT, "binding": {}}
+            )
+        self.assertEqual(result["status"], "provider_unavailable")
+        self.assertLess(
+            run.call_args_list[-1].kwargs["timeout"], run.call_args_list[0].kwargs["timeout"]
+        )
+        self.assertFalse(any(call.args[0][1] == "run" for call in run.call_args_list))
+
+    def test_rejected_probe_precedes_allocation_and_a_new_key_can_retry(self) -> None:
+        from control_plane import odoo_upgrade_rehearsal as rehearsal_module
+        from control_plane.dokploy import post_deploy
+
+        implementation = OdooRehearsalAdapter.check_business_entrypoint
+        fixture = rehearsal_tests.RehearsalScenario()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        adapter = fixture.adapter("prepare")
+        binding: dict[str, str] = {}
+        renderer = business_entrypoint_check_script
+
+        def render(image: str, expected: dict[str, str]) -> str:
+            binding.clear()
+            binding.update(expected)
+            return renderer(image, expected)
+
+        outcome = "entrypoint_unavailable"
+
+        def schedule(**kwargs: Any) -> dict[str, str]:
+            self.assertEqual(kwargs["schedule_lookup_id"], fixture.record.server_id)
+            return {"rehearsal_result": json.dumps({**binding, "status": outcome}).encode().hex()}
+
         with (
-            patch.dict(sys.modules, {module.__name__: module}),
-            patch("subprocess.run", side_effect=RuntimeError("shell unavailable")),
-            self.assertRaises(RuntimeError),
+            patch.object(
+                adapter,
+                "check_business_entrypoint",
+                side_effect=lambda record, key, check: implementation(adapter, record, key, check),
+            ),
+            patch.object(rehearsal_module, "business_entrypoint_check_script", side_effect=render),
+            patch(
+                "control_plane.odoo_upgrade_rehearsal.api.find_matching_dokploy_schedule",
+                return_value=None,
+            ),
+            patch.object(post_deploy, "run_manual_data_schedule", side_effect=schedule) as probe,
+            patch(
+                "control_plane.testing_local_credentials.prepare_rehearsal_local_credentials"
+            ) as credentials,
+            patch("control_plane.dokploy.sandbox_placement.create_isolated_placement") as placement,
+            patch.object(adapter, "run_script") as storage,
+            patch(
+                "control_plane.dokploy.sandbox_placement.created_placement",
+                return_value=("", "", ""),
+            ),
         ):
-            exec(business_validation_runner(plan), {})
-        self.assertEqual(released.call_count, acquired.call_count)
-        settings.host = "production"
+            for outcome in ("entrypoint_unavailable", "provider_unavailable"):
+                with self.subTest(outcome=outcome), self.assertRaises(RehearsalRefused):
+                    fixture.run_operation(adapter, outcome)
+                with self.assertRaises(RehearsalRefused) as readback:
+                    adapter.prepare_readback(fixture.record, outcome)
+                self.assertEqual(
+                    readback.exception.code,
+                    RehearsalPrerequisite.OPERATION_UNAVAILABLE,
+                )
+                credentials.assert_not_called()
+                placement.assert_not_called()
+                storage.assert_not_called()
+                self.assertFalse(fixture.store.list_held_provider_target_reservations())
+                self.assertEqual(
+                    fixture.store.read_odoo_upgrade_rehearsal(fixture.identifier), fixture.record
+                )
+            self.assertEqual(probe.call_count, 2)
+            outcome = "available"
+            credentials.side_effect = RuntimeError("next allocation stage")
+            with self.assertRaisesRegex(RuntimeError, "next allocation stage"):
+                fixture.run_operation(adapter, "available")
+            credentials.assert_called_once()
+            placement.assert_not_called()
+            storage.assert_not_called()
+
+    def test_interrupted_preflight_recovers_only_empty_idle_original(self) -> None:
+        fixture = rehearsal_tests.RehearsalScenario()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        adapter = fixture.adapter("prepare")
         with (
-            patch.dict(sys.modules, {module.__name__: module}),
-            patch("subprocess.run") as invoke,
-            self.assertRaises(RuntimeError),
+            patch.object(adapter, "check_business_entrypoint", side_effect=SystemExit),
+            patch(
+                "control_plane.dokploy.sandbox_placement.created_placement",
+                return_value=("", "", ""),
+            ),
+            patch(
+                "control_plane.odoo_upgrade_rehearsal.api.find_matching_dokploy_schedule",
+                return_value=None,
+            ) as schedule,
+            patch.object(adapter, "host") as host,
         ):
-            exec(business_validation_runner(plan), {})
-        invoke.assert_not_called()
+            with self.assertRaises(SystemExit):
+                fixture.run_operation(adapter, "interrupted")
+            self.assertEqual(adapter.observe("original", "", "").outcome, "absent")
+            readback = adapter.prepare_readback(fixture.record, "interrupted")
+            self.assertEqual(readback["recovery_disposition"], "continue_original_prepare")
+            from control_plane.dokploy.post_deploy import DOKPLOY_RUNNING_DEPLOYMENT_STATUSES
+
+            schedule.return_value = {
+                "deployments": [{"status": next(iter(DOKPLOY_RUNNING_DEPLOYMENT_STATUSES))}]
+            }
+            self.assertEqual(adapter.observe("original", "", "").outcome, "unknown")
+            schedule.return_value = None
+            with patch(
+                "control_plane.dokploy.sandbox_placement.created_placement",
+                return_value=("unexpected", "", ""),
+            ):
+                self.assertEqual(adapter.observe("original", "", "").outcome, "unknown")
+            host.assert_not_called()
+            with (
+                patch.object(adapter, "check_business_entrypoint"),
+                patch(
+                    "control_plane.testing_local_credentials.prepare_rehearsal_local_credentials",
+                    side_effect=RuntimeError("retry reached allocation"),
+                ) as credentials,
+                self.assertRaisesRegex(RuntimeError, "retry reached allocation"),
+            ):
+                fixture.run_operation(adapter, "interrupted")
+            credentials.assert_called_once()
+
+    def test_probe_receipt_must_match_its_candidate_and_attempt(self) -> None:
+        from control_plane.dokploy import post_deploy
+
+        implementation = OdooRehearsalAdapter.check_business_entrypoint
+        fixture = rehearsal_tests.RehearsalScenario()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        adapter = fixture.adapter("prepare")
+        binding = {
+            "intent_sha256": fixture.record.intent_sha256,
+            "record_binding_sha256": fixture.record.binding_sha256,
+            "attempt_sha256": canonical_json_sha256({"operation_key": "original"}),
+            "image": fixture.record.target_artifact.image.repository
+            + "@"
+            + fixture.record.target_artifact.image.digest,
+        }
+        for field in (*binding, "extra"):
+            payload = {**binding, "status": "available", field: "wrong"}
+            with (
+                self.subTest(field=field),
+                patch(
+                    "control_plane.odoo_upgrade_rehearsal.api.find_matching_dokploy_schedule",
+                    return_value=None,
+                ),
+                patch.object(
+                    post_deploy,
+                    "run_manual_data_schedule",
+                    return_value={"rehearsal_result": json.dumps(payload).encode().hex()},
+                ),
+                self.assertRaises(RehearsalRefused),
+            ):
+                implementation(adapter, fixture.record, "original", lambda: None)
 
 
 class BusinessValidationAdapterTests(unittest.TestCase):
@@ -305,18 +365,10 @@ class BusinessValidationAdapterTests(unittest.TestCase):
             }
         )
         self.fixture.store.compare_and_write_odoo_upgrade_rehearsal(old, self.record)
-        data = batch(self.record.rehearsal_id.replace("-", "_") + "_final_upgrade").model_dump(
-            mode="json"
-        )
-        data["source_commit"] = self.record.target_artifact.source_commit
-        self.plan = BusinessValidation.model_validate(data)
         self.request = OdooUpgradeRehearsalRequest.model_validate(
-            {
-                **self.fixture.request.model_dump(mode="json"),
-                "action": "validate-business",
-                "business_validation": self.plan.model_dump(mode="json"),
-            }
+            {**self.fixture.request.model_dump(mode="json"), "action": "validate-business"}
         )
+        self.plan = identity(self.record)
         self.adapter = OdooRehearsalAdapter(
             self.fixture.root,
             self.fixture.store,
@@ -326,29 +378,17 @@ class BusinessValidationAdapterTests(unittest.TestCase):
             "fixture-trace",
         )
 
-    def test_plan_binds_batch_copy_candidate_and_preserves_legacy_intent(self) -> None:
+    def test_plan_binds_copy_candidate_without_a_business_payload(self) -> None:
         self.assertEqual(self.request.intent(), self.fixture.request.intent())
         self.assertEqual(self.adapter.inputs()[0], self.record)
-        binding = self.adapter.reviewed_binding(self.record)
-        changed = self.plan.model_copy(update={"source_commit": "e" * 40})
-        self.adapter.request = self.request.model_copy(update={"business_validation": changed})
-        self.assertNotEqual(binding, self.adapter.reviewed_binding(self.record))
-        with self.assertRaises(RehearsalRefused):
-            self.adapter.inputs()
-        for invalid in ("prod", self.fixture.context):
-            with self.subTest(invalid=invalid), self.assertRaises(ValidationError):
-                OdooUpgradeRehearsalRequest.model_validate(
-                    {**self.request.model_dump(mode="json"), "rehearsal_id": invalid}
-                )
+        with self.assertRaises(ValidationError):
+            OdooUpgradeRehearsalRequest.model_validate(
+                {**self.request.model_dump(mode="json"), "business_validation": {"steps": []}}
+            )
 
     def test_apply_and_original_key_observation_retain_sanitized_evidence_and_snapshot_lineage(
         self,
     ) -> None:
-        from control_plane.contracts.odoo_rehearsal_business_validation import (
-            BusinessValidationReceipt,
-            BusinessStepEvidence,
-        )
-
         authority = self.fixture.authority()
         self.adapter.request = self.request.model_copy(
             update={
@@ -356,18 +396,7 @@ class BusinessValidationAdapterTests(unittest.TestCase):
                 "reviewed_plan_sha256": self.adapter.reviewed_binding(self.record),
             }
         )
-        validation = BusinessValidationReceipt(
-            validation_sha256=self.plan.sha256,
-            database=self.plan.database,
-            source_commit=self.plan.source_commit,
-            attempt_sha256=canonical_json_sha256({"operation_key": "original"}),
-            passed=True,
-            committed=True,
-            steps=[
-                BusinessStepEvidence(key=step.key, record_ids=[11], passed=True)
-                for step in self.plan.steps
-            ],
-        )
+        validation = BusinessValidationReceipt.model_validate(receipt(self.plan))
         result: dict[str, Any] = {
             "intent_sha256": self.record.intent_sha256,
             "state": "switched",
@@ -390,7 +419,7 @@ class BusinessValidationAdapterTests(unittest.TestCase):
         )
         with self.assertRaises(RehearsalRefused):
             self.adapter.operation_readback(current, "other-key")
-        # A committed failed batch stays identified when a corrected one passes.
+        # A committed failed scenario stays identified when a corrected one passes.
         failed = validation.model_copy(
             update={
                 "passed": False,
@@ -433,22 +462,12 @@ class BusinessValidationAdapterTests(unittest.TestCase):
         )
 
     def test_pending_evidence_is_private_bound_and_cannot_publish_before_verified(self) -> None:
-        receipt = {
-            "validation_sha256": self.plan.sha256,
-            "attempt_sha256": canonical_json_sha256({"operation_key": "original"}),
-            "database": self.plan.database,
-            "source_commit": self.plan.source_commit,
-            "passed": True,
-            "committed": True,
-            "steps": [
-                {"key": step.key, "record_ids": [31], "passed": True} for step in self.plan.steps
-            ],
-        }
+        evidence_receipt = receipt(self.plan)
         pending = {
             "intent_sha256": self.record.intent_sha256,
             "record_binding_sha256": self.record.binding_sha256,
-            "attempt_sha256": receipt["attempt_sha256"],
-            "receipt": receipt,
+            "attempt_sha256": evidence_receipt["attempt_sha256"],
+            "receipt": evidence_receipt,
         }
         result = {
             "intent_sha256": self.record.intent_sha256,
@@ -486,23 +505,23 @@ class BusinessValidationAdapterTests(unittest.TestCase):
             for key, value in result.items()
             if key not in {"pending_business_validation", "business_validation_postcheck_verified"}
         }
-        completed.update(completed=True, business_validation=receipt)
+        completed.update(completed=True, business_validation=evidence_receipt)
         with patch.object(OdooRehearsalAdapter, "host", return_value=read(completed)):
             self.assertEqual(
                 self.adapter.observe("original", "host", "reconcile").outcome, "present"
             )
         current = self.fixture.store.read_odoo_upgrade_rehearsal(self.record.rehearsal_id)
         assert current is not None
-        self.assertEqual(current.business_validations[0].steps[0].record_ids, [31])
+        self.assertEqual(current.business_validations[0].checks[0].records[0].id, 31)
 
-    def test_stale_review_cannot_dispatch_a_changed_batch(self) -> None:
+    def test_stale_review_cannot_dispatch_product_code(self) -> None:
         from control_plane.provider_operations import (
             ProviderMutationRejectedError,
             ProviderOperationLease,
         )
 
         self.adapter.request = self.request.model_copy(
-            update={"mode": "apply", "reviewed_plan_sha256": self.record.binding_sha256}
+            update={"mode": "apply", "reviewed_plan_sha256": "f" * 64}
         )
         with (
             patch.object(OdooRehearsalAdapter, "host") as host,
@@ -521,24 +540,21 @@ class BusinessValidationHostTests(unittest.TestCase):
         self.spec, self.root, self.containers = self.fixture.storage_fixture(
             {"database_bytes": 40, "filestore_bytes": 80, "staging_bytes": 20, "reserve_bytes": 10}
         )
-        self.plan = batch(self.fixture.identifier.replace("-", "_") + "_final_upgrade")
-        self.spec.update(
-            {
-                "action": "validate-business",
-                "business_validation": self.plan.model_dump(mode="json"),
-                "business_validation_sha256": self.plan.sha256,
-                "business_validation_runner": "fixed runner",
-            }
-        )
+        self.plan = {
+            "product": "fixture",
+            "rehearsal_id": self.fixture.identifier,
+            "artifact_id": "fixture-candidate",
+            "source_commit": "b" * 40,
+            "database": self.fixture.identifier.replace("-", "_") + "_final_upgrade",
+            "attempt_sha256": self.spec["attempt_sha256"],
+        }
+        self.spec.update(action="validate-business", business_validation_identity=self.plan)
         self.spec["record"].update(
-            {
-                "target_artifact": {"source_commit": self.plan.source_commit},
-                "source_odoo_version": "1.0",
-            }
+            target_artifact={"source_commit": self.plan["source_commit"]}, source_odoo_version="1.0"
         )
         self.host["inspection"] = lambda *args: self.containers
         self.host["private_health"] = Mock()
-        self.host["sql"] = lambda *args: self.host["witness"](self.spec, self.plan.database)
+        self.host["sql"] = lambda *args: self.host["witness"](self.spec, self.plan["database"])
         self.spec["readback_spec"] = "fixed-policy"
         self.spec["readback_program"] = "fixed-readback"
         self.executions = 0
@@ -546,25 +562,28 @@ class BusinessValidationHostTests(unittest.TestCase):
         def docker(*args: str, stdin: bytes | None = None) -> bytes:
             if stdin == b"fixed-readback":
                 return b"integration_readback_ok=true\n"
-            self.executions += 1
-            payload = {
-                "passed": True,
-                "committed": True,
-                "steps": [
-                    {"key": step.key, "record_ids": [31], "passed": True}
-                    for step in self.plan.steps
-                ],
-            }
-            return (
-                b"business_validation_result=" + json.dumps(payload).encode().hex().encode() + b"\n"
-            )
+            raise AssertionError("Product calls must discard child diagnostics")
 
         self.host["docker"] = docker
 
-    def test_native_batch_retains_original_receipt_and_never_replays_a_lost_reply(self) -> None:
+        def product_command(arguments: list[str], *, stdin: bytes | None = None) -> bytes:
+            self.executions += 1
+            self.last_command = arguments
+            supplied = json.loads(stdin or b"{}")
+            return (
+                b"business_validation_result="
+                + json.dumps(receipt(supplied)).encode().hex().encode()
+                + b"\n"
+            )
+
+        self.host["product_command"] = product_command
+
+    def test_native_entrypoint_retains_original_receipt_and_never_replays_a_lost_reply(
+        self,
+    ) -> None:
         result = self.fixture.run_host(self.spec)
         self.assertTrue(result["business_validation"]["passed"])
-        self.assertEqual(result["business_validation"]["database"], self.plan.database)
+        self.assertEqual(result["business_validation"]["database"], self.plan["database"])
         self.assertEqual(self.executions, 1)
         with self.assertRaises(RuntimeError):
             self.fixture.run_host(self.spec)
@@ -597,7 +616,7 @@ class BusinessValidationHostTests(unittest.TestCase):
         self.assertFalse(pending["completed"])
         self.assertFalse(pending["business_validation_postcheck_verified"])
         self.assertEqual(
-            pending["pending_business_validation"]["receipt"]["steps"][0]["record_ids"], [31]
+            pending["pending_business_validation"]["receipt"]["checks"][0]["records"][0]["id"], 31
         )
         self.assertEqual(self.executions, 1)
         with self.assertRaises(RuntimeError):
@@ -626,17 +645,17 @@ class BusinessValidationHostTests(unittest.TestCase):
             path.write_bytes(b"snapshot fixture")
 
         self.host["bounded_capture"] = Mock(side_effect=capture)
-        result = self.host["snapshot"](self.spec, self.root, self.containers, self.plan.database)
+        result = self.host["snapshot"](self.spec, self.root, self.containers, self.plan["database"])
         self.assertEqual(result["business_validation_sha256"], canonical_json_sha256(history))
         import shutil
 
-        shutil.rmtree(self.root / self.plan.database)
+        shutil.rmtree(self.root / self.plan["database"])
         history.append({"passed": False})
         self.host["bounded_capture"].reset_mock()
         with self.assertRaises(RuntimeError):
-            self.host["snapshot"](self.spec, self.root, self.containers, self.plan.database)
+            self.host["snapshot"](self.spec, self.root, self.containers, self.plan["database"])
         self.host["bounded_capture"].assert_not_called()
-        self.assertFalse((self.root / self.plan.database).exists())
+        self.assertFalse((self.root / self.plan["database"]).exists())
 
     def test_changed_witness_or_connection_isolation_refuses_before_business_writes(self) -> None:
         for failure in ("witness", "connections", "runtime"):
@@ -665,43 +684,119 @@ class BusinessValidationHostTests(unittest.TestCase):
                 self.assertFalse(observed["completed"])
                 self.assertEqual(self.executions, 0)
 
-    def test_each_interrupted_batch_retains_its_own_bound_child_diagnostic(self) -> None:
-        original = self.host["docker"]
-
-        def fail(*args: str, stdin: bytes | None = None) -> bytes:
-            if stdin == b"fixed runner":
-                raise self.host["RehearsalCommandFailure"](
-                    {
-                        "step": "business_validation",
-                        "exit_status": 9,
-                        "error_text": "fixed runner unavailable",
-                    }
-                )
-            return cast(bytes, original(*args, stdin=stdin))
+    def test_each_interrupted_scenario_retains_its_own_bound_child_diagnostic(self) -> None:
+        def fail(*args: Any, **kwargs: Any) -> bytes:
+            raise self.host["RehearsalCommandFailure"](
+                {
+                    "step": "business_validation",
+                    "exit_status": 9,
+                    "error_text": "Product validation unavailable",
+                }
+            )
 
         for key in ("first", "second"):
-            with self.subTest(key=key):
-                spec = {
-                    **self.spec,
-                    "attempt_sha256": canonical_json_sha256({"operation_key": key}),
-                }
-                with (
-                    patch.dict(self.host, {"docker": fail}),
-                    self.assertRaises(self.host["RehearsalCommandFailure"]),
-                ):
+            spec = {**self.spec, "attempt_sha256": canonical_json_sha256({"operation_key": key})}
+            spec["business_validation_identity"] = {
+                **self.plan,
+                "attempt_sha256": spec["attempt_sha256"],
+            }
+            with (
+                patch.dict(self.host, {"product_command": fail}),
+                self.assertRaises(self.host["RehearsalCommandFailure"]),
+            ):
+                self.fixture.run_host(spec)
+            observed = self.fixture.run_host({**spec, "mode": "observe", "inspect_capture": True})
+            self.assertFalse(observed["completed"])
+            self.assertTrue(observed["custody"]["effect_started"])
+            self.assertEqual(observed["child_failure"]["attempt_sha256"], spec["attempt_sha256"])
+
+    def test_receipt_identities_and_shape_are_checked_before_host_custody(self) -> None:
+        for field, value in (
+            ("product", "other"),
+            ("rehearsal_id", "lp-rehearsal-" + "c" * 32),
+            ("artifact_id", "other"),
+            ("source_commit", "c" * 40),
+            ("database", "production"),
+            ("attempt_sha256", "c" * 64),
+            ("traceback", "copied Client value"),
+            ("passed", "true"),
+        ):
+            changed = {**receipt(self.plan), field: value}
+            output = b"business_validation_result=" + json.dumps(changed).encode().hex().encode()
+            with (
+                self.subTest(field=field),
+                patch.dict(self.host, {"product_command": Mock(return_value=output)}),
+                self.assertRaises((RuntimeError, ValueError)),
+            ):
+                self.host["business_validation"](self.spec, self.containers)
+        valid = self.host["business_validation"](self.spec, self.containers)
+        self.assertEqual(valid, receipt(self.plan))
+        self.assertIn(BUSINESS_VALIDATION_ENTRYPOINT, self.last_command)
+
+    def test_invalid_or_missing_reply_preserves_unknown_original_without_replay(self) -> None:
+        valid = json.dumps(receipt(self.plan)).encode().hex().encode()
+        for index, output in enumerate(
+            (
+                b"copied customer",
+                b"business_validation_result=zz",
+                b"business_validation_result=" + valid + b"\nbusiness_validation_result=" + valid,
+            )
+        ):
+            attempt = canonical_json_sha256({"invalid_reply": index})
+            spec = {
+                **self.spec,
+                "attempt_sha256": attempt,
+                "business_validation_identity": {**self.plan, "attempt_sha256": attempt},
+            }
+            child = Mock(return_value=output)
+            with patch.dict(self.host, {"product_command": child}):
+                with self.assertRaises(RuntimeError):
                     self.fixture.run_host(spec)
-                observed = self.fixture.run_host(
-                    {**spec, "mode": "observe", "inspect_capture": True}
-                )
-                self.assertFalse(observed["completed"])
-                self.assertTrue(observed["custody"]["effect_started"])
-                self.assertEqual(
-                    observed["child_failure"]["attempt_sha256"], spec["attempt_sha256"]
-                )
+                with self.assertRaises(RuntimeError):
+                    self.fixture.run_host(spec)
+                observed = self.fixture.run_host({**spec, "mode": "observe"})
+            child.assert_called_once()
+            self.assertFalse(observed["completed"])
+            self.assertTrue(observed["custody"]["effect_started"])
+            self.assertNotIn("copied customer", str(observed))
+
+    def test_failed_noisy_or_hung_product_does_not_expose_output_or_hold_host_forever(self) -> None:
+        import sys
+
+        helper = rehearsal_tests.RehearsalHostSafetyTests()
+        helper.setUp()
+        self.addCleanup(helper.doCleanups)
+        cases: tuple[tuple[str, dict[str, int]], ...] = (
+            (
+                "import sys; print('copied customer'); print('private traceback', file=sys.stderr); sys.exit(9)",
+                {},
+            ),
+            (
+                "print('copied customer' * "
+                + str(helper.host["PRODUCT_COMMAND_OUTPUT_MAX_BYTES"])
+                + ")",
+                {},
+            ),
+            ("import time; time.sleep(60)", {"PRODUCT_COMMAND_TIMEOUT_SECONDS": 0}),
+        )
+        for script, limits in cases:
+            with (
+                self.subTest(script=script),
+                patch.dict(helper.host, limits),
+                self.assertRaises(helper.host["RehearsalCommandFailure"]) as failure,
+            ):
+                helper.host["product_command"]([sys.executable, "-c", script])
+            self.assertNotIn("copied customer", str(failure.exception.diagnostic))
+            self.assertNotIn("private traceback", str(failure.exception.diagnostic))
+        self.assertEqual(
+            helper.host["product_command"]([sys.executable, "-c", "print('receipt')"]), b"receipt\n"
+        )
 
 
 class BusinessValidationClientTests(unittest.TestCase):
-    def test_a_prior_failed_batch_cannot_make_an_inert_review_or_other_operation_fail(self) -> None:
+    def test_a_prior_failed_scenario_cannot_make_an_inert_review_or_other_operation_fail(
+        self,
+    ) -> None:
         from tests import test_odoo_upgrade_rehearsal_client as clients
 
         fixture = clients.RehearsalClientTests()

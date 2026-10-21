@@ -592,6 +592,7 @@ class RehearsalScenario(unittest.TestCase):
                 )
 
     def setUp(self) -> None:
+        self.enterContext(patch.object(OdooRehearsalAdapter, "check_business_entrypoint"))
         fixture = resources.TestingReplacementResourceFixture(self, database_url=self.database_url)
         self.enterContext(
             patch("control_plane.odoo_upgrade_rehearsal.require_bridge_network_capacity")
