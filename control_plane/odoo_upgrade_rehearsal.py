@@ -18,7 +18,7 @@ from control_plane._odoo_rehearsal_business_validation import (
     business_entrypoint_check_script,
     business_entrypoint_schedule,
     final_business_database,
-    BUSINESS_VALIDATION_COMMAND_TIMEOUT_SECONDS,
+    BUSINESS_ENTRYPOINT_WAIT_TIMEOUT_SECONDS,
 )
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.canonical_json import canonical_json_sha256
@@ -1183,8 +1183,7 @@ class OdooRehearsalAdapter:
                 "enabled": False,
                 "timezone": "UTC",
             },
-            resolved_schedule_execution_timeout_seconds=BUSINESS_VALIDATION_COMMAND_TIMEOUT_SECONDS
-            + 60,
+            resolved_schedule_execution_timeout_seconds=BUSINESS_ENTRYPOINT_WAIT_TIMEOUT_SECONDS,
             before_provider_mutation=lambda _phase: checkpoint(),
         )
         try:

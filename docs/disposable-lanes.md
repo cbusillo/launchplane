@@ -2893,7 +2893,10 @@ runs exactly `python3 /opt/project/addons/launchplane_business_validation.py`.
 A product change needs no Launchplane model or method allowlist change.
 
 `prepare` first runs that fixed file with `--check` in the exact candidate
-image, with no network, credentials or application mounts. It must exit zero
+image, with no network, credentials or application mounts, a read-only root,
+a bounded memory-only `/tmp` with noexec/nosuid/nodev, dropped capabilities and
+no-new-privileges. Odoo imports require a writable temporary directory; this
+scratch has no host or application data and disappears with the container. It must exit zero
 only when the entrypoint and scenario imports are available, without opening
 a database. A server-scoped probe runs before rehearsal credentials, provider
 placement or storage are allocated. It pulls the pinned image explicitly and
@@ -2901,11 +2904,15 @@ then checks with `--pull never`. Product failure is an artifact prerequisite;
 Docker/registry failure or unavailable evidence is a provider prerequisite.
 Either stops the fresh prepare before allocation and permits a fresh review/key.
 The probe uses an anonymous automatically removed container, so a leftover
-cannot reserve the name for a later attempt. On observer interruption it removes
-only the exact id its own invocation created. Image inspection, pull and the
+cannot reserve the name for a later attempt. On its own timeout or handled exception it attempts removal of
+only the exact id its own invocation created. External termination, missing
+container-id evidence or unavailable cleanup can leave a data-free anonymous
+container until the product exits; cleanup is not claimed in those cases. Image inspection, pull and the
 check share one 900-second deadline, followed by at most 30 seconds of cleanup;
 the provider wait allows 960 seconds. Docker exit 125 is reserved as a provider
 failure; exit 126/127 (including a missing image Python) is an artifact failure.
+Other exits, including signal termination, mean candidate unavailability and do
+not identify its root cause; compare provider event logs before diagnosing it.
 The disabled server probe schedule and its deployment logs remain as operational
 evidence after retirement; copy disposal does not remove those server records. After an interrupted preflight, the
 original key can retry only after observing an empty placement and an idle

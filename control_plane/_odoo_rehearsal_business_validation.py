@@ -3,6 +3,13 @@
 BUSINESS_VALIDATION_ENTRYPOINT = "/opt/project/addons/launchplane_business_validation.py"
 BUSINESS_VALIDATION_RECEIPT_MAX_BYTES = 8192
 BUSINESS_VALIDATION_COMMAND_TIMEOUT_SECONDS = 900
+BUSINESS_ENTRYPOINT_CLEANUP_TIMEOUT_SECONDS = 30
+BUSINESS_ENTRYPOINT_WAIT_MARGIN_SECONDS = 30
+BUSINESS_ENTRYPOINT_WAIT_TIMEOUT_SECONDS = (
+    BUSINESS_VALIDATION_COMMAND_TIMEOUT_SECONDS
+    + BUSINESS_ENTRYPOINT_CLEANUP_TIMEOUT_SECONDS
+    + BUSINESS_ENTRYPOINT_WAIT_MARGIN_SECONDS
+)
 BUSINESS_VALIDATION_OUTPUT_MAX_BYTES = 2 * BUSINESS_VALIDATION_RECEIPT_MAX_BYTES + 1024
 
 # The remote host has only the standard library. Keep this parser identical to
@@ -81,7 +88,8 @@ def check_business_entrypoint(spec):
             finished=False
             try:
                 code=run(['docker','run','--rm','--pull','never',
-                    '--cidfile',str(cid),'--network','none','--read-only','--cap-drop','ALL',
+                    '--cidfile',str(cid),'--network','none','--read-only',
+                    '--tmpfs','/tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777','--cap-drop','ALL',
                     '--security-opt','no-new-privileges','--entrypoint','python3',spec['image'],
                     spec['entrypoint'],'--check'])
                 finished=True
@@ -92,16 +100,16 @@ def check_business_entrypoint(spec):
                     if not re.fullmatch('[a-f0-9]{64}',identifier):
                         status='provider_unavailable'
                     elif not finished:
-                        cleaned=subprocess.run(['docker','rm','-f',identifier],stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL,timeout=30,check=False).returncode
-                        if cleaned:
-                            status='provider_unavailable'
+                        subprocess.run(['docker','rm','-f',identifier],stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,timeout=__CLEANUP_TIMEOUT__,check=False)
                 else:
                     status='provider_unavailable'
     except (OSError,ValueError,subprocess.TimeoutExpired):
         status='provider_unavailable'
     return {**spec['binding'],'status':status}
-""".replace("__COMMAND_TIMEOUT__", str(BUSINESS_VALIDATION_COMMAND_TIMEOUT_SECONDS))
+""".replace("__COMMAND_TIMEOUT__", str(BUSINESS_VALIDATION_COMMAND_TIMEOUT_SECONDS)).replace(
+    "__CLEANUP_TIMEOUT__", str(BUSINESS_ENTRYPOINT_CLEANUP_TIMEOUT_SECONDS)
+)
 
 
 def business_entrypoint_schedule(rehearsal_id: str) -> tuple[str, str]:

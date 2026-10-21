@@ -108,7 +108,6 @@ class BusinessEntrypointPreflightTests(unittest.TestCase):
             "timeout",
             "empty-cid",
             "bad-cid",
-            "cleanup",
         ):
             calls: list[list[str]] = []
 
@@ -125,6 +124,14 @@ class BusinessEntrypointPreflightTests(unittest.TestCase):
                     self.assertNotIn("--name", arguments)
                     self.assertEqual(arguments[arguments.index("--network") + 1], "none")
                     self.assertEqual(arguments[arguments.index("--pull") + 1], "never")
+                    scratch = arguments[arguments.index("--tmpfs") + 1]
+                    self.assertTrue(scratch.startswith("/tmp:"))
+                    self.assertTrue(
+                        {"noexec", "nosuid", "nodev"} <= set(scratch.split(":", 1)[1].split(","))
+                    )
+                    self.assertTrue(
+                        any(option.startswith("size=") for option in scratch.split(","))
+                    )
                     self.assertTrue(
                         {"--read-only", "--cap-drop", "--security-opt"} <= set(arguments)
                     )
@@ -137,13 +144,13 @@ class BusinessEntrypointPreflightTests(unittest.TestCase):
                         Path(arguments[arguments.index("--cidfile") + 1]).write_text(
                             "bad" if outcome == "bad-cid" else "a" * 64
                         )
-                    if outcome in {"timeout", "cleanup"}:
+                    if outcome == "timeout":
                         raise subprocess.TimeoutExpired("fixed check", 1)
                     return SimpleNamespace(
                         returncode={"missing": 2, "python": 127, "docker": 125}.get(outcome, 0)
                     )
                 self.assertEqual(arguments[1:], ["rm", "-f", "a" * 64])
-                return SimpleNamespace(returncode=1 if outcome == "cleanup" else 0)
+                return SimpleNamespace(returncode=0)
 
             spec: dict[str, Any] = {
                 "image": "fixture@sha256:" + "b" * 64,
@@ -161,7 +168,7 @@ class BusinessEntrypointPreflightTests(unittest.TestCase):
             )
             self.assertEqual(result, {**spec["binding"], "status": expected})
             removals = [call for call in calls if call[1] == "rm"]
-            self.assertEqual(bool(removals), outcome in {"timeout", "cleanup"})
+            self.assertEqual(bool(removals), outcome == "timeout")
 
     def test_probe_uses_one_deadline_across_image_pull_and_invocation(self) -> None:
         import subprocess
@@ -171,13 +178,19 @@ class BusinessEntrypointPreflightTests(unittest.TestCase):
         namespace: dict[str, Any] = {}
         exec(BUSINESS_ENTRYPOINT_CHECK_LIBRARY, namespace)
         limit = BUSINESS_VALIDATION_COMMAND_TIMEOUT_SECONDS
+        elapsed = 0.0
+
+        def advance(arguments: list[str], **kwargs: Any) -> Any:
+            nonlocal elapsed
+            if arguments[1] == "pull":
+                elapsed += limit
+                return SimpleNamespace(returncode=0)
+            elapsed += limit / 3
+            return SimpleNamespace(returncode=1)
+
         with (
-            patch.object(time, "monotonic", side_effect=[0, limit / 3, limit * 2 / 3, limit + 1]),
-            patch.object(
-                subprocess,
-                "run",
-                side_effect=[SimpleNamespace(returncode=1), SimpleNamespace(returncode=0)],
-            ) as run,
+            patch.object(time, "monotonic", side_effect=lambda: elapsed),
+            patch.object(subprocess, "run", side_effect=advance) as run,
         ):
             result = namespace["check_business_entrypoint"](
                 {"image": "fixture", "entrypoint": BUSINESS_VALIDATION_ENTRYPOINT, "binding": {}}
