@@ -19,9 +19,6 @@ publish the product artifact; Launchplane owns preview event semantics,
 idempotency, provider mutation, durable records, unsupported notices, feedback
 comments, inventory, and cleanup.
 
-This contract is the migration target for preview-enabled product repos that
-currently carry bespoke preview-control-plane workflows.
-
 ## Ownership Boundary
 
 Product repos own:
