@@ -152,18 +152,6 @@ def classify_candidate_check_failures(
     return CandidateCheckFailures(checks=tuple(failures), checks_pending=checks_pending)
 
 
-def candidate_failure_summary(failures: CandidateCheckFailures) -> str:
-    """Return a short, link-free sentence naming the failing checks and tests."""
-    names = failures.check_names
-    tests = failures.failed_tests
-    parts: list[str] = []
-    if names:
-        parts.append("failing checks: " + ", ".join(names[:MAX_NAMED_FAILURES]) + _more(len(names)))
-    if tests:
-        parts.append("failing tests: " + ", ".join(tests[:MAX_NAMED_FAILURES]) + _more(len(tests)))
-    return "; ".join(parts)
-
-
 def _more(count: int) -> str:
     return f" and {count - MAX_NAMED_FAILURES} more" if count > MAX_NAMED_FAILURES else ""
 

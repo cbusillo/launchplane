@@ -325,10 +325,6 @@ def finish_copy_upgrade(runner):
 TESTING_COPY_RUNNER = COPY_UPGRADE_FUNCTION + TESTING_COPY_RUNNER
 
 
-def encoded_testing_copy_runner() -> str:
-    return base64.b64encode(TESTING_COPY_RUNNER.encode()).decode()
-
-
 def generation_binding(generation: FreshOdooTestingGeneration) -> str:
     from control_plane.contracts.canonical_json import canonical_json_sha256
 

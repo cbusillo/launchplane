@@ -2856,13 +2856,6 @@ def _allow_context_for_candidates(
     return allow_context
 
 
-def _checkout_candidate_block(key: str) -> str:
-    match = re.search(r"\[(?P<block>\d+)]$", key)
-    if match is None:
-        return ""
-    return match.group("block")
-
-
 def _leading_space_count(text: str) -> int:
     return len(text) - len(text.lstrip(" "))
 
@@ -4288,10 +4281,6 @@ def _git_file_state(root: Path) -> dict[str, dict[str, str]]:
         entry.setdefault("head_blob_sha", _git_output(root, "rev-parse", f"HEAD:{relative_path}"))
         entry.setdefault("index_blob_sha", _git_output(root, "rev-parse", f":{relative_path}"))
     return state
-
-
-def _git_tracked_files(root: Path) -> list[Path]:
-    return [root / relative_path for relative_path in _git_tracked_relative_paths(root)]
 
 
 def _git_tracked_relative_paths(root: Path) -> list[str]:

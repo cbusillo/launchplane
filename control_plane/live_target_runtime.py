@@ -565,42 +565,6 @@ def evaluate_runtime_key_safety_for_live_target_sync(
     return summary
 
 
-def require_product_profile_runtime_keys(
-    *,
-    record_store: LiveTargetRuntimeProfileStore,
-    product_name: str,
-    context_name: str,
-    instance_name: str,
-    allow_owned_preview: bool = False,
-) -> set[str]:
-    profile = record_store.read_product_profile_record(product_name)
-    lane = next(
-        (
-            candidate
-            for candidate in profile.lanes
-            if candidate.context == context_name and candidate.instance == instance_name
-        ),
-        None,
-    )
-    if lane is None and not (
-        allow_owned_preview
-        and _owned_runtime_preview(record_store, profile, context_name, instance_name)
-    ):
-        raise LiveTargetRuntimeError(
-            f"Product {product_name!r} has no lane for {context_name}/{instance_name}.",
-            code="product_lane_not_found",
-        )
-    allowed_keys = _declared_runtime_keys(
-        profile=profile, context_name=context_name, instance_name=instance_name
-    )
-    if not allowed_keys:
-        raise LiveTargetRuntimeError(
-            f"Product {product_name!r} has no expected runtime keys for {context_name}/{instance_name}.",
-            code="runtime_environment_empty",
-        )
-    return allowed_keys
-
-
 def _declared_runtime_keys(
     *, profile: LaunchplaneProductProfileRecord, context_name: str, instance_name: str
 ) -> set[str]:
