@@ -36,6 +36,9 @@ must still match; the inventory is rechecked under the first-effect authority
 lock. The service rereads actual application schedules before proceeding. A changed
 baseline returns `409 testing_deploy_baseline_changed` before any forward or
 restore effect; it never rewrites the original receipt or restores stale values.
+Fresh application-testing operations also compare their captured inventory
+baseline at the first-effect checkpoint. This check does not reinterpret
+an original that already has effects as fresh no-effect work.
 Before releasing a proved no-effect refusal, the service records `not_started`
 under the exact current original lease and record comparison. Ordinary evidence
 corrections cannot create that proof. A fresh native standing operation derives

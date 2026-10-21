@@ -655,10 +655,15 @@ class GenericWebTestingAuthorityTests(unittest.TestCase):
     def test_unstarted_retry_rechecks_inventory_at_its_first_effect(self) -> None:
         self.check_inventory_correction_at_retry(before_workflow=False)
 
+    def test_fresh_operation_rechecks_inventory_at_its_first_effect(self) -> None:
+        self.check_inventory_correction_at_retry(before_workflow=False, fresh_operation=True)
+
     def test_unstarted_retry_keeps_original_classification_after_preflight(self) -> None:
         self.check_inventory_correction_at_retry(before_workflow=True)
 
-    def check_inventory_correction_at_retry(self, *, before_workflow: bool) -> None:
+    def check_inventory_correction_at_retry(
+        self, *, before_workflow: bool, fresh_operation: bool = False
+    ) -> None:
         with self.lifecycle_provider() as (provider, _schedules, writes):
             status, payload = self.deploy(key="inventory-baseline")
             self.assertEqual(status, 202, payload)
@@ -722,7 +727,9 @@ class GenericWebTestingAuthorityTests(unittest.TestCase):
                 )
             )
             with correction:
-                status, payload = self.deploy(key="inventory-race")
+                status, payload = self.deploy(
+                    key="inventory-fresh-race" if fresh_operation else "inventory-race"
+                )
             self.assertEqual(status, 409, payload)
             self.assertEqual(payload["error"]["code"], "testing_deploy_baseline_changed")
             self.assertEqual(provider.effects, effects_before)
@@ -847,6 +854,19 @@ class GenericWebTestingAuthorityTests(unittest.TestCase):
                     return
                 with self.assertRaises(ValueError):
                     self.store.write_deployment_record(self.lifecycle_state(retired, "prepared"))
+                malformed = retired.model_copy(
+                    update={
+                        "post_deploy_update": retired.post_deploy_update.model_copy(
+                            update={
+                                "evidence": {
+                                    "generic_web_application_lifecycle": "malformed replacement"
+                                }
+                            }
+                        )
+                    }
+                )
+                with self.assertRaises((ValueError, click.ClickException)):
+                    self.store.write_deployment_record(malformed)
                 receipt = execution_receipt(retired)
                 assert receipt is not None
                 with self.assertRaises(ValueError):

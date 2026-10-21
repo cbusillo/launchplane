@@ -218,7 +218,7 @@ class GenericWebDeployProviderMutationAdapter:
         self._settlement_no_effect_checkpoint = False
         self._standing_testing_permission = standing_testing_permission
         self._standing_effect_started = False
-        self._no_effect_retry_inventory_digest: str | None = None
+        self._pre_effect_inventory_digest: str | None = None
         self._standing_binding_sha256 = ""
         self.execution_check: Callable[[], None] = lambda: None
 
@@ -1680,8 +1680,8 @@ class GenericWebDeployProviderMutationAdapter:
             return
         self._require_standing_testing_admission()
         if (
-            self._no_effect_retry_inventory_digest is not None
-            and self._no_effect_retry_inventory_digest != self._current_testing_inventory_digest()
+            self._pre_effect_inventory_digest is not None
+            and self._pre_effect_inventory_digest != self._current_testing_inventory_digest()
         ):
             raise ApplicationLifecycleBaselineChanged("The original testing inventory changed.")
 
@@ -1743,7 +1743,7 @@ class GenericWebDeployProviderMutationAdapter:
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
         self._standing_effect_started = self._settlement_operation == provider_operation_key
-        self._no_effect_retry_inventory_digest = None
+        self._pre_effect_inventory_digest = None
         guard = (
             getattr(self._record_store, "provider_evidence_guard", None)
             if self._standing_testing_permission
@@ -1760,16 +1760,10 @@ class GenericWebDeployProviderMutationAdapter:
                 raise ProviderMutationUnknownError(
                     "Application evidence requires its original execution lease."
                 )
-            if self._standing_testing_permission:
-                context = guard(
-                    lease.evidence_reservation,
-                    effect_admission_checkpoint=self._require_effect_admission,
-                )
-            else:
-                context = guard(
-                    lease.evidence_reservation,
-                    effect_admission_checkpoint=self._require_effect_admission,
-                )
+            context = guard(
+                lease.evidence_reservation,
+                effect_admission_checkpoint=self._require_effect_admission,
+            )
         with context:
             try:
                 self._require_standing_testing_admission()
@@ -1839,6 +1833,8 @@ class GenericWebDeployProviderMutationAdapter:
             if self._application_testing(resolved_target)
             else None
         )
+        if recorder is not None and recorder.expected_record is None:
+            self._pre_effect_inventory_digest = recorder.receipt.inventory_baseline_digest
         try:
             expected_inventory = (
                 cast(_ExecutionInventoryReader, self._record_store).read_environment_inventory(
@@ -1924,7 +1920,7 @@ class GenericWebDeployProviderMutationAdapter:
                         )
                     receipt = execution_receipt(recorder.expected_record)
                     assert receipt is not None
-                    self._no_effect_retry_inventory_digest = receipt.inventory_baseline_digest
+                    self._pre_effect_inventory_digest = receipt.inventory_baseline_digest
                     proved_no_effect_retry = True
             records, result = execute_generic_web_deploy_result(
                 control_plane_root=self._control_plane_root,
