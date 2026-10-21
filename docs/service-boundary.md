@@ -800,6 +800,9 @@ exclusivity or complete refresh-pair retirement. Counting current session rows
 cannot establish those properties either: Client credentials are not retained
 and another callback may be in flight. Automatic provider retirement is not
 implemented; local logout must not be described as GitHub token invalidation.
+GitHub's token-count limits can also evict an older credential, making another
+browser require sign-in after its next revalidation. That existing provider
+behavior does not establish isolation for a Launchplane revocation request.
 
 Database backups may retain earlier encrypted credentials and the identifiers
 needed to decrypt them. Someone holding that backup and its original session
@@ -1557,13 +1560,9 @@ session cookie signed with `LAUNCHPLANE_SESSION_SECRET`. Sessions are backed by
 the Launchplane database when `LAUNCHPLANE_DATABASE_URL` is configured. GitHub
 access tokens stay server-side and are not exposed to the React Launchplane UI.
 Hosted requests reload the current DB policy before authorization and re-evaluate
-the session role. Admin/read-only sessions keep a sliding 14-day cookie/store
-window and revalidate GitHub before the 24-hour claims ceiling; background reads
-can refresh claims and renew the session without interactive sign-in. The
-callback retains encrypted server-side credentials and provider expiry metadata
-for those sessions. Confined Client sessions retain no credential and follow
-their current product-ownership checks. See the [human auth/session contract](#service-route-checklist)
-above for renewal, provider failures, concurrency and logout, and
+the session role. The [human auth/session contract](#service-route-checklist)
+above owns renewal, provider verification, credential custody, Client
+confinement, concurrency and logout. See
 [credential retirement](#human-oauth-credential-retirement) for the local/provider
 and backup boundaries. OAuth login state lasts 10 minutes (600 seconds).
 

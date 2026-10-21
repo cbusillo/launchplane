@@ -603,12 +603,9 @@ an ORM column/table or remains only in the evidence payload.
   creation/expiry timestamps, CSRF generation and provider-verification time.
   Admin/read-only sessions also hold session/person-bound encrypted OAuth
   credentials and their provider expiry metadata; Client sessions do not.
-  Hosted authorization
-  revalidates roles against the current DB policy on every request and rejects
-  stale OAuth-derived claims unless provider verification refreshes them within
-  the claims ceiling. Background verification can renew the sliding session.
-  Local removal does not revoke the provider token or erase older backups; see
-  [credential retirement](service-boundary.md#human-oauth-credential-retirement).
+  The [human auth/session contract](service-boundary.md#service-route-checklist)
+  owns verification and renewal; [credential retirement](service-boundary.md#human-oauth-credential-retirement)
+  distinguishes local removal from provider validity and historical backups.
 - Merge train stack collapse plan: modeled fields are `record_id`, `status`,
   `source`, `updated_at`, `repository`, `base_branch`, `collapse_id`,
   `root_pull_request_number`, and `plan_status`. The payload carries the typed
