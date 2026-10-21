@@ -30,6 +30,7 @@ export type EngineeringView =
   | "tenant-admission"
   | "governance-projection"
   | "github-delivery"
+  | "preview-lifecycle"
   | "privileged-operations";
 
 export function productIndexPath(): string {
@@ -67,6 +68,7 @@ export function ownerReviewPath(): string {
 }
 
 export function engineeringViewLabel(view: EngineeringView): string {
+  if (view === "preview-lifecycle") return "Preview cleanup";
   if (view === "github-delivery") {
     return "GitHub delivery";
   }
@@ -126,6 +128,7 @@ export function parseAppRoute(pathname: string): AppRoute {
         "tenant-admission",
         "governance-projection",
         "github-delivery",
+        "preview-lifecycle",
         "privileged-operations",
       ].includes(view)
     ) {

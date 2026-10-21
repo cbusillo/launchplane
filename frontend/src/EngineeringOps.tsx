@@ -15,6 +15,7 @@ import { EngineeringGovernanceProjectionRoute } from "./EngineeringGovernancePro
 import { EngineeringPrivilegedOperationsRoute } from "./EngineeringPrivilegedOperationsRoute";
 import { EngineeringTenantAdmissionRoute } from "./EngineeringTenantAdmissionRoute";
 import { EngineeringRouteFrame } from "./EngineeringRouteUi";
+import { EngineeringPreviewLifecycleRoute } from "./EngineeringPreviewLifecycleRoute";
 import { EngineeringGitHubDeliveryRoute } from "./EngineeringGitHubDeliveryRoute";
 import { EngineeringWorkGraphRoute } from "./EngineeringWorkGraphRoute";
 import {
@@ -26,6 +27,13 @@ import {
 import type { DevFixtureMode } from "./dev-fixture-loader";
 
 const ENGINEERING_SURFACES = [
+  {
+    detail: "Report orphaned previews or explicitly apply cleanup across preview-enabled products.",
+    icon: Wrench,
+    label: "Administrator controls",
+    title: "Preview cleanup",
+    view: "preview-lifecycle" as const,
+  },
   {
     detail: "Select the service's existing Delivery App key and review obsolete service-token retirement.",
     icon: KeyRound,
@@ -102,6 +110,9 @@ export function EngineeringOpsRoute({
   view: EngineeringView;
   actorId: number;
 }) {
+  if (view === "preview-lifecycle") {
+    return <EngineeringPreviewLifecycleRoute key={actorId} actorId={actorId} admin={admin} fixtureMode={fixtureMode} />;
+  }
   if (view === "github-delivery") {
     return <EngineeringGitHubDeliveryRoute actorId={actorId} />;
   }
@@ -138,7 +149,7 @@ function EngineeringOpsHub() {
       view="hub"
     >
       <div className="engineering-hub-intro">
-        <strong>Eight independent evidence routes</strong>
+        <strong>Independent platform operations and evidence</strong>
         <p>
           Each surface owns its own request lifecycle, direct link, stale-data
           disclosure, refresh failure, and cancellation state. Browser controls

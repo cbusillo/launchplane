@@ -24386,7 +24386,7 @@ def create_launchplane_fastapi_app(
     async def apply_preview_lifecycle_sweep(
         request: Request,
         sweep_request: PreviewLifecycleSweepEnvelope,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_operator_mutation_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:

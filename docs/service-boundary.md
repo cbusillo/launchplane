@@ -1926,7 +1926,15 @@ keep/orphaned/missing sets. Cleanup execution uses a second endpoint that
 requires an existing lifecycle `plan_id`; it defaults to `apply=false`
 report-only behavior and records the cleanup request/result next to the plan.
 Destructive provider cleanup is only attempted when `apply=true` is explicitly
-supplied by an authorized GitHub Actions workflow.
+supplied by an authorized caller. The sweep accepts a signed-in administrator
+through the existing browser CSRF boundary, as well as its existing operator,
+admin bearer and GitHub Actions callers. Both lifecycle actions remain authorized
+per product/context; admitting a browser session does not add policy authority.
+Client, read-only and terminal-agent sessions cannot run the browser sweep.
+Engineering Ops → Preview cleanup provides report-only and explicit cleanup for
+all preview-enabled products. Both modes write evidence and retain the same
+request/key after an uncertain response; HTTP acceptance does not turn an inner
+`fail`, `partial` or held-reservation result into success.
 
 `POST /v1/previews/desired-state`, `POST /v1/previews/lifecycle-plan`,
 `POST /v1/previews/lifecycle-cleanup`, and

@@ -4235,7 +4235,19 @@ anchors from open GitHub pull requests, including drafts, writes lifecycle plans
 results, which Product Ops shows per product. Destructive provider cleanup
 still requires an explicit `apply=true` request to
 `POST /v1/previews/lifecycle-sweep` from a separately authorized caller; the
-manual `Preview Lifecycle` workflow dispatch remains that route.
+native **Engineering Ops → Preview cleanup** page offers **Report** and
+**Apply cleanup** for all preview-enabled products. Cleanup requires the explicit
+delete confirmation; it discovers current desired state again, rather than
+applying a previously displayed report. The page shows per-product failures,
+held reservations and record/trace evidence even when the HTTP request completes.
+A dropped response locks both modes until the original request is retried with
+its retained operation key, including after reloading the page.
+
+The manual `Preview Lifecycle` workflow and its URL/audience/source settings stay
+supported during #3514's migration. Do not remove them until deployed native
+report/apply behavior, current binding/default and rollback evidence qualify the
+replacement and Chris's fresh settings-deletion table. Source tests alone do
+not establish that deployed proof.
 Preview-disabled products are excluded from the sweep. PR feedback goes through
 `POST /v1/previews/pr-feedback`; Launchplane renders and upserts the anchored PR
 comment when runtime GitHub credentials are available, then records delivery

@@ -5922,6 +5922,126 @@
         "summary": "Submit Owner Secret Input"
       }
     },
+    "/v1/previews/lifecycle-sweep": {
+      "post": {
+        "operationId": "apply_preview_lifecycle_sweep",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PreviewLifecycleSweepEnvelope"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Sweep preview lifecycle"
+      }
+    },
     "/v1/privileged-operations/authorization-candidates/prepare": {
       "post": {
         "operationId": "prepare_authorization_candidate",
@@ -26359,6 +26479,52 @@
           "status"
         ],
         "title": "PreviewInventoryEvidence",
+        "type": "object"
+      },
+      "PreviewLifecycleSweepEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "apply": {
+            "default": false,
+            "title": "Apply",
+            "type": "boolean"
+          },
+          "destroy_reason": {
+            "default": "launchplane_preview_lifecycle_cleanup",
+            "title": "Destroy Reason",
+            "type": "string"
+          },
+          "max_pages": {
+            "default": 10,
+            "maximum": 20,
+            "minimum": 1,
+            "title": "Max Pages",
+            "type": "integer"
+          },
+          "product": {
+            "default": "",
+            "title": "Product",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "source": {
+            "default": "launchplane-preview-lifecycle",
+            "title": "Source",
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "default": 300,
+            "minimum": 1,
+            "title": "Timeout Seconds",
+            "type": "integer"
+          }
+        },
+        "title": "PreviewLifecycleSweepEnvelope",
         "type": "object"
       },
       "PreviewPullRequestSummary": {

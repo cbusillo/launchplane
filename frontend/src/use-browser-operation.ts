@@ -77,6 +77,7 @@ export function useBrowserOperationController<
   readOnlyRef.current = readOnly;
 
   function updateState(next: BrowserOperationState) {
+    if (!mountedRef.current || scopeRef.current !== scope) return;
     stateRef.current = next;
     persistBrowserOperationState(scope, next);
     if (mountedRef.current) {
@@ -110,6 +111,7 @@ export function useBrowserOperationController<
     }
     try {
       current = await prepareBrowserOperation(scope, payload, current);
+      if (!mountedRef.current || scopeRef.current !== scope) return null;
       current = beginBrowserOperation(current);
       updateState(current);
     } catch (error) {
@@ -130,11 +132,15 @@ export function useBrowserOperationController<
         idempotencyKey: current.identity?.idempotencyKey ?? "",
         signal: controller.signal,
         onDispatch: () => {
+          if (!mountedRef.current || scopeRef.current !== scope) {
+            throw new DOMException("The operation's page or scope changed before dispatch.", "AbortError");
+          }
           dispatched = true;
           current = markBrowserOperationDispatched(current);
           updateState(current);
         },
       });
+      if (!mountedRef.current || scopeRef.current !== scope) return null;
       if (!dispatched) {
         current = markBrowserOperationDispatched(current);
       }

@@ -1231,3 +1231,12 @@ export function decideBackupPolicyProposal(payload: { operationId: string; decis
     decision: payload.decision, source_event_id: `ui:${payload.decision}:${payload.operationId}`,
   }, options.signal, options.idempotencyKey, options.onDispatch);
 }
+
+
+export function sweepPreviewLifecycle(
+  body: import("./generated/openapi.ts").ApplyPreviewLifecycleSweepData["body"],
+  options: BrowserOperationOptions,
+): Promise<AcceptedEvidenceResponse> {
+  return requestJson(BROWSER_WRITE_ROUTES.previewLifecycleSweep, "POST", body,
+    options.signal, options.idempotencyKey, options.onDispatch);
+}
