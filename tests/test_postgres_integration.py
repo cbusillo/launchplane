@@ -18,6 +18,7 @@ import time
 from typing import Any
 import unittest
 from tests import test_product_retirement_previews as integrated_retirement_tests
+from tests import test_legacy_preview_sibling_ownership as generic_sibling_tests
 from tests import test_odoo_secret_transport as secret_transport_tests
 from tests import test_testing_runtime_separation as testing_separation
 from tests import test_testing_separation_resources as independent_storage
@@ -72,6 +73,7 @@ from control_plane.contracts.dokploy_target_record import (
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from tests import test_http_app_product_retirement as retirement_tests
 from tests import test_legacy_preview_reconciliation as legacy_preview_tests
+from tests import test_legacy_odoo_preview_reconciliation as legacy_odoo_tests
 from tests.http_app_test_support import _asgi_request
 from control_plane import authz_grant_service, authz_policy_activation
 from control_plane.authz_candidate_preparation import (
@@ -15713,3 +15715,268 @@ class RealPostgresReleaseReviewHttpTests(release_review_http_tests._ReleaseRevie
             saved.record_id,
         )
         self.assertEqual(waiter_store.list_deployment_records(), ())
+
+
+class RealPostgresGenericSiblingOwnershipTests(
+    generic_sibling_tests.LegacyGenericSiblingOwnershipTests
+):
+    def database_url(self) -> str:
+        return self.enterContext(_head_postgres_database())
+
+    async def test_http_ownership_receipt_contention_refuses_and_recovers(self) -> None:
+        from control_plane.storage.postgres import LaunchplaneIdempotencyRow
+
+        runtime = await self.produced_sibling()
+        receipt = self.store.find_generic_preview_refresh_receipts(runtime.deployment_record_id)[0]
+        peer = PostgresRecordStore(database_url=self.store.database_url)
+        self.addCleanup(peer.close)
+        with self.provider_inventory():
+            plan = await self.plan()
+            with peer._session_factory() as session:
+                session.scalar(
+                    select(LaunchplaneIdempotencyRow)
+                    .where(LaunchplaneIdempotencyRow.record_id == receipt.record_id)
+                    .with_for_update()
+                )
+                blocked = await asyncio.wait_for(self.apply(plan), 5)
+                self.assertEqual(blocked.status_code, 409, blocked.text)
+                self.assertEqual(
+                    self.store.read_preview_record(self.preview.preview_id), self.preview
+                )
+                peer.write_preview_record(self.preview)
+                session.rollback()
+            self.assertEqual((await self.apply(plan)).status_code, 202)
+
+
+class RealPostgresLegacyOdooPreviewReconciliationTests(
+    legacy_odoo_tests.LegacyOdooPreviewReconciliationTests
+):
+    def database_url(self) -> str:
+        return self.enterContext(_head_postgres_database())
+
+    async def test_sibling_receipt_contention_refuses_without_authority_lock_cycle(self) -> None:
+        from control_plane.legacy_preview_reconciliation import (
+            bind_legacy_preview,
+            LegacyPreviewReconciliationRequest,
+        )
+        from control_plane.storage.postgres import LaunchplaneIdempotencyRow
+
+        runtime = self.produced_sibling()
+        self.compose(name=runtime.instance, image=self.profile.image.repository + ":current")
+        plan = await self.plan()
+        request = LegacyPreviewReconciliationRequest(
+            product=self.profile.product, preview_id=self.preview.preview_id, reason="fixture"
+        )
+        bound = bind_legacy_preview(self.store, request)
+        self.assertIn(runtime.deployment_record_id, bound.sibling_receipt_ids)
+        peer = PostgresRecordStore(database_url=self.store.database_url)
+        self.addCleanup(peer.close)
+        for identifier in bound.sibling_receipt_ids:
+            with self.subTest(receipt=identifier), peer._session_factory() as session:
+                session.scalar(
+                    select(LaunchplaneIdempotencyRow)
+                    .where(LaunchplaneIdempotencyRow.record_id == identifier)
+                    .with_for_update()
+                )
+                # A writer that owns the receipt can need authority next. Apply
+                # must fail immediately rather than waiting in the inverse order.
+                blocked = await asyncio.wait_for(self.apply(plan), 5)
+                self.assertEqual(blocked.status_code, 409, blocked.text)
+                self.assertEqual(
+                    self.store.read_preview_record(self.preview.preview_id), self.preview
+                )
+                peer.write_preview_record(self.preview)
+                session.rollback()
+        response = await self.apply(plan)
+        self.assertEqual(response.status_code, 202, response.text)
+
+    async def test_pointed_legacy_verifying_history_is_retained_under_actual_exclusion(
+        self,
+    ) -> None:
+        original = self.historical_generation().model_copy(
+            update={
+                "runtime_identity": None,
+                "state": "verifying",
+                "finished_at": "",
+                "ready_at": "",
+            }
+        )
+        latest = original.model_copy(update={"generation_id": "latest-interrupted", "sequence": 2})
+        for generation in (original, latest):
+            self.store.write_preview_generation_record(generation)
+        self.store.write_preview_record(
+            self.preview.model_copy(
+                update={
+                    "state": "pending",
+                    "active_generation_id": latest.generation_id,
+                    "serving_generation_id": "",
+                    "latest_generation_id": latest.generation_id,
+                }
+            )
+        )
+        closed = await self.closed_preview()
+        self.assertEqual(closed.state, "destroyed")
+        self.assertEqual(closed.active_generation_id, "")
+        self.assertEqual(closed.serving_generation_id, "")
+        self.assertEqual(closed.latest_generation_id, latest.generation_id)
+        for generation in (original, latest):
+            self.assertEqual(
+                self.store.read_preview_generation_record(generation.generation_id), generation
+            )
+
+    async def test_actual_odoo_executor_held_elsewhere_blocks_before_provider_observation(
+        self,
+    ) -> None:
+        from control_plane.legacy_preview_reconciliation import (
+            bind_legacy_preview,
+            LegacyPreviewReconciliationRequest,
+        )
+        from control_plane.contracts.preview_execution import (
+            odoo_preview_target_key,
+            preview_execution_lock_name,
+        )
+
+        bound = bind_legacy_preview(
+            self.store,
+            LegacyPreviewReconciliationRequest(
+                product=self.profile.product,
+                preview_id=self.preview.preview_id,
+                reason="fixture",
+            ),
+        )
+        peer = PostgresRecordStore(database_url=self.store.database_url)
+        self.addCleanup(peer.close)
+        name = preview_execution_lock_name(
+            odoo_preview_target_key(
+                context=self.profile.preview.context,
+                compose_name=bound.application_name,
+            )
+        )
+        with peer.testing_replacement_execution_lock(name) as check:
+            self.assertIsNotNone(check)
+            response = await self.call("inspect")
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertFalse(self.reads)
+        self.assertTrue((await self.plan())["apply_eligible"])
+
+    async def test_custom_physical_executor_shares_logical_preview_fence(self) -> None:
+        from tests.test_product_reconcile import FakePreviewProvider
+        from datetime import datetime, timedelta, timezone
+        from control_plane.workflows.launchplane import generate_preview_id
+
+        now = datetime.now(timezone.utc)
+        await self.closed_preview(completed_at=(now - timedelta(seconds=3)).isoformat())
+        self.reads.clear()
+        fake = FakePreviewProvider()
+        operation = self.prepared_operation(fake, "actual-custom-executor", now)
+        entered = threading.Event()
+        release = threading.Event()
+        execute = fake.execute_apply
+        logical = generate_preview_id(
+            context_name=self.profile.preview.context,
+            anchor_repo=self.preview.anchor_repo,
+            anchor_pr_number=self.preview.anchor_pr_number,
+        )
+        owner_pid: list[int] = []
+
+        def blocked_execute(**kwargs: Any) -> dict[str, object]:
+            entry = next(
+                item
+                for item in self.store._preview_execution_context.held
+                if item[0] == logical and not item[1]
+            )
+            owner_pid.append(entry[2].scalar(text("SELECT pg_backend_pid()")))
+            entered.set()
+            if not release.wait(10):
+                raise RuntimeError("Test provider release was not delivered.")
+            return execute(**kwargs)
+
+        operation.adapter._execute_apply = blocked_execute
+        with patch.object(operation.adapter, "capture_schedule_binding"):
+            execution = asyncio.create_task(asyncio.to_thread(operation.run, self.store))
+            inspection = None
+            try:
+                self.assertTrue(await asyncio.to_thread(entered.wait, 5))
+                inspection = asyncio.create_task(self.call("inspect"))
+                waiting = False
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    with self.store._engine.connect() as connection:
+                        waiting = bool(
+                            connection.scalar(
+                                text(
+                                    "SELECT count(*) FROM pg_locks owner JOIN pg_locks waiter "
+                                    "ON waiter.locktype = owner.locktype AND waiter.database = owner.database "
+                                    "AND waiter.classid = owner.classid AND waiter.objid = owner.objid "
+                                    "AND waiter.objsubid = owner.objsubid "
+                                    "WHERE owner.locktype = 'advisory' AND owner.granted "
+                                    "AND owner.pid = :owner_pid AND NOT waiter.granted"
+                                ),
+                                {"owner_pid": owner_pid[0]},
+                            )
+                        )
+                    if waiting:
+                        break
+                    await asyncio.sleep(0.01)
+                self.assertTrue(
+                    waiting, "Reconciliation never waited for the actual logical executor"
+                )
+                self.assertFalse(self.reads)
+            finally:
+                release.set()
+                tasks = [execution] + ([inspection] if inspection is not None else [])
+                outcomes = await asyncio.wait_for(
+                    asyncio.gather(*tasks, return_exceptions=True), 10
+                )
+            result = outcomes[0]
+            if isinstance(result, BaseException):
+                raise result
+            self.assertEqual(result.response_status_code, 202, result.response_payload)
+            self.assertEqual(result.response_payload["result"]["status"], "pass")
+            self.assertEqual(
+                result.response_payload["records"]["lifecycle_evidence_status"], "applied"
+            )
+            runtime = operation.adapter._runtime_identity
+            assert runtime is not None
+            preview = self.store.read_preview_record(self.preview.preview_id)
+            self.assertEqual(preview.state, "active")
+            self.assertEqual(preview.serving_generation_id, runtime.preview_generation_id)
+            generation = self.store.read_preview_generation_record(runtime.preview_generation_id)
+            self.assertEqual(generation.state, "ready")
+            self.assertEqual(generation.runtime_identity, runtime)
+            response = outcomes[1]
+            if isinstance(response, BaseException):
+                raise response
+            self.assertEqual(response.status_code, 409, response.text)
+            self.assertFalse(self.reads)
+
+    def test_lost_logical_transaction_cannot_reacquire_proof_after_autobegin(self) -> None:
+        from control_plane.workflows.launchplane import generate_preview_id
+        from control_plane.legacy_preview_reconciliation import (
+            serialize_legacy_preview_operation,
+            LegacyPreviewReconciliationRequest,
+            bind_legacy_preview,
+        )
+
+        logical = generate_preview_id(
+            context_name=self.profile.preview.context,
+            anchor_repo=self.preview.anchor_repo,
+            anchor_pr_number=self.preview.anchor_pr_number,
+        )
+        request = LegacyPreviewReconciliationRequest(
+            product=self.profile.product,
+            preview_id=self.preview.preview_id,
+            reason="fixture",
+        )
+        with serialize_legacy_preview_operation(self.store, request):
+            entry = next(
+                value for value in self.store._preview_execution_context.held if value[0] == logical
+            )
+            session = entry[2]
+            session.rollback()
+            session.execute(text("SELECT 1"))
+            with self.assertRaises(ValueError):
+                self.store.preview_refresh_is_excluded(preview_id=logical)
+            with self.assertRaises(ValueError):
+                bind_legacy_preview(self.store, request)
+        self.assertFalse(self.reads)
