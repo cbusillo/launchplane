@@ -1899,12 +1899,19 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
 
     def test_superseded_actions_execution_does_not_veto_current_checks(self) -> None:
         from control_plane.merge_train_github import _required_checks_status
+        from control_plane.tenant_admission_controller import (
+            TenantAdmissionRequiredTechnicalCheck,
+            read_technical_checks_for_requirements,
+        )
 
-        for consumer in ("head", "candidate"):
+        for consumer in ("head", "candidate", "base", "admission"):
             for change in (
                 "replacement",
                 "different_workflow",
                 "different_event",
+                "different_branch",
+                "different_repository",
+                "different_pull_target",
                 "unknown",
                 "running",
                 "rerun",
@@ -1912,6 +1919,9 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 "metadata_unavailable",
                 "suite_mismatch",
                 "old_failed",
+                "old_timed_out",
+                "old_action_required",
+                "new_failed",
                 "canonical_case",
                 "pending_non_actions",
             ):
@@ -1946,6 +1956,14 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                         current["workflow_id"] = 8
                     elif change == "different_event":
                         current["event"] = "push"
+                    elif change == "different_branch":
+                        current["head_branch"] = "work/independent"
+                    elif change == "different_repository":
+                        current["head_repository"] = {"id": 99}
+                    elif change == "different_pull_target":
+                        current["pull_requests"] = [
+                            {"number": 15, "base": {"ref": "main", "repo": {"id": 9}}}
+                        ]
                     elif change == "unknown":
                         old.pop("workflow_id")
                     elif change == "running":
@@ -1958,6 +1976,13 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                         old["check_suite_id"] = 30
                     elif change == "old_failed":
                         old["conclusion"] = "failure"
+                    elif change == "old_timed_out":
+                        old["conclusion"] = "timed_out"
+                    elif change == "old_action_required":
+                        old["conclusion"] = "action_required"
+                    elif change == "new_failed":
+                        old["conclusion"] = "success"
+                        current["conclusion"] = "failure"
                     checks = [
                         {
                             **_required_check_run("security-gate", "completed", result),
@@ -1968,8 +1993,8 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                             "details_url": f"https://github.com/example/tool/actions/runs/{run}/job/{job}",
                         }
                         for run, job, suite, result in (
-                            (11, 101, 10, "failure"),
-                            (12, 102, 20, "success"),
+                            (11, 101, 10, "success" if change == "new_failed" else "failure"),
+                            (12, 102, 20, "failure" if change == "new_failed" else "success"),
                         )
                     ]
                     if change == "canonical_case":
@@ -1979,15 +2004,18 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                             )
                     elif change == "pending_non_actions":
                         checks.append(
-                            _required_check_run("external-job", "queued", None, app_id=99)
+                            {
+                                **_required_check_run("external-job", "queued", None, app_id=99),
+                                "head_sha": head,
+                            }
                         )
                     responses = (
                         *(
                             ()
-                            if consumer == "head"
+                            if consumer not in {"candidate", "base"}
                             else (_protected_branch_with_checks("security-gate"),)
                         ),
-                        _combined_status(statuses=()),
+                        {**_combined_status(statuses=()), "sha": head},
                         {"check_runs": checks},
                         MergeTrainGitHubError("workflow evidence unavailable", status_code=403)
                         if change == "metadata_unavailable"
@@ -1997,12 +2025,39 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                         },
                     )
                     transport = RecordingMergeTrainGitHubTransport(responses=responses)
+                    status: str
                     if consumer == "head":
                         status = _required_checks_status(
                             transport=transport,
                             repository_path="example/tool",
                             encoded_head_sha=head,
                         )
+                    elif consumer == "base":
+                        status = GitHubMergeTrainClient(transport=transport).read_base_check_status(
+                            candidate=_batch_candidate().model_copy(
+                                update={"repository": "example/tool", "base_sha": head}
+                            ),
+                            failed_check_names=("security-gate", "external-job")
+                            if change == "pending_non_actions"
+                            else ("security-gate",),
+                        )
+                    elif consumer == "admission":
+                        required_names = ["security-gate"]
+                        if change == "pending_non_actions":
+                            required_names.append("external-job")
+                        status = read_technical_checks_for_requirements(
+                            transport=transport,
+                            merge_client=GitHubMergeTrainClient(transport=transport),
+                            repository="example/tool",
+                            base_sha="base-sha",
+                            head_sha=head,
+                            evaluated_at="2026-01-01T10:03:00Z",
+                            strict=False,
+                            required_checks=tuple(
+                                TenantAdmissionRequiredTechnicalCheck(name=name)
+                                for name in required_names
+                            ),
+                        ).status
                     else:
                         candidate = _batch_candidate().model_copy(
                             update={
@@ -2018,8 +2073,16 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                             )
                             .required_checks_status
                         )
-                    if change in {"replacement", "canonical_case"}:
+                    if change in {
+                        "replacement",
+                        "canonical_case",
+                        "old_failed",
+                        "old_timed_out",
+                        "old_action_required",
+                    }:
                         self.assertEqual(status, "pass")
+                    elif change == "new_failed":
+                        self.assertEqual(status, "fail")
                     elif change == "pending_non_actions":
                         self.assertEqual(status, "pending")
                     else:

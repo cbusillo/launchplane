@@ -5716,7 +5716,7 @@ def _without_superseded_actions_checks(
         superseded = {
             (run["id"], run["check_suite_id"])
             for run in selection["superseded"]
-            if run["id"] not in current_ids and run.get("conclusion") == "cancelled"
+            if run["id"] not in current_ids
         }
     except (ValueError, KeyError, TypeError, AttributeError):
         return unavailable("actions_history_selection_malformed")
