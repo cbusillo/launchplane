@@ -47,6 +47,43 @@ _TASK_STATES = frozenset(
     }
 )
 _DEPLOYMENT_PREFIX = "LAUNCHPLANE_DEPLOYMENT_RECORD_ID="
+_ENVIRONMENT_KEY = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]{0,127}$")
+MAX_APPLICATION_DIAGNOSTIC_ITEMS = 100
+MAX_APPLICATION_ENVIRONMENT_KEYS = 256
+
+
+@dataclass(frozen=True)
+class ApplicationEnvironmentKeys:
+    names: tuple[str, ...] = ()
+    complete: bool = False
+
+
+def _environment_keys(value: object) -> ApplicationEnvironmentKeys:
+    """Docker Env array names only; multiline values are never parsed as keys."""
+    if not isinstance(value, list):
+        return ApplicationEnvironmentKeys()
+    names: set[str] = set()
+    complete = True
+    for item in value:
+        if not isinstance(item, str):
+            complete = False
+            continue
+        name, separator, _ = item.partition("=")
+        if not separator or not _ENVIRONMENT_KEY.fullmatch(name) or name in names:
+            complete = False
+            continue
+        if len(names) >= MAX_APPLICATION_ENVIRONMENT_KEYS:
+            complete = False
+            continue
+        names.add(name)
+    return ApplicationEnvironmentKeys(tuple(sorted(names)), complete)
+
+
+@dataclass(frozen=True)
+class ApplicationContainerMetadata:
+    container_id: str
+    task_id: str
+    environment_keys: ApplicationEnvironmentKeys
 
 
 @dataclass(frozen=True)
@@ -54,6 +91,8 @@ class ApplicationTaskObservation:
     image: str
     deployment_record_id: str
     state: str
+    task_id: str = ""
+    desired_state: str = ""
 
 
 @dataclass(frozen=True)
@@ -73,6 +112,9 @@ class ApplicationRuntimeObservation:
     task_evidence_complete: bool = True
     tasks: tuple[ApplicationTaskObservation, ...] = ()
     initial_service: bool = False
+    server_id: str = ""
+    service_environment_keys: ApplicationEnvironmentKeys = ApplicationEnvironmentKeys()
+    running_containers: tuple[ApplicationContainerMetadata, ...] = ()
 
     @property
     def rollout_settled(self) -> bool:
@@ -334,6 +376,7 @@ def _fetch_application_runtime(
     images: list[tuple[str, ...]] = []
     record_ids: list[str] = []
     health: list[str] = []
+    container_metadata: list[ApplicationContainerMetadata] = []
     pending = 0
     containers: set[str] = set()
     task_observations: list[ApplicationTaskObservation] = []
@@ -370,7 +413,9 @@ def _fetch_application_runtime(
                 task_record_id = _deployment_identity(task_spec.get("Env"))
             except DokployEvidenceProviderError:
                 task_image, task_record_id = "", ""
-            task_observations.append(ApplicationTaskObservation(task_image, task_record_id, state))
+            task_observations.append(
+                ApplicationTaskObservation(task_image, task_record_id, state, task_id, desired)
+            )
             if state != "running":
                 pending += desired in {"ready", "running"}
                 continue
@@ -454,6 +499,12 @@ def _fetch_application_runtime(
             images.append(tuple(sorted(matching)))
             record_ids.append(record_id)
             health.append(str(health_status))
+            if len(container_metadata) < MAX_APPLICATION_DIAGNOSTIC_ITEMS:
+                container_metadata.append(
+                    ApplicationContainerMetadata(
+                        container_id, task_id, _environment_keys(config.get("Env"))
+                    )
+                )
     except (DokployEvidenceProviderError, click.ClickException, ValueError):
         task_evidence_complete = False
     if inspect(app_name) != service:
@@ -487,4 +538,7 @@ def _fetch_application_runtime(
         # A normal service update writes PreviousSpec before its async updater
         # writes UpdateStatus. Only the full native create shape lacks both.
         initial_service="PreviousSpec" not in service and "UpdateStatus" not in service,
+        server_id=server_id,
+        service_environment_keys=_environment_keys(container_spec.get("Env")),
+        running_containers=tuple(container_metadata),
     )

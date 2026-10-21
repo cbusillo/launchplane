@@ -19,6 +19,11 @@ from control_plane.contracts.privileged_operation_worker_heartbeat import (
 from control_plane.dokploy_target_comparison import provider_target_comparison_fingerprint
 from control_plane.dokploy import api as dokploy_api
 from control_plane.dokploy import runtime_evidence as dokploy_runtime_evidence
+from control_plane.dokploy.application_runtime import (
+    ApplicationRuntimeObservation,
+    fetch_application_runtime,
+)
+from control_plane.dokploy.application_runtime_summary import summarize_application_runtime
 
 DokployTargetType = Literal["application", "compose"]
 _RUNTIME_EVIDENCE_LOG_LINE_COUNT = dokploy_api.MAX_DOKPLOY_LOG_LINE_COUNT
@@ -29,6 +34,12 @@ class FetchDokployTargetPayload(Protocol):
     def __call__(
         self, *, host: str, token: str, target_type: str, target_id: str
     ) -> dokploy_api.JsonObject: ...
+
+
+class FetchDokployApplicationRuntime(Protocol):
+    def __call__(
+        self, *, host: str, token: str, application_id: str
+    ) -> ApplicationRuntimeObservation: ...
 
 
 class FetchDokployComposeServiceRuntime(Protocol):
@@ -89,8 +100,6 @@ class DokployTargetInspectRequest(BaseModel):
             raise ValueError("Dokploy target inspect requires product 'launchplane'.")
         if self.event and not self.service:
             raise ValueError("Dokploy runtime event evidence requires a compose service.")
-        if self.expected_image and not self.service:
-            raise ValueError("Dokploy expected image evidence requires a compose service.")
         if self.service and not self.expected_image:
             raise ValueError("Dokploy runtime service evidence requires an expected image.")
         has_route = bool(self.context or self.instance)
@@ -217,6 +226,7 @@ def inspect_dokploy_target(
     fetch_target_payload: FetchDokployTargetPayload | None = None,
     fetch_compose_service_runtime: FetchDokployComposeServiceRuntime | None = None,
     fetch_compose_logs: FetchDokployComposeLogs | None = None,
+    fetch_application: FetchDokployApplicationRuntime | None = None,
     now: Callable[[], datetime] = _utc_now,
 ) -> dict[str, object]:
     target_record: DokployTargetRecord | None = None
@@ -248,6 +258,16 @@ def inspect_dokploy_target(
         target_type = target_record.target_type
         target_id = target_id_record.target_id
 
+    if request.service and target_type != "compose":
+        raise ValueError("Dokploy runtime service evidence supports compose targets only.")
+    if request.expected_image and not request.service and target_type != "application":
+        raise ValueError("Dokploy compose image evidence requires a service.")
+    application_authority = None
+    if request.expected_image and target_type == "application" and target_record is not None:
+        application_authority = _application_read_authority(
+            request, target_record, target_id_record, provider_target_record
+        )
+
     payload_fetcher = fetch_target_payload or dokploy_api.fetch_dokploy_target_payload
     try:
         provider_payload = payload_fetcher(
@@ -270,6 +290,46 @@ def inspect_dokploy_target(
         "provider_payload_redacted": True,
         "provider": provider_summary,
     }
+    if request.expected_image and target_type == "application":
+        observed = (fetch_application or fetch_application_runtime)(
+            host=host, token=token, application_id=target_id
+        )
+        if (
+            provider_payload.get("applicationId") != target_id
+            or observed.application_id != target_id
+            or observed.app_name != provider_payload.get("appName")
+            or "serverId" not in provider_payload
+            or observed.server_id != (provider_payload.get("serverId") or "")
+        ):
+            raise dokploy_runtime_evidence.DokployEvidenceProviderError("target-inspect")
+        if application_authority is not None:
+            try:
+                current_target = record_store.read_dokploy_target_record(
+                    context_name=request.context, instance_name=request.instance
+                )
+                current_id = record_store.read_dokploy_target_id_record(
+                    context_name=request.context, instance_name=request.instance
+                )
+                try:
+                    current_provider = record_store.read_provider_target_record(
+                        context_name=request.context, instance_name=request.instance
+                    )
+                except FileNotFoundError:
+                    current_provider = None
+                current_authority = _application_read_authority(
+                    request, current_target, current_id, current_provider
+                )
+            except FileNotFoundError:
+                raise dokploy_runtime_evidence.DokployEvidenceProviderError(
+                    "target-inspect"
+                ) from None
+            if current_authority != application_authority:
+                raise dokploy_runtime_evidence.DokployEvidenceProviderError("target-inspect")
+        result["runtime_evidence"] = summarize_application_runtime(
+            observed,
+            expected_image=request.expected_image,
+            observed_at=now().astimezone(timezone.utc),
+        )
     if request.service:
         if target_type != "compose":
             raise ValueError("Dokploy runtime service evidence supports compose targets only.")
@@ -440,6 +500,41 @@ def inspect_dokploy_target(
                     # Missing bootstrap key configuration must not break runtime reads.
                     provider_target_summary["comparison_evidence_status"] = "unavailable"
     return result
+
+
+def _application_read_authority(
+    request: DokployTargetInspectRequest,
+    target: DokployTargetRecord,
+    target_id: DokployTargetIdRecord | None,
+    provider: ProviderTargetRecord | None,
+) -> tuple[object, ...]:
+    records = (target, target_id, provider)
+    if (
+        target_id is None
+        or target.target_type != "application"
+        or any(
+            record.context != request.context or record.instance != request.instance
+            for record in records
+            if record is not None
+        )
+        or (
+            provider is not None
+            and (
+                provider.provider_id != "dokploy"
+                or provider.target_id != target_id.target_id
+                or provider.target_category not in {"application", "unknown"}
+                or provider.provider_target_type not in {"application", ""}
+            )
+        )
+    ):
+        raise dokploy_runtime_evidence.DokployEvidenceProviderError("target-inspect")
+    return (
+        target.model_dump(exclude={"updated_at", "source_label"}),
+        target_id.model_dump(exclude={"updated_at", "source_label"}),
+        provider.model_dump(exclude={"updated_at", "source_label", "display_name"})
+        if provider is not None
+        else None,
+    )
 
 
 def summarize_dokploy_target_payload(
