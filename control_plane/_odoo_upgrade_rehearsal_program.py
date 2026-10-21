@@ -8,6 +8,8 @@ from control_plane._odoo_rehearsal_business_validation import (
     BUSINESS_VALIDATION_ENTRYPOINT,
     BUSINESS_VALIDATION_RECEIPT_MAX_BYTES,
     BUSINESS_VALIDATION_RECEIPT_LIBRARY,
+    BUSINESS_VALIDATION_COMMAND_TIMEOUT_SECONDS,
+    BUSINESS_VALIDATION_OUTPUT_MAX_BYTES,
 )
 from control_plane._odoo_rehearsal_source_reader import REHEARSAL_SOURCE_READER_LIBRARY
 from control_plane._odoo_rehearsal_attachment_validation import (
@@ -26,6 +28,11 @@ ODOO_UPGRADE_REHEARSAL_PROGRAM = (
     + repr(BUSINESS_VALIDATION_ENTRYPOINT)
     + "\nBUSINESS_VALIDATION_RECEIPT_MAX_BYTES = "
     + repr(BUSINESS_VALIDATION_RECEIPT_MAX_BYTES)
+    + "\n"
+    + "\nPRODUCT_COMMAND_TIMEOUT_SECONDS = "
+    + repr(BUSINESS_VALIDATION_COMMAND_TIMEOUT_SECONDS)
+    + "\nPRODUCT_COMMAND_OUTPUT_MAX_BYTES = "
+    + repr(BUSINESS_VALIDATION_OUTPUT_MAX_BYTES)
     + "\n"
     + BUSINESS_VALIDATION_RECEIPT_LIBRARY
     + "\nATTACHMENT_VALIDATION_PROGRAM = "
@@ -314,10 +321,6 @@ def business_validation_precheck(spec,containers):
         raise RuntimeError('Validation connection isolation changed')
 
 
-PRODUCT_COMMAND_TIMEOUT_SECONDS=900
-PRODUCT_COMMAND_OUTPUT_MAX_BYTES=2*BUSINESS_VALIDATION_RECEIPT_MAX_BYTES+1024
-
-
 def product_command(arguments, *, stdin=None):
     # Discard product stderr and failed stdout, which can contain Client data.
     process=subprocess.Popen(arguments,stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
@@ -354,12 +357,6 @@ def product_command(arguments, *, stdin=None):
         if process.poll() is None:
             process.kill()
         process.wait()
-
-
-def check_business_entrypoint(spec):
-    product_command(['docker','run','--rm','--network','none','--read-only','--cap-drop','ALL',
-        '--security-opt','no-new-privileges','--entrypoint','python3',spec['target_image'],
-        BUSINESS_VALIDATION_ENTRYPOINT,'--check'])
 
 
 def business_validation(spec,containers):
@@ -518,7 +515,7 @@ def refusal_receipt(spec, root, code):
     if not all(re.fullmatch(r'[a-f0-9]{64}',value) for value in (attempt,binding)):
         return None
     kind={'rehearsal_storage_capacity_insufficient':'capacity',
-        'rehearsal_precheck_refused':'precheck','rehearsal_entrypoint_unavailable':'entrypoint'}[code]
+        'rehearsal_precheck_refused':'precheck'}[code]
     return root/(spec['action']+'.refused-'+attempt+'-'+binding+'-'+kind)
 
 
@@ -552,7 +549,7 @@ def emit_refusal(spec,root,code):
 
 def read_refusal(spec, root):
     result=None
-    for code in ('rehearsal_storage_capacity_insufficient','rehearsal_precheck_refused','rehearsal_entrypoint_unavailable'):
+    for code in ('rehearsal_storage_capacity_insufficient','rehearsal_precheck_refused'):
         path=refusal_receipt(spec,root,code)
         if path is None:
             continue
@@ -809,11 +806,6 @@ def main():
         action=spec['action']
         database,image=current(spec)
         if action=='prepare':
-            try:
-                check_business_entrypoint(spec)
-            except RehearsalCommandFailure:
-                emit_refusal(spec,root,'rehearsal_entrypoint_unavailable')
-                return
             (root/(action+'.started')).touch(mode=0o600)
             compose(spec,root,image=spec['source_image'],database=names['source'])
             deadline=time.monotonic()+120

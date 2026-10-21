@@ -2895,9 +2895,14 @@ A product change needs no Launchplane model or method allowlist change.
 `prepare` first runs that fixed file with `--check` in the exact candidate
 image, with no network, credentials or application mounts. It must exit zero
 only when the entrypoint and scenario imports are available, without opening
-a database. A missing entrypoint returns the determinate `rehearsal_entrypoint_unavailable`
-refusal before upgrade or source-copy work, retaining its exact attempt’s
-no-effect receipt. Existing isolated placement stays owned by the rehearsal.
+a database. A server-scoped probe runs before rehearsal credentials, provider
+placement or storage are allocated. It pulls the pinned image explicitly and
+then checks with `--pull never`. Product failure is an artifact prerequisite;
+Docker/registry failure or unavailable evidence is a provider prerequisite.
+Either stops the fresh prepare before allocation and permits a fresh review/key.
+The probe cleans up only the container id its own invocation created. It never
+deletes a colliding existing container. Partial prepare and host continuation
+keep their existing recovery path; they do not repeat this fresh preflight.
 
 Normal invocation runs inside the independently checked isolated script-runner.
 The native environment supplies only rehearsal-local credentials, with
@@ -2920,8 +2925,7 @@ rehearsal-local copies, whose recovery snapshots remain outside its mounts.
 The product writes exactly one line
 `business_validation_result=<hex-encoded UTF-8 JSON receipt>`. Other output is
 discarded, including stderr and nonzero-exit stdout; product tracebacks are never
-used as diagnostics. Product command observation has a bounded deadline and
-output budget. A timeout or excessive output after a write starts preserves
+used as diagnostics. Product command observation is bounded to 900 seconds and 17,408 stdout bytes. A timeout or excessive output after a write starts preserves
 unknown original-key custody; stopping the host observer does not prove the
 in-container writer stopped or rolled back. A receipt contains exactly the six input identity fields,
 `passed`, `committed`, and `checks`. Each check has a unique `key`, a `passed`

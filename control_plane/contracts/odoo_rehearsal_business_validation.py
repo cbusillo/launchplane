@@ -4,7 +4,10 @@ from typing import Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from control_plane._odoo_rehearsal_business_validation import checked_business_receipt
+from control_plane._odoo_rehearsal_business_validation import (
+    checked_business_receipt,
+    final_business_database,
+)
 from control_plane.contracts.canonical_json import canonical_json_sha256
 
 
@@ -36,7 +39,7 @@ class BusinessValidationReceipt(BaseModel):
     @model_validator(mode="after")
     def successful_commit(self) -> Self:
         checked_business_receipt(self.model_dump(mode="json"))
-        if self.database != self.rehearsal_id.replace("-", "_") + "_final_upgrade":
+        if self.database != final_business_database(self.rehearsal_id):
             raise ValueError("Validation requires this rehearsal's final copy.")
         return self
 

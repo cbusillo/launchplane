@@ -10,6 +10,9 @@ from pydantic import ValidationError
 from control_plane._odoo_rehearsal_business_validation import (
     BUSINESS_VALIDATION_ENTRYPOINT,
     BUSINESS_VALIDATION_RECEIPT_MAX_BYTES,
+    BUSINESS_ENTRYPOINT_CHECK_LIBRARY,
+    final_business_database,
+    business_entrypoint_check_script,
 )
 from control_plane.contracts.odoo_rehearsal_business_validation import BusinessValidationReceipt
 from control_plane.contracts.canonical_json import canonical_json_sha256
@@ -24,7 +27,7 @@ def identity(record: Any) -> dict[str, str]:
         "rehearsal_id": record.rehearsal_id,
         "artifact_id": record.target_artifact.artifact_id,
         "source_commit": record.target_artifact.source_commit,
-        "database": record.rehearsal_id.replace("-", "_") + "_final_upgrade",
+        "database": final_business_database(record.rehearsal_id),
         "attempt_sha256": canonical_json_sha256({"operation_key": "original"}),
     }
 
@@ -80,6 +83,166 @@ class BusinessValidationContractTests(unittest.TestCase):
             valid["checks"][0]["records"] *= 2
         with self.assertRaises(ValidationError):
             BusinessValidationReceipt.model_validate(valid)
+
+
+class BusinessEntrypointPreflightTests(unittest.TestCase):
+    def test_probe_distinguishes_product_and_provider_failure_and_cleans_its_container(
+        self,
+    ) -> None:
+        import subprocess
+        from pathlib import Path
+        from types import SimpleNamespace
+
+        namespace: dict[str, Any] = {}
+        exec(BUSINESS_ENTRYPOINT_CHECK_LIBRARY, namespace)
+        for outcome in ("available", "missing", "docker", "pull", "timeout", "occupied"):
+            calls: list[list[str]] = []
+
+            def run(arguments: list[str], **kwargs: Any) -> Any:
+                calls.append(arguments)
+                self.assertIs(kwargs["stdout"], subprocess.DEVNULL)
+                self.assertIs(kwargs["stderr"], subprocess.DEVNULL)
+                if arguments[1:3] == ["container", "inspect"]:
+                    return SimpleNamespace(returncode=0 if outcome == "occupied" else 1)
+                if arguments[1:3] == ["image", "inspect"]:
+                    return SimpleNamespace(returncode=1 if outcome == "pull" else 0)
+                if arguments[1] == "pull":
+                    return SimpleNamespace(returncode=125)
+                if arguments[1] == "run":
+                    self.assertEqual(arguments[arguments.index("--network") + 1], "none")
+                    self.assertEqual(arguments[arguments.index("--pull") + 1], "never")
+                    self.assertTrue(
+                        {"--read-only", "--cap-drop", "--security-opt"} <= set(arguments)
+                    )
+                    self.assertFalse(
+                        {"-e", "--env", "--env-file", "-v", "--volume", "--mount"} & set(arguments)
+                    )
+                    self.assertIn(BUSINESS_VALIDATION_ENTRYPOINT, arguments)
+                    self.assertIn(spec["image"], arguments)
+                    Path(arguments[arguments.index("--cidfile") + 1]).write_text("a" * 64)
+                    if outcome == "timeout":
+                        raise subprocess.TimeoutExpired("fixed check", 1)
+                    return SimpleNamespace(returncode={"missing": 2, "docker": 125}.get(outcome, 0))
+                self.assertEqual(arguments[1:], ["rm", "-f", "a" * 64])
+                return SimpleNamespace(returncode=0)
+
+            spec: dict[str, Any] = {
+                "image": "fixture@sha256:" + "b" * 64,
+                "container_name": "fixture-check",
+                "entrypoint": BUSINESS_VALIDATION_ENTRYPOINT,
+                "binding": {"attempt": "fixture"},
+            }
+            with self.subTest(outcome=outcome), patch.object(subprocess, "run", side_effect=run):
+                result = namespace["check_business_entrypoint"](spec)
+            expected = (
+                "available"
+                if outcome == "available"
+                else "entrypoint_unavailable"
+                if outcome == "missing"
+                else "provider_unavailable"
+            )
+            self.assertEqual(result, {**spec["binding"], "status": expected})
+            removals = [call for call in calls if call[1] == "rm"]
+            self.assertEqual(bool(removals), outcome not in {"pull", "occupied"})
+
+    def test_rejected_probe_precedes_allocation_and_a_new_key_can_retry(self) -> None:
+        from control_plane import odoo_upgrade_rehearsal as rehearsal_module
+        from control_plane.dokploy import post_deploy
+
+        implementation = OdooRehearsalAdapter.check_business_entrypoint
+        fixture = rehearsal_tests.RehearsalScenario()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        adapter = fixture.adapter("prepare")
+        binding: dict[str, str] = {}
+        renderer = business_entrypoint_check_script
+
+        def render(image: str, identifier: str, expected: dict[str, str]) -> str:
+            binding.clear()
+            binding.update(expected)
+            return renderer(image, identifier, expected)
+
+        outcome = "entrypoint_unavailable"
+
+        def schedule(**kwargs: Any) -> dict[str, str]:
+            self.assertEqual(kwargs["schedule_lookup_id"], fixture.record.server_id)
+            self.assertEqual(kwargs["schedule_type"], "server")
+            self.assertEqual(kwargs["target_definition"].target_id, "")
+            return {"rehearsal_result": json.dumps({**binding, "status": outcome}).encode().hex()}
+
+        with (
+            patch.object(
+                adapter,
+                "check_business_entrypoint",
+                side_effect=lambda record, key, check: implementation(adapter, record, key, check),
+            ),
+            patch.object(rehearsal_module, "business_entrypoint_check_script", side_effect=render),
+            patch(
+                "control_plane.odoo_upgrade_rehearsal.api.find_matching_dokploy_schedule",
+                return_value=None,
+            ),
+            patch.object(post_deploy, "run_manual_data_schedule", side_effect=schedule) as probe,
+            patch(
+                "control_plane.testing_local_credentials.prepare_rehearsal_local_credentials"
+            ) as credentials,
+            patch("control_plane.dokploy.sandbox_placement.create_isolated_placement") as placement,
+            patch.object(adapter, "run_script") as storage,
+            patch(
+                "control_plane.dokploy.sandbox_placement.created_placement",
+                return_value=("", "", ""),
+            ),
+        ):
+            for outcome in ("entrypoint_unavailable", "provider_unavailable"):
+                with self.subTest(outcome=outcome), self.assertRaises(RehearsalRefused):
+                    fixture.run_operation(adapter, outcome)
+                credentials.assert_not_called()
+                placement.assert_not_called()
+                storage.assert_not_called()
+                self.assertFalse(fixture.store.list_held_provider_target_reservations())
+                self.assertEqual(
+                    fixture.store.read_odoo_upgrade_rehearsal(fixture.identifier), fixture.record
+                )
+            self.assertEqual(probe.call_count, 2)
+            outcome = "available"
+            credentials.side_effect = RuntimeError("next allocation stage")
+            with self.assertRaisesRegex(RuntimeError, "next allocation stage"):
+                fixture.run_operation(adapter, "available")
+            credentials.assert_called_once()
+            placement.assert_not_called()
+            storage.assert_not_called()
+
+    def test_probe_receipt_must_match_its_candidate_and_attempt(self) -> None:
+        from control_plane.dokploy import post_deploy
+
+        implementation = OdooRehearsalAdapter.check_business_entrypoint
+        fixture = rehearsal_tests.RehearsalScenario()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        adapter = fixture.adapter("prepare")
+        binding = {
+            "intent_sha256": fixture.record.intent_sha256,
+            "record_binding_sha256": fixture.record.binding_sha256,
+            "attempt_sha256": canonical_json_sha256({"operation_key": "original"}),
+            "image": fixture.record.target_artifact.image.repository
+            + "@"
+            + fixture.record.target_artifact.image.digest,
+        }
+        for field in (*binding, "extra"):
+            payload = {**binding, "status": "available", field: "wrong"}
+            with (
+                self.subTest(field=field),
+                patch(
+                    "control_plane.odoo_upgrade_rehearsal.api.find_matching_dokploy_schedule",
+                    return_value=None,
+                ),
+                patch.object(
+                    post_deploy,
+                    "run_manual_data_schedule",
+                    return_value={"rehearsal_result": json.dumps(payload).encode().hex()},
+                ),
+                self.assertRaises(RehearsalRefused),
+            ):
+                implementation(adapter, fixture.record, "original", lambda: None)
 
 
 class BusinessValidationAdapterTests(unittest.TestCase):
@@ -463,36 +626,6 @@ class BusinessValidationHostTests(unittest.TestCase):
         valid = self.host["business_validation"](self.spec, self.containers)
         self.assertEqual(valid, receipt(self.plan))
         self.assertIn(BUSINESS_VALIDATION_ENTRYPOINT, self.last_command)
-
-    def test_prepare_checks_the_candidate_without_network_or_credentials(self) -> None:
-        self.host["product_command"] = call = Mock(return_value=b"")
-        self.host["check_business_entrypoint"](self.spec)
-        arguments = call.call_args.args[0]
-        self.assertEqual(arguments[arguments.index("--network") + 1], "none")
-        self.assertIn(self.spec["target_image"], arguments)
-        self.assertIn(BUSINESS_VALIDATION_ENTRYPOINT, arguments)
-        self.assertIn("--check", arguments)
-        self.assertFalse(
-            set(arguments) & {"--env", "-e", "--env-file", "-v", "--volume", "--mount"}
-        )
-        call.side_effect = self.host["RehearsalCommandFailure"](
-            {
-                "step": "business_validation",
-                "exit_status": 2,
-                "error_text": "Product validation unavailable",
-            }
-        )
-        self.spec.update(action="prepare", source_image=self.spec["target_image"])
-        self.spec["record"]["state"] = "planned"
-        self.host["compose"] = compose = Mock()
-        refused = self.fixture.run_host(self.spec)
-        self.assertFalse(refused["completed"])
-        self.assertEqual(refused["refusal_code"], "rehearsal_entrypoint_unavailable")
-        compose.assert_not_called()
-        self.assertFalse((self.root / "prepare.started").exists())
-        calls = call.call_count
-        self.assertEqual(self.fixture.run_host({**self.spec, "mode": "observe"}), refused)
-        self.assertEqual(call.call_count, calls)
 
     def test_invalid_or_missing_reply_preserves_unknown_original_without_replay(self) -> None:
         valid = json.dumps(receipt(self.plan)).encode().hex().encode()

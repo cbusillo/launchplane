@@ -26,7 +26,6 @@ INCOMPLETE_REHEARSAL_TARGET_SUFFIX = ":incomplete-retirement"
 REHEARSAL_PUBLIC_FAILURE_MESSAGES = {
     "rehearsal_storage_capacity_insufficient": "No rehearsal action started. Requalify storage capacity and review a new operation key.",
     "rehearsal_precheck_refused": "No rehearsal action started. Requalify the prerequisite and review a new operation key.",
-    "rehearsal_entrypoint_unavailable": "The candidate business-validation entrypoint is unavailable. No source copy or upgrade started. Review a candidate with the fixed entrypoint.",
 }
 RehearsalAction = Literal[
     "prepare",
@@ -419,7 +418,6 @@ class RehearsalHostResult(BaseModel):
         "",
         "rehearsal_storage_capacity_insufficient",
         "rehearsal_precheck_refused",
-        "rehearsal_entrypoint_unavailable",
     ] = ""
     attempt_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
     business_validation: BusinessValidationReceipt | None = None
