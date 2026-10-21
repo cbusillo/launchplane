@@ -35,6 +35,7 @@ from control_plane.contracts.runtime_identity import RuntimeIdentity, runtime_id
 from control_plane.dokploy.odoo_walkthrough import (
     ACCOUNT_ODOO_PROGRAM,
     ACCOUNT_HOST_PROGRAM,
+    TestingRead,
     WALKTHROUGH_JOURNAL_DIRECTORY,
 )
 from control_plane.http_routes.odoo_walkthrough import (
@@ -245,7 +246,10 @@ class TaskRouteTests(unittest.TestCase):
             patch("control_plane.odoo_walkthrough.testing_task_unused", return_value=True)
         )
         self.stack.enter_context(
-            patch("control_plane.odoo_walkthrough.testing_connection_isolated", return_value=True)
+            patch(
+                "control_plane.odoo_walkthrough.read_testing_connection_isolation",
+                return_value=TestingRead.CLEAR,
+            )
         )
         self.stack.enter_context(
             patch(
