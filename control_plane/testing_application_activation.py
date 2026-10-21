@@ -514,7 +514,7 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
         return live
 
     def recover_placement(self, record: TestingActivationRecord) -> TestingActivationRecord:
-        """Only positive original namespace evidence can fill an uncertain create's ID."""
+        """Only positive original namespace evidence can fill the ID of an uncertain creation."""
         host, token = source.read_dokploy_config(control_plane_root=self.root)
         inventory = read_dokploy_inventory(host=host, token=token, offset=0, limit=MAX_PROJECTS)
         if inventory.next_offset is not None or inventory.total_projects != len(inventory.projects):
@@ -961,7 +961,6 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                     },
                 )
                 live = self.live(record)
-                mounts = live.get("mounts")
                 if not self.mount_matches(record, live, resources):
                     raise TestingActivationRefusal("The original mount remains unobserved.")
             record = self.save_state(record, mount_verified="true")
@@ -1634,9 +1633,9 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                 return route.digest
 
             def apply(
-                inner, provider_operation_key: str, child: ProviderOperationLease
+                inner, provider_operation_key: str, lease: ProviderOperationLease
             ) -> ProviderMutationOutcome:
-                return effects.apply(child)
+                return effects.apply(lease)
 
             def observe(
                 inner,

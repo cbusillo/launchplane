@@ -43,7 +43,6 @@ def inspect_application_runtime(
     observed_at = observation_clock()
     deadline = observed_at + observation_window_seconds()
     while True:
-        result = None
         try:
             frames: list[dict[str, object]] = []
             _read_remote(

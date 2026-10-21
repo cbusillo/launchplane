@@ -12933,7 +12933,6 @@ class RealPostgresApplicationTestingActivationTests(unittest.TestCase):
             with ThreadPoolExecutor(max_workers=4) as workers:
                 deadline = time.monotonic() + 60
                 publication = workers.submit(fixture.activate)
-                contenders = []
 
                 def require_publication_pending(stage: str) -> None:
                     if publication.done():
