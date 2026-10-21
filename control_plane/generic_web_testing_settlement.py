@@ -1,4 +1,4 @@
-"""Settle testing attempts proved pre-image or refused before dispatch."""
+"""Settle safe testing attempts and recognize their deterministic successors."""
 
 from collections.abc import Callable
 from pathlib import Path
@@ -51,6 +51,7 @@ from control_plane.workflows.ship import build_deployment_record, utc_now_timest
 
 
 TESTING_PRE_IMAGE_SETTLEMENT_PHASE = "testing_pre_image_settlement"
+TESTING_POST_IMAGE_SETTLEMENT_PHASE = "testing_failure_settlement"
 TESTING_PRE_IMAGE_SETTLED = "testing_deploy_pre_image_settled"
 TESTING_DISPATCH_REFUSED_SETTLED = "testing_deploy_dispatch_refused_settled"
 
@@ -63,11 +64,13 @@ class _SettlementStore(TestingInputStore, ExecutionRecordStore, Protocol):
 
 def testing_attempt_was_settled(record: LaunchplaneIdempotencyRecord) -> bool:
     result = record.response_payload.get("result")
-    return (
-        record.state == "completed"
-        and isinstance(result, dict)
-        and result.get("error_code")
-        in {TESTING_PRE_IMAGE_SETTLED, TESTING_DISPATCH_REFUSED_SETTLED}
+    return record.state == "completed" and (
+        record.provider_effect_phase == TESTING_POST_IMAGE_SETTLEMENT_PHASE
+        or (
+            isinstance(result, dict)
+            and result.get("error_code")
+            in {TESTING_PRE_IMAGE_SETTLED, TESTING_DISPATCH_REFUSED_SETTLED}
+        )
     )
 
 

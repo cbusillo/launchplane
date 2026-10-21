@@ -19,6 +19,7 @@ from control_plane.generic_web_testing_inputs import (
 from control_plane.generic_web_testing_settlement import (
     TESTING_DISPATCH_REFUSED_SETTLED,
     TESTING_PRE_IMAGE_SETTLED,
+    TESTING_POST_IMAGE_SETTLEMENT_PHASE,
     settle_testing_pre_image_attempt,
     testing_pre_image_settlement_required,
 )
@@ -251,7 +252,7 @@ class GenericWebDeployProviderMutationAdapter:
         except FileNotFoundError:
             if phase.startswith(("application_", "post_deploy_")) or phase in {
                 "records_commit",
-                "testing_failure_settlement",
+                TESTING_POST_IMAGE_SETTLEMENT_PHASE,
             }:
                 return ExecutionObservation("unknown", {"receipt": "missing"}), None
             return None, None
@@ -1168,13 +1169,16 @@ class GenericWebDeployProviderMutationAdapter:
         *,
         current_lane: bool,
         check_inputs: bool,
+        check_profile: bool = True,
     ) -> None:
         from control_plane.generic_web_testing_inputs import (
             require_testing_application_target_authority,
         )
 
         self.execution_check()
-        if self._record_store.read_product_profile_record(self._profile.product) != self._profile:
+        if check_profile and (
+            self._record_store.read_product_profile_record(self._profile.product) != self._profile
+        ):
             raise ProviderMutationUnknownError("Reviewed product ownership changed.")
         if current_lane:
             require_testing_application_target_authority(
@@ -1360,7 +1364,7 @@ class GenericWebDeployProviderMutationAdapter:
                 expected_record = record
             if settle and hold_needed:
                 assert record is not None
-                checkpoint("testing_failure_settlement")
+                checkpoint(TESTING_POST_IMAGE_SETTLEMENT_PHASE)
                 snapshot = recorded_application_lifecycle(record)
                 original_receipt = execution_receipt(record)
                 assert original_receipt is not None
@@ -1409,7 +1413,7 @@ class GenericWebDeployProviderMutationAdapter:
                 raise ProviderMutationUnknownError(
                     "Unqualified testing work requires hold-only settlement."
                 )
-            checkpoint("testing_failure_settlement" if settle else "records_commit")
+            checkpoint(TESTING_POST_IMAGE_SETTLEMENT_PHASE if settle else "records_commit")
             legacy_image_only = current is None and not fresh.post_deploy_unobserved and not settle
             if legacy_image_only and not _saved_testing_result_is_final(record):
                 record, _legacy_records, _legacy_result = build_observed_generic_web_deploy(
@@ -1423,13 +1427,17 @@ class GenericWebDeployProviderMutationAdapter:
                 )
             if record is None:
                 raise ProviderMutationUnknownError("The original testing result is unavailable.")
-            if (
+            observed_final_image = (
                 record.deploy.status in {"pass", "fail"}
                 and record.deploy.deployment_id != GENERIC_WEB_UNOBSERVED_DEPLOYMENT_ID
-            ):
+            )
+            if observed_final_image:
                 if record.deploy.deployment_id != observation.deployment_id:
                     raise ProviderMutationUnknownError("The original image observation changed.")
-            elif settle:
+            if settle and (
+                not observed_final_image
+                or not generic_web_provider_deployment_succeeded(observation.deployment_status)
+            ):
                 record = record.model_copy(
                     update={
                         "deploy": record.deploy.model_copy(
@@ -1446,7 +1454,7 @@ class GenericWebDeployProviderMutationAdapter:
                         ),
                     }
                 )
-            else:
+            elif not observed_final_image:
                 raise ProviderMutationUnknownError("The original testing result is unfinished.")
             published = record
             records, result = generic_web_record_result(
@@ -1609,8 +1617,10 @@ class GenericWebDeployProviderMutationAdapter:
                 self._require_testing_publication_authority(
                     resolved_target,
                     current_lane=inventory is not None,
-                    check_inputs=inventory is not None
-                    and (progress or deployment_record_passed(record)),
+                    check_inputs=not progress
+                    and inventory is not None
+                    and deployment_record_passed(record),
+                    check_profile=not progress,
                 )
 
             with guard(lease.evidence_reservation, authority_checkpoint=authority):
@@ -1626,6 +1636,12 @@ class GenericWebDeployProviderMutationAdapter:
             recorder.expected_record = record
             if inventory is not None:
                 expected_inventory = inventory
+            if progress:
+                self._require_testing_publication_authority(
+                    resolved_target,
+                    current_lane=True,
+                    check_inputs=True,
+                )
 
         try:
             resolved_target = self._resolve_deploy_target()

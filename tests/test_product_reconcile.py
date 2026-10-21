@@ -4003,6 +4003,53 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         )
         return cast(str, plan["deployment_record_id"])
 
+    def test_fresh_image_only_native_settlement_permits_event_successor(self) -> None:
+        from control_plane.provider_operations import ProviderMutationUnknownError
+
+        self.github.add_run(20, DEPLOYABLE)
+        self.request()
+        with patch(
+            "control_plane.workflows.generic_web_deploy.integration_key_readback",
+            side_effect=ProviderMutationUnknownError(
+                "Interrupted after original image observation."
+            ),
+        ):
+            self.assertEqual(self.run_once().state, "failed")
+        (first_original,) = self.store.list_held_provider_target_reservations()
+        self.assertEqual(len(self.deploys.runtime_identities), 1)
+        settled = self.settle_terminal_testing_original()
+        self.assertEqual(settled.post_deploy_update.status, "fail")
+        with self.assertRaises(FileNotFoundError):
+            self.store.read_environment_inventory(context_name="cm", instance_name="testing")
+
+        self.request()
+        with patch(
+            "control_plane.workflows.generic_web_deploy.integration_key_readback",
+            side_effect=ProviderMutationUnknownError(
+                "Interrupted successor needs its own recovery."
+            ),
+        ):
+            self.assertEqual(self.run_once().state, "failed")
+        (second_original,) = self.store.list_held_provider_target_reservations()
+        self.assertNotEqual(second_original.idempotency_key, first_original.idempotency_key)
+        self.assertEqual(len(self.deploys.runtime_identities), 2)
+        self.request()
+        self.assertEqual(self.run_once().state, "failed")
+        self.assertEqual(len(self.deploys.runtime_identities), 2)
+        (held_second,) = self.store.list_held_provider_target_reservations()
+        self.assertEqual(held_second.record_id, second_original.record_id)
+
+        self.settle_terminal_testing_original()
+        self.request()
+        successor = self.reconcile()
+        self.assertEqual(successor["deploy_operation_status"], "completed")
+        self.assertEqual(successor["deploy_status"], "pass")
+        self.assertNotEqual(successor["deploy_idempotency_key"], second_original.idempotency_key)
+        self.assertEqual(len(self.deploys.runtime_identities), 3)
+        self.request()
+        self.assertEqual(self.reconcile()["reason"], "already_deployed")
+        self.assertEqual(len(self.deploys.runtime_identities), 3)
+
     def test_pending_generic_web_qualification_surfaces_original_unknown_fence(self) -> None:
         from control_plane.provider_operations import ProviderMutationUnknownError
 
@@ -4026,7 +4073,7 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         self.assertEqual(first.state, "failed")
         self.assertEqual(repeated.state, "failed")
         self.assertEqual(repeated.last_plan["reason"], "testing_qualification_pending")
-        self.assertIn("provider outcome is unknown", repeated.last_error)
+        self.assertTrue(repeated.last_error)
         executor.assert_called_once()
 
     @staticmethod

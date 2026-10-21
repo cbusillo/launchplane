@@ -887,7 +887,13 @@ the original schedule hold before publishing truthful failure. Its HTTP 202
 recovery envelope preserves the original failed HTTP 502 result and replays
 without effects. An unqualified healthy image retains its separate image fact;
 settlement never creates a successful lane projection. Missing execution proof
-stays `hold_unknown` even if cleanup is the last saved phase.
+stays `hold_unknown` even if cleanup is the last saved phase. Receiptless legacy
+`records_commit` alone does not prove image-only work: a current configuration
+without an executor does not establish what the original required. Such originals
+need attributable terminal proof. Where the provider cannot supply it,
+application-side isolation or verified cessation of the original work is a
+prerequisite for a safe continuation; deploying another image does not provide
+that proof.
 When current inventory already points at that original, restarted settlement
 preserves it exactly and writes the truthful failed deployment it references.
 Its copied fields can remain pending until an ordinary successor replaces it;
@@ -900,9 +906,18 @@ inventory. Durable terminal execution facts are not re-derived from later cron
 history; only unresolved original entries require provider observation.
 When post-image maintenance, an executor or schedule activation is required, the
 ordinary application-testing producer first publishes image success with
-qualification pending under its current lease, target and input authority. A refused publication retains the fence and dispatches no
-post-image maintenance, executor or activation. Its supported continuation is
-the reviewed original recovery above, never another guessed provider call.
+qualification pending under its original lease, exact deployment/inventory CAS
+and current target binding. Input or profile metadata drift does not suppress
+that unqualified projection while the binding remains current. After committing
+it, the producer rechecks the full current profile and captured input authority
+before any further work. A refusal retains the fence and dispatches no
+post-image maintenance, executor or activation. Terminal work can use reviewed
+original recovery above, never another guessed provider call.
+A completed native post-image failure settlement permits a deterministic ordinary
+event successor, including when a fresh lane has no inventory to change its
+starting point. Repeated sweeps reuse that successor. If it becomes unknown, it
+needs its own native settlement before another successor can start. An ordinary
+recorded failure retains the existing newer-build or changed-lane retry policy.
 `retry_original_operation` resumes
 the already-acquired reservation path and preserves `reconcile_required` for
 pre-effect rejection, lease loss, uncertain, or non-durable outcomes.

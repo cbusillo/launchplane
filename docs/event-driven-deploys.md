@@ -139,9 +139,12 @@ reservation. The webhook request never waits on a deploy.
     provider outcome is unknown stays reserved for generic-web deploy recovery
     and fails the reconcile until it settles, including when current inventory
     points at an image whose referenced deployment still has pending qualification.
-    That image identity is not an already-qualified result. One that failed with a recorded
-    result is not retried until a newer build or the lane changes. A complete,
-    correlated terminal provider failure before any application/post-deploy
+    That image identity is not an already-qualified result. Explicit native
+    terminal failure settlement permits one deterministic ordinary successor,
+    including on a fresh lane; an unknown successor needs its own settlement.
+    An ordinary recorded failure is not retried until a newer build or the lane
+    changes. A complete, correlated terminal provider failure before any
+    application/post-deploy
     executor runs commits a durable failed result (HTTP 502), including its
     provider deployment ID and times. Timeouts and incomplete/ambiguous provider
     evidence remain unknown; a failed untitled job must settle as the sole new

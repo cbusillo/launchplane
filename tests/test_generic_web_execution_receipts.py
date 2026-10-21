@@ -1150,6 +1150,7 @@ class ExecutionRecoveryTests(unittest.TestCase):
                 status, result = self.complete_original(key, action="settle_testing_failure")
                 self.assertEqual((status, result["reservation_state"]), (202, "completed"))
                 settled = self.store.read_deployment_record(saved.record_id)
+                self.assertEqual(settled.deploy.status, "fail")
                 self.assertEqual(settled.post_deploy_update.status, "fail")
                 self.assertEqual(settled.destination_health, saved.destination_health)
                 self.assertEqual(
@@ -1408,10 +1409,19 @@ class ExecutionRecoveryTests(unittest.TestCase):
                     self.assertEqual(current.deployment_record_id, record_id)
                     self.assertEqual(current.post_deploy_update.status, "fail")
 
-    def test_normal_publication_checks_actual_config_change_after_callback(self) -> None:
+    def assert_progress_disqualifies_before_refusing_changed_authority(
+        self, *, prior_inventory: bool, profile_drift: bool
+    ) -> None:
         self.profile = _profile()
         self.store.write_product_profile_record(self.profile)
         lane = self.profile.lanes[0]
+        prior = None
+        if prior_inventory:
+            baseline = self.run_normal(self.normal_adapter(), "qualified-prior")
+            self.assertEqual(baseline.status, "completed")
+            prior = qualified_generic_web_source_inventory(
+                store=self.store, profile=self.profile, lane=lane
+            )
         settings = RuntimeEnvironmentRecord(
             scope="instance",
             context=lane.context,
@@ -1438,19 +1448,32 @@ class ExecutionRecoveryTests(unittest.TestCase):
                 )
 
         with patch.dict(os.environ, {"LAUNCHPLANE_MASTER_ENCRYPTION_KEY": "test-master-key"}):
-            configure("reviewed")
-            self.target = self.target.model_copy(
-                update={
-                    "testing_runtime_digest": testing_input_authority(
-                        self.store, self.profile, lane
-                    )
-                }
-            )
+            if not profile_drift:
+                configure("reviewed")
+                self.target = self.target.model_copy(
+                    update={
+                        "testing_runtime_digest": testing_input_authority(
+                            self.store, self.profile, lane
+                        )
+                    }
+                )
             publisher = self.store.publish_generic_web_testing_result
 
             def changed_then_publish(**kwargs: Any) -> None:
-                if kwargs["deployment"].deploy.status == "pass":
-                    configure("changed-after-callback")
+                if kwargs["deployment"].post_deploy_update.status == "pending":
+                    if profile_drift:
+                        with closing(
+                            PostgresRecordStore(
+                                database_url=f"sqlite+pysqlite:///{self.root / 'records.db'}"
+                            )
+                        ) as writer:
+                            writer.write_product_profile_record(
+                                self.profile.model_copy(
+                                    update={"display_name": "Changed during image execution"}
+                                )
+                            )
+                    else:
+                        configure("changed-after-callback")
                 publisher(**kwargs)
 
             with (
@@ -1466,10 +1489,89 @@ class ExecutionRecoveryTests(unittest.TestCase):
                 outcome = self.run_normal(self.normal_adapter(), "normal-authority-race")
                 selector.return_value.assert_not_called()
         self.assertEqual(outcome.status, "reconcile_required")
-        with self.assertRaises(FileNotFoundError):
+        saved = self.normal_record(outcome)
+        current = self.store.read_environment_inventory(
+            context_name=lane.context, instance_name="testing"
+        )
+        self.assertEqual(saved.deploy.status, "pass")
+        self.assertEqual(saved.post_deploy_update.status, "pending")
+        self.assertEqual(current.deployment_record_id, saved.record_id)
+        if prior is not None:
+            self.assertNotEqual(current.deployment_record_id, prior.deployment_record_id)
+        with self.assertRaises(GenericWebSourceUnqualified):
+            qualified_generic_web_source_inventory(
+                store=self.store, profile=self.profile, lane=lane
+            )
+
+    def test_normal_publication_checks_actual_config_change_after_callback(self) -> None:
+        self.assert_progress_disqualifies_before_refusing_changed_authority(
+            prior_inventory=False, profile_drift=False
+        )
+
+    def test_progress_replaces_old_qualification_before_input_drift_refusal(self) -> None:
+        self.assert_progress_disqualifies_before_refusing_changed_authority(
+            prior_inventory=True, profile_drift=False
+        )
+
+    def test_progress_records_pending_before_profile_drift_refusal(self) -> None:
+        self.assert_progress_disqualifies_before_refusing_changed_authority(
+            prior_inventory=False, profile_drift=True
+        )
+
+    def test_progress_replaces_old_qualification_before_profile_drift_refusal(self) -> None:
+        self.assert_progress_disqualifies_before_refusing_changed_authority(
+            prior_inventory=True, profile_drift=True
+        )
+
+    def test_progress_refuses_repointed_target_without_replacing_prior_inventory(self) -> None:
+        self.profile = _profile()
+        self.store.write_product_profile_record(self.profile)
+        lane = self.profile.lanes[0]
+        self.assertEqual(self.run_normal(self.normal_adapter(), "prior-target").status, "completed")
+        prior = qualified_generic_web_source_inventory(
+            store=self.store, profile=self.profile, lane=lane
+        )
+        publisher = self.store.publish_generic_web_testing_result
+
+        def repoint_then_publish(**kwargs: Any) -> None:
+            if kwargs["deployment"].post_deploy_update.status == "pending":
+                with closing(
+                    PostgresRecordStore(
+                        database_url=f"sqlite+pysqlite:///{self.root / 'records.db'}"
+                    )
+                ) as writer:
+                    binding = writer.read_dokploy_target_id_record(
+                        context_name=lane.context, instance_name="testing"
+                    )
+                    target = writer.read_provider_target_record(
+                        context_name=lane.context, instance_name="testing"
+                    )
+                    writer.write_dokploy_target_id_record(
+                        binding.model_copy(update={"target_id": "independent-target"})
+                    )
+                    writer.write_provider_target_record(
+                        target.model_copy(update={"target_id": "independent-target"})
+                    )
+            publisher(**kwargs)
+
+        with (
+            patch.object(
+                self.store, "publish_generic_web_testing_result", side_effect=repoint_then_publish
+            ),
+            patch(
+                "control_plane.generic_web_deploy_http._generic_web_post_deploy_executor_for_profile"
+            ) as selector,
+        ):
+            outcome = self.run_normal(self.normal_adapter(), "target-repoint-before-progress")
+            selector.return_value.assert_not_called()
+        self.assertEqual(outcome.status, "reconcile_required")
+        self.assertEqual(
             self.store.read_environment_inventory(
                 context_name=lane.context, instance_name="testing"
-            )
+            ),
+            prior,
+        )
+        self.assertNotEqual(self.normal_record(outcome).deploy.status, "pass")
 
     def test_pre_image_settlement_records_enable_and_delete_and_fences_lost_enable(self) -> None:
         class Provider(_RecoveryObservationProvider, DokployGenericWebDeployProvider):

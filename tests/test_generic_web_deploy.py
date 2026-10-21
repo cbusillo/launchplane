@@ -42,6 +42,7 @@ from control_plane.generic_web_deploy_provider_adapter import (
     GenericWebDeployProviderMutationAdapter,
 )
 from control_plane.workflows.generic_web_deploy import (
+    GENERIC_WEB_UNOBSERVED_DEPLOYMENT_ID,
     GenericWebDeployResult,
     GenericWebDeployRequest,
     GenericWebDeployStore,
@@ -1865,7 +1866,7 @@ class GenericWebDeployTests(unittest.TestCase):
             build_deployment_record(
                 request=resolved_target.ship_request,
                 record_id=deployment_record_id,
-                deployment_id="control-plane-dokploy",
+                deployment_id=GENERIC_WEB_UNOBSERVED_DEPLOYMENT_ID,
                 deployment_status="fail",
                 started_at="2026-07-13T11:59:00Z",
                 finished_at="2026-07-13T11:59:30Z",
@@ -1883,7 +1884,7 @@ class GenericWebDeployTests(unittest.TestCase):
 
         self.assertEqual(observation.outcome, "unknown")
         retained = store.read_deployment_record(deployment_record_id)
-        self.assertEqual(retained.deploy.deployment_id, "control-plane-dokploy")
+        self.assertEqual(retained.deploy.deployment_id, GENERIC_WEB_UNOBSERVED_DEPLOYMENT_ID)
         self.assertEqual(retained.deploy.finished_at, "2026-07-13T11:59:30Z")
         self.assertEqual(store.inventories, [])
 
