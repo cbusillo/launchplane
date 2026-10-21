@@ -263,6 +263,9 @@ print(json.dumps({'fname': a.store_fname}))
         }
         bounded = host["bounded_capture"]
         remove_reference = False
+        removed = self.data / "native-removed-reference"
+        orphan = source_file.with_name("unreferenced")
+        self.addCleanup(orphan.unlink, missing_ok=True)
 
         def capture(arguments: list[str], path: Path, bound: int, **kwargs: Any) -> None:
             if path.suffix == ".dump":
@@ -289,7 +292,7 @@ env.cr.commit()
 """)
                 return
             if remove_reference:
-                source_file.unlink()
+                source_file.rename(removed)
             change = shlex.join(["touch", source + "/" + reference["fname"][:2] + "/unreferenced"])
             command = (
                 arguments[-1]
@@ -316,6 +319,7 @@ env.cr.commit()
                 "source_odoo_version": "19.0",
                 "storage": {"database_bytes": 64 * 1024**2, "filestore_bytes": 64 * 1024**2},
             },
+            "capture_comparison_timeout_seconds": 1200,
         }
         containers: dict[str, tuple[str, dict[str, Any]]] = {
             "database": (self.project + "-database", {}),
@@ -335,13 +339,30 @@ env.cr.commit()
         root = self.data / "native-missing-reference"
         root.mkdir()
         remove_reference = True
-        with self.assertRaises(host["RehearsalCommandFailure"]):
-            host["capture"](spec, root, containers, "fixture_source")
-        source_file.write_bytes(b"native-cut bytes")
-        source_file.chmod(0o666)
+        try:
+            with self.assertRaises(host["RehearsalCommandFailure"]):
+                host["capture"](spec, root, containers, "fixture_source")
+        finally:
+            if removed.exists():
+                removed.rename(source_file)
         self.assertFalse((root / "capture.json").exists())
         self.assertFalse((root / "raw-source" / "filestore").exists())
         self.assertTrue((root / "raw-source" / "database.dump").is_file())
+        remove_reference = False
+        root = self.data / "native-aliased-shard"
+        root.mkdir()
+        shard = source_file.parent
+        target = self.data / "native-shard-target"
+        shard.rename(target)
+        shard.symlink_to("/volumes/data/native-shard-target")
+        try:
+            with self.assertRaises(host["RehearsalCommandFailure"]):
+                host["capture"](spec, root, containers, "fixture_source")
+            self.assertEqual((root / "raw-source" / "filestore.tar").stat().st_size, 0)
+            self.assertFalse((root / "capture.json").exists())
+        finally:
+            shard.unlink()
+            target.rename(shard)
 
     def test_restore_cut_with_concurrent_attachment_writes_and_gc(self) -> None:
         old = json.loads(

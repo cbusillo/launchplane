@@ -65,7 +65,7 @@ def captured_attachment_table_chunks(stream,containers,deadline,output_limit):
                 if not chunk:
                     break
                 consumed+=len(chunk)
-                if consumed>output_limit:
+                if output_limit is not None and consumed>output_limit:
                     raise ValueError('Captured database output exceeds its bound')
                 yield chunk
         remaining=deadline-time.monotonic()
@@ -156,10 +156,12 @@ def captured_attachment_reference_present(chunks,reference):
 def write_captured_attachment_names(spec: dict[str, Any], raw: Path, containers: dict[str, Any]) -> Path:
     bound=spec['record']['storage']['database_bytes']
     references={}
+    name_bytes=0
     with capture_comparison_file(raw/'database.dump') as (stream,metadata):
         if not 0<metadata.st_size<=bound:
             raise ValueError('Captured database exceeds its reviewed bound')
-        chunks=captured_attachment_table_chunks(stream,containers,time.monotonic()+600,bound)
+        budget=capture_comparison_budget(metadata.st_size,spec['capture_comparison_timeout_seconds'])
+        chunks=captured_attachment_table_chunks(stream,containers,time.monotonic()+budget,None)
         try:
             for row in captured_attachment_rows(chunks):
                 if row['store_fname']==b'\\N':
@@ -173,6 +175,10 @@ def write_captured_attachment_names(spec: dict[str, Any], raw: Path, containers:
                 size=int(row['file_size'])
                 if name in references and references[name]!=size:
                     raise ValueError('Captured attachment references conflict')
+                if name not in references:
+                    name_bytes+=len(name)+1
+                    if name_bytes>bound:
+                        raise ValueError('Captured attachment names exceed their reviewed bound')
                 references[name]=size
         finally:
             chunks.close()

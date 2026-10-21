@@ -2834,6 +2834,15 @@ else:
         with self.assertRaises(ValueError):
             select(spec, root, containers)
         self.assertFalse(selected.exists())
+        spec["record"]["storage"]["database_bytes"] = 128
+        table = header
+        for index in range(4):
+            digest = hashlib.sha1(str(index).encode()).hexdigest()
+            table += f"fixture\t{digest[:2]}/{digest}\t{digest}\t1\n".encode()
+        table += b"\\.\n"
+        with self.assertRaises(ValueError):
+            select(spec, root, containers)
+        self.assertFalse(selected.exists())
         table = header + b"\\N\t\\N\t\\N\t0\n\\.\n"
         self.assertEqual(select(spec, root, containers).read_bytes(), b"")
 
@@ -2856,7 +2865,7 @@ else:
         import sys
         import time
 
-        _, root, _ = self.storage_fixture(
+        spec, root, _ = self.storage_fixture(
             {
                 "database_bytes": 4096,
                 "filestore_bytes": 10240,
@@ -2864,7 +2873,7 @@ else:
                 "reserve_bytes": 10,
             }
         )
-        dump = root / "dump-fixture"
+        dump = root / "database.dump"
         dump.write_bytes(b"fixture stdin")
         original_popen = subprocess.Popen
         processes = []
@@ -2926,6 +2935,8 @@ else:
                         reference,
                     )
                 )
+            selected = self.host["write_captured_attachment_names"](spec, root, self.inspect())
+            self.assertEqual(selected.read_bytes(), name.encode() + b"\0")
         self.assertTrue(all(process.poll() is not None for process in processes))
         self.assertEqual(dump.read_bytes(), b"fixture stdin")
 

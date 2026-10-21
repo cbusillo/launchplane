@@ -432,6 +432,25 @@ def sanitize_capture(spec,containers,database,raw):
         docker('exec','-u','root',containers['script-runner'][0],'rm','-f','/tmp/rehearsal.dump')
 
 
+def source_filestore_archive_command(filestore: str) -> str:
+    check='''from pathlib import Path
+import stat
+import sys
+root=Path(sys.argv[1])
+if root.resolve()!=root.absolute() or not root.is_dir():
+    raise RuntimeError('Source filestore is aliased or unavailable')
+for shard in range(256):
+    try:
+        metadata=(root/f'{shard:02x}').lstat()
+    except FileNotFoundError:
+        continue
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise RuntimeError('Source filestore shard is aliased or unavailable')
+'''
+    archive=['tar','-cf','-','-C',filestore,'--no-recursion','--null','--verbatim-files-from','-T','-']
+    return shlex.join(['python3','-c',check,filestore])+' && exec '+shlex.join(archive)
+
+
 def capture(spec,root,containers,database):
     started=time.monotonic()
     raw=root/'raw-source'
@@ -444,7 +463,7 @@ def capture(spec,root,containers,database):
     budget=spec['record']['storage']
     bounded_capture([*ssh,destination,remote],raw/'database.dump',budget['database_bytes'])
     names=write_captured_attachment_names(spec,raw,containers)
-    remote=shlex.join(['tar','-cf','-','-C',filestore,'--no-recursion','--null','--verbatim-files-from','-T','-'])
+    remote=source_filestore_archive_command(filestore)
     with names.open('rb') as listed:
         bounded_capture([*ssh,destination,remote],raw/'filestore.tar',budget['filestore_bytes'],stdin=listed)
     (raw/'filestore').mkdir(mode=0o700)
