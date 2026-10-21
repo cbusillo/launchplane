@@ -60,9 +60,6 @@ The decision is deliberately small:
   `status="unsupported"` from a trusted base-branch workflow.
 - `ignore`: make no Launchplane mutation.
 
-The same contract applies to SYO, VeriReel, Odoo CM, and future products. Driver
-routes may differ by product family, but event interpretation stays the same.
-
 Product repo adapters can ask Launchplane to render that decision from a GitHub
 event payload before doing product-owned work:
 
