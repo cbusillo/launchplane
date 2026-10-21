@@ -2577,7 +2577,8 @@ else:
         self.host["bounded_capture"] = capture_file
         table = (
             "COPY public.ir_attachment (store_fname, checksum, file_size) FROM stdin;\n"
-            f"{mismatch['store_fname']}\t{mismatch['database_checksum']}\t{mismatch['database_size']}\n\\.\n"
+            f"{mismatch['store_fname']}\t{mismatch['database_checksum']}\t{mismatch['database_size']}\n"
+            f"{mismatch['store_fname']}\t{mismatch['database_checksum']}\t{mismatch['database_size'] + 1}\n\\.\n"
         ).encode()
         self.host["captured_attachment_table_chunks"] = lambda *_: (chunk for chunk in [table])
         probe = Mock(return_value={"reason": mismatch["reason"], "mismatch": mismatch})
@@ -2805,7 +2806,15 @@ else:
         name = checksum[:2] + "/" + checksum
         header = b"COPY public.ir_attachment (name, store_fname, checksum, file_size) FROM stdin;\n"
         row = f"private\\tname\t{name}\t{checksum}\t10\n".encode()
-        table = header + b"x" * (2 * 1024**2) + b"\t\\N\t\\N\t0\n" + row * 2 + b"\\.\n"
+        table = (
+            header
+            + b"x" * (2 * 1024**2)
+            + b"\t\\N\t\\N\t0\n"
+            + row
+            + row.replace(b"\t10\n", b"\t11\n")
+            + row.replace(b"\t10\n", b"\t-1\n")
+            + b"\\.\n"
+        )
 
         def decode(*_args: Any) -> Any:
             return (table[i : i + 31] for i in range(0, len(table), 31))
@@ -2820,8 +2829,6 @@ else:
             row.replace(name.encode(), b"../private"),
             row.replace(name.encode(), b"/private"),
             row.replace(checksum.encode(), b"z" * 40),
-            row.replace(b"\t10\n", b"\t-1\n"),
-            row + row.replace(b"\t10\n", b"\t11\n"),
             row.replace(name.encode(), b"x" * 100),
             row + b"\\.\n" + header,
         ):
@@ -2846,7 +2853,7 @@ else:
         table = header + b"\\N\t\\N\t\\N\t0\n\\.\n"
         self.assertEqual(select(spec, root, containers).read_bytes(), b"")
 
-    def test_capture_reads_large_file_stdin_while_draining_stdout(self) -> None:
+    def test_capture_forwards_large_file_stdin(self) -> None:
         import sys
 
         source = self.fixture.root / "large-input"

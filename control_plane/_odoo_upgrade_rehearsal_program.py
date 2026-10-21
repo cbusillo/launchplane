@@ -437,8 +437,8 @@ def source_filestore_archive_command(filestore: str) -> str:
 import stat
 import sys
 root=Path(sys.argv[1])
-if root.resolve()!=root.absolute() or not root.is_dir():
-    raise RuntimeError('Source filestore is aliased or unavailable')
+if not root.is_dir():
+    raise RuntimeError('Source filestore is unavailable')
 for shard in range(256):
     try:
         metadata=(root/f'{shard:02x}').lstat()

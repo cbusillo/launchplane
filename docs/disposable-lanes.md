@@ -2944,7 +2944,7 @@ key and new evidence file:
    dump, without walking live directories or copying unreferenced files and the
    GC checklist. A referenced file removed by source GC before it is read still
    fails the capture; every nonzero source status remains a refusal. A bounded
-   read-only check refuses aliased source roots and shard directories before
+   read-only check refuses unavailable roots and aliased shard directories before
    archiving. Dump decoding uses the existing size-scaled time budget; decoded
    text is streamed, and selected filenames stay within the database byte bound.
    Database and filestore streams are bounded. Source-copy lineage is hashed,

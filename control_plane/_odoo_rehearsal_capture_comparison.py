@@ -155,7 +155,7 @@ def captured_attachment_reference_present(chunks,reference):
 
 def write_captured_attachment_names(spec: dict[str, Any], raw: Path, containers: dict[str, Any]) -> Path:
     bound=spec['record']['storage']['database_bytes']
-    references={}
+    references=set()
     name_bytes=0
     with capture_comparison_file(raw/'database.dump') as (stream,metadata):
         if not 0<metadata.st_size<=bound:
@@ -169,17 +169,13 @@ def write_captured_attachment_names(spec: dict[str, Any], raw: Path, containers:
                 checksum=row['checksum']
                 name=row['store_fname']
                 if (not re.fullmatch(b'[a-f0-9]{40}',checksum)
-                        or name!=checksum[:2]+b'/'+checksum
-                        or not re.fullmatch(b'[0-9]+',row['file_size'])):
+                        or name!=checksum[:2]+b'/'+checksum):
                     raise ValueError('Captured attachment reference is unsupported')
-                size=int(row['file_size'])
-                if name in references and references[name]!=size:
-                    raise ValueError('Captured attachment references conflict')
                 if name not in references:
                     name_bytes+=len(name)+1
                     if name_bytes>bound:
                         raise ValueError('Captured attachment names exceed their reviewed bound')
-                references[name]=size
+                references.add(name)
         finally:
             chunks.close()
     path=raw/'attachment-names'
