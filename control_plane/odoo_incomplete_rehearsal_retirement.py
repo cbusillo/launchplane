@@ -45,6 +45,7 @@ PUBLISHED_FIELDS = (
     "source_binding_sha256",
     "shape_sha256",
     "target_artifact_id",
+    "business_validations",
 )
 
 
@@ -107,7 +108,7 @@ class IncompleteRehearsalRetirement:
             or original.state != "completed"
             or original.provider_target_key != record.rehearsal_id
             or not isinstance(result, dict)
-            or any(result.get(field) != published[field] for field in PUBLISHED_FIELDS)
+            or any(result.get(field) != published.get(field) for field in PUBLISHED_FIELDS)
         ):
             raise RehearsalRefused(RehearsalPrerequisite.RECOVERY_REQUIRED)
         return original

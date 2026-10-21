@@ -209,6 +209,9 @@ class IncompleteRehearsalRetirementReceipt(BaseModel):
     shape_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     copies: tuple[RehearsalCopyReceipt, ...]
     elapsed_seconds: dict[str, float]
+    business_validations: tuple[BusinessValidationReceipt, ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
     resources_preserved: Literal[False]
     public_route: Literal[False]
     business_host_frozen: Literal[False]

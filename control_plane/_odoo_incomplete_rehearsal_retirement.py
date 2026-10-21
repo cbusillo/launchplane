@@ -145,10 +145,6 @@ def incomplete_retirement_locked(spec,root):
         snapshots=later_phase_snapshots(spec,root)
         database,image=current(spec)
         containers=inspection(spec,database,image)
-        # The private web may serve the settled copy; an exec is an unsettled writer.
-        if any('ExecIDs' not in item[1] or item[1]['ExecIDs'] not in (None,[])
-                for item in containers.values()):
-            raise RuntimeError('An active rehearsal exec cannot be retired')
     else:
         if not (root/'execute.started').is_file() or (root/'execute.started').is_symlink() or (root/'execute.json').exists():
             raise RuntimeError('Original execute is not incomplete')
@@ -213,6 +209,16 @@ def incomplete_retirement_locked(spec,root):
         for mount in item['Mounts']:
             if mount.get('Name') in manifest['volumes'] and item['Id'] not in remaining:
                 raise RuntimeError('Storage has another consumer')
+    if record['copies']:
+        # Raw custody is untouched until every owned resource is proven absent, so
+        # every attempt, including a resumed manifest, re-proves it first.
+        if (remaining or volumes or network_present) and (
+                later_phase_snapshots(spec,root)!=manifest['recovery_snapshots']):
+            raise RuntimeError('Recovery custody changed after review')
+        # The private web may serve the settled copy; an exec is an unsettled writer.
+        if any('ExecIDs' not in item or item['ExecIDs'] not in (None,[])
+                for item in remaining.values()):
+            raise RuntimeError('An active rehearsal exec cannot be retired')
     if spec['mode']=='apply':
         if progress.get('host_binding_sha256')!=binding_sha256:
             if not marker.exists():

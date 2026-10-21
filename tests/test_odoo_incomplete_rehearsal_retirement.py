@@ -673,8 +673,8 @@ class LaterPhaseRetirementTests(unittest.TestCase):
     def run_retirement(self, operation: Any) -> Any:
         return IncompleteRehearsalRetirementTests.run_retirement(cast(Any, self), operation)
 
-    def native(self, snapshots: Any = None) -> dict[str, object]:
-        native = native_fixture(self.switched, "final", "e" * 64)
+    def native(self, snapshots: Any = None, key: str = "final") -> dict[str, object]:
+        native = native_fixture(self.switched, key, "e" * 64)
         native["recovery_snapshots"] = [
             copy.model_dump(mode="json")
             for copy in (self.switched.copies if snapshots is None else snapshots)
@@ -826,6 +826,50 @@ class LaterPhaseRetirementTests(unittest.TestCase):
                 with self.assertRaises(RehearsalRefused):
                     operation.host("dry-run", lambda: None)
 
+    def test_completed_business_validation_key_retires_with_its_validations(self) -> None:
+        from tests.test_odoo_rehearsal_business_validation import identity, receipt
+
+        validation = receipt({**identity(self.switched), "attempt_sha256": "c" * 64})
+
+        def host(adapter: Any, record: Any, mode: str, checkpoint: Any, **_: Any) -> Any:
+            checkpoint()
+            return {
+                "intent_sha256": record.intent_sha256,
+                "state": "switched",
+                "copies": [copy.model_dump(mode="json") for copy in record.copies],
+                "elapsed_seconds": {**record.elapsed_seconds, "validate-business": 0.1},
+                "resources_preserved": True,
+                "public_route": False,
+                "business_host_frozen": False,
+                "business_validation": validation,
+            }
+
+        with patch.object(OdooRehearsalAdapter, "host", autospec=True, side_effect=host):
+            outcome = self.fixture.run_operation(
+                self.fixture.adapter("validate-business"), "validation"
+            )
+        self.assertEqual(outcome.status, "completed")
+        validated = self.store.read_odoo_upgrade_rehearsal(self.fixture.identifier)
+        assert validated is not None and validated.business_validations
+        self.switched = validated
+        operation = self.retirement("validation")
+        with (
+            patch.object(
+                type(operation), "host", side_effect=self.host(self.native(key="validation"))
+            ),
+            patch.object(type(operation), "placement", return_value=True),
+        ):
+            plan = operation.plan()
+            operation.adapter.request = operation.adapter.request.model_copy(
+                update={"reviewed_plan_sha256": plan["plan_sha256"]}
+            )
+            result = self.run_retirement(operation).response_payload["result"]
+            self.assertEqual(result["business_validations"], [validation])
+            self.assertEqual(operation.readback(), result)
+        with self.assertRaises(RehearsalRefused):
+            # The earlier simulate-final key no longer published this phase.
+            self.retirement("final").plan()
+
     def test_production_alias_refuses_a_later_phase_retirement(self) -> None:
         from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 
@@ -937,6 +981,52 @@ class IncompleteRetirementHostTests(unittest.TestCase):
             self.assertFalse((self.root / copy["database"]).exists())
         self.assertEqual((self.outside / "keep").read_bytes(), b"production fixture")
         self.assertTrue(self.fixture.run_host(self.spec)["disposed"])
+
+    def test_interrupted_later_phase_apply_reproves_custody_before_resuming(self) -> None:
+        for changed in (
+            "none",
+            "exec-session",
+            "unrecorded-snapshot",
+            "corrupt",
+            "uncertain-effect",
+        ):
+            with self.subTest(changed=changed):
+                native = IncompleteRetirementHostTests()
+                native.setUp()
+                self.addCleanup(native.doCleanups)
+                copies = native.later_phase()
+                names = native.fixture.host["database_names"](native.spec)
+                native.admit(native.fixture.run_host(native.spec))
+                native.spec["mode"] = "apply"
+                docker = native.fixture.host["docker"]
+
+                def interrupted(*args: str, stdin: bytes | None = None) -> bytes:
+                    if args[0] == "stop":
+                        raise RuntimeError("Interrupted after the disposal manifest")
+                    return cast(bytes, docker(*args, stdin=stdin))
+
+                native.fixture.host["docker"] = interrupted
+                with self.assertRaises(RuntimeError):
+                    native.fixture.run_host(native.spec)
+                self.assertTrue((native.root / "incomplete-retirement.json").is_file())
+                native.fixture.host["docker"] = docker
+                if changed == "exec-session":
+                    native.fixture.fixture.containers["script-runner"]["ExecIDs"] = ["active"]
+                elif changed == "unrecorded-snapshot":
+                    (native.root / names["final_upgrade"]).mkdir()
+                elif changed == "corrupt":
+                    (native.root / names["final_source"] / "database.dump").write_bytes(b"x")
+                elif changed == "uncertain-effect":
+                    (native.root / ("validate-business-" + "a" * 64 + ".started")).touch()
+                native.calls.clear()
+                if changed == "none":
+                    self.assertTrue(native.fixture.run_host(native.spec)["disposed"])
+                    continue
+                with self.assertRaises(RuntimeError):
+                    native.fixture.run_host(native.spec)
+                self.assertFalse(any(call[0] in {"stop", "rm"} for call in native.calls))
+                for copy in copies:
+                    self.assertTrue((native.root / copy["database"] / "database.dump").exists())
 
     def test_later_phase_refuses_uncertain_or_unattributed_custody(self) -> None:
         import fcntl

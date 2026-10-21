@@ -2849,11 +2849,17 @@ link, with witness, capture lineage and database/filestore bytes matching its
 recorded receipt. An unrecorded snapshot directory or pending capture refuses.
 The review binds those receipts into the native manifest as
 `host_disposal.recovery_snapshots`. Apply then stops and removes the runtime
-and disposes the snapshot bytes under the same absence proofs as below.
+and disposes the snapshot bytes under the same absence proofs as below. While
+any owned container, volume or network remains, every attempt, including
+resumption of an admitted manifest, repeats these custody and exec proofs and
+requires the same snapshot receipts as the review. Once all three are proven
+absent, only host custody deletion remains, and an interrupted deletion
+resumes without them.
 Publication marks the rehearsal retired and removes its target registration.
 It leaves the completed original journal unchanged as custody evidence; there
 is no hold to release. The retired record and the receipt keep the copy
-receipts as the custody record of what was disposed. Readback rebuilds the
+receipts, and any business-validation receipts, as the custody record of what
+was disposed. Readback rebuilds the
 receipt from the persisted host disposal and placement absence.
 
 The dry-run acquires executor exclusion and inspects the exact private placement,
