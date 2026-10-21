@@ -1249,8 +1249,30 @@ class OdooRehearsalAdapter:
             raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
         if child is not None or result.get("retained_upgrade_logs") is not None:
             result["diagnostics_private"] = True
-        if self.request.business_validation is not None and result.get("completed") is True:
-            validation = result.get("business_validation")
+        pending = result.get("pending_business_validation")
+        if pending is not None:
+            if (
+                not isinstance(pending, dict)
+                or mode != "observe"
+                or self.request.business_validation is None
+                or result["completed"] is not False
+                or result["business_validation"] is not None
+                or result["business_validation_postcheck_verified"] is not False
+                or pending["intent_sha256"] != record.intent_sha256
+                or pending["record_binding_sha256"] != record.binding_sha256
+                or pending["attempt_sha256"]
+                != canonical_json_sha256({"operation_key": operation_key})
+            ):
+                raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
+            result["diagnostics_private"] = True
+        if self.request.business_validation is not None and (
+            result.get("completed") is True or pending is not None
+        ):
+            validation = (
+                pending["receipt"]
+                if isinstance(pending, dict)
+                else result.get("business_validation")
+            )
             plan = self.request.business_validation
             if not isinstance(validation, dict) or (
                 validation["validation_sha256"] != plan.sha256

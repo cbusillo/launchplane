@@ -260,7 +260,13 @@ def register_odoo_upgrade_rehearsal_routes(
                     **({"custody": result["custody"]} if result.get("custody") else {}),
                     **{
                         key: result[key]
-                        for key in ("child_failure", "retained_upgrade_logs", "business_validation")
+                        for key in (
+                            "child_failure",
+                            "retained_upgrade_logs",
+                            "business_validation",
+                            "pending_business_validation",
+                            "business_validation_postcheck_verified",
+                        )
                         if result.get(key) is not None
                     },
                     **({"diagnostics_private": True} if result.get("diagnostics_private") else {}),

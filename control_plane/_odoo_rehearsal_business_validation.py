@@ -6,6 +6,7 @@ def run_business_validation(env, plan):
     evidence = []
     committed = False
     commit_started = False
+    reread_index = None
 
     def resolve(value):
         if isinstance(value, dict):
@@ -60,17 +61,22 @@ def run_business_validation(env, plan):
         env.cr.commit()
         committed = True
         env.invalidate_all()
-        for step in plan['steps']:
+        for index, step in enumerate(plan['steps']):
             if step['op'] == 'assert':
+                reread_index = index
                 value = records[step['record']][step['field']]
                 if hasattr(value, 'ids'):
                     value = value.ids
                 if step['comparison'] == 'truthy':
                     value = bool(value)
                 if value != step['expected']:
+                    evidence[index]['passed'] = False
                     return finish(False)
+                reread_index = None
         return finish(True)
     except Exception:
+        if committed and reread_index is not None:
+            evidence[reread_index]['passed'] = False
         env.cr.rollback()
         if commit_started and not committed:
             raise RuntimeError('Validation commit outcome unavailable') from None

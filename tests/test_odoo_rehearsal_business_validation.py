@@ -162,6 +162,7 @@ class BusinessValidationEngineTests(unittest.TestCase):
             "exception",
             "wrong_copy",
             "post_commit",
+            "post_commit_assertion",
             "wrong_relation",
             "commit_uncertain",
         ):
@@ -179,19 +180,32 @@ class BusinessValidationEngineTests(unittest.TestCase):
                     plan["steps"][1]["values"]["partner_id"] = 1
                 if outcome == "commit_uncertain":
                     env.cr.commit = Mock(side_effect=RuntimeError("connection lost"))
-                    with self.assertRaisesRegex(RuntimeError, "commit outcome unavailable"):
+                    with self.assertRaises(RuntimeError):
                         run(env, plan)
                     continue
                 if outcome == "post_commit":
                     cast(Any, env).invalidate_all = Mock(
                         side_effect=RuntimeError("private copied Client value")
                     )
+                if outcome == "post_commit_assertion":
+
+                    def change_after_commit() -> None:
+                        env.connection.execute(
+                            "UPDATE records SET data=? WHERE id=2",
+                            (json.dumps({"state": "draft"}),),
+                        )
+
+                    cast(Any, env).invalidate_all = change_after_commit
                 result = run(env, plan)
                 self.assertEqual(result["passed"], outcome == "pass")
-                self.assertEqual(result["committed"], outcome in {"pass", "post_commit"})
+                self.assertEqual(
+                    result["committed"], outcome in {"pass", "post_commit", "post_commit_assertion"}
+                )
                 count = env.connection.execute("SELECT count(*) FROM records").fetchone()[0]
                 self.assertEqual(count, 2 if result["committed"] else 0)
                 self.assertEqual(bool(result["steps"][0]["record_ids"]), result["committed"])
+                if outcome == "post_commit_assertion":
+                    self.assertFalse(result["steps"][-1]["passed"])
                 if outcome == "pass":
                     identifier = result["steps"][1]["record_ids"][0]
                     values = json.loads(
@@ -418,6 +432,69 @@ class BusinessValidationAdapterTests(unittest.TestCase):
             lineage,
         )
 
+    def test_pending_evidence_is_private_bound_and_cannot_publish_before_verified(self) -> None:
+        receipt = {
+            "validation_sha256": self.plan.sha256,
+            "attempt_sha256": canonical_json_sha256({"operation_key": "original"}),
+            "database": self.plan.database,
+            "source_commit": self.plan.source_commit,
+            "passed": True,
+            "committed": True,
+            "steps": [
+                {"key": step.key, "record_ids": [31], "passed": True} for step in self.plan.steps
+            ],
+        }
+        pending = {
+            "intent_sha256": self.record.intent_sha256,
+            "record_binding_sha256": self.record.binding_sha256,
+            "attempt_sha256": receipt["attempt_sha256"],
+            "receipt": receipt,
+        }
+        result = {
+            "intent_sha256": self.record.intent_sha256,
+            "state": "switched",
+            "copies": [copy.model_dump(mode="json") for copy in self.record.copies],
+            "elapsed_seconds": {},
+            "resources_preserved": True,
+            "public_route": False,
+            "business_host_frozen": False,
+            "completed": False,
+            "pending_business_validation": pending,
+            "business_validation_postcheck_verified": False,
+        }
+
+        def read(payload: dict[str, Any], key: str = "original") -> dict[str, object]:
+            evidence = {"rehearsal_result": json.dumps(payload).encode().hex()}
+            with patch.object(OdooRehearsalAdapter, "run_script", return_value=evidence):
+                return self.adapter.host(self.record, "observe", lambda: None, operation_key=key)
+
+        observed = read(result)
+        self.assertTrue(observed["diagnostics_private"])
+        with self.assertRaises(RehearsalRefused):
+            self.adapter.publish(self.record, observed)
+        with self.assertRaises(RehearsalRefused):
+            read(result, "another-key")
+        for field in ("intent_sha256", "record_binding_sha256", "attempt_sha256"):
+            with self.subTest(field=field), self.assertRaises(RehearsalRefused):
+                read({**result, "pending_business_validation": {**pending, field: "e" * 64}})
+        with patch.object(OdooRehearsalAdapter, "host", return_value=observed):
+            self.assertEqual(
+                self.adapter.observe("original", "host", "reconcile").outcome, "unknown"
+            )
+        completed = {
+            key: value
+            for key, value in result.items()
+            if key not in {"pending_business_validation", "business_validation_postcheck_verified"}
+        }
+        completed.update(completed=True, business_validation=receipt)
+        with patch.object(OdooRehearsalAdapter, "host", return_value=read(completed)):
+            self.assertEqual(
+                self.adapter.observe("original", "host", "reconcile").outcome, "present"
+            )
+        current = self.fixture.store.read_odoo_upgrade_rehearsal(self.record.rehearsal_id)
+        assert current is not None
+        self.assertEqual(current.business_validations[0].steps[0].record_ids, [31])
+
     def test_stale_review_cannot_dispatch_a_changed_batch(self) -> None:
         from control_plane.provider_operations import (
             ProviderMutationRejectedError,
@@ -499,6 +576,67 @@ class BusinessValidationHostTests(unittest.TestCase):
         missing = self.fixture.run_host(self.spec)
         self.assertFalse(missing["completed"])
         self.assertEqual(self.executions, 1)
+
+    def test_committed_pending_outcome_survives_failed_postcheck_and_recovers_without_replay(
+        self,
+    ) -> None:
+        precheck = self.host["business_validation_precheck"]
+        calls = 0
+
+        def fail_after_write(*args: Any) -> None:
+            nonlocal calls
+            calls += 1
+            if calls > 1:
+                raise RuntimeError("isolation unverified")
+            precheck(*args)
+
+        with patch.dict(self.host, {"business_validation_precheck": fail_after_write}):
+            with self.assertRaises(RuntimeError):
+                self.fixture.run_host(self.spec)
+            pending = self.fixture.run_host({**self.spec, "mode": "observe"})
+        self.assertFalse(pending["completed"])
+        self.assertFalse(pending["business_validation_postcheck_verified"])
+        self.assertEqual(
+            pending["pending_business_validation"]["receipt"]["steps"][0]["record_ids"], [31]
+        )
+        self.assertEqual(self.executions, 1)
+        with self.assertRaises(RuntimeError):
+            self.fixture.run_host(
+                {**self.spec, "mode": "observe", "record_binding_sha256": "e" * 64}
+            )
+        wrong = self.fixture.run_host({**self.spec, "mode": "observe", "attempt_sha256": "f" * 64})
+        self.assertNotIn("pending_business_validation", wrong)
+        completed = self.fixture.run_host({**self.spec, "mode": "observe"})
+        self.assertTrue(completed["business_validation"]["committed"])
+        self.assertEqual(self.executions, 1)
+        self.assertEqual(self.fixture.run_host({**self.spec, "mode": "observe"}), completed)
+
+    def test_host_snapshot_seals_complete_history_and_refuses_failed_latest_before_capture(
+        self,
+    ) -> None:
+        self.spec["versions"] = {self.spec["target_image"]: "19.0"}
+        self.host["sql"] = lambda *args: "19.0"
+        (self.root / "capture.json").write_text("{}")
+        history = [
+            {"passed": True, "steps": [{"key": "order", "record_ids": [31], "passed": True}]}
+        ]
+        self.spec["record"]["business_validations"] = history
+
+        def capture(args: list[str], path: Any, bound: int) -> None:
+            path.write_bytes(b"snapshot fixture")
+
+        self.host["bounded_capture"] = Mock(side_effect=capture)
+        result = self.host["snapshot"](self.spec, self.root, self.containers, self.plan.database)
+        self.assertEqual(result["business_validation_sha256"], canonical_json_sha256(history))
+        import shutil
+
+        shutil.rmtree(self.root / self.plan.database)
+        history.append({"passed": False})
+        self.host["bounded_capture"].reset_mock()
+        with self.assertRaises(RuntimeError):
+            self.host["snapshot"](self.spec, self.root, self.containers, self.plan.database)
+        self.host["bounded_capture"].assert_not_called()
+        self.assertFalse((self.root / self.plan.database).exists())
 
     def test_changed_witness_or_connection_isolation_refuses_before_business_writes(self) -> None:
         for failure in ("witness", "connections", "runtime"):

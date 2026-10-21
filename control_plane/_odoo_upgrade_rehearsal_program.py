@@ -170,6 +170,9 @@ def stamp(spec,containers,database):
 
 
 def snapshot(spec,root,containers,database):
+    validations=spec['record'].get('business_validations',[])
+    if database.endswith('_final_upgrade') and validations and validations[-1].get('passed') is not True:
+        raise RuntimeError('Product validation has not passed')
     version=sql(containers,"SELECT latest_version FROM ir_module_module WHERE name='base'",database)
     expected=spec['record']['source_odoo_version'] if database.endswith('_source') else spec['versions'][spec['target_image']]
     if version.split('.')[0]!=expected.split('.')[0]:
@@ -309,9 +312,63 @@ def business_validation(spec,containers):
     if len(markers)!=1:
         raise RuntimeError('Validation evidence is unavailable')
     result=json.loads(bytes.fromhex(markers[0].decode()))
-    business_validation_precheck(spec,containers)
     return {**result,'database':database,'source_commit':spec['business_validation']['source_commit'],
         'validation_sha256':spec['business_validation_sha256'],'attempt_sha256':spec['attempt_sha256']}
+
+
+def pending_business_outcome(spec,root,receipt,lock_held):
+    path=root/(spec['receipt_action']+'.outcome.json')
+    if not path.exists() and not path.is_symlink():
+        return None
+    metadata=path.lstat()
+    if (not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode)!=0o600
+            or metadata.st_uid!=os.getuid() or metadata.st_size>262144):
+        raise RuntimeError('Invalid validation outcome custody')
+    saved=json.loads(path.read_text())
+    if (set(saved)!={'intent_sha256','record_binding_sha256','attempt_sha256','result'}
+            or any(saved[key]!=spec[key] for key in ('record_binding_sha256','attempt_sha256'))
+            or saved['intent_sha256']!=spec['record']['intent_sha256']):
+        raise RuntimeError('Validation outcome binding changed')
+    result=saved['result']
+    if (set(result)!={'intent_sha256','state','copies','elapsed_seconds','resources_preserved',
+            'public_route','business_host_frozen','business_validation'}
+            or result['intent_sha256']!=saved['intent_sha256'] or result['state']!='switched'
+            or result['copies']!=spec['record']['copies'] or result['resources_preserved'] is not True
+            or result['public_route'] is not False or result['business_host_frozen'] is not False):
+        raise RuntimeError('Invalid retained validation result')
+    validation=result['business_validation']
+    plan=spec['business_validation']
+    if (set(validation)!={'passed','committed','steps','database','source_commit','validation_sha256','attempt_sha256'}
+            or validation['database']!=plan['database'] or validation['source_commit']!=plan['source_commit']
+            or validation['validation_sha256']!=spec['business_validation_sha256']
+            or validation['attempt_sha256']!=spec['attempt_sha256']
+            or type(validation['passed']) is not bool or type(validation['committed']) is not bool
+            or not 0<len(validation['steps'])<=len(plan['steps'])):
+        raise RuntimeError('Invalid retained validation evidence')
+    for step,expected in zip(validation['steps'],plan['steps']):
+        if (set(step)!={'key','record_ids','passed'} or step['key']!=expected['key']
+                or type(step['passed']) is not bool or not isinstance(step['record_ids'],list)
+                or any(type(identifier) is not int or identifier<1 for identifier in step['record_ids'])):
+            raise RuntimeError('Invalid retained validation step')
+    verified=False
+    if lock_held:
+        try:
+            database,image=current(spec)
+            containers=inspection(spec,database,image)
+            validate_snapshots(spec,root,containers,result['copies'])
+            business_validation_precheck(spec,containers)
+            verified=True
+        except Exception:
+            pass
+    if verified:
+        save(receipt,result)
+        return result
+    return {'intent_sha256':saved['intent_sha256'],'state':'switched',
+        'copies':result['copies'],'elapsed_seconds':result['elapsed_seconds'],
+        'resources_preserved':True,'public_route':False,'business_host_frozen':False,
+        'completed':False,'business_validation_postcheck_verified':False,'diagnostics_private':True,
+        'pending_business_validation':{key:saved[key] for key in
+            ('intent_sha256','record_binding_sha256','attempt_sha256')} | {'receipt':validation}}
 
 
 def sanitize_capture(spec,containers,database,raw):
@@ -359,6 +416,9 @@ def capture(spec,root,containers,database):
     started=time.monotonic()
     sanitize_capture(spec,containers,database,raw)
     spec['phase_elapsed']['source-sanitization']=time.monotonic()-started
+    validations=spec['record'].get('business_validations',[])
+    if database.endswith('_final_upgrade') and validations and validations[-1].get('passed') is not True:
+        raise RuntimeError('Product validation has not passed')
     version=sql(containers,"SELECT latest_version FROM ir_module_module WHERE name='base'",database)
     if version.split('.')[0] != spec['record']['source_odoo_version'].split('.')[0]:
         raise RuntimeError('Captured source version differs from the selected source version')
@@ -534,6 +594,11 @@ def observe(spec, root, receipt, lock_held=False):
     namespace=record['rehearsal_id']
     action=spec['action']
     if not receipt.is_file() or receipt.is_symlink():
+        if action=='validate-business':
+            pending=pending_business_outcome(spec,root,receipt,lock_held)
+            if pending is not None:
+                emit_rehearsal_result(pending)
+                return
         if not (root/(spec.get('receipt_action',action)+'.started')).exists():
             refused=read_refusal(spec,root)
             if refused is not None:
@@ -785,6 +850,10 @@ def main():
             'resources_preserved':True,'public_route':False,'business_host_frozen':False}
         if action=='validate-business':
             result['business_validation']=validation
+            save(root/(spec['receipt_action']+'.outcome.json'),{
+                'intent_sha256':record['intent_sha256'],'record_binding_sha256':spec['record_binding_sha256'],
+                'attempt_sha256':spec['attempt_sha256'],'result':result})
+            business_validation_precheck(spec,containers)
         save(receipt,result)
         emit_rehearsal_result(result)
 

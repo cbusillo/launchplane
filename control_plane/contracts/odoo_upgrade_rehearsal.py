@@ -373,6 +373,14 @@ class RehearsalRetainedLogs(BaseModel):
     truncated: bool
 
 
+class PendingBusinessValidation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    intent_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    record_binding_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    attempt_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    receipt: BusinessValidationReceipt
+
+
 class RehearsalHostResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
     intent_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
@@ -427,6 +435,8 @@ class RehearsalHostResult(BaseModel):
     ] = ""
     attempt_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
     business_validation: BusinessValidationReceipt | None = None
+    pending_business_validation: PendingBusinessValidation | None = None
+    business_validation_postcheck_verified: Literal[False] | None = None
 
 
 def rehearsal_identity(product: str, principal: str, key: str) -> str:

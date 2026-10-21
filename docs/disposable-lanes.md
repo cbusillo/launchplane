@@ -2924,7 +2924,9 @@ identity and connection isolation. It uses the candidate image's existing
 Odoo shell configuration and fixed ORM code inside the isolated runner.
 
 Only step keys, synthetic record ids and booleans leave the runner. Raw Odoo
-output, errors and copied database values are withheld. A passing batch commits
+output, errors and copied database values are withheld. Receipts identify synthetic
+roots and direct method targets. Derived records and consumed sequence numbers
+created by called methods require tracing from those roots. A passing batch commits
 and reads its assertions again after cache invalidation. A failed assertion or
 exception before commit rolls back and returns `passed: false, committed: false`,
 without ids for rolled-back records. A failed assertion/read after confirmed
@@ -2941,7 +2943,12 @@ never be replayed or replaced to diagnose it.
 For validation `readback`, supply the original intent, key **and evidence file**;
 the saved review binds the journal even after publication changes the rehearsal
 record. Each operation has its own host marker, receipt and bound failure
-diagnostic. Observation cannot
+diagnostic. A confirmed outcome is retained before the isolation post-check.
+If that check fails, original-key readback exposes only a private
+`pending_business_validation` receipt with `completed: false` and
+`business_validation_postcheck_verified: false`. The operation retains custody.
+Fresh isolation checks must pass before original-key reconciliation can settle
+that retained outcome. Observation cannot
 re-execute a batch or adopt another operation's result. After a successful batch,
 ordinary `verify` seals a digest of the complete ordered `business_validations`
 receipt list into the final upgraded snapshot's `business_validation_sha256`;

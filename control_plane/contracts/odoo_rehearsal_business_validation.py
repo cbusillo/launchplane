@@ -101,6 +101,7 @@ class BusinessValidation(BaseModel):
 
     @property
     def sha256(self) -> str:
+        # Business quantities allow decimals; the shared canonical encoder intentionally rejects floats.
         return hashlib.sha256(
             json.dumps(
                 self.model_dump(mode="json"), sort_keys=True, separators=(",", ":"), allow_nan=False
