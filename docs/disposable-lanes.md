@@ -2901,7 +2901,10 @@ then checks with `--pull never`. Product failure is an artifact prerequisite;
 Docker/registry failure or unavailable evidence is a provider prerequisite.
 Either stops the fresh prepare before allocation and permits a fresh review/key.
 The probe cleans up only the container id its own invocation created. It never
-deletes a colliding existing container. Partial prepare and host continuation
+deletes a colliding existing container. After an interrupted preflight, the
+original key can retry only after observing an empty placement and an idle
+probe, with the unchanged reviewed record and no credential binding. Unknown
+observations keep that key held. Partial prepare and host continuation
 keep their existing recovery path; they do not repeat this fresh preflight.
 
 Normal invocation runs inside the independently checked isolated script-runner.

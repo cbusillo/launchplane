@@ -613,6 +613,34 @@ class OdooRehearsalAdapter:
             }
         ).binding_sha256
 
+    def can_retry_empty_prepare(self, record: OdooUpgradeRehearsalRecord, phase: str) -> bool:
+        from control_plane.dokploy import post_deploy
+        from control_plane.dokploy.sandbox_placement import created_placement
+
+        if (
+            self.request.action != "prepare"
+            or phase
+            or record.state != "planned"
+            or any((record.project_id, record.environment_id, record.compose_id))
+            or record.credential_bindings_sha256
+            or record.copies
+            or record.elapsed_seconds
+        ):
+            return False
+        fresh, _, _ = self.inputs()
+        if fresh != record or any(created_placement(self.root, record.rehearsal_id)):
+            return False
+        host, token = source.read_dokploy_config(control_plane_root=self.root)
+        schedule = api.find_matching_dokploy_schedule(
+            host=host,
+            token=token,
+            target_id=record.server_id,
+            schedule_type="server",
+            schedule_name="Launchplane rehearsal entrypoint check",
+            app_name=record.rehearsal_id + "-entrypoint-check",
+        )
+        return not post_deploy._has_running_schedule_deployment(schedule)
+
     def partial_prepare_project(self, record: OdooUpgradeRehearsalRecord, phase: str) -> str:
         from control_plane.dokploy.sandbox_placement import observe_empty_isolated_project
 
@@ -706,9 +734,12 @@ class OdooRehearsalAdapter:
         reason = "operation_not_recoverable"
         if journal["operation_state"] == "reconcile_required" and not record.compose_id:
             try:
-                self.partial_prepare_project(record, str(journal["provider_effect_phase"]))
+                if self.can_retry_empty_prepare(record, str(journal["provider_effect_phase"])):
+                    reason = "empty_original_placement_observed"
+                else:
+                    self.partial_prepare_project(record, str(journal["provider_effect_phase"]))
+                    reason = "empty_original_project_observed"
                 disposition = "continue_original_prepare"
-                reason = "empty_original_project_observed"
             except api.DokployRequestFailed as error:
                 if error.status_code in {401, 403}:
                     raise
@@ -1472,6 +1503,14 @@ class OdooRehearsalAdapter:
                 ):
                     return ProviderObservation("unknown")
                 require_unaliased_rehearsal(self.store, record)
+                if self.request.action == "prepare" and not provider_effect_phase:
+                    if (
+                        record.binding_sha256 != self.request.reviewed_plan_sha256
+                        or not self.can_retry_empty_prepare(record, provider_effect_phase)
+                    ):
+                        return ProviderObservation("unknown")
+                    check()
+                    return ProviderObservation("absent", retry_safe=True)
                 if self.request.action == "prepare" and provider_effect_phase == "project_id":
                     if self.initial_prepare_binding(record) != self.request.reviewed_plan_sha256:
                         return ProviderObservation("unknown")

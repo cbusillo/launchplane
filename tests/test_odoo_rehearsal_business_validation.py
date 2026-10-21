@@ -211,6 +211,48 @@ class BusinessEntrypointPreflightTests(unittest.TestCase):
             placement.assert_not_called()
             storage.assert_not_called()
 
+    def test_interrupted_preflight_recovers_only_empty_idle_original(self) -> None:
+        fixture = rehearsal_tests.RehearsalScenario()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        adapter = fixture.adapter("prepare")
+        with (
+            patch.object(adapter, "check_business_entrypoint", side_effect=SystemExit),
+            patch(
+                "control_plane.dokploy.sandbox_placement.created_placement",
+                return_value=("", "", ""),
+            ),
+            patch(
+                "control_plane.odoo_upgrade_rehearsal.api.find_matching_dokploy_schedule",
+                return_value=None,
+            ) as schedule,
+            patch.object(adapter, "host") as host,
+        ):
+            with self.assertRaises(SystemExit):
+                fixture.run_operation(adapter, "interrupted")
+            self.assertEqual(adapter.observe("original", "", "").outcome, "absent")
+            readback = adapter.prepare_readback(fixture.record, "interrupted")
+            self.assertEqual(readback["recovery_disposition"], "continue_original_prepare")
+            schedule.return_value = {"deployments": [{"status": "running"}]}
+            self.assertEqual(adapter.observe("original", "", "").outcome, "unknown")
+            schedule.return_value = None
+            with patch(
+                "control_plane.dokploy.sandbox_placement.created_placement",
+                return_value=("unexpected", "", ""),
+            ):
+                self.assertEqual(adapter.observe("original", "", "").outcome, "unknown")
+            host.assert_not_called()
+            with (
+                patch.object(adapter, "check_business_entrypoint"),
+                patch(
+                    "control_plane.testing_local_credentials.prepare_rehearsal_local_credentials",
+                    side_effect=RuntimeError("retry reached allocation"),
+                ) as credentials,
+                self.assertRaisesRegex(RuntimeError, "retry reached allocation"),
+            ):
+                fixture.run_operation(adapter, "interrupted")
+            credentials.assert_called_once()
+
     def test_probe_receipt_must_match_its_candidate_and_attempt(self) -> None:
         from control_plane.dokploy import post_deploy
 
