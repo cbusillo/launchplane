@@ -12,6 +12,7 @@ OutboxDeliveryKind = Literal[
     "operator_authorization_recovery_alert",
     "public_ingress_notification",
     "release_digest",
+    "discussion_reminder",
 ]
 OutboxDeliveryState = Literal[
     "pending",

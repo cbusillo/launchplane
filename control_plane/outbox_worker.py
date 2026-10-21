@@ -7,6 +7,7 @@ import time
 from typing import Protocol, cast
 
 from control_plane.contracts.outbox_delivery import OutboxDeliveryRecord
+from control_plane.discussion_reminders import DiscussionReminderSender, deliver_discussion_reminder
 from control_plane.workflows.generic_web_promotion_workflow import (
     dispatch_generic_web_promotion_workflow_delivery,
 )
@@ -65,6 +66,8 @@ def run_outbox_worker_once(
     lease_owner: str,
     lease_seconds: int = DEFAULT_OUTBOX_WORKER_LEASE_SECONDS,
     notification_drivers: PublicIngressNotificationDriverSet | None = None,
+    discussion_reminder_sender: DiscussionReminderSender | None = None,
+    discussion_reminder_clock: Callable[[], float] = time.time,
 ) -> OutboxWorkerStepResult:
     claim = record_store.claim_next_outbox_delivery_record(
         lease_owner=lease_owner,
@@ -122,6 +125,25 @@ def run_outbox_worker_once(
                 provider_id=provider,
             ),
         )
+    elif record.kind == "discussion_reminder":
+        from control_plane.storage.postgres import PostgresRecordStore
+
+        if not isinstance(record_store, PostgresRecordStore):
+            raise TypeError("Discussion reminders require the service record store")
+        result = deliver_discussion_reminder(
+            store=record_store,
+            record=record,
+            drivers=notification_drivers or PublicIngressNotificationDriverSet(),
+            sender=discussion_reminder_sender,
+            clock=discussion_reminder_clock,
+            mark_provider_started=lambda key, provider: _mark_provider_started(
+                record_store=record_store,
+                record=record,
+                lease_owner=lease_owner,
+                provider_operation_key=key,
+                provider_id=provider,
+            ),
+        )
     elif record.kind == "operator_authorization_recovery_alert":
         result = record.model_copy(
             update={
@@ -167,6 +189,7 @@ def run_outbox_worker_loop(
     error_backoff_seconds: int = DEFAULT_OUTBOX_WORKER_ERROR_BACKOFF_SECONDS,
     max_consecutive_errors: int = DEFAULT_OUTBOX_WORKER_MAX_CONSECUTIVE_ERRORS,
     notification_drivers: PublicIngressNotificationDriverSet | None = None,
+    discussion_reminder_sender: DiscussionReminderSender | None = None,
 ) -> None:
     consecutive_errors = 0
     while not should_stop():
@@ -177,6 +200,7 @@ def run_outbox_worker_loop(
                 lease_owner=lease_owner,
                 lease_seconds=lease_seconds,
                 notification_drivers=notification_drivers,
+                discussion_reminder_sender=discussion_reminder_sender,
             )
             consecutive_errors = 0
         except Exception:  # noqa: BLE001 - worker loop backoff keeps process bounded.
